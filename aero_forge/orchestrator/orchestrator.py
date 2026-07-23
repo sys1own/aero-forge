@@ -316,6 +316,29 @@ class Orchestrator:
 
         return self.function_name
 
+    def _validate_return_tuple_sizes(self, tree: ast.AST) -> None:
+        """Reject functions whose return statements return different tuple sizes."""
+        for node in tree.body:
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name not in self.function_names:
+                continue
+            sizes: Dict[int, int] = {}
+            for ret in ast.walk(node):
+                if not isinstance(ret, ast.Return) or ret.value is None:
+                    continue
+                if isinstance(ret.value, (ast.Tuple, ast.List)):
+                    size = len(ret.value.elts)
+                else:
+                    size = 1
+                sizes[size] = sizes.get(size, 0) + 1
+            if len(sizes) > 1:
+                raise _BuildFailure(
+                    f"All return statements in '{node.name}' must return the same number of values. "
+                    f"Found return arities: {dict(sorted(sizes.items()))}. "
+                    "Rewrite so every return has the same tuple size."
+                )
+
     def _compile_to_native(self, source: str, sandbox_root: Path) -> Path:
         """Transpile ``source`` to Rust, build it, and return the compiled .so path."""
         try:
@@ -324,6 +347,8 @@ class Orchestrator:
             raise _BuildFailure(
                 f"Syntax error in source: {exc} (line {exc.lineno})"
             ) from exc
+
+        self._validate_return_tuple_sizes(tree)
 
         for name in self.function_names:
             if _find_top_level(tree, name)[0] is None:

@@ -1,0 +1,7 @@
+project: level1_matrix_append
+functions:
+  - file: matrix_multiply_append.py
+    name: matrix_multiply_append
+    tests:
+      - tests/test_matrix_append.py
+output_dir: dist_matrix_append

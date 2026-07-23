@@ -46,7 +46,7 @@ MINIMAL = PromptTemplate(
 Keep the code transpiler-friendly:
 - Do NOT use list comprehensions. Use explicit for loops instead.
 - Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
-- Use simple variable assignments, not tuple unpacking.
+- Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 """,
     "Minimal baseline prompt.",
 )
@@ -69,7 +69,7 @@ RULES:
 10. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
 11. Do NOT use list comprehensions. Use explicit for loops instead.
 12. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
-13. Use simple variable assignments, not tuple unpacking.
+13. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 14. The implementation file is named `generated.py` and the test file `test_generated.py`; tests must import with `from generated import function_name`. Wrap the implementation in ```python ... ``` and the tests in a second ```python ... ``` block. No other explanation.
 
 OUTPUT FORMAT:
@@ -96,7 +96,7 @@ RULES:
 7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
 8. Do NOT use list comprehensions. Use explicit for loops instead.
 9. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
-10. Use simple variable assignments, not tuple unpacking.
+10. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 11. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 """,
     "Focus on algorithmic efficiency.",
@@ -116,7 +116,7 @@ RULES:
 7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
 8. Do NOT use list comprehensions. Use explicit for loops instead.
 9. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
-10. Use simple variable assignments, not tuple unpacking.
+10. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 11. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 """,
     "Focus on low-level performance and SIMD-friendly code.",
@@ -136,7 +136,7 @@ RULES:
 7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
 8. Do NOT use list comprehensions. Use explicit for loops instead.
 9. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
-10. Use simple variable assignments, not tuple unpacking.
+10. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 11. The implementation file is named `generated.py` and the test file `test_generated.py`; tests must import with `from generated import function_name`. Wrap the implementation in ```python ... ``` and the tests in a second ```python ... ``` block. No other explanation.
 
 OUTPUT FORMAT:
@@ -160,7 +160,7 @@ RULES:
 5. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
 6. Do NOT use list comprehensions. Use explicit for loops instead.
 7. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
-8. Use simple variable assignments, not tuple unpacking.
+8. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 9. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 """,
     "Encourage novel algorithm choices.",
@@ -178,7 +178,7 @@ RULES:
 5. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
 6. Do NOT use list comprehensions. Use explicit for loops instead.
 7. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
-8. Use simple variable assignments, not tuple unpacking.
+8. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 9. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 """,
     "Use only well-known algorithms.",
@@ -197,7 +197,7 @@ RULES:
 6. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
 7. Do NOT use list comprehensions. Use explicit for loops instead.
 8. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
-9. Use simple variable assignments, not tuple unpacking.
+9. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 10. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 """,
     "Optimizes with iterative feedback.",
@@ -216,7 +216,8 @@ RULES:
 6. Do NOT use tuple unpacking or multi-target assignments (e.g., `a, b = b, a + b`). Use temporary variables and simple assignments.
 7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, list slicing, `sum()`, `map()`, `filter()`, `eval()`, `exec()`, generators, `async`/`await`, `match`/`case`, or walrus operators.
 8. Keep code simple and explicit; avoid Python idioms that do not map directly to Rust.
-9. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+9. All return statements must return the same number of values.
+10. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 """,
     "Explicitly forbids constructs that are hard for the transpiler to handle.",
 )
