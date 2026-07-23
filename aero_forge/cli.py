@@ -241,6 +241,17 @@ def fix(
     help="Parallel build jobs (default: min(4, functions)).",
 )
 @click.option(
+    "--distribute",
+    is_flag=True,
+    help="Use process-based parallelism for local distributed builds.",
+)
+@click.option(
+    "--workers",
+    type=int,
+    default=None,
+    help="Number of parallel workers for distributed builds (default: --jobs or min(4, functions)).",
+)
+@click.option(
     "--write-blueprint",
     "write_blueprint_flag",
     is_flag=True,
@@ -250,6 +261,12 @@ def fix(
     "--dry-run",
     is_flag=True,
     help="Preview what would be built without compiling.",
+)
+@click.option(
+    "--target",
+    type=click.Choice(["native", "wasm32-unknown-unknown"]),
+    default="native",
+    help="Build target (default: native).",
 )
 @click.option(
     "--gpu",
@@ -274,8 +291,11 @@ def build(
     cache_dir: str | None,
     output_dir: str | None,
     jobs: int | None,
+    distribute: bool,
+    workers: int | None,
     write_blueprint_flag: bool,
     dry_run: bool,
+    target: str,
     gpu: bool,
     verbose: bool,
 ) -> None:
@@ -311,7 +331,7 @@ def build(
 
     runner = BuildRunner(
         blueprint=bp,
-        max_workers=jobs or min(4, len(bp.functions) or 1),
+        max_workers=workers or jobs or min(4, len(bp.functions) or 1),
         llm_provider=llm_provider,
         model=model,
         max_iterations=max_iterations,
@@ -320,6 +340,8 @@ def build(
         cache_dir=Path(cache_dir) if cache_dir else None,
         force=force,
         gpu=gpu,
+        target=target,
+        distributed=distribute,
         dry_run=dry_run,
     )
 

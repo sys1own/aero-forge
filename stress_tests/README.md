@@ -32,6 +32,8 @@ fail with a clear `UnsupportedError` message rather than crashing.
 | 12 | NumPy-style 1D vectors | **Pass** | `np.array`, `np.zeros`, `np.ones`, `np.dot` (1D and 2D), `np.sum`, and elementwise `arr * 2 + 1` compile and pass. |
 | 13 | Incremental builds | **Pass** | `--force`, `--cache-dir`, `AERO_FORGE_CACHE_DIR`, and `rustc` version keys tested. |
 | 14 | GPU scaffolding | **Partial** | `--gpu` and `# @accelerate gpu` detection work; CPU fallback when `nvcc` is unavailable. |
+| 15 | WASM target | **Pass** | `--target wasm32-unknown-unknown` compiles scalar functions to `.wasm` and a `.js` loader; verified with Node.js. |
+| 16 | Distributed builds | **Partial** | `--distribute` compiles multiple source files in parallel worker processes locally; cross-machine worker pool is future work. |
 
 ## Adding a new stress test
 

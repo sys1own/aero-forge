@@ -15,6 +15,7 @@ from aero_forge.blueprint import Blueprint, FunctionSpec, discover_functions
 from aero_forge.cache.build_cache import BuildCache
 from aero_forge.gpu import compile_gpu_kernel, find_gpu_functions
 from aero_forge.orchestrator.orchestrator import Orchestrator
+from aero_forge.wasm import build_wasm_module
 
 logger = logging.getLogger("aero_forge.build")
 
@@ -54,6 +55,8 @@ class BuildRunner:
         cache_dir: Optional[Path] = None,
         force: bool = False,
         gpu: bool = False,
+        target: str = "native",
+        distributed: bool = False,
         dry_run: bool = False,
     ):
         self.blueprint = blueprint
@@ -64,6 +67,8 @@ class BuildRunner:
         self.max_retries = max_retries
         self.force = force
         self.gpu = gpu
+        self.target = target
+        self.distributed = distributed
         env_cache = os.getenv("AERO_FORGE_CACHE_ENABLED", "true").lower() not in (
             "0",
             "false",
@@ -104,9 +109,12 @@ class BuildRunner:
             for source, specs in source_specs:
                 results.append(self._safe_build_source(output_dir, source, specs))
         else:
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=self.max_workers
-            ) as executor:
+            executor_class = (
+                concurrent.futures.ProcessPoolExecutor
+                if self.distributed
+                else concurrent.futures.ThreadPoolExecutor
+            )
+            with executor_class(max_workers=self.max_workers) as executor:
                 futures = {
                     executor.submit(
                         self._safe_build_source, output_dir, source, specs
@@ -205,11 +213,33 @@ class BuildRunner:
                         iterations=0,
                     )
 
-        cache_key_name = f"{source.stem}_{'_'.join(function_names)}"
-        cached = self.cache.get(source_text, flags, cache_key_name)
-
         source_output = output_dir
         source_output.mkdir(parents=True, exist_ok=True)
+
+        if self.target == "wasm32-unknown-unknown":
+            try:
+                wasm_artifact = build_wasm_module(
+                    source, function_names, source_output, module_name=source.stem
+                )
+                return BuildResult(
+                    source=source,
+                    function_names=function_names,
+                    success=True,
+                    artifact=wasm_artifact,
+                    logs="WASM module built",
+                    iterations=0,
+                )
+            except UnsupportedError as exc:
+                return BuildResult(
+                    source=source,
+                    function_names=function_names,
+                    success=False,
+                    logs=str(exc),
+                    iterations=0,
+                )
+
+        cache_key_name = f"{source.stem}_{'_'.join(function_names)}"
+        cached = self.cache.get(source_text, flags, cache_key_name)
 
         if cached is not None:
             try:

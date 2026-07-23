@@ -1,0 +1,7 @@
+project: level15_wasm
+functions:
+  - file: fib.py
+    compile_all: true
+output_dir: dist
+llm:
+  provider: none
