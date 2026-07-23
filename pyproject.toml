@@ -13,6 +13,7 @@ dependencies = [
     "click>=8.0",
     "tree-sitter",
     "pydantic",
+    "pyyaml>=5.0",
     "numpy",
     "networkx",
     "z3-solver",

@@ -54,7 +54,9 @@ class Orchestrator:
         self,
         source_path: str | Path,
         function_name: str,
+        function_names: Optional[List[str]] = None,
         test_path: Optional[str | Path] = None,
+        test_paths: Optional[List[str | Path]] = None,
         max_iterations: Optional[int] = None,
         use_llm: Optional[bool] = None,
         llm_provider: Optional[str] = None,
@@ -63,6 +65,8 @@ class Orchestrator:
         max_retries: Optional[int] = None,
         cache_enabled: Optional[bool] = None,
         fallback_model: Optional[str] = None,
+        compiler_flags: Optional[List[str]] = None,
+        output_dir: Optional[str | Path] = None,
     ):
         overrides: Dict[str, Any] = {}
         if max_iterations is not None:
@@ -92,10 +96,19 @@ class Orchestrator:
 
         self.source_path = Path(source_path)
         self.function_name = function_name
-        self.test_path = Path(test_path) if test_path else None
+        self.function_names = list(function_names) if function_names else [function_name]
+        if test_paths:
+            self.test_paths = [Path(p) for p in test_paths]
+        elif test_path:
+            self.test_paths = [Path(test_path)]
+        else:
+            self.test_paths = []
+        self.test_path = self.test_paths[0] if self.test_paths else None
+        self.output_dir = Path(output_dir) if output_dir else self.source_path.parent
         self._project_root: Optional[Path] = None
         self.max_iterations = self.settings["MAX_ITERATIONS"]
         self.use_llm = self.settings.get("LLM_PROVIDER", "none") != "none"
+        self.compiler_flags = compiler_flags or []
 
         self.cache = FixCache(enabled=self.settings["CACHE_ENABLED"])
         self.prompt_builder = PromptBuilder()
@@ -116,7 +129,11 @@ class Orchestrator:
 
     def run(self) -> Dict[str, Any]:
         """Run the build/heal loop and return the final result."""
-        logger.info("Starting forge for %s::%s", self.source_path, self.function_name)
+        logger.info(
+            "Starting forge for %s::%s",
+            self.source_path,
+            ", ".join(self.function_names),
+        )
         self._project_root = find_project_root(self.source_path)
         ensure_sys_path(self._project_root)
         check_toolchain()
@@ -136,7 +153,7 @@ class Orchestrator:
             with Sandbox(
                 self.source_path,
                 self.function_name,
-                self.test_path,
+                test_paths=self.test_paths,
                 project_root=self._project_root,
             ) as sandbox:
                 sandbox.source_in_sandbox.write_text(source, encoding="utf-8")
@@ -276,9 +293,12 @@ class Orchestrator:
                 f"Syntax error in source: {exc} (line {exc.lineno})"
             ) from exc
 
-        if _find_function(tree, self.function_name) is None:
-            raise _BuildFailure(f"Function {self.function_name!r} not found")
+        for name in self.function_names:
+            if _find_function(tree, name) is None:
+                raise _BuildFailure(f"Function {name!r} not found")
 
+        # Use the source stem for the module name so multiple functions from the
+        # same file are compiled into a single extension.
         module_name = f"aero_forge_{self.source_path.stem}"
         crate_name = _rust_identifier(module_name)
 
@@ -286,11 +306,14 @@ class Orchestrator:
         graph = UASTToHINTranslator().translate(uast)
 
         shield_config: Dict[str, Any] = {}
-        traits = Shield(config=shield_config).analyze(
-            graph, func_name=self.function_name, source=source
-        )
-        traits["function_name"] = self.function_name
-        graph.traits_by_name = {self.function_name: traits}
+        traits_by_name: Dict[str, Any] = {}
+        for name in self.function_names:
+            traits = Shield(config=shield_config).analyze(
+                graph, func_name=name, source=source
+            )
+            traits["function_name"] = name
+            traits_by_name[name] = traits
+        graph.traits_by_name = traits_by_name
         graph.traits = graph.traits_by_name
 
         engine = Engine()
@@ -298,7 +321,7 @@ class Orchestrator:
             graph,
             sandbox_root,
             module_name=module_name,
-            function_names=[self.function_name],
+            function_names=self.function_names,
             source=source,
         )
 
@@ -317,6 +340,10 @@ class Orchestrator:
             self._cargo_target.mkdir(parents=True, exist_ok=True)
             env = os.environ.copy()
             env["CARGO_TARGET_DIR"] = str(self._cargo_target)
+            if self.compiler_flags:
+                env["RUSTFLAGS"] = " ".join(
+                    [os.environ.get("RUSTFLAGS", "")] + self.compiler_flags
+                ).strip()
 
             build = subprocess.run(
                 ["cargo", "build", "--release"],
@@ -343,7 +370,7 @@ class Orchestrator:
         loader.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(artifact, so_path)
         loader.write_text(
-            self._loader_source(so_path, crate_name, [self.function_name]),
+            self._loader_source(so_path, crate_name, self.function_names),
             encoding="utf-8",
         )
         ensure_init_files(loader, project_root=sandbox.root)
@@ -366,15 +393,20 @@ class Orchestrator:
         return "\n".join(lines) + "\n"
 
     def _merge_back(self, sandbox: Sandbox, artifact: Path) -> None:
-        """Copy the loader and compiled extension to the original directory."""
-        dest_dir = self.source_path.parent
+        """Copy the loader and compiled extension to the output directory."""
+        dest_dir = self.output_dir
+        dest_dir.mkdir(parents=True, exist_ok=True)
         so_dest = dest_dir / artifact.name
         loader_dest = dest_dir / self.source_path.name
         shutil.copy(sandbox.source_in_sandbox, loader_dest)
         shutil.copy(artifact, so_dest)
         if self._project_root is None:
             self._project_root = find_project_root(self.source_path)
-        ensure_init_files(loader_dest, project_root=self._project_root)
+        if dest_dir == self.source_path.parent:
+            ensure_init_files(loader_dest, project_root=self._project_root)
+        else:
+            # Build outputs are isolated; do not turn them into packages.
+            pass
 
     def _extract_function_source(self, source: str) -> str:
         try:
