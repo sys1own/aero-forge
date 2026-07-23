@@ -1,0 +1,8 @@
+project: advanced_match_case
+functions:
+  - file: match_case.py
+    name: match_func
+    tests: []
+output_dir: dist
+llm:
+  provider: none

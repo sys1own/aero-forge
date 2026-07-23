@@ -13,10 +13,7 @@ class Matrix:
         return result
 
     def transpose(self) -> list[list[float]]:
-        return [
-            [self.data[j][i] for j in range(self.rows)]
-            for i in range(self.cols)
-        ]
+        return [[self.data[j][i] for j in range(self.rows)] for i in range(self.cols)]
 
     def get(self, row: int, col: int) -> float:
         return self.data[row][col]

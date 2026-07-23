@@ -1,0 +1,9 @@
+project: is_prime_example
+functions:
+  - file: src/generated.py
+    compile_all: true
+    tests:
+      - tests/test_generated.py
+output_dir: dist
+llm:
+  provider: none

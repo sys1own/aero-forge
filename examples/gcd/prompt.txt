@@ -1,0 +1,1 @@
+Write a function that returns the greatest common divisor of two integers using Euclid's algorithm.

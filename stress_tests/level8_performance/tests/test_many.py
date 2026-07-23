@@ -48,6 +48,8 @@ from many_funcs import func_46
 from many_funcs import func_47
 from many_funcs import func_48
 from many_funcs import func_49
+
+
 def test_many():
     assert func_0(0) == 0
     assert func_1(0) == 1

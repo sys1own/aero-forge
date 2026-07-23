@@ -1,0 +1,1 @@
+Write a function that returns True if n is a prime number, False otherwise.

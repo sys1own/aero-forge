@@ -1,0 +1,1 @@
+Write a function that returns the number of iterations until the Mandelbrot sequence escapes.

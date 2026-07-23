@@ -1,0 +1,8 @@
+project: advanced_async_await
+functions:
+  - file: async_await.py
+    name: async_func
+    tests: []
+output_dir: dist
+llm:
+  provider: none
