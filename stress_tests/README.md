@@ -1,0 +1,43 @@
+# Aero-Forge Stress Test Campaign
+
+This directory contains a growing suite of real-world Python patterns used to
+push the boundaries of the Aero-Forge transpiler. Tests are run via
+`pytest stress_tests/test_stress.py` (or `python -m pytest` from the repo root).
+
+## Running the suite
+
+```bash
+python -m pytest stress_tests/test_stress.py -v
+```
+
+Each test invokes `aero-forge build` on a level-specific blueprint and checks the
+result. Passing tests compile successfully; unsupported patterns are verified to
+fail with a clear `UnsupportedError` message rather than crashing.
+
+## Level results
+
+| Level | Theme | Status | Notes |
+|-------|-------|--------|-------|
+| 1 | Mathematical & numerical | **Pass** | `factorial`, `power`, `is_prime`, `mandelbrot` compile and pass tests. `matrix_multiply` is unsupported (lists/append/len). |
+| 2 | Data structures & collections | **Partial** | Tuple unpacking and `min`/`max` multi-arg work. Lists, dicts, slicing, `sum`, `enumerate`, `zip` raise `UnsupportedError`. |
+| 3 | Object-oriented | **Unsupported** | Classes, methods, staticmethods, properties, dataclasses, inheritance raise `UnsupportedError`. |
+| 4 | Control flow | **Pass** | `break`/`continue` in `for`/`while` loops, recursion, nested `if`/`elif`/`else` work. |
+| 5 | Standard library | **Partial** | `math` module functions and constants work. `random`, `datetime`, `re`, `json` are unsupported. |
+| 6 | Cross-file & multi-module | **Pass** | Multiple source files build in parallel with per-source tests. |
+| 7 | LLM healing | **Skipped** (no API key) | `test_no_llm_graceful_failure` passes. Real LLM healing requires `OPENROUTER_API_KEY` or `GEMINI_API_KEY`. |
+| 8 | Performance & scale | **Pass** | 50 functions from one file compile in ~1 second. |
+| 9 | Blueprint edge cases | **Pass** | Missing files, missing function names, and name/compile_all combinations produce clear messages. |
+
+## Adding a new stress test
+
+1. Create a directory `stress_tests/levelX_<name>/`.
+2. Add a `blueprint.aero`, source `.py`, and `tests/test_*.py`.
+3. Import only the module that the current source file becomes (the file stem).
+4. Add a test class in `stress_tests/test_stress.py`.
+5. For unsupported patterns, assert `returncode != 0` and check for the word
+   `Unsupported` in the output.
+
+## Known limitations
+
+See the main `README.md` for the authoritative list of supported and unsupported
+Python constructs.

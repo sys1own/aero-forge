@@ -254,6 +254,35 @@ Aero-Forge merges configuration from (lowest to highest precedence):
    - Finally calls the configured LLM provider with retry and exponential backoff.
 7. When tests pass, the native extension and wrapper are copied back to the source directory.
 
+## Supported Python constructs (stress-tested)
+
+Aero-Forge is designed for numeric/scalar Python functions. The `stress_tests/`
+directory covers real-world patterns:
+
+**Supported:**
+- Scalar arithmetic, comparisons, and boolean returns.
+- `if`/`elif`/`else`, nested conditions.
+- `for`/`while` loops over `range(...)`.
+- `break` and `continue` inside loops.
+- Recursion.
+- Tuple unpacking assignments (`a, b = b, a`).
+- `min`/`max` with multiple scalar arguments.
+- `math.sqrt`, `math.sin`, `math.cos`, `math.tan`, `math.exp`, `math.log`,
+  `math.log10`, `math.ceil`, `math.floor`, `math.trunc`, `math.pow`,
+  `math.radians`, `math.degrees`, and `math.pi`/`e`/`tau`.
+- Multi-source builds via `compile_all` and per-function `tests`.
+- Parallel builds (`--jobs`) and incremental build caching.
+
+**Currently unsupported (clear error messages):**
+- Lists, list comprehensions, slicing, `append`, `len`, `sum`, `enumerate`, `zip`.
+- Dictionaries and sets.
+- Classes, methods, properties, dataclasses.
+- `try`/`except`, `with`, `yield`, `async`/`await`.
+- `random`, `datetime`, `re`, `json`, and other non-math stdlib modules.
+- I/O (`print`, file access, network, `os`, `subprocess`, etc.).
+
+See `stress_tests/README.md` for the full campaign report.
+
 ## Free-tier / low-quota usage
 
 - Use `aero-forge fix ... --llm-provider openrouter --model openrouter/free` and set `OPENROUTER_API_KEY` to leverage OpenRouter's free models.

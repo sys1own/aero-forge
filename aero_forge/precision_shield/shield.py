@@ -19,6 +19,8 @@ _FLOAT_MATH_FUNCS: Set[str] = {
     "ceil",
     "floor",
     "trunc",
+    "radians",
+    "degrees",
 }
 _BITWISE_OPS: Set[type] = {
     ast.LShift,

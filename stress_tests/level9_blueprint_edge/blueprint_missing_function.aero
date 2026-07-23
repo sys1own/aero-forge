@@ -1,0 +1,6 @@
+project: edge
+functions:
+  - file: valid.py
+    name: does_not_exist
+    tests:
+      - tests/test_valid.py

@@ -1,0 +1,7 @@
+project: performance
+functions:
+  - file: many_funcs.py
+    compile_all: true
+    tests:
+      - tests/test_many.py
+output_dir: dist

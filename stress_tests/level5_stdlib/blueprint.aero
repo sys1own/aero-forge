@@ -1,0 +1,14 @@
+project: level5_stdlib
+functions:
+  - file: math_funcs.py
+    name: hypotenuse
+    tests:
+      - tests/test_stdlib.py
+  - file: math_funcs.py
+    name: sine_angle
+    tests:
+      - tests/test_stdlib.py
+  - file: math_funcs.py
+    name: cos_angle
+    tests:
+      - tests/test_stdlib.py

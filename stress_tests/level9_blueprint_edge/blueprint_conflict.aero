@@ -1,0 +1,7 @@
+project: edge
+functions:
+  - file: valid.py
+    name: f
+    compile_all: true
+    tests:
+      - tests/test_valid.py

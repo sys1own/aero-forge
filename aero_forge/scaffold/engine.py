@@ -329,6 +329,10 @@ class RustGenerator:
             return self._emit_while(stmt)
         if isinstance(stmt, ast.For):
             return self._emit_for(stmt)
+        if isinstance(stmt, ast.Break):
+            return "break;"
+        if isinstance(stmt, ast.Continue):
+            return "continue;"
         if isinstance(stmt, ast.Pass):
             return ""
         if isinstance(stmt, ast.Expr):
@@ -691,6 +695,18 @@ class RustGenerator:
             if ctx == "f64":
                 return f"({left}).powf({right})"
             return f"(({left} as f64).powf({right} as f64) as i64)"
+
+        if name == "radians":
+            arg = args[0]
+            if ctx == "f64":
+                return f"(({arg}) * std::f64::consts::PI / 180.0)"
+            return f"((({arg}) as f64) * std::f64::consts::PI / 180.0) as i64"
+
+        if name == "degrees":
+            arg = args[0]
+            if ctx == "f64":
+                return f"(({arg}) * 180.0 / std::f64::consts::PI)"
+            return f"((({arg}) as f64) * 180.0 / std::f64::consts::PI) as i64"
 
         if len(args) != 1:
             raise UnsupportedError(f"math.{name}() takes exactly one argument")

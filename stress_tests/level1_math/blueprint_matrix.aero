@@ -1,0 +1,7 @@
+project: level1_matrix
+functions:
+  - file: matrix_multiply.py
+    name: matrix_multiply
+    tests:
+      - tests/test_matrix.py
+output_dir: dist_matrix

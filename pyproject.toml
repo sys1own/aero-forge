@@ -26,6 +26,9 @@ gemini = ["google-generativeai>=0.7.0"]
 [project.scripts]
 aero-forge = "aero_forge.cli:main"
 
+[tool.pytest.ini_options]
+testpaths = ["tests", "stress_tests/test_stress.py"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["aero_forge*"]
