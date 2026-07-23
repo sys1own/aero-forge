@@ -185,6 +185,14 @@ aero-forge build --dry-run
 
 `--dry-run` parses the blueprint, expands wildcards, and lists what would be compiled without invoking `cargo`.
 
+### Build for WebAssembly
+
+```bash
+aero-forge build --target wasm32-unknown-unknown --no-llm
+```
+
+This produces a `<module>.wasm` file plus a `<module>.js` loader in `dist/` that can be used from Node.js or a browser for scalar numeric functions. Classes, lists, and PyO3-specific constructs are not yet supported in the WASM target.
+
 ### Build CLI flags
 
 - `--auto FILE` – auto-discover functions.
@@ -192,12 +200,15 @@ aero-forge build --dry-run
 - `--model MODEL` – override model.
 - `--output-dir PATH` / `-o PATH` – override `output_dir`.
 - `--jobs N` / `-j N` – parallel build jobs (default `min(4, functions)`).
+- `--distribute` – use process-based parallelism for local multi-core builds.
+- `--workers N` – override worker count when `--distribute` is used.
 - `--no-llm` – skip LLM-based healing.
 - `--no-cache` – disable the build cache.
 - `--force` – ignore the build cache and recompile.
 - `--cache-dir PATH` / `AERO_FORGE_CACHE_DIR` – custom cache directory.
 - `--write-blueprint` – when using `--auto`, write a generated `blueprint.aero`.
 - `--dry-run` – preview what would be built.
+- `--target {native,wasm32-unknown-unknown}` – compile to native PyO3 extension or WASM.
 - `--gpu` – route `# @accelerate gpu` functions through the GPU backend (falls back to CPU if `nvcc` is missing).
 - `--verbose` – show debug logs and per-function results.
 
@@ -209,6 +220,7 @@ See `BLUEPRINT.md` for a complete field reference and a fully commented example.
 - The cache key is a SHA-256 of the source file hash, sorted compiler flags, function name, and `rustc -Vv` output.
 - Re-running `aero-forge build` skips unchanged functions; use `--force` to rebuild.
 - Functions from different source files are compiled in parallel (configurable with `--jobs`).
+- `--distribute` uses process-based parallelism so each source file compiles in an isolated worker process (useful for local multi-core builds).
 
 ## Configuration
 
@@ -282,7 +294,7 @@ directory covers real-world patterns:
   - `np.sum`
   - elementwise `arr * 2 + 1` on 1D vectors
 - Multi-source builds via `compile_all` and per-function `tests`.
-- Parallel builds (`--jobs`).
+- Parallel builds (`--jobs`) and local process-based distribution (`--distribute`).
 - Incremental builds with source-hash + compiler-flags + `rustc` version cache
   keys, `--force` to ignore cache, and `--cache-dir` / `AERO_FORGE_CACHE_DIR`
   to customize the cache location.
@@ -290,6 +302,8 @@ directory covers real-world patterns:
   `@classmethod`, and class attributes with getter/setter access.
 - GPU scaffolding: functions annotated with `# @accelerate gpu` are detected
   when `--gpu` is passed; if `nvcc` is unavailable the build falls back to CPU.
+- WASM target (`--target wasm32-unknown-unknown`) for scalar numeric functions;
+  generates a `.wasm` file and a Node/browser-compatible `.js` loader.
 
 **Currently unsupported (clear error messages):**
 - List slicing, `append`, `extend`, `len`, `enumerate`, `zip`.

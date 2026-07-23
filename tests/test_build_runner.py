@@ -329,3 +329,40 @@ def test_build_runner_gpu_fallback_to_cpu(tmp_path):
     result = runner.build()
     assert result["success"] is True
     assert result["passed"] == 1
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_build_runner_distributed(tmp_path):
+    source1 = tmp_path / "a.py"
+    source2 = tmp_path / "b.py"
+    test1 = tmp_path / "test_a.py"
+    test2 = tmp_path / "test_b.py"
+    source1.write_text("def add(a, b):\n    return a + b\n")
+    source2.write_text("def mul(a, b):\n    return a * b\n")
+    test1.write_text("from a import add\ndef test_add():\n    assert add(2, 3) == 5\n")
+    test2.write_text("from b import mul\ndef test_mul():\n    assert mul(4, 5) == 20\n")
+    blueprint_path = tmp_path / "blueprint.aero"
+    blueprint_path.write_text(
+        "project: dist_test\n"
+        "functions:\n"
+        "  - file: a.py\n"
+        "    name: add\n"
+        "    tests: [test_a.py]\n"
+        "  - file: b.py\n"
+        "    name: mul\n"
+        "    tests: [test_b.py]\n"
+        "llm:\n"
+        "  provider: none\n"
+        "output_dir: ./dist\n"
+    )
+
+    bp = parse_blueprint(blueprint_path)
+    runner = BuildRunner(bp, max_workers=2, distributed=True, cache_enabled=False)
+    result = runner.build()
+
+    assert result["success"] is True
+    assert result["total"] == 2
+    assert result["passed"] == 2
