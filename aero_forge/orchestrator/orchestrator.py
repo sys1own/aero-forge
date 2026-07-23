@@ -5,27 +5,35 @@ from __future__ import annotations
 import ast
 import importlib.machinery
 import importlib.util
+import logging
 import os
-import re
 import shutil
 import subprocess
-import sys
-import tempfile
 import textwrap
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from aero_forge.cache.fix_cache import FixCache
+from aero_forge.config import load_config, resolve_settings
 from aero_forge.errors import (
-    UnsupportedError,
     UserError,
     check_toolchain,
     classify_cargo_error,
 )
 from aero_forge.healing.router import try_auto_fix
+from aero_forge.orchestrator.error_classifier import (
+    ErrorClass,
+    classify_exception,
+    is_fatal,
+)
+from aero_forge.orchestrator.model_client import ModelClient
+from aero_forge.orchestrator.prompt_builder import PromptBuilder
 from aero_forge.precision_shield.shield import Shield
 from aero_forge.sandbox.manager import Sandbox
 from aero_forge.scaffold.engine import Engine, _find_function, _rust_identifier
 from aero_forge.translator import UASTToHINTranslator, python_source_to_uast
+
+logger = logging.getLogger("aero_forge.orchestrator")
 
 
 class ForgeError(Exception):
@@ -40,37 +48,52 @@ class Orchestrator:
         source_path: str | Path,
         function_name: str,
         test_path: Optional[str | Path] = None,
-        max_iterations: int = 5,
-        use_llm: bool = True,
-        model: str = "gpt-4",
+        max_iterations: Optional[int] = None,
+        use_llm: Optional[bool] = None,
+        model: Optional[str] = None,
+        model_priority: Optional[List[str]] = None,
+        max_retries: Optional[int] = None,
+        cache_enabled: Optional[bool] = None,
+        fallback_model: Optional[str] = None,
     ):
+        overrides: Dict[str, Any] = {}
+        if max_iterations is not None:
+            overrides["MAX_ITERATIONS"] = max_iterations
+        if use_llm is not None:
+            overrides["USE_LLM"] = use_llm
+        if max_retries is not None:
+            overrides["MAX_RETRIES"] = max_retries
+        if cache_enabled is not None:
+            overrides["CACHE_ENABLED"] = cache_enabled
+        if fallback_model is not None:
+            overrides["FALLBACK_MODEL"] = fallback_model
+
+        # Backward compat: --model sets a single-model priority list.
+        if model is not None:
+            overrides["MODEL_PRIORITY"] = [model]
+        if model_priority is not None:
+            overrides["MODEL_PRIORITY"] = model_priority
+
+        file_config = load_config()
+        self.settings = resolve_settings(file_config, **overrides)
+
         self.source_path = Path(source_path)
         self.function_name = function_name
         self.test_path = Path(test_path) if test_path else None
-        self.max_iterations = max_iterations
-        self.use_llm = use_llm
-        self.model = model
-        self._llm_client: Any = None
-        self._cargo_target = Path.home() / ".cache" / "aero-forge" / "target"
+        self.max_iterations = self.settings["MAX_ITERATIONS"]
+        self.use_llm = self.settings["USE_LLM"]
 
-    def _llm(self) -> Any:
-        if self._llm_client is None:
-            try:
-                from openai import OpenAI
-            except ImportError as exc:
-                raise UserError(
-                    "openai package is not installed; install it or use --no-llm"
-                ) from exc
-            key = os.getenv("OPENAI_API_KEY")
-            if not key:
-                raise UserError(
-                    "OPENAI_API_KEY is not set. Set it or run with --no-llm."
-                )
-            self._llm_client = OpenAI(api_key=key)
-        return self._llm_client
+        self.cache = FixCache(enabled=self.settings["CACHE_ENABLED"])
+        self.prompt_builder = PromptBuilder()
+        self.model_client = ModelClient(
+            models=self.settings["MODEL_PRIORITY"],
+            max_retries=self.settings["MAX_RETRIES"],
+        )
+        self._cargo_target = Path.home() / ".cache" / "aero-forge" / "target"
 
     def run(self) -> Dict[str, Any]:
         """Run the build/heal loop and return the final result."""
+        logger.info("Starting forge for %s::%s", self.source_path, self.function_name)
         check_toolchain()
         if not self.source_path.is_file():
             raise UserError(f"Source file not found: {self.source_path}")
@@ -78,7 +101,13 @@ class Orchestrator:
         original_source = self.source_path.read_text(encoding="utf-8")
         source = original_source
 
+        last_working_source: Optional[str] = None
+        last_working_artifact: Optional[Path] = None
+        self.prompt_builder.clear()
+
         for iteration in range(1, self.max_iterations + 1):
+            logger.info("Forge iteration %d/%d", iteration, self.max_iterations)
+
             with Sandbox(
                 self.source_path, self.function_name, self.test_path
             ) as sandbox:
@@ -87,20 +116,43 @@ class Orchestrator:
                 try:
                     artifact = self._compile_to_native(source, sandbox.root)
                 except _BuildFailure as exc:
-                    log = exc.log
-                    fixed = self._attempt_fix(source, log)
+                    error_log = exc.log
+                    if is_fatal(error_log):
+                        logger.error("Fatal build error: %s", error_log)
+                        raise UserError(f"Fatal build error: {error_log}") from exc
+
+                    self.prompt_builder.add_error(error_log)
+                    fixed = self._attempt_fix(source, error_log)
                     if fixed is None:
-                        raise ForgeError(
-                            f"Build failed and could not be fixed after {iteration} iteration(s).\n\n{log}"
-                        ) from exc
+                        reason = f"Build failed and could not be fixed: {error_log[:500]}"
+                        return self._partial_result(
+                            iteration,
+                            last_working_artifact,
+                            reason,
+                            error_log,
+                        )
                     source = fixed
                     continue
+                except UserError:
+                    raise
+                except Exception as exc:
+                    cls = classify_exception(exc)
+                    if cls == ErrorClass.FATAL:
+                        raise
+                    logger.exception("Unexpected error during build")
+                    return self._partial_result(
+                        iteration, last_working_artifact, str(exc), ""
+                    )
+
+                last_working_source = source
+                last_working_artifact = artifact
 
                 self._install_native_module(sandbox, artifact)
 
                 result = sandbox.run_tests()
                 if result["passed"]:
                     self._merge_back(sandbox, artifact)
+                    logger.info("Tests passed after %d iteration(s)", iteration)
                     return {
                         "success": True,
                         "iterations": iteration,
@@ -108,14 +160,84 @@ class Orchestrator:
                         "logs": result["logs"],
                     }
 
-                fixed = self._attempt_fix(source, result["logs"])
+                error_log = result["logs"]
+                if is_fatal(error_log):
+                    raise UserError(f"Fatal test error: {error_log}")
+
+                self.prompt_builder.add_error(error_log)
+                fixed = self._attempt_fix(source, error_log)
                 if fixed is None:
-                    raise ForgeError(
-                        f"Tests failed and could not be fixed after {iteration} iteration(s).\n\n{result['logs']}"
+                    reason = f"Tests failed and could not be fixed: {error_log[:500]}"
+                    return self._partial_result(
+                        iteration,
+                        last_working_artifact,
+                        reason,
+                        error_log,
                     )
                 source = fixed
 
-        raise ForgeError("Maximum iterations exceeded without a passing result.")
+        return self._partial_result(
+            self.max_iterations,
+            last_working_artifact,
+            "Maximum iterations exceeded without a passing result.",
+            "",
+        )
+
+    def _partial_result(
+        self,
+        iterations: int,
+        artifact: Optional[Path],
+        reason: str,
+        logs: str,
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "success": False,
+            "partial": True,
+            "iterations": iterations,
+            "error": reason,
+            "logs": logs,
+        }
+        if artifact is not None:
+            result["artifact"] = str(artifact)
+        return result
+
+    def _attempt_fix(self, source: str, error_log: str) -> Optional[str]:
+        """Try router, cache, then LLM."""
+        # 1. Router-first healing.
+        fixed = try_auto_fix(error_log, source)
+        if fixed is not None and fixed != source:
+            logger.info("Self-healing router produced a fix")
+            return fixed
+
+        # 2. Cached fix.
+        cached = self.cache.get(error_log, source)
+        if cached is not None and cached != source:
+            logger.info("Fix cache hit")
+            return cached
+
+        # 3. LLM fallback.
+        if not self.use_llm:
+            logger.info("LLM disabled; no fix available")
+            return None
+
+        func_source = self._extract_function_source(source)
+        messages = self.prompt_builder.build(self.function_name, func_source)
+
+        logger.info("Requesting LLM fix from %s", self.settings["MODEL_PRIORITY"])
+        answer = self.model_client.complete(messages)
+        if answer is None:
+            logger.error("All LLM models failed to produce a fix")
+            return None
+
+        new_func = _extract_function_body(answer, self.function_name)
+        fixed = _replace_function(source, self.function_name, new_func)
+        if fixed == source:
+            logger.warning("LLM returned a fix identical to current source; ignoring")
+            return None
+
+        self.cache.set(error_log, source, fixed)
+        logger.info("LLM produced a fix")
+        return fixed
 
     def _compile_to_native(self, source: str, sandbox_root: Path) -> Path:
         """Transpile ``source`` to Rust, build it, and return the compiled .so path."""
@@ -222,46 +344,6 @@ class Orchestrator:
         shutil.copy(sandbox.root / self.source_path.name, loader_dest)
         shutil.copy(artifact, so_dest)
 
-    def _attempt_fix(self, source: str, error_log: str) -> Optional[str]:
-        """Try a pattern-based fix, then optionally ask the LLM."""
-        fixed = try_auto_fix(error_log, source)
-        if fixed is not None:
-            return fixed
-        if not self.use_llm:
-            return None
-        return self._llm_fix(source, error_log)
-
-    def _llm_fix(self, source: str, error_log: str) -> Optional[str]:
-        """Prompt the LLM for a corrected function body."""
-        client = self._llm()
-
-        func_source = self._extract_function_source(source)
-        prompt = (
-            f"Fix the following Python function so that it compiles and passes its tests.\n\n"
-            f"Function `{self.function_name}`:\n{func_source}\n\n"
-            f"Failure context:\n{error_log}\n\n"
-            "Return ONLY the corrected function definition (no markdown fences, no explanation)."
-        )
-
-        try:
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are an expert Python and Rust programmer.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.2,
-            )
-        except Exception as exc:
-            raise ForgeError(f"LLM request failed: {exc}") from exc
-
-        answer = response.choices[0].message.content or ""
-        new_func = _extract_function_body(answer, self.function_name)
-        return _replace_function(source, self.function_name, new_func)
-
     def _extract_function_source(self, source: str) -> str:
         try:
             tree = ast.parse(source)
@@ -299,6 +381,13 @@ def _replace_function(source: str, name: str, new_body: str) -> str:
     try:
         tree = ast.parse(source)
     except SyntaxError:
+        # Source is unparseable; if the LLM returned a clean function, use it.
+        try:
+            body_tree = ast.parse(new_body)
+            if len(body_tree.body) == 1 and isinstance(body_tree.body[0], ast.FunctionDef):
+                return ast.unparse(body_tree.body[0]) + "\n"
+        except SyntaxError:
+            pass
         return source
 
     for node in ast.walk(tree):
