@@ -39,6 +39,8 @@ MATH_ATTRS = {
     "floor",
     "trunc",
     "pow",
+    "radians",
+    "degrees",
 }
 
 MATH_CONSTANTS = {

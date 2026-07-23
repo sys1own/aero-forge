@@ -1,0 +1,4 @@
+project: edge
+functions:
+  - file: does_not_exist.py
+    name: missing

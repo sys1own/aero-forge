@@ -1,0 +1,10 @@
+project: level4_control
+functions:
+  - file: break_continue.py
+    name: find_first_factor
+    tests:
+      - tests/test_control.py
+  - file: break_continue.py
+    name: sum_skipping_multiples
+    tests:
+      - tests/test_control.py

@@ -1,0 +1,22 @@
+project: level2_unsupported
+functions:
+  - file: list_comp.py
+    name: double_list
+    tests:
+      - tests_unsupported/test_unsupported.py
+  - file: dict_ops.py
+    name: count_keys
+    tests:
+      - tests_unsupported/test_unsupported.py
+  - file: slice_ops.py
+    name: head
+    tests:
+      - tests_unsupported/test_unsupported.py
+  - file: enumerate_zip.py
+    name: sum_pairs
+    tests:
+      - tests_unsupported/test_unsupported.py
+  - file: sum_builtin.py
+    name: total
+    tests:
+      - tests_unsupported/test_unsupported.py

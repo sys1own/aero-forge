@@ -9,3 +9,6 @@ __pycache__/
 *.dylib
 *.dll
 *.bak
+dist/
+dist_*/
+

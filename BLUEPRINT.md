@@ -118,3 +118,5 @@ Settings are merged from lowest to highest priority:
 - Functions from the same source file are compiled into a single shared library.
 - Functions from different source files are built in parallel (controlled by `--jobs`).
 - Unchanged source files are skipped when a cached artifact exists in `~/.cache/aero-forge/build_cache/`.
+- See `stress_tests/` for a broad set of real-world Python patterns and the
+  current limits of what Aero-Forge can compile.

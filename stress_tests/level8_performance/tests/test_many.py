@@ -1,0 +1,101 @@
+from many_funcs import func_0
+from many_funcs import func_1
+from many_funcs import func_2
+from many_funcs import func_3
+from many_funcs import func_4
+from many_funcs import func_5
+from many_funcs import func_6
+from many_funcs import func_7
+from many_funcs import func_8
+from many_funcs import func_9
+from many_funcs import func_10
+from many_funcs import func_11
+from many_funcs import func_12
+from many_funcs import func_13
+from many_funcs import func_14
+from many_funcs import func_15
+from many_funcs import func_16
+from many_funcs import func_17
+from many_funcs import func_18
+from many_funcs import func_19
+from many_funcs import func_20
+from many_funcs import func_21
+from many_funcs import func_22
+from many_funcs import func_23
+from many_funcs import func_24
+from many_funcs import func_25
+from many_funcs import func_26
+from many_funcs import func_27
+from many_funcs import func_28
+from many_funcs import func_29
+from many_funcs import func_30
+from many_funcs import func_31
+from many_funcs import func_32
+from many_funcs import func_33
+from many_funcs import func_34
+from many_funcs import func_35
+from many_funcs import func_36
+from many_funcs import func_37
+from many_funcs import func_38
+from many_funcs import func_39
+from many_funcs import func_40
+from many_funcs import func_41
+from many_funcs import func_42
+from many_funcs import func_43
+from many_funcs import func_44
+from many_funcs import func_45
+from many_funcs import func_46
+from many_funcs import func_47
+from many_funcs import func_48
+from many_funcs import func_49
+def test_many():
+    assert func_0(0) == 0
+    assert func_1(0) == 1
+    assert func_2(0) == 2
+    assert func_3(0) == 3
+    assert func_4(0) == 4
+    assert func_5(0) == 5
+    assert func_6(0) == 6
+    assert func_7(0) == 7
+    assert func_8(0) == 8
+    assert func_9(0) == 9
+    assert func_10(0) == 10
+    assert func_11(0) == 11
+    assert func_12(0) == 12
+    assert func_13(0) == 13
+    assert func_14(0) == 14
+    assert func_15(0) == 15
+    assert func_16(0) == 16
+    assert func_17(0) == 17
+    assert func_18(0) == 18
+    assert func_19(0) == 19
+    assert func_20(0) == 20
+    assert func_21(0) == 21
+    assert func_22(0) == 22
+    assert func_23(0) == 23
+    assert func_24(0) == 24
+    assert func_25(0) == 25
+    assert func_26(0) == 26
+    assert func_27(0) == 27
+    assert func_28(0) == 28
+    assert func_29(0) == 29
+    assert func_30(0) == 30
+    assert func_31(0) == 31
+    assert func_32(0) == 32
+    assert func_33(0) == 33
+    assert func_34(0) == 34
+    assert func_35(0) == 35
+    assert func_36(0) == 36
+    assert func_37(0) == 37
+    assert func_38(0) == 38
+    assert func_39(0) == 39
+    assert func_40(0) == 40
+    assert func_41(0) == 41
+    assert func_42(0) == 42
+    assert func_43(0) == 43
+    assert func_44(0) == 44
+    assert func_45(0) == 45
+    assert func_46(0) == 46
+    assert func_47(0) == 47
+    assert func_48(0) == 48
+    assert func_49(0) == 49

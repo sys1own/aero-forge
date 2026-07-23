@@ -1,0 +1,10 @@
+project: level2_collections
+functions:
+  - file: tuple_unpack.py
+    name: swap
+    tests:
+      - tests/test_collections.py
+  - file: tuple_unpack.py
+    name: minmax
+    tests:
+      - tests/test_collections.py

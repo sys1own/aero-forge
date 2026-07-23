@@ -1,0 +1,7 @@
+project: edge
+functions:
+  - file: valid.py
+    name: f
+    tests:
+      - tests/test_valid.py
+output_dir: dist_valid

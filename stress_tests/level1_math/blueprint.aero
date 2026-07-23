@@ -1,0 +1,14 @@
+project: level1_math
+functions:
+  - file: fibonacci.py
+    name: fibonacci
+    tests:
+      - tests/test_fibonacci.py
+  - file: gcd.py
+    name: gcd
+    tests:
+      - tests/test_gcd.py
+  - file: mandelbrot.py
+    name: mandelbrot_iterations
+    tests:
+      - tests/test_mandelbrot.py

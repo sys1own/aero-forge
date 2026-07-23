@@ -1,0 +1,11 @@
+project: cross_file
+functions:
+  - file: src/utils.py
+    compile_all: true
+    tests:
+      - tests/test_utils.py
+  - file: src/geometry.py
+    name: circle_area
+    tests:
+      - tests/test_geometry.py
+output_dir: dist
