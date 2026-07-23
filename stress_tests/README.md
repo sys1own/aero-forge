@@ -27,7 +27,9 @@ fail with a clear `UnsupportedError` message rather than crashing.
 | 7 | LLM healing | **Partial / API-dependent** | `test_no_llm_graceful_failure` passes. Real healing verified with `openrouter/free` for syntax, type, and multi-function broken files when a valid key is available. Rate-limit/backoff and API-fallback behavior is covered by mocked unit tests in `stress_tests/test_llm_rate_limits.py`. Gemini free-tier keys are often quota-exhausted and will xfail/skip. |
 | 8 | Performance & scale | **Pass** | 50 functions from one file compile in ~1 second. |
 | 9 | Blueprint edge cases | **Pass** | Missing files, missing function names, and name/compile_all combinations produce clear messages. |
-| 10 | Classes & methods | **Partial** | `Counter` and `Calculator` classes compile, including instance methods, read-only methods, `@staticmethod`, and `@classmethod`. List/Vec attributes and nested class types are not yet supported. |
+| 10 | Classes & methods | **Pass** | `Counter` and `Calculator` classes compile, including instance methods, read-only methods, `@staticmethod`, and `@classmethod`. |
+| 11 | Class `Vec` attributes | **Pass** | `Matrix` class with `rows`, `cols`, and `data: list[list[float]]` compiles; `multiply`, `transpose`, and `get` methods pass. |
+| 12 | NumPy-style 1D vectors | **Pass** | `np.array`, `np.zeros`, `np.ones`, `np.dot` (1D and 2D), `np.sum`, and elementwise `arr * 2 + 1` compile and pass. |
 
 ## Adding a new stress test
 

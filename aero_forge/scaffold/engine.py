@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from aero_forge._constants import IO_MODULES, IO_NAMES, MATH_ATTRS, MATH_CONSTANTS
 from aero_forge.errors import UnsupportedError
+from aero_forge.precision_shield.shield import _FLOAT_MATH_FUNCS
 
 logger = logging.getLogger("aero_forge.scaffold.engine")
 
@@ -51,7 +52,7 @@ class Engine:
                 )
             traits = traits_by_name.get(name, {}) or {}
             if is_class:
-                generator = ClassGenerator(node, module_name, traits)
+                generator = ClassGenerator(node, module_name, traits, class_names)
                 block = generator.emit()
                 function_blocks.append(block)
                 module_init_lines.append(
@@ -130,13 +131,23 @@ class RustGenerator:
         self.class_names = class_names or set()
 
         arg_names = [a.arg for a in func.args.args]
-        arg_types = traits.get("arg_types") or [self.function_type] * len(arg_names)
+        arg_types = self._annotated_arg_types(func, arg_names)
+        if arg_types is None:
+            arg_types = traits.get("arg_types") or [self.function_type] * len(arg_names)
         if len(arg_types) != len(arg_names):
             arg_types = [self.function_type] * len(arg_names)
         self.arg_names = arg_names
         self.arg_types = arg_types
 
+        annotated_return = _annotation_to_rust_type(func.returns, self.class_names)
+        if annotated_return:
+            self.return_type = annotated_return
+
         self.assigned = self._collect_assigned()
+        self.type_env: Dict[str, str] = {}
+        for name, typ in zip(self.arg_names, self.arg_types):
+            self.type_env[name] = typ
+        self._scan_local_types()
         self._tmp_counter = 0
         self.used_traits: Set[str] = set()
 
@@ -146,17 +157,190 @@ class RustGenerator:
     def emit(self) -> str:
         return self._emit_function()
 
+    def _annotated_arg_types(
+        self, func: ast.FunctionDef, arg_names: List[str]
+    ) -> Optional[List[str]]:
+        """Return Rust types from parameter annotations, or None if none are present."""
+        types: List[str] = []
+        any_annotation = False
+        for arg in func.args.args:
+            typ = _annotation_to_rust_type(arg.annotation, self.class_names)
+            if typ:
+                any_annotation = True
+            types.append(typ or self.function_type)
+        return types if any_annotation else None
+
+    def _scan_local_types(self) -> None:
+        """Infer types for local variables from assignments and loops."""
+        for stmt in self.func.body:
+            self._scan_stmt_types(stmt)
+
+    def _scan_stmt_types(self, stmt: ast.stmt) -> None:
+        if isinstance(stmt, ast.Assign):
+            for target in stmt.targets:
+                if isinstance(target, ast.Name):
+                    self.type_env[target.id] = self._type_of(stmt.value)
+        elif isinstance(stmt, ast.AnnAssign):
+            if isinstance(stmt.target, ast.Name):
+                typ = _annotation_to_rust_type(stmt.annotation, self.class_names)
+                if typ is None and stmt.value is not None:
+                    typ = self._type_of(stmt.value)
+                if typ:
+                    self.type_env[stmt.target.id] = typ
+        elif isinstance(stmt, ast.For):
+            if isinstance(stmt.target, ast.Name) and stmt.target.id != "_":
+                self.type_env[stmt.target.id] = "i64"
+            for body_stmt in stmt.body + stmt.orelse:
+                self._scan_stmt_types(body_stmt)
+        elif isinstance(stmt, (ast.If, ast.While)):
+            for body_stmt in stmt.body + stmt.orelse:
+                self._scan_stmt_types(body_stmt)
+
+    def _type_of(self, expr: ast.expr) -> str:
+        """Return the Rust type of an expression without emitting it."""
+        if isinstance(expr, ast.Constant):
+            if isinstance(expr.value, bool):
+                return "bool"
+            if isinstance(expr.value, int):
+                return "i64"
+            if isinstance(expr.value, float):
+                return "f64"
+            if expr.value is None:
+                return "()"
+        if isinstance(expr, ast.Name):
+            return self.type_env.get(expr.id, self.function_type)
+        if isinstance(expr, ast.Attribute):
+            return self._field_type(expr.value, expr.attr)
+        if isinstance(expr, ast.Subscript):
+            base_type = self._type_of(expr.value)
+            if base_type.startswith("Vec<"):
+                return _element_type(base_type)
+            return self.function_type
+        if isinstance(expr, ast.List):
+            if not expr.elts:
+                return f"Vec<{self.function_type}>"
+            return f"Vec<{self._type_of(expr.elts[0])}>"
+        if isinstance(expr, ast.ListComp):
+            return f"Vec<{self._type_of(expr.elt)}>"
+        if isinstance(expr, ast.BinOp):
+            if isinstance(expr.op, ast.Mult):
+                left_type = self._type_of(expr.left)
+                if left_type.startswith("Vec<") or isinstance(expr.left, ast.List):
+                    return left_type
+                right_type = self._type_of(expr.right)
+                if right_type.startswith("Vec<") or isinstance(expr.right, ast.List):
+                    return right_type
+            left_type = self._type_of(expr.left)
+            right_type = self._type_of(expr.right)
+            if "f64" in (left_type, right_type):
+                return "f64"
+            if "i64" in (left_type, right_type):
+                return "i64"
+            return self.function_type
+        if isinstance(expr, ast.UnaryOp):
+            return self._type_of(expr.operand)
+        if isinstance(expr, (ast.Compare, ast.BoolOp)):
+            return "bool"
+        if isinstance(expr, ast.IfExp):
+            return self._type_of(expr.body)
+        if isinstance(expr, ast.Call):
+            name = _call_name(expr)
+            base = _call_base(expr)
+            if name == "len" and base is None:
+                return "i64"
+            if base == "math" and name in _FLOAT_MATH_FUNCS:
+                return "f64"
+            if name in ("sqrt", "sin", "cos", "tan", "exp", "log", "log10"):
+                return "f64"
+            if name in ("pow",):
+                return self.function_type
+            if base in ("np", "numpy"):
+                return self._type_of_numpy_call(name, expr)
+            if name == self.func.name and name not in self.class_names:
+                return self.return_type or self.function_type
+            if getattr(self, "class_name", None) and name == self.class_name:
+                return "Self"
+            if name in self.class_names:
+                return name
+        return self.function_type
+
+    def _type_of_numpy_call(self, name: str, expr: ast.Call) -> str:
+        if name in ("zeros", "ones"):
+            if expr.args and isinstance(expr.args[0], ast.Tuple):
+                dims = len(expr.args[0].elts)
+                return ("Vec<" * dims) + "f64" + (">" * dims)
+            return "Vec<f64>"
+        if name == "array" and expr.args:
+            return self._type_of(expr.args[0])
+        if name == "dot" and len(expr.args) == 2:
+            t1 = self._type_of(expr.args[0])
+            t2 = self._type_of(expr.args[1])
+            if t1 == "Vec<f64>" and t2 == "Vec<f64>":
+                return "f64"
+            if "Vec<Vec<f64>>" in (t1, t2):
+                if t1 == t2:
+                    return "Vec<Vec<f64>>"
+                matrix = t1 if t1 == "Vec<Vec<f64>>" else t2
+                vector = t2 if matrix == t1 else t1
+                if vector == "Vec<f64>":
+                    return "Vec<f64>"
+            return "f64"
+        if name == "sum" and expr.args:
+            return "f64"
+        return "Vec<f64>"
+
+    def _field_type(self, value: ast.expr, attr: str) -> str:
+        """Return the type of ``value.attr`` when ``value`` is a class instance."""
+        base_type = self._type_of(value)
+        class_names = self.class_names | {getattr(self, "class_name", "")}
+        class_names.discard("")
+        if base_type in class_names or base_type == "Self":
+            fields = getattr(self, "fields", {})
+            return fields.get(attr, self.function_type)
+        if base_type.startswith("&") and base_type[1:] in class_names:
+            fields = getattr(self, "fields", {})
+            return fields.get(attr, self.function_type)
+        return self.function_type
+
+    def _coerce(self, expr: str, from_type: str, to_type: str) -> str:
+        """Cast ``expr`` from ``from_type`` to ``to_type`` when necessary."""
+        if from_type == to_type:
+            return expr
+        if from_type == "Self" and to_type == getattr(self, "class_name", ""):
+            return expr
+        if from_type == getattr(self, "class_name", "") and to_type == "Self":
+            return expr
+        if to_type.startswith("&") and from_type == to_type[1:]:
+            return expr
+        if from_type.startswith("&") and to_type == from_type[1:]:
+            return expr
+        if from_type.startswith("Vec<") and to_type.startswith("Vec<"):
+            return expr
+        if from_type == "i64" and to_type == "f64":
+            return f"({expr} as f64)"
+        if from_type == "f64" and to_type == "i64":
+            return f"({expr} as i64)"
+        if from_type == "bool" and to_type in ("i64", "f64"):
+            return f"({expr} as {to_type})"
+        if from_type == "i64" and to_type == "bool":
+            return f"({expr} != 0)"
+        if from_type == "f64" and to_type == "bool":
+            return f"({expr} != 0.0)"
+        return expr
+
     # ------------------------------------------------------------------
     # Collection helpers
     # ------------------------------------------------------------------
     def _collect_assigned(self) -> set[str]:
         names: set[str] = set()
         for node in ast.walk(self.func):
-            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            if isinstance(node, ast.Assign):
                 for target in node.targets:
                     names.update(_names_in_target(target))
-            elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
-                names.add(node.target.id)
+            elif isinstance(node, ast.AnnAssign):
+                names.update(_names_in_target(node.target))
+            elif isinstance(node, ast.AugAssign):
+                names.update(_names_in_target(node.target))
         return names
 
     @staticmethod
@@ -195,8 +379,8 @@ class RustGenerator:
                     # An assignment inside a loop may execute multiple times.
                     return 2 if in_loop else 1
             return 0
-        if isinstance(stmt, ast.AugAssign) and isinstance(stmt.target, ast.Name):
-            if stmt.target.id == name:
+        if isinstance(stmt, ast.AugAssign):
+            if name in _names_in_target(stmt.target):
                 return 2 if in_loop else 1
             return 0
         if isinstance(stmt, ast.If):
@@ -262,7 +446,17 @@ class RustGenerator:
         return defaults, body
 
     def _zero(self) -> str:
-        return "0.0_f64" if self.function_type == "f64" else "0_i64"
+        return self._zero_for_type(self.return_type)
+
+    def _zero_for_type(self, typ: str) -> str:
+        if typ == "f64":
+            return "0.0_f64"
+        if typ == "bool":
+            return "false"
+        if typ.startswith("Vec<"):
+            inner = _element_type(typ)
+            return f"Vec::<{inner}>::new()"
+        return "0_i64"
 
     def _return_type(self) -> str:
         """Derive the Rust return type from the function's return statements."""
@@ -344,6 +538,16 @@ class RustGenerator:
             return f"return {value};"
         if isinstance(stmt, ast.Assign):
             return self._emit_assign(stmt)
+        if isinstance(stmt, ast.AnnAssign):
+            if stmt.value is None:
+                raise UnsupportedError(
+                    "Annotated assignments without a value are not supported", node=stmt
+                )
+            return self._emit_assign(
+                ast.Assign(targets=[stmt.target], value=stmt.value, lineno=stmt.lineno)
+            )
+        if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            return ""
         if isinstance(stmt, ast.AugAssign):
             return self._emit_augassign(stmt)
         if isinstance(stmt, ast.If):
@@ -406,19 +610,30 @@ class RustGenerator:
         return "\n".join(lines)
 
     def _emit_augassign(self, stmt: ast.AugAssign) -> str:
-        if not isinstance(stmt.target, ast.Name):
-            raise UnsupportedError(
-                "Only simple names may be used in augmented assignment",
-                node=stmt,
+        if isinstance(stmt.target, ast.Name):
+            name = stmt.target.id
+            fake = ast.BinOp(
+                left=ast.Name(id=name, ctx=ast.Load()),
+                op=stmt.op,
+                right=stmt.value,
             )
-        name = stmt.target.id
-        fake = ast.BinOp(
-            left=ast.Name(id=name, ctx=ast.Load()),
-            op=stmt.op,
-            right=stmt.value,
-        )
-        value = self._strip_outer_parens(self._emit_binop(fake, self.function_type))
-        return f"{name} = {value};"
+            value = self._strip_outer_parens(self._emit_binop(fake, self.function_type))
+            return f"{name} = {value};"
+        target_type = self._type_of(stmt.target)
+        lvalue = self._emit_lvalue(stmt.target, target_type)
+        rhs = self._emit_expr(stmt.value, target_type)
+        op = _augassign_op(stmt.op)
+        return f"{lvalue} {op} {rhs};"
+
+    def _emit_lvalue(self, target: ast.expr, ctx: str) -> str:
+        """Emit a place expression, stripping outer parentheses when possible."""
+        expr = self._emit_expr(target, ctx)
+        while True:
+            stripped = self._strip_outer_parens(expr)
+            if stripped == expr:
+                break
+            expr = stripped
+        return expr
 
     def _emit_if(self, stmt: ast.If) -> str:
         cond = self._strip_outer_parens(self._emit_expr(stmt.test, "bool"))
@@ -498,7 +713,7 @@ class RustGenerator:
         if isinstance(expr, ast.Constant):
             return self._emit_constant(expr, ctx)
         if isinstance(expr, ast.Name):
-            return expr.id
+            return self._coerce(expr.id, self._type_of(expr), ctx)
         if isinstance(expr, ast.BinOp):
             return self._emit_binop(expr, ctx)
         if isinstance(expr, ast.UnaryOp):
@@ -511,12 +726,18 @@ class RustGenerator:
             return self._emit_call(expr, ctx)
         if isinstance(expr, ast.IfExp):
             return self._emit_ifexp(expr, ctx)
-        if isinstance(expr, (ast.Tuple, ast.List)):
+        if isinstance(expr, ast.List):
+            if ctx and ctx.startswith("Vec<"):
+                return self._emit_list_literal(expr, ctx)
+            return f"({', '.join(self._emit_expr(e, ctx) for e in expr.elts)})"
+        if isinstance(expr, ast.ListComp):
+            return self._emit_listcomp(expr, ctx)
+        if isinstance(expr, ast.Tuple):
             return f"({', '.join(self._emit_expr(e, ctx) for e in expr.elts)})"
         if isinstance(expr, ast.Attribute):
             return self._emit_attribute(expr, ctx)
         if isinstance(expr, ast.Subscript):
-            raise UnsupportedError("Subscript/indexing is not supported", node=expr)
+            return self._emit_subscript(expr, ctx)
         raise UnsupportedError(
             f"Unsupported expression: {type(expr).__name__}", node=expr
         )
@@ -533,9 +754,11 @@ class RustGenerator:
                 col_offset=getattr(expr, "col_offset", None) or 0,
             )
             return self._emit_constant(constant, ctx)
-        raise UnsupportedError(
-            f"Unsupported expression: {type(expr).__name__}", node=expr
-        )
+
+        base_expr = self._emit_expr(expr.value, self._type_of(expr.value))
+        field_type = self._field_type(expr.value, expr.attr)
+        access = f"{base_expr}.{expr.attr}"
+        return self._coerce(access, field_type, ctx)
 
     def _emit_constant(self, expr: ast.Constant, ctx: str) -> str:
         value = expr.value
@@ -555,6 +778,67 @@ class RustGenerator:
             raise UnsupportedError("None is not a numeric value", node=expr)
         raise UnsupportedError(f"Unsupported literal: {value!r}", node=expr)
 
+    def _emit_list_literal(self, expr: ast.List, ctx: str) -> str:
+        """Emit a Python list literal as a Rust vec! macro."""
+        element_type = _element_type(ctx)
+        if not expr.elts:
+            return f"Vec::<{element_type}>::new()"
+        elements = [self._emit_expr(e, element_type) for e in expr.elts]
+        return f"vec![{', '.join(elements)}]"
+
+    def _emit_listcomp(self, expr: ast.ListComp, ctx: str) -> str:
+        """Emit ``[elt for x in range(n)]`` as a Rust ``for`` loop block."""
+        if len(expr.generators) != 1 or expr.generators[0].ifs:
+            raise UnsupportedError(
+                "Only simple list comprehensions over range are supported", node=expr
+            )
+        gen = expr.generators[0]
+        if not isinstance(gen.target, ast.Name):
+            raise UnsupportedError(
+                "Only a single loop variable is supported in list comprehensions",
+                node=expr,
+            )
+        if not isinstance(gen.iter, ast.Call) or _call_name(gen.iter) != "range":
+            raise UnsupportedError(
+                "List comprehensions must iterate over range(...)", node=expr
+            )
+        if len(gen.iter.args) != 1:
+            raise UnsupportedError(
+                "List comprehension range must have a single argument", node=expr
+            )
+        element_type = _element_type(ctx)
+        count = self._emit_expr(gen.iter.args[0], "i64")
+        loop_name = gen.target.id
+        tmp = self._next_tmp()
+        if loop_name != "_":
+            old_type = self.type_env.get(loop_name)
+            self.type_env[loop_name] = "i64"
+        else:
+            loop_name = self._next_tmp()
+        element = self._emit_expr(expr.elt, element_type)
+        if gen.target.id != "_":
+            if old_type is not None:
+                self.type_env[loop_name] = old_type
+            else:
+                self.type_env.pop(loop_name, None)
+        return (
+            f"{{ let mut {tmp} = Vec::<{element_type}>::new(); "
+            f"for {loop_name} in 0_i64..({count}) {{ {tmp}.push({element}); }} "
+            f"{tmp} }}"
+        )
+
+    def _emit_subscript(self, expr: ast.Subscript, ctx: str) -> str:
+        base_type = self._type_of(expr.value)
+        if not base_type.startswith("Vec<"):
+            raise UnsupportedError(
+                "Subscript/indexing is only supported on Vec/list types", node=expr
+            )
+        element_type = _element_type(base_type)
+        value_expr = self._emit_expr(expr.value, base_type)
+        index_expr = self._emit_expr(expr.slice, "i64")
+        access = f"{value_expr}[({index_expr}) as usize]"
+        return self._coerce(access, element_type, ctx)
+
     def _emit_unaryop(self, expr: ast.UnaryOp, ctx: str) -> str:
         if isinstance(expr.op, ast.Invert):
             if self.function_type != "i64":
@@ -568,42 +852,69 @@ class RustGenerator:
                 return f"({result} != 0)"
             return result
 
-        operand = self._emit_expr(expr.operand, ctx)
         if isinstance(expr.op, ast.UAdd):
-            return operand
+            return self._emit_expr(expr.operand, ctx)
         if isinstance(expr.op, ast.USub):
-            return f"-({operand})"
+            operand_type = self._type_of(expr.operand)
+            operand = self._emit_expr(expr.operand, operand_type)
+            return self._coerce(f"-({operand})", operand_type, ctx)
         if isinstance(expr.op, ast.Not):
-            return f"!({operand})"
+            operand = self._emit_expr(expr.operand, "bool")
+            return self._coerce(f"!({operand})", "bool", ctx)
         raise UnsupportedError(
             f"Unsupported unary operator: {type(expr.op).__name__}", node=expr
         )
 
     def _emit_binop(self, expr: ast.BinOp, ctx: str) -> str:
-        left = self._emit_expr(expr.left, ctx)
-        right = self._emit_expr(expr.right, ctx)
         op = expr.op
 
+        # List replication: [value] * n -> vec![value; n as usize]
+        if isinstance(op, ast.Mult) and isinstance(expr.left, ast.List):
+            element_type = _element_type(ctx)
+            if expr.left.elts:
+                element = self._emit_expr(expr.left.elts[0], element_type)
+            else:
+                element = self._zero_for_type(element_type)
+            count = self._emit_expr(expr.right, "i64")
+            return f"vec![{element}; ({count}) as usize]"
+
+        left_type = self._type_of(expr.left)
+        right_type = self._type_of(expr.right)
+
+        # NumPy-style elementwise vector <op> scalar.
+        if _is_vec_type(left_type) and _is_numeric_scalar(right_type):
+            return self._emit_elementwise_vec_scalar(
+                expr.left, expr.right, op, left_type, ctx
+            )
+        if _is_numeric_scalar(left_type) and _is_vec_type(right_type):
+            return self._emit_elementwise_scalar_vec(
+                expr.left, expr.right, op, right_type, ctx
+            )
+
+        result_type = self._type_of(expr)
+        left = self._emit_expr(expr.left, result_type)
+        right = self._emit_expr(expr.right, result_type)
+
         if isinstance(op, ast.Add):
-            return f"({left} + {right})"
+            return self._coerce(f"({left} + {right})", result_type, ctx)
         if isinstance(op, ast.Sub):
-            return f"({left} - {right})"
+            return self._coerce(f"({left} - {right})", result_type, ctx)
         if isinstance(op, ast.Mult):
-            return f"({left} * {right})"
+            return self._coerce(f"({left} * {right})", result_type, ctx)
         if isinstance(op, ast.Div):
-            return f"({left} / {right})"
+            return self._coerce(f"({left} / {right})", "f64", ctx)
         if isinstance(op, ast.FloorDiv):
-            if ctx == "f64":
-                return f"(({left}) / ({right})).floor()"
-            return f"({left}).div_euclid({right})"
+            if result_type == "f64":
+                return self._coerce(f"(({left}) / ({right})).floor()", result_type, ctx)
+            return self._coerce(f"({left}).div_euclid({right})", result_type, ctx)
         if isinstance(op, ast.Mod):
-            if ctx == "f64":
-                return f"(({left}) % ({right}))"
-            return f"({left}).rem_euclid({right})"
+            if result_type == "f64":
+                return self._coerce(f"(({left}) % ({right}))", result_type, ctx)
+            return self._coerce(f"({left}).rem_euclid({right})", result_type, ctx)
         if isinstance(op, ast.Pow):
-            if ctx == "f64":
-                return f"({left}).powf({right})"
-            return f"({left}).pow(({right}) as u32)"
+            if result_type == "f64":
+                return self._coerce(f"({left}).powf({right})", result_type, ctx)
+            return self._coerce(f"({left}).pow(({right}) as u32)", result_type, ctx)
         if isinstance(op, (ast.LShift, ast.RShift, ast.BitOr, ast.BitXor, ast.BitAnd)):
             if self.function_type != "i64":
                 raise UnsupportedError(
@@ -627,6 +938,65 @@ class RustGenerator:
         raise UnsupportedError(
             f"Unsupported binary operator: {type(op).__name__}", node=expr
         )
+
+    def _emit_elementwise_vec_scalar(
+        self,
+        vec_expr: ast.expr,
+        scalar_expr: ast.expr,
+        op: ast.operator,
+        vec_type: str,
+        ctx: str,
+    ) -> str:
+        element_type = _element_type(vec_type)
+        vec_code = self._strip_outer_parens(self._emit_expr(vec_expr, vec_type))
+        scalar_code = self._strip_outer_parens(
+            self._emit_expr(scalar_expr, element_type)
+        )
+        closure = self._build_elementwise_closure(op, "x", scalar_code)
+        return f"({vec_code}).iter().map(|x| {closure}).collect::<{vec_type}>()"
+
+    def _emit_elementwise_scalar_vec(
+        self,
+        scalar_expr: ast.expr,
+        vec_expr: ast.expr,
+        op: ast.operator,
+        vec_type: str,
+        ctx: str,
+    ) -> str:
+        element_type = _element_type(vec_type)
+        vec_code = self._strip_outer_parens(self._emit_expr(vec_expr, vec_type))
+        scalar_code = self._strip_outer_parens(
+            self._emit_expr(scalar_expr, element_type)
+        )
+        closure = self._build_elementwise_closure(
+            op, "x", scalar_code, left_scalar=True
+        )
+        return f"({vec_code}).iter().map(|x| {closure}).collect::<{vec_type}>()"
+
+    def _build_elementwise_closure(
+        self, op: ast.operator, var: str, scalar: str, left_scalar: bool = False
+    ) -> str:
+        op_map = {
+            ast.Add: "+",
+            ast.Sub: "-",
+            ast.Mult: "*",
+            ast.Div: "/",
+            ast.FloorDiv: "/",
+            ast.Mod: "%",
+            ast.Pow: ".pow",
+        }
+        if type(op) not in op_map:
+            raise UnsupportedError(
+                f"Unsupported elementwise operator: {type(op).__name__}"
+            )
+        op_str = op_map[type(op)]
+        if isinstance(op, ast.Pow):
+            if left_scalar:
+                return f"({scalar}).powf({var})"
+            return f"({var}).powf({scalar})"
+        if left_scalar:
+            return f"({scalar} {op_str} {var})"
+        return f"({var} {op_str} {scalar})"
 
     def _emit_compare(self, expr: ast.Compare, ctx: str) -> str:
         if len(expr.ops) != 1 or len(expr.comparators) != 1:
@@ -738,6 +1108,9 @@ class RustGenerator:
                 result = f"({result}.{method}({a}))"
             return result
 
+        if base in ("np", "numpy"):
+            return self._emit_numpy_call(name, expr, ctx)
+
         if base == "math" and name in self.MATH_ATTRS:
             return self._emit_math_call(name, args, ctx)
 
@@ -786,6 +1159,53 @@ class RustGenerator:
             return f"({arg}).{rust_method}()"
         return f"(({arg} as f64).{rust_method}() as i64)"
 
+    def _emit_numpy_call(self, name: str, expr: ast.Call, ctx: str) -> str:
+        if name == "array" and expr.args:
+            return self._emit_expr(expr.args[0], ctx)
+        if name in ("zeros", "ones") and expr.args:
+            fill = "0.0_f64" if name == "zeros" else "1.0_f64"
+            arg = expr.args[0]
+            if isinstance(arg, ast.Tuple) and len(arg.elts) == 2:
+                rows = self._emit_expr(arg.elts[0], "i64")
+                cols = self._emit_expr(arg.elts[1], "i64")
+                return f"vec![vec![{fill}; ({cols}) as usize]; ({rows}) as usize]"
+            count = self._emit_expr(arg, "i64")
+            return f"vec![{fill}; ({count}) as usize]"
+        if name == "dot" and len(expr.args) == 2:
+            return self._emit_numpy_dot(expr.args[0], expr.args[1], ctx)
+        if name == "sum" and expr.args:
+            arr = self._strip_outer_parens(self._emit_expr(expr.args[0], ctx))
+            arr_type = self._type_of(expr.args[0])
+            if arr_type == "Vec<Vec<f64>>":
+                return f"({arr}).iter().map(|row| row.iter().sum::<f64>()).sum::<f64>()"
+            return f"({arr}).iter().sum::<f64>()"
+        raise UnsupportedError(f"Unsupported NumPy call: np.{name}", node=expr)
+
+    def _emit_numpy_dot(self, a: ast.expr, b: ast.expr, ctx: str) -> str:
+        a_type = self._type_of(a)
+        b_type = self._type_of(b)
+        a_expr = self._strip_outer_parens(self._emit_expr(a, a_type))
+        b_expr = self._strip_outer_parens(self._emit_expr(b, b_type))
+        if a_type == "Vec<f64>" and b_type == "Vec<f64>":
+            return (
+                f"({a_expr}).iter().zip(({b_expr}).iter())"
+                f".map(|(x, y)| x * y).sum::<f64>()"
+            )
+        if a_type == "Vec<Vec<f64>>" and b_type == "Vec<Vec<f64>>":
+            tmp = self._next_tmp()
+            return (
+                f"{{ "
+                f"let mut {tmp} = vec![vec![0.0_f64; ({b_expr})[0].len()]; ({a_expr}).len()]; "
+                f"for _i in 0_i64..(({a_expr}).len() as i64) {{ "
+                f"for _j in 0_i64..(({b_expr})[0].len() as i64) {{ "
+                f"for _k in 0_i64..(({b_expr}).len() as i64) {{ "
+                f"{tmp}[_i as usize][_j as usize] += ({a_expr})[_i as usize][_k as usize] * ({b_expr})[_k as usize][_j as usize]; "
+                f"}} }} }} {tmp} }}"
+            )
+        raise UnsupportedError(
+            f"np.dot not supported for types {a_type} and {b_type}", node=a
+        )
+
 
 # ---------------------------------------------------------------------------
 # Class support
@@ -798,12 +1218,14 @@ class ClassGenerator:
         class_node: ast.ClassDef,
         module_name: str,
         traits: Dict[str, Any],
+        class_names: Optional[Set[str]] = None,
     ):
         self.class_node = class_node
         self.module_name = module_name
         self.traits = traits
         self.orig_name = class_node.name
         self.class_name = _rust_identifier(class_node.name)
+        self.class_names = (class_names or set()) | {class_node.name}
         self.methods: Dict[str, ast.FunctionDef] = {
             node.name: node
             for node in class_node.body
@@ -822,7 +1244,20 @@ class ClassGenerator:
                 f"Class {self.orig_name!r} must define __init__", node=self.class_node
             )
 
-        field_decls = [f"    pub {name}: {typ}," for name, typ in self.fields.items()]
+        method_names = {m for m in self.methods if m != "__init__"}
+        field_decls: List[str] = []
+        for name, typ in self.fields.items():
+            attrs = []
+            if f"get_{name}" not in method_names:
+                attrs.append("get")
+            if f"set_{name}" not in method_names:
+                attrs.append("set")
+            attr = f"#[pyo3({', '.join(attrs)})]" if attrs else ""
+            field_decls.append(
+                f"    {attr}\n    pub {name}: {typ},"
+                if attr
+                else f"    pub {name}: {typ},"
+            )
         struct_block = (
             f"#[pyclass]\n"
             f"struct {self.class_name} {{\n"
@@ -830,13 +1265,20 @@ class ClassGenerator:
             f"}}"
         )
 
+        init_arg_types = [
+            _annotation_to_rust_type(arg.annotation, self.class_names)
+            or self.traits.get("function_type", "i64")
+            for arg in init.args.args[1:]
+        ]
         init_gen = ClassMethodGenerator(
             init,
             self.module_name,
             self.class_name,
             self.fields,
             self.traits,
+            class_names=self.class_names,
             is_new=True,
+            init_arg_types=init_arg_types,
         )
         blocks = [init_gen.emit()]
         self._used_traits.update(init_gen.shield_traits())
@@ -850,6 +1292,8 @@ class ClassGenerator:
                 self.class_name,
                 self.fields,
                 self.traits,
+                class_names=self.class_names,
+                init_arg_types=init_arg_types,
             )
             blocks.append(gen.emit())
             self._used_traits.update(gen.shield_traits())
@@ -868,15 +1312,32 @@ class ClassGenerator:
         fields: Dict[str, str] = {}
         function_type = self.traits.get("function_type", "i64")
         for stmt in init.body:
-            if not isinstance(stmt, ast.Assign):
-                continue
-            for target in stmt.targets:
+            targets: List[ast.expr] = []
+            if isinstance(stmt, ast.Assign):
+                targets = list(stmt.targets)
+            elif isinstance(stmt, ast.AnnAssign):
+                targets = [stmt.target]
+            for target in targets:
                 if (
                     isinstance(target, ast.Attribute)
                     and isinstance(target.value, ast.Name)
                     and target.value.id == "self"
                 ):
-                    fields[target.attr] = function_type
+                    field = target.attr
+                    if isinstance(stmt, ast.AnnAssign):
+                        typ = _annotation_to_rust_type(
+                            stmt.annotation, self.class_names
+                        )
+                        if typ is None and stmt.value is not None:
+                            typ = _infer_expr_type(
+                                stmt.value, function_type, self.class_names
+                            )
+                        fields[field] = typ or function_type
+                    else:
+                        typ = _infer_expr_type(
+                            stmt.value, function_type, self.class_names
+                        )
+                        fields[field] = typ or function_type
         return fields
 
 
@@ -890,11 +1351,14 @@ class ClassMethodGenerator(RustGenerator):
         class_name: str,
         fields: Dict[str, str],
         traits: Dict[str, Any],
+        class_names: Optional[Set[str]] = None,
         is_new: bool = False,
+        init_arg_types: Optional[List[str]] = None,
     ):
         self.class_name = class_name
         self.fields = fields
         self.is_new = is_new
+        self.init_arg_types = init_arg_types or []
         self.is_staticmethod = self._has_decorator(func, "staticmethod")
         self.is_classmethod = self._has_decorator(func, "classmethod")
         self.mutates_self = (
@@ -903,20 +1367,45 @@ class ClassMethodGenerator(RustGenerator):
             and self._method_mutates_self(func)
         )
         self.field_inits: Dict[str, str] = {}
-        super().__init__(func, module_name, traits)
-        # Methods always have `self` as the first parameter unless they are
-        # static or class methods.
+        super().__init__(func, module_name, traits, class_names=class_names)
+        # Methods always have `self`/`cls` as the first parameter unless they are
+        # static methods.
         if self.is_staticmethod:
-            self.arg_names = [a.arg for a in func.args.args]
+            arg_slice = func.args.args
         elif self.is_classmethod:
-            self.arg_names = [a.arg for a in func.args.args[1:]]
+            arg_slice = func.args.args[1:]
         else:
-            self.arg_names = [a.arg for a in func.args.args[1:]]
-        self.arg_types = traits.get("arg_types") or [self.function_type] * len(
-            self.arg_names
-        )
+            arg_slice = func.args.args[1:]
+        self.arg_names = [a.arg for a in arg_slice]
+        self.arg_types: List[str] = []
+        any_annotation = False
+        for arg in arg_slice:
+            typ = _annotation_to_rust_type(arg.annotation, self.class_names)
+            if typ:
+                any_annotation = True
+            self.arg_types.append(typ or self.function_type)
+        if not any_annotation:
+            self.arg_types = [self.function_type] * len(self.arg_names)
         if len(self.arg_types) != len(self.arg_names):
             self.arg_types = [self.function_type] * len(self.arg_names)
+
+        # Update the type environment with the post-processed method argument types.
+        for name, typ in zip(self.arg_names, self.arg_types):
+            self.type_env[name] = typ
+
+        # `self` is the receiver, not a local variable.
+        self.assigned.discard("self")
+        self.assigned.discard("cls")
+        self.type_env["self"] = "Self"
+        if self.is_classmethod:
+            self.type_env["cls"] = "&PyType"
+
+        # Convert same-class argument/return types to borrowed Rust forms.
+        for i, typ in enumerate(self.arg_types):
+            if typ == self.class_name:
+                self.arg_types[i] = f"&{typ}"
+        if self.return_type == self.class_name:
+            self.return_type = "Self"
 
     @staticmethod
     def _has_decorator(func: ast.FunctionDef, name: str) -> bool:
@@ -947,8 +1436,8 @@ class ClassMethodGenerator(RustGenerator):
         return self.used_traits
 
     def _return_type(self) -> str:
-        """Use ``Self`` as the return type for classmethods that construct instances."""
-        if self.is_classmethod:
+        """Use ``Self`` as the return type for classmethods/constructors."""
+        if self.is_classmethod or self.return_type in ("Self", self.class_name):
             return "Self"
         return super()._return_type()
 
@@ -1007,25 +1496,14 @@ class ClassMethodGenerator(RustGenerator):
         indented = "\n".join("    " + line for line in body.splitlines())
         return f"{header}\n{indented}\n}}"
 
-    def _zero_for_type(self, typ: str) -> str:
-        return "0.0_f64" if typ == "f64" else "0_i64"
-
     def _emit_expr(self, expr: ast.expr, ctx: str) -> str:
-        if (
-            isinstance(expr, ast.Attribute)
-            and isinstance(expr.value, ast.Name)
-            and expr.value.id == "self"
-            and expr.attr in self.fields
-        ):
-            return f"self.{expr.attr}"
         return super()._emit_expr(expr, ctx)
 
     def _emit_assign(self, stmt: ast.Assign) -> str:
         if len(stmt.targets) == 1 and self._is_self_attribute(stmt.targets[0]):
             field = stmt.targets[0].attr
-            value = self._strip_outer_parens(
-                self._emit_expr(stmt.value, self.function_type)
-            )
+            field_type = self.fields.get(field, self.function_type)
+            value = self._strip_outer_parens(self._emit_expr(stmt.value, field_type))
             if self.is_new:
                 self.field_inits[field] = value
                 return ""
@@ -1051,16 +1529,19 @@ class ClassMethodGenerator(RustGenerator):
     def _emit_call(self, expr: ast.Call, ctx: str) -> str:
         """Handle constructor calls like ``cls(...)`` or ``Matrix(...)`` inside methods."""
         name = _call_name(expr)
-        if name == "cls" and self.is_classmethod:
+        if (name == "cls" and self.is_classmethod) or (
+            name == self.class_name and self.class_name
+        ):
+            types = self.init_arg_types or [self.function_type] * len(expr.args)
+            if len(types) != len(expr.args):
+                types = [self.function_type] * len(expr.args)
             args = [
-                self._strip_outer_parens(self._emit_expr(a, self.function_type))
-                for a in expr.args
-            ]
-            return f"Self::new({', '.join(args)})"
-        if name == self.class_name and self.class_name:
-            args = [
-                self._strip_outer_parens(self._emit_expr(a, self.function_type))
-                for a in expr.args
+                self._strip_outer_parens(
+                    self._emit_expr(
+                        a, types[i] if i < len(types) else self.function_type
+                    )
+                )
+                for i, a in enumerate(expr.args)
             ]
             return f"Self::new({', '.join(args)})"
         return super()._emit_call(expr, ctx)
@@ -1100,7 +1581,28 @@ def _names_in_target(target: ast.expr) -> List[str]:
     elif isinstance(target, (ast.Tuple, ast.List)):
         for elt in target.elts:
             names.extend(_names_in_target(elt))
+    elif isinstance(target, ast.Attribute):
+        names.extend(_names_in_target(target.value))
+    elif isinstance(target, ast.Subscript):
+        names.extend(_names_in_target(target.value))
     return names
+
+
+def _augassign_op(op: ast.operator) -> str:
+    mapping = {
+        ast.Add: "+=",
+        ast.Sub: "-=",
+        ast.Mult: "*=",
+        ast.Div: "/=",
+        ast.FloorDiv: "/=",
+        ast.Mod: "%=",
+        ast.Pow: "=",
+    }
+    if type(op) not in mapping:
+        raise UnsupportedError(
+            f"Unsupported augmented assignment operator: {type(op).__name__}"
+        )
+    return mapping[type(op)]
 
 
 def _elements(container: ast.expr) -> List[ast.expr]:
@@ -1184,6 +1686,137 @@ _RUST_KEYWORDS = {
     "virtual",
     "yield",
 }
+
+
+def _annotation_to_rust_type(
+    annotation: Optional[ast.expr], class_names: Optional[Set[str]] = None
+) -> Optional[str]:
+    """Convert a Python type annotation to a Rust type string.
+
+    Supported forms: int, float, bool, list[<T>], List[<T>], and forward
+    references to classes (e.g. ``"Matrix"``).
+    """
+    if annotation is None:
+        return None
+    class_names = class_names or set()
+
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        name = annotation.value
+        if name in class_names:
+            return name
+        # Scalar aliases may also be wrapped in strings.
+        return _SCALAR_TYPE_MAP.get(name)
+
+    if isinstance(annotation, ast.Name):
+        name = annotation.id
+        if name in class_names:
+            return name
+        return _SCALAR_TYPE_MAP.get(name)
+
+    if isinstance(annotation, ast.Subscript):
+        base_name = ""
+        if isinstance(annotation.value, ast.Name):
+            base_name = annotation.value.id
+        if base_name in ("list", "List"):
+            inner = _annotation_to_rust_type(annotation.slice, class_names)
+            if inner is None:
+                return None
+            return f"Vec<{inner}>"
+        if base_name == "ndarray":
+            inner = _annotation_to_rust_type(annotation.slice, class_names)
+            if inner:
+                return f"Vec<{inner}>"
+            return "Vec<f64>"
+
+    if isinstance(annotation, ast.Attribute):
+        if isinstance(annotation.value, ast.Name) and annotation.value.id in (
+            "np",
+            "numpy",
+        ):
+            if annotation.attr == "ndarray":
+                return "Vec<f64>"
+
+    if isinstance(annotation, ast.Name) and annotation.id == "ndarray":
+        return "Vec<f64>"
+
+    return None
+
+
+_SCALAR_TYPE_MAP = {
+    "int": "i64",
+    "float": "f64",
+    "bool": "bool",
+    "None": "()",
+}
+
+
+def _infer_expr_type(
+    expr: ast.expr, function_type: str = "i64", class_names: Optional[Set[str]] = None
+) -> Optional[str]:
+    """Infer a Rust type from an expression used for an unannotated field."""
+    class_names = class_names or set()
+    if isinstance(expr, ast.Constant):
+        if isinstance(expr.value, bool):
+            return "bool"
+        if isinstance(expr.value, int):
+            return "i64"
+        if isinstance(expr.value, float):
+            return "f64"
+    if isinstance(expr, ast.List):
+        if not expr.elts:
+            return f"Vec<{function_type}>"
+        inner = _infer_expr_type(expr.elts[0], function_type, class_names)
+        return f"Vec<{inner or function_type}>"
+    if isinstance(expr, ast.ListComp):
+        inner = _infer_expr_type(expr.elt, function_type, class_names)
+        return f"Vec<{inner or function_type}>"
+    if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Mult):
+        if isinstance(expr.left, ast.List):
+            return _infer_expr_type(expr.left, function_type, class_names)
+    if isinstance(expr, ast.Call):
+        name = _call_name(expr)
+        if name in class_names:
+            return name
+    return None
+
+
+def _element_type(rust_type: str) -> str:
+    """Return the element type of a Vec, or the type itself if not a Vec."""
+    if rust_type.startswith("Vec<") and rust_type.endswith(">"):
+        depth = 0
+        for i in range(4, len(rust_type) - 1):
+            ch = rust_type[i]
+            if ch == "<":
+                depth += 1
+            elif ch == ">":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                # Not expected for Vec<T>, but keep parser robust.
+                return rust_type[4:i].strip()
+        return rust_type[4:-1]
+    return rust_type
+
+
+def _vec_depth(rust_type: str) -> int:
+    depth = 0
+    while rust_type.startswith("Vec<") and rust_type.endswith(">"):
+        depth += 1
+        rust_type = _element_type(rust_type)
+    return depth
+
+
+def _is_numeric_scalar(rust_type: str) -> bool:
+    return rust_type in ("i64", "f64")
+
+
+def _is_vec_type(rust_type: str) -> bool:
+    return rust_type.startswith("Vec<")
+
+
+def _is_class_type(rust_type: str, class_names: Set[str]) -> bool:
+    refs = {"Self", "&Self"}
+    refs.update(f"&{c}" for c in class_names)
+    return rust_type in class_names or rust_type in refs
 
 
 def _rust_identifier(name: str) -> str:
