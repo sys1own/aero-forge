@@ -215,6 +215,18 @@ def fix(
     help="Disable the build cache.",
 )
 @click.option(
+    "--force",
+    is_flag=True,
+    help="Ignore the build cache and force a recompile.",
+)
+@click.option(
+    "--cache-dir",
+    type=click.Path(file_okay=False, path_type=str),
+    default=None,
+    envvar="AERO_FORGE_CACHE_DIR",
+    help="Directory for the build cache (default: ~/.cache/aero-forge/build_cache).",
+)
+@click.option(
     "--output-dir",
     "-o",
     type=click.Path(file_okay=False, path_type=str),
@@ -240,6 +252,11 @@ def fix(
     help="Preview what would be built without compiling.",
 )
 @click.option(
+    "--gpu",
+    is_flag=True,
+    help="Attempt GPU acceleration for functions annotated with # @accelerate gpu.",
+)
+@click.option(
     "--verbose",
     is_flag=True,
     help="Show debug logs and full output.",
@@ -253,10 +270,13 @@ def build(
     max_retries: int | None,
     no_llm: bool,
     no_cache: bool,
+    force: bool,
+    cache_dir: str | None,
     output_dir: str | None,
     jobs: int | None,
     write_blueprint_flag: bool,
     dry_run: bool,
+    gpu: bool,
     verbose: bool,
 ) -> None:
     """Build all functions described by BLUEPRINT (default: blueprint.aero)."""
@@ -297,6 +317,9 @@ def build(
         max_iterations=max_iterations,
         max_retries=max_retries,
         cache_enabled=not no_cache,
+        cache_dir=Path(cache_dir) if cache_dir else None,
+        force=force,
+        gpu=gpu,
         dry_run=dry_run,
     )
 
@@ -401,11 +424,13 @@ def init(project: str, path: str, fmt: str) -> None:
         blueprint = generate_blueprint(
             project=project,
             functions=[
-                FunctionSpec.model_validate({
-                    "file": str(example_py),
-                    "name": "factorial",
-                    "tests": [str(test_py)],
-                })
+                FunctionSpec.model_validate(
+                    {
+                        "file": str(example_py),
+                        "name": "factorial",
+                        "tests": [str(test_py)],
+                    }
+                )
             ],
             output_dir=dist,
         )

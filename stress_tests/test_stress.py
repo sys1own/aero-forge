@@ -114,6 +114,7 @@ class TestLevel7LLMHealing:
                 "401",
                 "403",
                 "429",
+                "identical to current source",
             )
         )
 
