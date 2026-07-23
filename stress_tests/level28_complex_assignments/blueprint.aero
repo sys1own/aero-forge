@@ -1,0 +1,7 @@
+project: level28_complex_assignments
+functions:
+  - file: timsort.py
+    name: timsort
+    tests:
+      - tests/test_timsort.py
+output_dir: dist

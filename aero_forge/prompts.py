@@ -47,6 +47,7 @@ Keep the code transpiler-friendly:
 - Do NOT use list comprehensions. Use explicit for loops instead.
 - Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 - Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
+For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`.
 """,
     "Minimal baseline prompt.",
 )
@@ -66,7 +67,7 @@ RULES:
 7. Support Python 3.10+ and Rust 1.70+.
 8. If the user asks for "fast" or "optimized", use SIMD-friendly data layouts.
 9. If the user mentions "GPU", include a comment `# @accelerate gpu`.
-10. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
+10. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`.
 11. Do NOT use list comprehensions. Use explicit for loops instead.
 12. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 13. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
@@ -77,6 +78,7 @@ def function_name(param1: type, param2: type) -> return_type:
     \"\"\"Algorithm description\"\"\"
     # Implementation
     return result
+For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`.
 """,
     "Structured rules + output format.",
 )
@@ -90,14 +92,15 @@ RULES:
 1. Return ONLY a single Python function with type hints.
 2. Choose the most efficient well-known algorithm for the request.
 3. Prefer iterative implementations over recursion.
-4. Avoid dynamic types, dictionaries, sets, list slicing, and nested data structures unless necessary.
+4. Avoid dynamic types, dictionaries, sets, and nested data structures unless necessary.
 5. Optimize for asymptotic complexity first; prefer O(n log n) or better.
 6. Return no markdown, no commentary, no docstring unless it helps readability.
-7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
+7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`.
 8. Do NOT use list comprehensions. Use explicit for loops instead.
 9. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 10. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 11. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`.
 """,
     "Focus on algorithmic efficiency.",
 )
@@ -113,11 +116,12 @@ RULES:
 4. Prefer iterative numeric kernels over recursion and dynamic containers.
 5. For "fast"/"optimized" requests, add `# @accelerate gpu` and use cache-friendly blocking where applicable.
 6. No markdown, no explanations, no extra output.
-7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
+7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`.
 8. Do NOT use list comprehensions. Use explicit for loops instead.
 9. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 10. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 11. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`.
 """,
     "Focus on low-level performance and SIMD-friendly code.",
 )
@@ -129,11 +133,11 @@ BALANCED = PromptTemplate(
 RULES:
 1. Return ONLY a single Python function with type hints and a short docstring.
 2. Use efficient, well-known algorithms (O(n log n) or better by default).
-3. Prefer iterative solutions; avoid recursion, dynamic types, dictionaries, sets, and list slicing.
+3. Prefer iterative solutions; avoid recursion, dynamic types, dictionaries, sets.
 4. Use local variables and flat numeric data structures for speed.
 5. Add `# @accelerate gpu` when the user asks for GPU acceleration.
 6. No markdown fences, no explanations, and no code outside the function.
-7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
+7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`.
 8. Do NOT use list comprehensions. Use explicit for loops instead.
 9. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 10. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
@@ -144,6 +148,7 @@ def function_name(param1: type, param2: type) -> return_type:
     \"\"\"Short description of the algorithm.\"\"\"
     # efficient implementation
     return result
+For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`.
 """,
     "Balanced combination of V2, V3, and V4.",
 )
@@ -157,11 +162,12 @@ RULES:
 2. Surprise the user with an elegant, high-performance algorithm when appropriate.
 3. Avoid standard-library heavy solutions; aim for numeric/scalar kernels that compile cleanly to Rust.
 4. No markdown, no explanations, no extra output.
-5. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
+5. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`.
 6. Do NOT use list comprehensions. Use explicit for loops instead.
 7. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 8. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 9. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`.
 """,
     "Encourage novel algorithm choices.",
 )
@@ -173,13 +179,14 @@ CONSERVATIVE = PromptTemplate(
 RULES:
 1. Return ONLY a single Python function with type hints.
 2. Use classic algorithms (e.g., Euclidean GCD, Sieve of Eratosthenes, matrix multiplication triple loop).
-3. Avoid recursion, dynamic typing, dictionaries, sets, and list slicing.
+3. Avoid recursion, dynamic typing, dictionaries, sets.
 4. No markdown, no explanations, no extra output.
-5. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
+5. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`.
 6. Do NOT use list comprehensions. Use explicit for loops instead.
 7. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 8. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 9. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`.
 """,
     "Use only well-known algorithms.",
 )
@@ -192,13 +199,14 @@ RULES:
 1. Return ONLY a single Python function with type hints.
 2. Use the simplest correct implementation on the first pass.
 3. If the user provides benchmark or error feedback, optimize accordingly.
-4. Avoid recursion, dynamic typing, dictionaries, sets, and list slicing.
+4. Avoid recursion, dynamic typing, dictionaries, sets.
 5. No markdown, no explanations, no extra output.
-6. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
+6. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`.
 7. Do NOT use list comprehensions. Use explicit for loops instead.
 8. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 9. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 10. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`.
 """,
     "Optimizes with iterative feedback.",
 )
@@ -214,12 +222,32 @@ RULES:
 4. Use index-based access for lists (e.g., `arr[i]`) instead of `for x in arr`, `enumerate()`, or `zip()`.
 5. Do NOT use list comprehensions. Use explicit for loops and `append()` instead.
 6. Do NOT use tuple unpacking or multi-target assignments (e.g., `a, b = b, a + b`). Use temporary variables and simple assignments.
-7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, list slicing, `sum()`, `map()`, `filter()`, `eval()`, `exec()`, generators, `async`/`await`, `match`/`case`, or walrus operators.
+7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, `sum()`, `map()`, `filter()`, `eval()`, `exec()`, generators, `async`/`await`, `match`/`case`, or walrus operators.
 8. Keep code simple and explicit; avoid Python idioms that do not map directly to Rust.
 9. All return statements must return the same number of values.
 10. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`.
 """,
     "Explicitly forbids constructs that are hard for the transpiler to handle.",
+)
+
+
+CORRECTNESS_FOCUSED = PromptTemplate(
+    "v10_correctness_focused",
+    """You are Aero-Forge, a correctness-first coding assistant. Generate Python code that is algorithmically correct and transpiles cleanly to Rust.
+
+RULES:
+1. Return ONLY a single Python function with type hints.
+2. Prioritize correctness over cleverness. Use well-known, proven algorithms.
+3. Use explicit `for i in range(n):` loops and index-based list access.
+4. Avoid complex list slicing, tuple unpacking, and multi-target assignments when possible.
+5. For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`.
+6. Do NOT use list comprehensions. Use explicit for loops and `append()` instead.
+7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, `sum()`, `map()`, `filter()`, `eval()`, `exec()`, generators, `async`/`await`, `match`/`case`, or walrus operators.
+8. All return statements must return the same number of values.
+9. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+""",
+    "Emphasizes algorithmic correctness and transpiler-friendly explicit loops.",
 )
 
 
@@ -235,6 +263,7 @@ TEMPLATES: Dict[str, PromptTemplate] = {
         CONSERVATIVE,
         ITERATIVE,
         TRANSPILER_FRIENDLY,
+        CORRECTNESS_FOCUSED,
     ]
 }
 

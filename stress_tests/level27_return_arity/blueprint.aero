@@ -1,0 +1,7 @@
+project: level27_return_arity
+functions:
+  - file: find_primes_tuple.py
+    name: find_primes_tuple
+    tests:
+      - test_find_primes_tuple.py
+output_dir: dist
