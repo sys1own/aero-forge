@@ -1,0 +1,8 @@
+project: advanced_with_stmt
+functions:
+  - file: with_stmt.py
+    name: with_func
+    tests: []
+output_dir: dist
+llm:
+  provider: none

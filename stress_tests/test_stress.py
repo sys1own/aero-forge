@@ -224,3 +224,35 @@ class TestLevel12Numpy:
         result = _run_build(blueprint)
         assert result.returncode == 0, result.stderr + result.stdout
         assert "Build summary: 3 succeeded, 0 failed" in result.stderr
+
+
+class TestLevel13GPU:
+    def test_gpu_pragma_falls_back_to_cpu(self):
+        """A function marked ``# @accelerate gpu`` compiles on CPU when nvcc is unavailable."""
+        blueprint = STRESS_DIR / "level13_gpu" / "blueprint.aero"
+        result = _run_build(blueprint, env={"AERO_FORGE_CACHE_ENABLED": "false"})
+        output = result.stderr + result.stdout
+        assert result.returncode == 0, output
+        assert "Build summary: 1 succeeded, 0 failed" in result.stderr
+
+
+class TestLevel14AdvancedPython:
+    @pytest.mark.parametrize(
+        "blueprint,expected",
+        [
+            ("blueprint_try_except.aero", "try/except"),
+            ("blueprint_with_stmt.aero", "with statements"),
+            ("blueprint_yield_gen.aero", "yield"),
+            ("blueprint_walrus.aero", "walrus"),
+            ("blueprint_match_case.aero", "match/case"),
+            ("blueprint_async_await.aero", "async/await"),
+            ("blueprint_slots.aero", "__slots__"),
+        ],
+    )
+    def test_unsupported_advanced_python(self, blueprint, expected):
+        """Advanced Python constructs produce clear, specific error messages."""
+        bp = STRESS_DIR / "level14_advanced_python" / blueprint
+        result = _run_build(bp)
+        output = result.stderr + result.stdout
+        assert result.returncode != 0
+        assert expected.lower() in output.lower()

@@ -39,7 +39,17 @@ def _is_io_call(expr: ast.Call) -> bool:
 
 def _lower_stmt(stmt: ast.stmt) -> Optional[dict]:
     if isinstance(stmt, (ast.With, ast.AsyncWith)):
-        raise UnsupportedError("io", node=stmt)
+        raise UnsupportedError("with statements / context managers are not supported", node=stmt)
+    if isinstance(stmt, (ast.Try, getattr(ast, "TryStar", ()))):
+        raise UnsupportedError("try/except exception handling is not supported", node=stmt)
+    if isinstance(stmt, (ast.Yield, ast.YieldFrom)):
+        raise UnsupportedError("yield / generators are not supported", node=stmt)
+    if isinstance(stmt, ast.AsyncFor):
+        raise UnsupportedError("async for loops are not supported", node=stmt)
+    if isinstance(stmt, ast.AsyncFunctionDef):
+        raise UnsupportedError("async/await is not supported", node=stmt)
+    if isinstance(stmt, ast.Match):
+        raise UnsupportedError("match/case is not supported", node=stmt)
     if isinstance(stmt, ast.FunctionDef):
         params = [a.arg for a in stmt.args.args]
         body = [n for n in (_lower_stmt(s) for s in stmt.body) if n is not None]
@@ -90,6 +100,12 @@ def _cmp_op_name(op: ast.cmpop) -> str:
 
 
 def _lower_expr(expr: Optional[ast.expr]) -> Optional[dict]:
+    if isinstance(expr, ast.NamedExpr):
+        raise UnsupportedError("walrus operator (:=) is not supported", node=expr)
+    if isinstance(expr, (ast.Await, ast.Yield, ast.YieldFrom)):
+        raise UnsupportedError("async/await and yield expressions are not supported", node=expr)
+    if isinstance(expr, ast.ListComp):
+        raise UnsupportedError("list comprehensions are not supported by the UAST frontend", node=expr)
     if expr is None:
         return None
     if isinstance(expr, ast.Constant):

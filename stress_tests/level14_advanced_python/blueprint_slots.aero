@@ -1,0 +1,8 @@
+project: advanced_slots
+functions:
+  - file: slots.py
+    name: WithSlots
+    tests: []
+output_dir: dist
+llm:
+  provider: none
