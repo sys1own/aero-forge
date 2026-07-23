@@ -1,0 +1,7 @@
+project: level11_vec_class
+functions:
+  - file: matrix.py
+    name: Matrix
+output_dir: dist
+llm:
+  provider: none

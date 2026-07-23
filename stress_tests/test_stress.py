@@ -207,3 +207,19 @@ class TestLevel10Classes:
         result = _run_build(blueprint)
         assert result.returncode == 0, result.stderr + result.stdout
         assert "Build summary: 1 succeeded, 0 failed" in result.stderr
+
+
+class TestLevel11VecClass:
+    def test_matrix_class_with_vec_fields(self):
+        blueprint = STRESS_DIR / "level11_vec_class" / "blueprint.aero"
+        result = _run_build(blueprint)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert "Build summary: 1 succeeded, 0 failed" in result.stderr
+
+
+class TestLevel12Numpy:
+    def test_numpy_vector_ops(self):
+        blueprint = STRESS_DIR / "level12_numpy" / "blueprint.aero"
+        result = _run_build(blueprint)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert "Build summary: 3 succeeded, 0 failed" in result.stderr

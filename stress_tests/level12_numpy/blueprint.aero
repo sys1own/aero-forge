@@ -1,0 +1,9 @@
+project: level12_numpy
+functions:
+  - file: vector_ops.py
+    compile_all: true
+    tests:
+      - tests/test_vector_ops.py
+output_dir: dist
+llm:
+  provider: none

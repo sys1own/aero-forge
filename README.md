@@ -270,17 +270,26 @@ directory covers real-world patterns:
 - `math.sqrt`, `math.sin`, `math.cos`, `math.tan`, `math.exp`, `math.log`,
   `math.log10`, `math.ceil`, `math.floor`, `math.trunc`, `math.pow`,
   `math.radians`, `math.degrees`, and `math.pi`/`e`/`tau`.
+- Lists and nested lists (`list[float]`, `list[list[float]]`, `Vec<Vec<T>>`).
+- List comprehensions over `range(...)`.
+- Simple NumPy-style 1D vector operations:
+  - `np.array`, `np.zeros`, `np.ones` (1D and 2D tuple shapes)
+  - `np.dot` (1D vector dot product and 2D matrix multiplication)
+  - `np.sum`
+  - elementwise `arr * 2 + 1` on 1D vectors
 - Multi-source builds via `compile_all` and per-function `tests`.
 - Parallel builds (`--jobs`) and incremental build caching.
-- Simple Python classes with `__init__`, instance methods, `@staticmethod`, and `@classmethod`.
+- Simple Python classes with `__init__`, instance methods, `@staticmethod`,
+  `@classmethod`, and class attributes with getter/setter access.
 
 **Currently unsupported (clear error messages):**
-- Lists, list comprehensions, slicing, `append`, `len`, `sum`, `enumerate`, `zip`.
+- List slicing, `append`, `extend`, `len`, `enumerate`, `zip`.
 - Dictionaries and sets.
 - Class inheritance, properties, and dataclasses.
 - `try`/`except`, `with`, `yield`, `async`/`await`.
 - `random`, `datetime`, `re`, `json`, and other non-math stdlib modules.
 - I/O (`print`, file access, network, `os`, `subprocess`, etc.).
+- Full `ndarray` broadcasting, slicing, and n-dimensional operations.
 
 See `stress_tests/README.md` for the full campaign report.
 
