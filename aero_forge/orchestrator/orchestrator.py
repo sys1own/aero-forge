@@ -71,6 +71,7 @@ class Orchestrator:
         fallback_model: Optional[str] = None,
         compiler_flags: Optional[List[str]] = None,
         output_dir: Optional[str | Path] = None,
+        target: Optional[str] = None,
     ):
         overrides: Dict[str, Any] = {}
         if max_iterations is not None:
@@ -115,6 +116,7 @@ class Orchestrator:
         self.max_iterations = self.settings["MAX_ITERATIONS"]
         self.use_llm = self.settings.get("LLM_PROVIDER", "none") != "none"
         self.compiler_flags = compiler_flags or []
+        self.target = target
 
         self.cache = FixCache(enabled=self.settings["CACHE_ENABLED"])
         self.prompt_builder = PromptBuilder()
@@ -375,8 +377,12 @@ class Orchestrator:
                     [os.environ.get("RUSTFLAGS", "")] + self.compiler_flags
                 ).strip()
 
+            build_cmd = ["cargo", "build", "--release"]
+            if self.target:
+                build_cmd.extend(["--target", self.target])
+
             build = subprocess.run(
-                ["cargo", "build", "--release"],
+                build_cmd,
                 cwd=crate_root,
                 env=env,
                 capture_output=True,
@@ -389,7 +395,7 @@ class Orchestrator:
                     f"Cargo build failed:\n{full_output}\n{classify_cargo_error(full_output)}"
                 )
 
-            artifact = _find_artifact(self._cargo_target, crate_name)
+            artifact = _find_artifact(self._cargo_target, crate_name, self.target)
             if artifact is None:
                 raise _BuildFailure(
                     "No compiled shared library found after cargo build."
@@ -653,9 +659,16 @@ def _extension_suffix() -> str:
     return suffixes[0] if suffixes else ".so"
 
 
-def _find_artifact(cargo_target_dir: Path, crate_name: str) -> Optional[Path]:
+def _find_artifact(
+    cargo_target_dir: Path, crate_name: str, target: Optional[str] = None
+) -> Optional[Path]:
     candidates: List[Path] = []
-    for root in (cargo_target_dir, cargo_target_dir / "release"):
+    roots = [cargo_target_dir]
+    if target:
+        roots.append(cargo_target_dir / target / "release")
+    else:
+        roots.append(cargo_target_dir / "release")
+    for root in roots:
         if root.is_dir():
             candidates.extend(root.rglob(f"lib{crate_name}.so"))
             candidates.extend(root.rglob(f"{crate_name}.dll"))

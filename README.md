@@ -193,6 +193,21 @@ aero-forge build --target wasm32-unknown-unknown --no-llm
 
 This produces a `<module>.wasm` file plus a `<module>.js` loader in `dist/` that can be used from Node.js or a browser for scalar numeric functions. Classes, lists, and PyO3-specific constructs are not yet supported in the WASM target.
 
+### Cross-compilation
+
+```bash
+# Linux (glibc) from any x86_64 Linux host
+aero-forge build --target x86_64-unknown-linux-gnu --no-llm
+
+# Windows from Linux with MinGW-w64
+aero-forge build --target x86_64-pc-windows-gnu --no-llm
+
+# ARM Linux from a cross toolchain
+aero-forge build --target aarch64-unknown-linux-gnu --no-llm
+```
+
+Cross-compilation requires the target to be installed (`rustup target add <triple>`) and an appropriate linker to be available. When the target does not match the build host, tests are skipped and the compiled artifact is placed in `dist/`.
+
 ### Build CLI flags
 
 - `--auto FILE` – auto-discover functions.
@@ -208,7 +223,7 @@ This produces a `<module>.wasm` file plus a `<module>.js` loader in `dist/` that
 - `--cache-dir PATH` / `AERO_FORGE_CACHE_DIR` – custom cache directory.
 - `--write-blueprint` – when using `--auto`, write a generated `blueprint.aero`.
 - `--dry-run` – preview what would be built.
-- `--target {native,wasm32-unknown-unknown}` – compile to native PyO3 extension or WASM.
+- `--target TRIPLE` – compile to native, WASM (`wasm32-unknown-unknown`), or any Rust target triple (e.g. `x86_64-pc-windows-gnu`).
 - `--gpu` – route `# @accelerate gpu` functions through the GPU backend (falls back to CPU if `nvcc` is missing).
 - `--verbose` – show debug logs and per-function results.
 
@@ -304,6 +319,9 @@ directory covers real-world patterns:
   when `--gpu` is passed; if `nvcc` is unavailable the build falls back to CPU.
 - WASM target (`--target wasm32-unknown-unknown`) for scalar numeric functions;
   generates a `.wasm` file and a Node/browser-compatible `.js` loader.
+- Cross-compilation to arbitrary Rust target triples (e.g.
+  `x86_64-pc-windows-gnu`, `aarch64-unknown-linux-gnu`); host tests are skipped
+  when the target does not match the build machine.
 
 **Currently unsupported (clear error messages):**
 - List slicing, `append`, `extend`, `len`, `enumerate`, `zip`.

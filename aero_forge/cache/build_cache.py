@@ -41,22 +41,34 @@ class BuildCache:
             encoding="utf-8",
         )
 
-    def _key(self, source: str, compiler_flags: list, function_name: str) -> str:
+    def _key(
+        self,
+        source: str,
+        compiler_flags: list,
+        function_name: str,
+        target: Optional[str] = None,
+    ) -> str:
         source_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        target_token = target or "native"
         material = (
             f"{source_hash}::"
             f"{','.join(sorted(compiler_flags))}::"
             f"{function_name}::"
-            f"{self._rustc_version}"
+            f"{self._rustc_version}::"
+            f"{target_token}"
         ).encode("utf-8")
         return hashlib.sha256(material).hexdigest()
 
     def get(
-        self, source: str, compiler_flags: list, function_name: str
+        self,
+        source: str,
+        compiler_flags: list,
+        function_name: str,
+        target: Optional[str] = None,
     ) -> Optional[Path]:
         if not self.enabled:
             return None
-        key = self._key(source, compiler_flags, function_name)
+        key = self._key(source, compiler_flags, function_name, target)
         artifact_name = self._index.get(key)
         if not artifact_name:
             return None
@@ -75,10 +87,11 @@ class BuildCache:
         compiler_flags: list,
         function_name: str,
         artifact: Path,
+        target: Optional[str] = None,
     ) -> Path:
         if not self.enabled:
             return Path(artifact)
-        key = self._key(source, compiler_flags, function_name)
+        key = self._key(source, compiler_flags, function_name, target)
         dest = self.root / f"{key}_{artifact.name}"
         shutil.copy(artifact, dest)
         self._index[key] = dest.name
