@@ -100,3 +100,39 @@ def test_generate_and_write_blueprint(tmp_path):
     written = out.read_text()
     assert "project: gen" in written
     assert "f" in written
+
+
+def test_parse_compile_all_wildcard(tmp_path):
+    source = tmp_path / "utils.py"
+    source.write_text(
+        "def add(a, b):\n"
+        "    return a + b\n"
+        "def mul(a, b):\n"
+        "    return a * b\n"
+    )
+    blueprint_path = tmp_path / "blueprint.aero"
+    blueprint_path.write_text(
+        "project: wild\n"
+        "functions:\n"
+        "  - file: utils.py\n"
+        '    name: "*"\n'
+    )
+
+    bp = parse_blueprint(blueprint_path)
+    assert bp.functions[0].compile_all is True
+    assert bp.functions[0].name == "*"
+
+
+def test_parse_compile_all_flag(tmp_path):
+    source = tmp_path / "utils.py"
+    source.write_text("def f(): pass\n")
+    blueprint_path = tmp_path / "blueprint.yaml"
+    blueprint_path.write_text(
+        "project: all\n"
+        "functions:\n"
+        "  - file: utils.py\n"
+        "    compile_all: true\n"
+    )
+
+    bp = parse_blueprint(blueprint_path)
+    assert bp.functions[0].compile_all is True

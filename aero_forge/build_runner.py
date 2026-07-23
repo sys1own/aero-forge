@@ -9,7 +9,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from aero_forge.blueprint import Blueprint, FunctionSpec
+from aero_forge.blueprint import Blueprint, FunctionSpec, discover_functions
 from aero_forge.cache.build_cache import BuildCache
 from aero_forge.orchestrator.orchestrator import Orchestrator
 
@@ -48,6 +48,7 @@ class BuildRunner:
         max_iterations: Optional[int] = None,
         max_retries: Optional[int] = None,
         cache_enabled: bool = True,
+        dry_run: bool = False,
     ):
         self.blueprint = blueprint
         self.max_workers = max(1, max_workers)
@@ -56,14 +57,32 @@ class BuildRunner:
         self.max_iterations = max_iterations
         self.max_retries = max_retries
         self.cache = BuildCache(enabled=cache_enabled)
+        self.dry_run = dry_run
 
     def build(self) -> Dict[str, Any]:
         """Run the build for every source file in the blueprint."""
         output_dir = self.blueprint.output_dir.resolve()
-        output_dir.mkdir(parents=True, exist_ok=True)
+        if not self.dry_run:
+            output_dir.mkdir(parents=True, exist_ok=True)
 
-        grouped = self._group_by_source()
+        expanded = self._expand_specs()
+        grouped = self._group_by_source(expanded)
         source_specs = list(grouped.items())
+
+        if self.dry_run:
+            return self._summarize(
+                [
+                    BuildResult(
+                        source=source,
+                        function_names=[spec.name for spec in specs],
+                        success=True,
+                        logs="dry run",
+                        iterations=0,
+                    )
+                    for source, specs in source_specs
+                ],
+                dry_run=True,
+            )
 
         results: List[BuildResult] = []
         if self.max_workers == 1 or len(source_specs) == 1:
@@ -84,11 +103,34 @@ class BuildRunner:
 
         return self._summarize(results)
 
+    def _expand_specs(self) -> List[FunctionSpec]:
+        """Expand any compile-all specs into individual function specs."""
+        expanded: List[FunctionSpec] = []
+        for spec in self.blueprint.functions:
+            if spec.compile_all:
+                discovered = discover_functions(spec.file)
+                if not discovered:
+                    logger.warning("No public functions found in %s", spec.file)
+                for func in discovered:
+                    expanded.append(
+                        FunctionSpec(
+                            file=spec.file,
+                            name=func.name,
+                            tests=spec.tests or func.tests,
+                            output_name=func.name,
+                            compiler_flags=list(spec.compiler_flags),
+                        )
+                    )
+            else:
+                expanded.append(spec)
+        return expanded
+
     def _group_by_source(
         self,
+        specs: List[FunctionSpec],
     ) -> Dict[Path, List[FunctionSpec]]:
         groups: Dict[Path, List[FunctionSpec]] = defaultdict(list)
-        for spec in self.blueprint.functions:
+        for spec in specs:
             groups[spec.file.resolve()].append(spec)
         return groups
 
@@ -133,8 +175,8 @@ class BuildRunner:
 
         logger.info(
             "[%s/%s] Compiling %s -> %s",
-            list(self._group_by_source().keys()).index(source) + 1,
-            len(self._group_by_source()),
+            list(self._group_by_source(self._expand_specs()).keys()).index(source) + 1,
+            len(self._group_by_source(self._expand_specs())),
             source,
             ", ".join(function_names),
         )
@@ -200,7 +242,9 @@ class BuildRunner:
         )
         return loader
 
-    def _summarize(self, results: List[BuildResult]) -> Dict[str, Any]:
+    def _summarize(
+        self, results: List[BuildResult], dry_run: bool = False
+    ) -> Dict[str, Any]:
         total_functions = sum(len(r.function_names) for r in results)
         passed_functions = sum(
             len(r.function_names) for r in results if r.success
@@ -209,24 +253,35 @@ class BuildRunner:
 
         for r in results:
             status = "OK" if r.success else "FAIL"
-            logger.info(
-                "[%s] %s -> %s",
-                ", ".join(r.function_names),
-                r.source,
-                status,
-            )
-            if not r.success:
+            if dry_run:
+                logger.info("[DRY-RUN] %s -> %s", r.source, ", ".join(r.function_names))
+            else:
+                logger.info(
+                    "[%s] %s -> %s",
+                    ", ".join(r.function_names),
+                    r.source,
+                    status,
+                )
+            if not r.success and not dry_run:
                 logger.error("%s failed:\n%s", r.source, r.logs)
 
-        logger.info(
-            "Build summary: %d succeeded, %d failed out of %d",
-            passed_functions,
-            failed_functions,
-            total_functions,
-        )
+        if dry_run:
+            logger.info(
+                "Dry-run summary: %d function(s) across %d source file(s) would be built",
+                total_functions,
+                len(results),
+            )
+        else:
+            logger.info(
+                "Build summary: %d succeeded, %d failed out of %d",
+                passed_functions,
+                failed_functions,
+                total_functions,
+            )
 
         return {
-            "success": failed_functions == 0,
+            "success": failed_functions == 0 and not dry_run,
+            "dry_run": dry_run,
             "project": self.blueprint.project,
             "output_dir": str(self.blueprint.output_dir),
             "total": total_functions,
