@@ -1,0 +1,11 @@
+project: level29_indexing_type_inference
+functions:
+  - file: dot_product_zip.py
+    name: dot_product_zip
+    tests:
+      - tests/test_dot_product_zip.py
+  - file: dot_product_index.py
+    name: dot_product_index
+    tests:
+      - tests/test_dot_product_index.py
+output_dir: dist

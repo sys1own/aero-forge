@@ -1,0 +1,5 @@
+project: level30_nested_functions
+functions:
+  - file: nested_func.py
+    name: outer
+output_dir: dist

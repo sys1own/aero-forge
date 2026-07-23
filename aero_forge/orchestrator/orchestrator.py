@@ -322,15 +322,33 @@ class Orchestrator:
         A bare ``return`` (no value) is ignored when other returns exist; the
         engine will emit it as ``return <zero>;`` for the function's return type.
         """
+
+        def _returns(func: ast.AST) -> List[ast.Return]:
+            """Yield Return nodes that belong to ``func``, not nested functions/classes."""
+            returns: List[ast.Return] = []
+
+            def _visit(n: Any) -> None:
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    return
+                if isinstance(n, ast.Return):
+                    returns.append(n)
+                if isinstance(n, ast.AST):
+                    for child in ast.iter_child_nodes(n):
+                        _visit(child)
+                elif isinstance(n, list):
+                    for child in n:
+                        _visit(child)
+
+            _visit(func.body)
+            return returns
+
         for node in tree.body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             if node.name not in self.function_names:
                 continue
             sizes: Dict[int, int] = {}
-            for ret in ast.walk(node):
-                if not isinstance(ret, ast.Return):
-                    continue
+            for ret in _returns(node):
                 if ret.value is None:
                     continue
                 if isinstance(ret.value, (ast.Tuple, ast.List)):
@@ -339,9 +357,13 @@ class Orchestrator:
                     size = 1
                 sizes[size] = sizes.get(size, 0) + 1
             if len(sizes) > 1:
+                counts = ", ".join(
+                    f"{size} value(s) {count} time(s)"
+                    for size, count in sorted(sizes.items())
+                )
                 raise _BuildFailure(
                     f"All return statements in '{node.name}' must return the same number of values. "
-                    f"Found return arities: {dict(sorted(sizes.items()))}. "
+                    f"Found: {counts}. "
                     "Rewrite so every return has the same tuple size."
                 )
 

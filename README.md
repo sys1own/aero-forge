@@ -261,15 +261,17 @@ Aero-Forge targets 10-100x speedups for hot numerical loops. Actual speedup depe
 
 The transpiler handles common numerical and algorithmic Python patterns:
 
-- Primitive numeric types (`int`, `float`, `bool`) and `list`/`List[T]` annotations.
+- Primitive numeric types (`int`, `float`, `bool`) and `list`/`List[T]` annotations, plus `numpy.ndarray` which maps to `Vec<f64>`.
 - Nested `for`/`while` loops, `if`/`elif`/`else`, `break`, `continue`, and early `return`.
-- `range(...)` loops with one or two arguments.
+- `range(...)` loops with one, two, or three arguments (step is supported).
 - List comprehensions (e.g., `[x * x for x in range(10)]` or `[x * 2 for x in arr]`) and nested list comprehensions.
-- Tuple unpacking assignments (`a, b = b, a + b`) including inside loops.
+- Tuple unpacking assignments (`a, b = b, a + b`) and chain assignments (`i = j = 0`).
 - `enumerate()` and `zip()` in `for` loop iteration.
+- List slicing for reads (`a[:]`, `a[1:3]`) and slice assignment (`a[1:3] = b`).
 - `len()` on lists and nested list rows.
-- `append()` on lists.
-- Basic `list[list[T]]` matrices and indexing (`m[i][j]`).
+- `append()` and `extend()` on lists.
+- Basic `list[list[T]]` matrices and indexing (`m[i][j]`), including row caching (`row = m[i]`).
+- `min()` and `max()` on two scalar values.
 
 ## Known Limitations
 
@@ -277,14 +279,15 @@ The transpiler is intentionally narrow. It works well for numerical/algorithmic 
 
 Currently not supported:
 
-- List slicing, `extend`, `pop`, `insert`, and other list methods.
+- `pop`, `insert`, `remove`, and most other list methods (only `append`, `extend`, and indexing/slicing are supported).
+- Nested function, class, or method definitions (refactor to top-level functions).
 - Dictionaries and sets.
 - Complex class inheritance, properties, and dataclasses.
 - `try`/`except`, `with`, `yield`, `async`/`await`.
 - `eval`/`exec` and dynamic imports.
 - `random`, `datetime`, `re`, `json`, and other non-math stdlib modules.
 - I/O, networking, and `os`/`subprocess`.
-- Full `ndarray` broadcasting, slicing, and n-dimensional operations.
+- Full `ndarray` broadcasting and n-dimensional operations.
 
 See `BLUEPRINT.md` and `stress_tests/README.md` for the full supported-construct list and the stress-test campaign results.
 

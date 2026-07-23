@@ -10,20 +10,20 @@ import pytest
 from aero_forge.chat import ChatSession
 
 
-def test_chat_session_reply():
+def test_chat_session_reply(tmp_path):
     from aero_forge.generate import extract_code_blocks
 
     client = MagicMock()
     client.generate.return_value = "```python\ndef cube(n):\n    return n ** 3\n```"
-    session = ChatSession(Path("."))
+    session = ChatSession(tmp_path)
     with patch("aero_forge.chat.get_llm_client", return_value=client):
         response = session.reply("write a function that cubes a number")
     assert "def cube" in response
     assert len(session.messages) == 3  # system + user + assistant
 
 
-def test_chat_session_no_provider():
-    session = ChatSession(Path("."))
+def test_chat_session_no_provider(tmp_path):
+    session = ChatSession(tmp_path)
     with patch("aero_forge.chat.get_llm_client", return_value=None):
         response = session.reply("hello")
     assert "No LLM provider" in response

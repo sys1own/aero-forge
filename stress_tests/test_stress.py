@@ -406,7 +406,7 @@ class TestLevel17Explainable:
 
 
 class TestLevel18Discovery:
-    def test_discover_flag_allows_unknown_prompt(self):
+    def test_discover_flag_allows_unknown_prompt(self, tmp_path):
         """With --discover, the CLI accepts prompts not in the algorithm library."""
         from click.testing import CliRunner
         from aero_forge.cli import main
@@ -427,6 +427,8 @@ class TestLevel18Discovery:
                     "solve a brand new unseen problem",
                     "--algorithm-library",
                     "--discover",
+                    "--output-dir",
+                    str(tmp_path),
                     "--llm-provider",
                     "openai",
                 ],
@@ -486,6 +488,33 @@ class TestLevel28ComplexAssignments:
     def test_timsort(self):
         """Timsort with chain assignments, list slicing, extend, and range step compiles."""
         blueprint = STRESS_DIR / "level28_complex_assignments" / "blueprint.aero"
+        result = _run_build(blueprint)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert "Build summary: 1 succeeded, 0 failed" in result.stderr
+
+
+class TestLevel29IndexingTypeInference:
+    def test_dot_product_variants(self):
+        """Type inference handles zip-based and index-based vector iteration."""
+        blueprint = STRESS_DIR / "level29_indexing_type_inference" / "blueprint.aero"
+        result = _run_build(blueprint)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert "Build summary: 2 succeeded, 0 failed" in result.stderr
+
+
+class TestLevel30NestedFunctions:
+    def test_nested_functions_rejected(self):
+        """Nested function definitions are rejected with a clear message."""
+        blueprint = STRESS_DIR / "level30_nested_functions" / "blueprint.aero"
+        result = _run_build(blueprint)
+        assert result.returncode != 0
+        assert "nested" in (result.stderr + result.stdout).lower()
+
+
+class TestLevel31MatrixBorrow:
+    def test_matrix_multiply_borrow(self):
+        """Matrix multiply that caches a row with ``ai = a[i]`` clones/borrows correctly."""
+        blueprint = STRESS_DIR / "level31_matrix_borrow" / "blueprint.aero"
         result = _run_build(blueprint)
         assert result.returncode == 0, result.stderr + result.stdout
         assert "Build summary: 1 succeeded, 0 failed" in result.stderr
