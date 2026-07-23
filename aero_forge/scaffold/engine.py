@@ -174,8 +174,14 @@ class RustGenerator:
     def _infer_all_types(self) -> None:
         """Iteratively infer Rust types for arguments and locals from usage."""
         # Start from unknown so subscript/append-driven inference can override
-        # the default scalar function_type.
-        types: Dict[str, Optional[str]] = {name: None for name in self.arg_names}
+        # the default scalar function_type. Annotated arguments are seeded with
+        # their declared type because the source explicitly gives us that type.
+        types: Dict[str, Optional[str]] = {}
+        for i, name in enumerate(self.arg_names):
+            if self.func.args.args[i].annotation is not None:
+                types[name] = self.arg_types[i]
+            else:
+                types[name] = None
 
         for stmt in self.func.body:
             self._infer_annotated_local(stmt, types)
@@ -194,10 +200,16 @@ class RustGenerator:
                 types[name] = self.arg_types[i]
             self.arg_types[i] = types.get(name, self.arg_types[i])
 
-        self.type_env = {k: v for k, v in types.items() if v is not None}
+        # Replace any unresolved placeholder element types with the default.
+        def resolve(t: Optional[str]) -> Optional[str]:
+            if t is None:
+                return None
+            return t.replace("?", self.function_type)
+
+        self.type_env = {k: resolve(v) for k, v in types.items() if v is not None}
 
         if not self.annotated_return:
-            ret_type = types.get("__return__")
+            ret_type = resolve(types.get("__return__"))
             if ret_type:
                 self.return_type = ret_type
 
@@ -307,11 +319,14 @@ class RustGenerator:
         if isinstance(expr, ast.Subscript):
             base_type = self._infer_expr_type(expr.value, types)
             if base_type and base_type.startswith("Vec<"):
-                return _element_type(base_type)
+                element_type = _element_type(base_type)
+                if isinstance(expr.slice, ast.Slice):
+                    return f"Vec<{element_type}>"
+                return element_type
             return None
         if isinstance(expr, ast.List):
             if not expr.elts:
-                return f"Vec<{self.function_type}>"
+                return "Vec<?>"
             inner = self._infer_expr_type(expr.elts[0], types) or self.function_type
             return f"Vec<{inner}>"
         if isinstance(expr, ast.ListComp):
@@ -426,29 +441,11 @@ class RustGenerator:
             return t1
         if t1 == t2:
             return t1
-        # A scalar placeholder should be overridden by a concrete container type.
-        if (
-            t1.startswith("Vec<")
-            and not t2.startswith("Vec<")
-            and t2
-            in (
-                "i64",
-                "f64",
-                "bool",
-            )
-        ):
-            return t1
-        if (
-            t2.startswith("Vec<")
-            and not t1.startswith("Vec<")
-            and t1
-            in (
-                "i64",
-                "f64",
-                "bool",
-            )
-        ):
+        # ``?`` is an unknown/placeholder element type from an empty list literal.
+        if t1 == "?":
             return t2
+        if t2 == "?":
+            return t1
         if t1.startswith("Vec<") and t2.startswith("Vec<"):
             e1 = _element_type(t1)
             e2 = _element_type(t2)
@@ -514,12 +511,15 @@ class RustGenerator:
             return self._field_type(expr.value, expr.attr)
         if isinstance(expr, ast.Subscript):
             base_type = self._type_of(expr.value)
-            if base_type.startswith("Vec<"):
-                return _element_type(base_type)
-            return self.function_type
+            if not base_type.startswith("Vec<"):
+                return self.function_type
+            element_type = _element_type(base_type)
+            if isinstance(expr.slice, ast.Slice):
+                return f"Vec<{element_type}>"
+            return element_type
         if isinstance(expr, ast.List):
             if not expr.elts:
-                return f"Vec<{self.function_type}>"
+                return "Vec<?>"
             return f"Vec<{self._type_of(expr.elts[0])}>"
         if isinstance(expr, ast.ListComp):
             return f"Vec<{self._type_of(expr.elt)}>"
@@ -672,7 +672,7 @@ class RustGenerator:
                     isinstance(call.func, ast.Attribute)
                     and isinstance(call.func.value, ast.Name)
                     and call.func.value.id == name
-                    and call.func.attr == "append"
+                    and call.func.attr in ("append", "extend", "sort", "reverse")
                 ):
                     return True
             for child in ("body", "orelse"):
@@ -733,33 +733,42 @@ class RustGenerator:
         declared = set(self.arg_names)
 
         for stmt in self.func.body:
-            if (
-                isinstance(stmt, ast.Assign)
-                and len(stmt.targets) == 1
-                and isinstance(stmt.targets[0], ast.Name)
+            if isinstance(stmt, ast.Assign) and all(
+                isinstance(t, ast.Name) for t in stmt.targets
             ):
-                name = stmt.targets[0].id
-                if (
-                    name in self.assigned
-                    and name not in self.arg_names
-                    and not self._name_in_expr(stmt.value, name)
-                    and self._rhs_uses_only(stmt.value, declared)
+                target_names = [t.id for t in stmt.targets]
+                new_targets = [
+                    n
+                    for n in target_names
+                    if n in self.assigned
+                    and n not in self.arg_names
+                    and n not in declared
+                ]
+                if new_targets and all(
+                    not self._name_in_expr(stmt.value, n) for n in new_targets
                 ):
-                    mutable = self._is_mutable(name)
-                    mut = "mut " if mutable else ""
+                    # Only hoist the initializer if all RHS references are already
+                    # declared; otherwise fall back to normal body emission.
+                    first_new = new_targets[0]
                     if (
                         isinstance(stmt.value, ast.List)
                         and not stmt.value.elts
-                        and name in self.type_env
+                        and first_new in self.type_env
                     ):
-                        rhs_type = self.type_env[name]
+                        rhs_type = self.type_env[first_new]
                     else:
                         rhs_type = self._type_of(stmt.value)
                     value = self._strip_outer_parens(
                         self._emit_expr(stmt.value, rhs_type)
                     )
-                    defaults.append(f"let {mut}{name} = {value};")
-                    declared.add(name)
+                    for name in target_names:
+                        if name in new_targets:
+                            mutable = self._is_mutable(name)
+                            mut = "mut " if mutable else ""
+                            defaults.append(f"let {mut}{name} = {value};")
+                            declared.add(name)
+                    if not all(n in declared for n in target_names):
+                        body.append(stmt)
                     continue
             body.append(stmt)
 
@@ -790,6 +799,9 @@ class RustGenerator:
         if typ.startswith("Vec<"):
             inner = _element_type(typ)
             return f"Vec::<{inner}>::new()"
+        if typ.startswith("(") and typ.endswith(")"):
+            parts = self._tuple_element_types(typ)
+            return f"({', '.join(self._zero_for_type(p) for p in parts)})"
         return "0_i64"
 
     def _return_type(self) -> str:
@@ -882,7 +894,10 @@ class RustGenerator:
     def _emit_stmt(self, stmt: ast.stmt) -> str:
         if isinstance(stmt, ast.Return):
             if stmt.value is None:
-                return "return;"
+                # Bare ``return`` compiles to the zero value for the declared return type.
+                if self.return_type == "()":
+                    return "return;"
+                return f"return {self._zero()};"
             if isinstance(stmt.value, (ast.Tuple, ast.List)):
                 value = self._emit_expr(stmt.value, self.return_type)
             else:
@@ -924,8 +939,13 @@ class RustGenerator:
                 stmt.value.value, str
             ):
                 return ""
-            if isinstance(stmt.value, ast.Call) and _call_name(stmt.value) == "append":
-                return self._emit_append(stmt.value)
+            if isinstance(stmt.value, ast.Call) and _call_name(stmt.value) in (
+                "append",
+                "extend",
+            ):
+                if _call_name(stmt.value) == "append":
+                    return self._emit_append(stmt.value)
+                return self._emit_call(stmt.value, self.function_type)
             self._emit_expr(stmt.value, self.function_type)
             return ""
         if isinstance(stmt, (ast.With, ast.AsyncWith)):
@@ -966,11 +986,51 @@ class RustGenerator:
                     rhs_type = self._type_of(stmt.value)
                 value = self._strip_outer_parens(self._emit_expr(stmt.value, rhs_type))
                 return f"{name} = {value};"
+            if isinstance(target, ast.Subscript):
+                target_type = self._type_of(target)
+                rhs_type = target_type
+                if isinstance(target.slice, ast.Slice):
+                    base_type = self._type_of(target.value)
+                    base_expr = self._emit_expr(target.value, base_type)
+                    lower = (
+                        self._emit_expr(target.slice.lower, "i64")
+                        if target.slice.lower is not None
+                        else "0"
+                    )
+                    if target.slice.upper is None:
+                        upper = f"({base_expr}).len()"
+                    else:
+                        upper = self._emit_expr(target.slice.upper, "i64")
+                    value = self._strip_outer_parens(
+                        self._emit_expr(stmt.value, rhs_type)
+                    )
+                    return f"{base_expr}.splice(({lower}) as usize..({upper}) as usize, {value});"
+                lvalue = self._emit_lvalue(target, target_type)
+                value = self._strip_outer_parens(self._emit_expr(stmt.value, rhs_type))
+                return f"{lvalue} = {value};"
             if isinstance(target, (ast.Tuple, ast.List)):
                 return self._emit_tuple_unpack(target, stmt.value)
 
+        # Chain assignment: ``a = b = expr`` becomes a temporary plus assignments.
+        if all(isinstance(t, ast.Name) for t in stmt.targets):
+            first_name = stmt.targets[0].id
+            if (
+                isinstance(stmt.value, ast.List)
+                and not stmt.value.elts
+                and first_name in self.type_env
+            ):
+                rhs_type = self.type_env[first_name]
+            else:
+                rhs_type = self._type_of(stmt.value)
+            value = self._strip_outer_parens(self._emit_expr(stmt.value, rhs_type))
+            tmp = self._next_tmp()
+            lines = [f"let {tmp} = {value};"]
+            for target in stmt.targets:
+                lines.append(f"{target.id} = {tmp};")
+            return "\n".join(lines)
+
         raise UnsupportedError(
-            "Only single-target or tuple unpacking assignments are supported",
+            "Only single-target, tuple unpacking, or chain assignments are supported",
             node=stmt,
         )
 
@@ -1116,8 +1176,19 @@ class RustGenerator:
                 start = f"({start} as i64)"
                 stop = f"({stop} as i64)"
             range_expr = f"{start}..{stop}"
+        elif len(call.args) == 3:
+            start = self._emit_expr(call.args[0], self.function_type)
+            stop = self._emit_expr(call.args[1], self.function_type)
+            step = self._emit_expr(call.args[2], self.function_type)
+            if self.function_type == "f64":
+                start = f"({start} as i64)"
+                stop = f"({stop} as i64)"
+            step_usize = f"(({step} as i64) as usize)"
+            range_expr = f"({start}..{stop}).step_by({step_usize})"
         else:
-            raise UnsupportedError("range(...) with step is not supported", node=call)
+            raise UnsupportedError(
+                "range(...) requires 1, 2, or 3 arguments", node=call
+            )
         body = self._emit_body(stmt.body)
         return f"for {target.id} in {range_expr} {{\n{body}\n}}"
 
@@ -1298,6 +1369,8 @@ class RustGenerator:
     def _emit_list_literal(self, expr: ast.List, ctx: str) -> str:
         """Emit a Python list literal as a Rust vec! macro."""
         element_type = _element_type(ctx)
+        if element_type == "?":
+            element_type = self.function_type
         if not expr.elts:
             return f"Vec::<{element_type}>::new()"
         elements = [self._emit_expr(e, element_type) for e in expr.elts]
@@ -1433,6 +1506,30 @@ class RustGenerator:
             )
         element_type = _element_type(base_type)
         value_expr = self._emit_expr(expr.value, base_type)
+
+        if isinstance(expr.slice, ast.Slice):
+            lower = (
+                self._emit_expr(expr.slice.lower, "i64")
+                if expr.slice.lower is not None
+                else "0"
+            )
+            if expr.slice.upper is None and expr.slice.lower is None:
+                return self._coerce(f"{value_expr}.clone()", base_type, ctx)
+            if expr.slice.upper is None:
+                return self._coerce(
+                    f"{value_expr}[({lower}) as usize..].to_vec()", base_type, ctx
+                )
+            upper = self._emit_expr(expr.slice.upper, "i64")
+            if expr.slice.lower is None:
+                return self._coerce(
+                    f"{value_expr}[0..({upper}) as usize].to_vec()", base_type, ctx
+                )
+            return self._coerce(
+                f"{value_expr}[({lower}) as usize..({upper}) as usize].to_vec()",
+                base_type,
+                ctx,
+            )
+
         index_expr = self._emit_expr(expr.slice, "i64")
         access = f"{value_expr}[({index_expr}) as usize]"
         return self._coerce(access, element_type, ctx)
@@ -1715,6 +1812,18 @@ class RustGenerator:
                 container_type = self._type_of(arg_node.value)
             arg_str = self._emit_expr(arg_node, container_type)
             return f"(({arg_str}).len() as i64)"
+
+        # list.extend(other)
+        if base is not None and name == "extend":
+            if len(expr.args) != 1:
+                raise UnsupportedError("extend() takes exactly one argument", node=expr)
+            target = expr.func.value
+            target_type = self._type_of(target)
+            element_type = _element_type(target_type)
+            target_str = self._emit_expr(target, target_type)
+            arg_type = f"Vec<{element_type}>"
+            arg_str = self._emit_expr(expr.args[0], arg_type)
+            return f"{target_str}.extend({arg_str}.iter().cloned());"
 
         if base in ("np", "numpy"):
             return self._emit_numpy_call(name, expr, ctx)

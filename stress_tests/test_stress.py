@@ -455,3 +455,37 @@ class TestLevel19CodeReview:
             corrected = _review_code(original, "factorial", None, "openai", None, 3)
 
         assert "result = 1" in corrected
+
+
+class TestLevel26NestedLists:
+    def test_matrix_multiply_nested(self):
+        """Append-based nested list construction infers Vec<Vec<f64>>."""
+        blueprint = STRESS_DIR / "level26_nested_lists" / "blueprint.aero"
+        result = _run_build(blueprint)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert "Build summary: 1 succeeded, 0 failed" in result.stderr
+
+
+class TestLevel27ReturnArity:
+    def test_find_primes_tuple_return(self):
+        """Functions with consistent tuple returns (including bare early return) pass."""
+        blueprint = STRESS_DIR / "level27_return_arity" / "blueprint.aero"
+        result = _run_build(blueprint)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert "Build summary: 1 succeeded, 0 failed" in result.stderr
+
+    def test_mismatched_return_tuple_sizes(self):
+        """Functions with mismatched return tuple sizes are rejected early."""
+        blueprint = STRESS_DIR / "level27_return_arity" / "blueprint_mismatched.aero"
+        result = _run_build(blueprint)
+        assert result.returncode != 0
+        assert "same number of values" in (result.stderr + result.stdout)
+
+
+class TestLevel28ComplexAssignments:
+    def test_timsort(self):
+        """Timsort with chain assignments, list slicing, extend, and range step compiles."""
+        blueprint = STRESS_DIR / "level28_complex_assignments" / "blueprint.aero"
+        result = _run_build(blueprint)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert "Build summary: 1 succeeded, 0 failed" in result.stderr

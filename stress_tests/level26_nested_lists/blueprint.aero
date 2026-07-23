@@ -1,0 +1,7 @@
+project: level26_nested_lists
+functions:
+  - file: matrix_multiply_nested.py
+    name: matrix_multiply_nested
+    tests:
+      - tests/test_matrix_multiply_nested.py
+output_dir: dist

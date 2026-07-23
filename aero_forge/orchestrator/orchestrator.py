@@ -317,7 +317,11 @@ class Orchestrator:
         return self.function_name
 
     def _validate_return_tuple_sizes(self, tree: ast.AST) -> None:
-        """Reject functions whose return statements return different tuple sizes."""
+        """Reject functions whose return statements return different tuple sizes.
+
+        A bare ``return`` (no value) is ignored when other returns exist; the
+        engine will emit it as ``return <zero>;`` for the function's return type.
+        """
         for node in tree.body:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
@@ -325,7 +329,9 @@ class Orchestrator:
                 continue
             sizes: Dict[int, int] = {}
             for ret in ast.walk(node):
-                if not isinstance(ret, ast.Return) or ret.value is None:
+                if not isinstance(ret, ast.Return):
+                    continue
+                if ret.value is None:
                     continue
                 if isinstance(ret.value, (ast.Tuple, ast.List)):
                     size = len(ret.value.elts)
