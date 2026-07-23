@@ -353,7 +353,11 @@ class Orchestrator:
                 text=True,
             )
             if build.returncode != 0:
-                raise _BuildFailure(classify_cargo_error(build.stdout))
+                full_output = f"{build.stdout}\n{build.stderr}".strip()
+                logger.debug("Cargo build output:\n%s", full_output)
+                raise _BuildFailure(
+                    f"Cargo build failed:\n{full_output}\n{classify_cargo_error(full_output)}"
+                )
 
             artifact = _find_artifact(self._cargo_target, crate_name)
             if artifact is None:

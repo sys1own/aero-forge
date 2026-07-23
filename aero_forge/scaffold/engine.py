@@ -258,13 +258,13 @@ class RustGenerator:
                 else:
                     sizes.add(1)
         if not sizes or sizes == {1}:
-            return self.function_type
+            return self.return_type
         if len(sizes) != 1:
             raise UnsupportedError(
                 "All return statements must return the same tuple size",
                 node=self.func,
             )
-        return f"({', '.join([self.function_type] * sizes.pop())})"
+        return f"({', '.join([self.return_type] * sizes.pop())})"
 
     def _next_tmp(self) -> str:
         self._tmp_counter += 1
@@ -313,10 +313,10 @@ class RustGenerator:
             if stmt.value is None:
                 return "return;"
             if isinstance(stmt.value, (ast.Tuple, ast.List)):
-                value = self._emit_expr(stmt.value, self.function_type)
+                value = self._emit_expr(stmt.value, self.return_type)
             else:
                 value = self._strip_outer_parens(
-                    self._emit_expr(stmt.value, self.function_type)
+                    self._emit_expr(stmt.value, self.return_type)
                 )
             return f"return {value};"
         if isinstance(stmt, ast.Assign):
@@ -444,7 +444,7 @@ class RustGenerator:
         else:
             raise UnsupportedError("range(...) with step is not supported", node=call)
         body = self._emit_body(stmt.body)
-        if self.function_type == "f64":
+        if self.function_type == "f64" and stmt.target.id != "_":
             # The loop index is an integer, but the rest of the function expects
             # f64. Shadow it as f64 inside the body so `return i` works.
             body = f"    let {stmt.target.id} = {stmt.target.id} as f64;\n{body}"

@@ -159,6 +159,85 @@ def test_build_runner_compile_all(tmp_path):
     assert result["passed"] == 2
 
 
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_build_runner_compile_all_mixed_types(tmp_path):
+    """Regression test for f64 loops, bool returns, and underscore loop vars."""
+    source = tmp_path / "math_ops.py"
+    test = tmp_path / "test_math_ops.py"
+    source.write_text(
+        "def factorial(n):\n"
+        "    if n <= 1:\n"
+        "        return 1\n"
+        "    result = 1\n"
+        "    for i in range(2, n + 1):\n"
+        "        result *= i\n"
+        "    return result\n"
+        "\n"
+        "def power(base, exp):\n"
+        "    result = 1.0\n"
+        "    for _ in range(exp):\n"
+        "        result *= base\n"
+        "    return result\n"
+        "\n"
+        "def is_prime(n):\n"
+        "    if n < 2:\n"
+        "        return False\n"
+        "    i = 2\n"
+        "    while i * i <= n:\n"
+        "        if n % i == 0:\n"
+        "            return False\n"
+        "        i += 1\n"
+        "    return True\n"
+    )
+    test.write_text(
+        "from math_ops import factorial, power, is_prime\n"
+        "\n"
+        "def test_factorial():\n"
+        "    assert factorial(0) == 1\n"
+        "    assert factorial(5) == 120\n"
+        "\n"
+        "def test_power():\n"
+        "    assert power(2, 3) == 8.0\n"
+        "    assert power(3, 0) == 1.0\n"
+        "\n"
+        "def test_is_prime():\n"
+        "    assert is_prime(2) == True\n"
+        "    assert is_prime(4) == False\n"
+        "    assert is_prime(17) == True\n"
+    )
+    blueprint_path = tmp_path / "blueprint.aero"
+    blueprint_path.write_text(
+        "project: mixed_types\n"
+        "functions:\n"
+        "  - file: math_ops.py\n"
+        "    compile_all: true\n"
+        "    tests: [test_math_ops.py]\n"
+        "llm:\n"
+        "  provider: none\n"
+        "output_dir: ./dist\n"
+    )
+
+    bp = parse_blueprint(blueprint_path)
+    runner = BuildRunner(bp, max_workers=1, cache_enabled=False)
+    result = runner.build()
+
+    assert result["success"] is True
+    assert result["total"] == 3
+    assert result["passed"] == 3
+
+    sys.path.insert(0, str(tmp_path / "dist"))
+    try:
+        mod = importlib.import_module("math_ops")
+        assert mod.factorial(5) == 120
+        assert mod.power(2, 3) == 8.0
+        assert mod.is_prime(17) is True
+    finally:
+        sys.path.remove(str(tmp_path / "dist"))
+
+
 def test_build_runner_dry_run(tmp_path):
     source = tmp_path / "utils.py"
     source.write_text(

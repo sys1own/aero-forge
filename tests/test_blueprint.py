@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from aero_forge.precision_shield.shield import Shield
 from aero_forge.blueprint import (
     Blueprint,
     FunctionSpec,
@@ -136,3 +137,11 @@ def test_parse_compile_all_flag(tmp_path):
 
     bp = parse_blueprint(blueprint_path)
     assert bp.functions[0].compile_all is True
+
+
+def test_shield_detects_boolean_return_type():
+    source = "def is_prime(n):\n    if n < 2:\n        return False\n    return True\n"
+    traits = Shield().analyze(None, "is_prime", source)
+    assert traits["function_type"] == "i64"
+    assert traits["return_type"] == "bool"
+    assert traits["arg_types"] == ["i64"]
