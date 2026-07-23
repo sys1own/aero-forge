@@ -82,11 +82,10 @@ def get(config: Dict[str, Any], *keys: str, default: Any = None) -> Any:
 
 
 DEFAULTS: Dict[str, Any] = {
-    "MODEL_PRIORITY": ["openrouter/free", "gpt-4"],
+    "LLM_PROVIDER": "none",
+    "MODEL": None,
     "MAX_RETRIES": 3,
     "CACHE_ENABLED": True,
-    "FALLBACK_MODEL": "openrouter/free",
-    "USE_LLM": True,
     "MAX_ITERATIONS": 5,
 }
 
@@ -129,36 +128,31 @@ def resolve_settings(
             settings[key] = file_config[key]
 
     # Environment overrides
-    env_list = _env_list("AERO_FORGE_MODEL_PRIORITY")
-    if env_list:
-        settings["MODEL_PRIORITY"] = env_list
+    env_provider = os.getenv("AERO_FORGE_LLM_PROVIDER")
+    if env_provider:
+        settings["LLM_PROVIDER"] = env_provider
+    env_model = os.getenv("AERO_FORGE_MODEL")
+    if env_model:
+        settings["MODEL"] = env_model
     env_retries = _env_int("AERO_FORGE_MAX_RETRIES")
     if env_retries is not None:
         settings["MAX_RETRIES"] = env_retries
     env_cache = _env_bool("AERO_FORGE_CACHE_ENABLED")
     if env_cache is not None:
         settings["CACHE_ENABLED"] = env_cache
-    env_fallback = os.getenv("AERO_FORGE_FALLBACK_MODEL")
-    if env_fallback:
-        settings["FALLBACK_MODEL"] = env_fallback
-    env_use_llm = _env_bool("AERO_FORGE_USE_LLM")
-    if env_use_llm is not None:
-        settings["USE_LLM"] = env_use_llm
     env_max_iter = _env_int("AERO_FORGE_MAX_ITERATIONS")
     if env_max_iter is not None:
         settings["MAX_ITERATIONS"] = env_max_iter
+
+    # Backward compat: AERO_FORGE_USE_LLM=false forces provider to none.
+    env_use_llm = _env_bool("AERO_FORGE_USE_LLM")
+    if env_use_llm is False:
+        settings["LLM_PROVIDER"] = "none"
 
     # Explicit overrides (e.g. CLI flags)
     for key, value in overrides.items():
         if value is not None:
             settings[key] = value
-
-    # Append fallback model to priority list if not already present.
-    fallback = settings.get("FALLBACK_MODEL")
-    priority = list(settings.get("MODEL_PRIORITY", []))
-    if fallback and fallback not in priority:
-        priority.append(fallback)
-    settings["MODEL_PRIORITY"] = priority
 
     return settings
 

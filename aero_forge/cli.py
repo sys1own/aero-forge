@@ -44,6 +44,16 @@ def main() -> None:
     help="Path to the test file (default: test_<file>.py in the same directory).",
 )
 @click.option(
+    "--llm-provider",
+    default=None,
+    help="LLM provider: openai, openrouter, gemini, or none (default: config/env).",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="Model name to use (default depends on provider).",
+)
+@click.option(
     "--max-iterations",
     "-i",
     type=int,
@@ -54,17 +64,7 @@ def main() -> None:
     "--max-retries",
     type=int,
     default=None,
-    help="Retries per LLM model before falling back.",
-)
-@click.option(
-    "--model-priority",
-    default=None,
-    help="Comma-separated list of LLM models in priority order.",
-)
-@click.option(
-    "--fallback-model",
-    default=None,
-    help="Model to append to the priority list as final fallback.",
+    help="Retries per LLM call.",
 )
 @click.option(
     "--no-llm",
@@ -77,11 +77,6 @@ def main() -> None:
     help="Disable the fix cache.",
 )
 @click.option(
-    "--model",
-    default=None,
-    help="(Deprecated) Single LLM model; sets the priority list to this model.",
-)
-@click.option(
     "--verbose",
     is_flag=True,
     help="Print full compiler/test output and debug logs.",
@@ -90,29 +85,27 @@ def fix(
     file: str,
     function: str,
     test_file: str | None,
+    llm_provider: str | None,
+    model: str | None,
     max_iterations: int | None,
     max_retries: int | None,
-    model_priority: str | None,
-    fallback_model: str | None,
     no_llm: bool,
     no_cache: bool,
-    model: str | None,
     verbose: bool,
 ) -> None:
     """Compile and test FILE's FUNCTION, healing failures automatically."""
     _setup_logging(verbose)
 
-    priority: list[str] | None = None
-    if model_priority:
-        priority = [m.strip() for m in model_priority.split(",") if m.strip()]
+    if no_llm:
+        llm_provider = "none"
 
-    use_llm = not no_llm
-    if use_llm and not os.getenv("AERO_FORGE_API_KEY"):
+    if not llm_provider and not os.getenv("AERO_FORGE_LLM_PROVIDER"):
         click.echo(
-            "AERO_FORGE_API_KEY not set; falling back to router-only mode.",
+            "No LLM provider configured (set AERO_FORGE_LLM_PROVIDER or use --llm-provider); "
+            "running in router-only mode.",
             err=True,
         )
-        use_llm = False
+        llm_provider = "none"
 
     try:
         orchestrator = Orchestrator(
@@ -120,14 +113,15 @@ def fix(
             function_name=function,
             test_path=test_file,
             max_iterations=max_iterations,
-            use_llm=use_llm,
+            llm_provider=llm_provider,
             model=model,
-            model_priority=priority,
             max_retries=max_retries,
             cache_enabled=not no_cache,
-            fallback_model=fallback_model,
         )
     except UserError as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
+    except ImportError as exc:
         click.echo(str(exc), err=True)
         sys.exit(1)
 
