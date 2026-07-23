@@ -30,7 +30,9 @@ class FunctionSpec(BaseModel):
         if self.compile_all:
             self.name = self.name or "*"
         if not self.compile_all and not self.name:
-            raise ValueError("FunctionSpec requires 'name' unless 'compile_all' is true")
+            raise ValueError(
+                "FunctionSpec requires 'name' unless 'compile_all' is true"
+            )
         if self.output_name is None:
             self.output_name = self.name
         return self
@@ -62,7 +64,9 @@ class Blueprint(BaseModel):
                 if not test.is_file():
                     missing.append(str(test))
         if missing:
-            raise ValueError(f"Blueprint references missing file(s): {', '.join(missing)}")
+            raise ValueError(
+                f"Blueprint references missing file(s): {', '.join(missing)}"
+            )
         return self
 
 
@@ -178,29 +182,68 @@ def parse_blueprint(path: Path) -> Blueprint:
 
 
 def discover_functions(path: Path) -> List[FunctionSpec]:
-    """Discover all top-level public functions in a Python file."""
+    """Discover all top-level public functions in a Python file.
+
+    Falls back to token-based discovery when the source has syntax errors so
+    that the forge loop can still attempt to heal the file.
+    """
     import ast
+    import io
+    import re
+    import tokenize
 
     source_path = Path(path)
     if not source_path.is_file():
         raise ValueError(f"Source file not found: {source_path}")
 
-    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    source = source_path.read_text(encoding="utf-8")
+    names: List[str] = []
+    try:
+        tree = ast.parse(source)
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and not node.name.startswith("_"):
+                names.append(node.name)
+    except SyntaxError:
+        # Parse failed (likely a broken function the LLM needs to repair). Use
+        # tokenization so we can still collect function names; fall back to a
+        # simple regex if tokenization also fails.
+        try:
+            tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+            i = 0
+            while i < len(tokens):
+                tok = tokens[i]
+                if tok.type == tokenize.NAME and tok.string == "def":
+                    j = i + 1
+                    while j < len(tokens) and tokens[j].type in (
+                        tokenize.NL,
+                        tokenize.NEWLINE,
+                        tokenize.INDENT,
+                        tokenize.DEDENT,
+                        tokenize.COMMENT,
+                    ):
+                        j += 1
+                    if j < len(tokens) and tokens[j].type == tokenize.NAME:
+                        names.append(tokens[j].string)
+                        i = j
+                i += 1
+        except Exception:
+            names = re.findall(r"^\s*def\s+([A-Za-z_]\w*)", source, re.MULTILINE)
+        names = [n for n in names if not n.startswith("_")]
+
     functions: List[FunctionSpec] = []
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and not node.name.startswith("_"):
-            test_candidates = [
-                source_path.parent / f"test_{node.name}.py",
-                source_path.parent / f"test_{source_path.stem}.py",
-            ]
-            tests = [t for t in test_candidates if t.is_file()]
-            functions.append(
-                FunctionSpec(
-                    file=source_path,
-                    name=node.name,
-                    tests=tests,
-                )
+    for name in names:
+        test_candidates = [
+            source_path.parent / f"test_{name}.py",
+            source_path.parent / f"test_{source_path.stem}.py",
+        ]
+        tests = [t for t in test_candidates if t.is_file()]
+        functions.append(
+            FunctionSpec(
+                file=source_path,
+                name=name,
+                tests=tests,
             )
+        )
     return functions
 
 

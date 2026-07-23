@@ -5,11 +5,14 @@ from __future__ import annotations
 import ast
 import importlib.machinery
 import importlib.util
+import io
 import logging
 import os
+import re
 import shutil
 import subprocess
 import textwrap
+import tokenize
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -96,7 +99,9 @@ class Orchestrator:
 
         self.source_path = Path(source_path)
         self.function_name = function_name
-        self.function_names = list(function_names) if function_names else [function_name]
+        self.function_names = (
+            list(function_names) if function_names else [function_name]
+        )
         if test_paths:
             self.test_paths = [Path(p) for p in test_paths]
         elif test_path:
@@ -169,7 +174,9 @@ class Orchestrator:
                     self.prompt_builder.add_error(error_log)
                     fixed = self._attempt_fix(source, error_log)
                     if fixed is None:
-                        reason = f"Build failed and could not be fixed: {error_log[:500]}"
+                        reason = (
+                            f"Build failed and could not be fixed: {error_log[:500]}"
+                        )
                         return self._partial_result(
                             iteration,
                             last_working_artifact,
@@ -265,17 +272,22 @@ class Orchestrator:
             logger.info("LLM disabled; no fix available")
             return None
 
-        func_source = self._extract_function_source(source)
-        messages = self.prompt_builder.build(self.function_name, func_source)
+        target = self._function_name_for_error(source, error_log)
+        func_source = self._extract_function_source(source, target)
+        messages = self.prompt_builder.build(target, func_source)
 
-        logger.info("Requesting LLM fix from %s", self.settings.get("LLM_PROVIDER"))
+        logger.info(
+            "Requesting LLM fix for %s from %s",
+            target,
+            self.settings.get("LLM_PROVIDER"),
+        )
         answer = self.llm_client.generate(messages)
         if answer is None:
             logger.error("LLM failed to produce a fix")
             return None
 
-        new_func = _extract_function_body(answer, self.function_name)
-        fixed = _replace_function(source, self.function_name, new_func)
+        new_func = _extract_function_body(answer, target)
+        fixed = _replace_function(source, target, new_func)
         if fixed == source:
             logger.warning("LLM returned a fix identical to current source; ignoring")
             return None
@@ -283,6 +295,23 @@ class Orchestrator:
         self.cache.set(error_log, source, fixed)
         logger.info("LLM produced a fix")
         return fixed
+
+    def _function_name_for_error(self, source: str, error_log: str) -> str:
+        """Return the function most likely responsible for ``error_log``."""
+        # Syntax errors include a line number; map it back to a function.
+        m = re.search(r"\(line (\d+)\)", error_log)
+        if m:
+            line = int(m.group(1))
+            name = _function_at_line(source, line)
+            if name:
+                return name
+
+        # Failing test/assert output usually names the function.
+        for name in self.function_names:
+            if name in error_log:
+                return name
+
+        return self.function_name
 
     def _compile_to_native(self, source: str, sandbox_root: Path) -> Path:
         """Transpile ``source`` to Rust, build it, and return the compiled .so path."""
@@ -361,7 +390,9 @@ class Orchestrator:
 
             artifact = _find_artifact(self._cargo_target, crate_name)
             if artifact is None:
-                raise _BuildFailure("No compiled shared library found after cargo build.")
+                raise _BuildFailure(
+                    "No compiled shared library found after cargo build."
+                )
             return artifact
         finally:
             shutil.rmtree(crate_root, ignore_errors=True)
@@ -388,12 +419,14 @@ class Orchestrator:
             "_HERE = pathlib.Path(__file__).parent",
             f'_SO = _HERE / "{so_path.name}"',
             f'_SPEC = importlib.util.spec_from_file_location("{module_name}", _SO)',
-            '_MOD = importlib.util.module_from_spec(_SPEC)',
-            '_SPEC.loader.exec_module(_MOD)',
+            "_MOD = importlib.util.module_from_spec(_SPEC)",
+            "_SPEC.loader.exec_module(_MOD)",
         ]
         for name in function_names:
             lines.append(f"{name} = _MOD.{name}")
-        lines.append("\n__all__ = [" + ", ".join(f'"{n}"' for n in function_names) + "]")
+        lines.append(
+            "\n__all__ = [" + ", ".join(f'"{n}"' for n in function_names) + "]"
+        )
         return "\n".join(lines) + "\n"
 
     def _merge_back(self, sandbox: Sandbox, artifact: Path) -> None:
@@ -412,15 +445,78 @@ class Orchestrator:
             # Build outputs are isolated; do not turn them into packages.
             pass
 
-    def _extract_function_source(self, source: str) -> str:
+    def _extract_function_source(
+        self, source: str, function_name: Optional[str] = None
+    ) -> str:
+        function_name = function_name or self.function_name
         try:
             tree = ast.parse(source)
         except SyntaxError:
             return source
         for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == self.function_name:
+            if isinstance(node, ast.FunctionDef) and node.name == function_name:
                 return ast.unparse(node)
         return source
+
+
+def _function_at_line(source: str, line: int) -> Optional[str]:
+    """Return the function whose source region contains ``line``.
+
+    Falls back to token-based discovery when the source has syntax errors.
+    """
+    try:
+        tree = ast.parse(source)
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef):
+                start = node.lineno
+                end = node.end_lineno or start
+                if start <= line <= end:
+                    return node.name
+    except SyntaxError:
+        pass
+
+    try:
+        import io
+        import tokenize
+
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (SyntaxError, tokenize.TokenError):
+        tokens = []
+
+    functions: List[tuple] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok.type == tokenize.NAME and tok.string == "def":
+            j = i + 1
+            while j < len(tokens) and tokens[j].type in (
+                tokenize.NL,
+                tokenize.NEWLINE,
+                tokenize.INDENT,
+                tokenize.DEDENT,
+                tokenize.COMMENT,
+            ):
+                j += 1
+            if j < len(tokens) and tokens[j].type == tokenize.NAME:
+                name = tokens[j].string
+                start_line = tok.start[0]
+                end_line = len(source.splitlines()) + 1
+                for k in range(j + 1, len(tokens)):
+                    if (
+                        tokens[k].type == tokenize.NAME
+                        and tokens[k].string in {"def", "class"}
+                        and tokens[k].start[1] == tok.start[1]
+                    ):
+                        end_line = tokens[k].start[0] - 1
+                        break
+                functions.append((name, start_line, end_line))
+                i = j
+        i += 1
+
+    for name, start_line, end_line in functions:
+        if start_line <= line <= end_line:
+            return name
+    return None
 
 
 def _extract_function_body(text: str, name: str) -> str:
@@ -445,29 +541,31 @@ def _extract_function_body(text: str, name: str) -> str:
 
 
 def _replace_function(source: str, name: str, new_body: str) -> str:
-    """Replace the body of ``name`` in ``source`` with ``new_body``."""
+    """Replace the function ``name`` in ``source`` with ``new_body``.
+
+    Falls back to text-region replacement when the original source is not valid
+    Python, so that a syntax error in one function of a multi-function file does
+    not erase the other functions.
+    """
+    try:
+        body_tree = ast.parse(new_body)
+    except SyntaxError:
+        return source
+
+    is_full_func = len(body_tree.body) == 1 and isinstance(
+        body_tree.body[0], ast.FunctionDef
+    )
+
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        # Source is unparseable; if the LLM returned a clean function, use it.
-        try:
-            body_tree = ast.parse(new_body)
-            if len(body_tree.body) == 1 and isinstance(body_tree.body[0], ast.FunctionDef):
-                return ast.unparse(body_tree.body[0]) + "\n"
-        except SyntaxError:
-            pass
+        if is_full_func:
+            return _replace_function_text(source, name, ast.unparse(body_tree.body[0]))
         return source
 
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == name:
-            try:
-                body_tree = ast.parse(new_body)
-            except SyntaxError:
-                body_tree = ast.parse(f"def {name}():\n{textwrap.indent(new_body, '    ')}")
-
-            if len(body_tree.body) == 1 and isinstance(
-                body_tree.body[0], ast.FunctionDef
-            ):
+            if is_full_func:
                 new_func = body_tree.body[0]
                 node.args = new_func.args
                 node.body = new_func.body
@@ -478,6 +576,67 @@ def _replace_function(source: str, name: str, new_body: str) -> str:
             return ast.unparse(tree)
 
     return source
+
+
+def _replace_function_text(source: str, name: str, replacement: str) -> str:
+    """Replace the source text region of ``def name(...)`` with ``replacement``.
+
+    Uses tokenization so it works even when the file as a whole does not parse.
+    """
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except (SyntaxError, tokenize.TokenError):
+        tokens = []
+
+    all_defs: List[Tuple[int, int]] = []
+    for i, tok in enumerate(tokens):
+        if tok.type == tokenize.NAME and tok.string in {"def", "class"}:
+            j = i + 1
+            while j < len(tokens) and tokens[j].type in (
+                tokenize.NL,
+                tokenize.NEWLINE,
+                tokenize.INDENT,
+                tokenize.DEDENT,
+                tokenize.COMMENT,
+            ):
+                j += 1
+            if j < len(tokens) and tokens[j].type == tokenize.NAME:
+                all_defs.append((i, j))
+
+    target_index = -1
+    for idx, (i, j) in enumerate(all_defs):
+        if tokens[j].string == name:
+            target_index = idx
+            break
+
+    if target_index == -1:
+        # Fall back to a simple regex for the function header.
+        pattern = re.compile(
+            rf"^(\s*def\s+{re.escape(name)}\b.*?)(?=^\s*def\s+\w+\b|\Z)",
+            re.MULTILINE | re.DOTALL,
+        )
+        return pattern.sub(replacement, source)
+
+    start_tok = tokens[all_defs[target_index][0]]
+    start_line = start_tok.start[0]
+
+    # Find the next top-level definition or the end of the file.
+    end_line = len(source.splitlines()) + 1
+    for i, j in all_defs[target_index + 1 :]:
+        tok = tokens[i]
+        if tok.start[1] == start_tok.start[1]:
+            end_line = tok.start[0]
+            break
+
+    lines = source.splitlines(keepends=True)
+    replacement_with_nl = (
+        replacement if replacement.endswith("\n") else replacement + "\n"
+    )
+    return (
+        "".join(lines[: start_line - 1])
+        + replacement_with_nl
+        + "".join(lines[end_line - 1 :])
+    )
 
 
 class _BuildFailure(UserError):

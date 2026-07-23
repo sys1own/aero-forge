@@ -1,0 +1,9 @@
+project: llm_type
+functions:
+  - file: broken_type.py
+    name: broken_type
+    tests:
+      - tests/test_broken_type.py
+llm:
+  provider: openrouter
+  model: openrouter/free
