@@ -96,9 +96,7 @@ def list_algorithms(category: Optional[str] = None) -> List[str]:
     """Return the names of available reference algorithms."""
     algorithms = _load_algorithms()
     if category:
-        return sorted(
-            a.name for a in algorithms.values() if a.category == category
-        )
+        return sorted(a.name for a in algorithms.values() if a.category == category)
     return sorted(algorithms.keys())
 
 
@@ -159,9 +157,7 @@ def select_algorithm(
     """
     candidates = _load_algorithms()
     if category:
-        candidates = {
-            k: v for k, v in candidates.items() if v.category == category
-        }
+        candidates = {k: v for k, v in candidates.items() if v.category == category}
     if not candidates:
         return None
 

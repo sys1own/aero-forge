@@ -4,6 +4,7 @@ def find_first_factor(n):
             return i
     return -1
 
+
 def sum_skipping_multiples(limit):
     total = 0
     for i in range(1, limit):

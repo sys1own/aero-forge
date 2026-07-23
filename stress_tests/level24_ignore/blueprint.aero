@@ -1,0 +1,17 @@
+project: auto_project
+functions:
+- file: /home/ubuntu/repos/aero-forge/stress_tests/level24_ignore/src/keep.py
+  name: keep
+  compile_all: false
+  tests:
+  - /home/ubuntu/repos/aero-forge/stress_tests/level24_ignore/tests/test_keep.py
+  - /home/ubuntu/repos/aero-forge/stress_tests/level24_ignore/tests/test_keep.py
+  output_name: keep
+  compiler_flags: []
+compiler_flags: []
+output_dir: dist
+llm:
+  provider: none
+  model: null
+prompt: null
+constraints: null

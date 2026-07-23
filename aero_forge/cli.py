@@ -12,12 +12,15 @@ import click
 from .blueprint import (
     FunctionSpec,
     discover_functions,
+    discover_project,
     generate_blueprint,
     parse_blueprint,
     write_blueprint,
 )
 from .build_runner import BuildRunner
+from .error_explainer import explain_error
 from .errors import UserError
+from .examples import create_example, list_examples, run_example
 from .orchestrator.orchestrator import ForgeError, Orchestrator
 
 
@@ -29,10 +32,19 @@ def _setup_logging(verbose: bool) -> None:
     )
 
 
-def _resolve_llm_provider(llm_provider: str | None, no_llm: bool) -> str | None:
+def _resolve_llm_provider(
+    llm_provider: str | None, no_llm: bool, llm_fix: bool = False
+) -> str | None:
     if no_llm:
         return "none"
-    if not llm_provider and not os.getenv("AERO_FORGE_LLM_PROVIDER"):
+    if not llm_provider:
+        llm_provider = os.getenv("AERO_FORGE_LLM_PROVIDER")
+    if llm_fix and not llm_provider:
+        raise UserError(
+            "--llm-fix requires an LLM provider. "
+            "Set AERO_FORGE_LLM_PROVIDER or use --llm-provider."
+        )
+    if not llm_provider:
         click.echo(
             "No LLM provider configured (set AERO_FORGE_LLM_PROVIDER or use --llm-provider); "
             "running in router-only mode.",
@@ -94,6 +106,11 @@ def main() -> None:
     help="Run the accelerator without LLM-based healing.",
 )
 @click.option(
+    "--llm-fix",
+    is_flag=True,
+    help="Use an LLM to explain and auto-fix failures.",
+)
+@click.option(
     "--no-cache",
     is_flag=True,
     help="Disable the fix cache.",
@@ -112,13 +129,14 @@ def fix(
     max_iterations: int | None,
     max_retries: int | None,
     no_llm: bool,
+    llm_fix: bool,
     no_cache: bool,
     verbose: bool,
 ) -> None:
     """Compile and test FILE's FUNCTION, healing failures automatically."""
     _setup_logging(verbose)
 
-    llm_provider = _resolve_llm_provider(llm_provider, no_llm)
+    llm_provider = _resolve_llm_provider(llm_provider, no_llm, llm_fix=llm_fix)
 
     try:
         orchestrator = Orchestrator(
@@ -186,6 +204,12 @@ def fix(
     help="Discover all public functions in FILE and build them.",
 )
 @click.option(
+    "--auto-detect",
+    "auto_detect",
+    is_flag=True,
+    help="Auto-detect project structure (src/ and tests/) and build.",
+)
+@click.option(
     "--llm-provider",
     default=None,
     help="LLM provider: openai, openrouter, deepseek, gemini, or none.",
@@ -208,6 +232,11 @@ def fix(
     "--no-llm",
     is_flag=True,
     help="Run without LLM-based healing.",
+)
+@click.option(
+    "--llm-fix",
+    is_flag=True,
+    help="Use an LLM to explain and auto-fix failures.",
 )
 @click.option(
     "--no-cache",
@@ -296,14 +325,21 @@ def fix(
     is_flag=True,
     help="Show debug logs and full output.",
 )
+@click.option(
+    "--progress",
+    is_flag=True,
+    help="Show a real-time progress bar during the build.",
+)
 def build(
     blueprint: str,
     auto_file: str | None,
+    auto_detect: bool,
     llm_provider: str | None,
     model: str | None,
     max_iterations: int | None,
     max_retries: int | None,
     no_llm: bool,
+    llm_fix: bool,
     no_cache: bool,
     force: bool,
     cache_dir: str | None,
@@ -317,18 +353,27 @@ def build(
     gpu: bool,
     verbose: bool,
     prompt_template: str,
+    progress: bool,
 ) -> None:
     """Build all functions described by BLUEPRINT (default: blueprint.aero)."""
     _setup_logging(verbose)
-
-    if no_llm:
-        llm_provider = "none"
 
     try:
         if auto_file:
             bp = _blueprint_from_auto(Path(auto_file), output_dir)
             if write_blueprint_flag:
                 blueprint_path = Path(auto_file).parent / "blueprint.aero"
+                write_blueprint(bp, blueprint_path)
+                click.echo(f"Wrote blueprint: {blueprint_path}")
+        elif auto_detect:
+            root = (
+                Path(blueprint).parent
+                if blueprint and blueprint != "blueprint.aero"
+                else Path(".")
+            )
+            bp = _blueprint_from_auto_detect(root, output_dir)
+            if write_blueprint_flag:
+                blueprint_path = root / "blueprint.aero"
                 write_blueprint(bp, blueprint_path)
                 click.echo(f"Wrote blueprint: {blueprint_path}")
         else:
@@ -360,8 +405,11 @@ def build(
     if output_dir:
         bp.output_dir = Path(output_dir)
 
-    if not llm_provider:
-        llm_provider = os.getenv("AERO_FORGE_LLM_PROVIDER") or bp.llm.provider
+    try:
+        llm_provider = _resolve_llm_provider(llm_provider, no_llm, llm_fix=llm_fix)
+    except UserError as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
     if not model:
         model = os.getenv("AERO_FORGE_MODEL") or bp.llm.model
 
@@ -379,6 +427,7 @@ def build(
         target=target,
         distributed=distribute,
         dry_run=dry_run,
+        progress=progress,
     )
 
     try:
@@ -637,6 +686,28 @@ def _blueprint_from_auto(
     )
 
 
+def _blueprint_from_auto_detect(
+    root: Path,
+    output_dir: str | None,
+) -> Any:
+    from aero_forge.ignore import parse_aeroignore
+
+    ignore_file = root / ".aeroignore"
+    functions = discover_project(
+        root,
+        ignore_patterns=parse_aeroignore(ignore_file),
+    )
+    if not functions:
+        raise ValueError(f"No public Python functions found in {root}")
+
+    out = Path(output_dir) if output_dir else root / "dist"
+    return generate_blueprint(
+        project=root.name or "auto_project",
+        functions=functions,
+        output_dir=out,
+    )
+
+
 @main.command()
 @click.argument("project", required=True, type=str)
 @click.option(
@@ -779,7 +850,7 @@ def chat(
         prompt_template=prompt_template,
     )
 
-    click.echo("Aero-Forge chat mode. Type 'exit' or 'quit' to leave.")
+    click.echo("Aero-Forge chat mode. Type 'help' for commands, 'exit' to leave.")
     while True:
         try:
             user_input = click.prompt("> ", prompt_suffix="")
@@ -789,20 +860,187 @@ def chat(
         if not text:
             continue
         if text.lower() in {"exit", "quit"}:
+            click.echo("Goodbye!")
             break
 
         action_result = session.handle_command(text)
         if action_result:
-            build = action_result.get("build")
-            if build:
-                click.echo(
-                    f"Build: {build.get('passed', 0)}/{build.get('total', 0)} succeeded"
-                )
+            message = action_result.get("message")
+            if message:
+                click.echo(message)
             else:
-                click.echo("Action completed.")
+                build = action_result.get("build")
+                if build:
+                    click.echo(
+                        f"Build: {build.get('passed', 0)}/{build.get('total', 0)} succeeded"
+                    )
+                else:
+                    click.echo("Action completed.")
+            # After explicit commands like 'help' or 'show', do not also call the LLM.
+            if text.lower() in ("help", "?", "show"):
+                continue
 
         response = session.reply(text)
         click.echo(response)
+
+
+@main.command()
+@click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=str))
+@click.option(
+    "--error-file",
+    "-e",
+    type=click.Path(dir_okay=False, path_type=str),
+    default=None,
+    help="File containing the build error log (default: read from stdin).",
+)
+@click.option(
+    "--llm-provider",
+    default=None,
+    help="LLM provider for the explanation (default: config/env).",
+)
+@click.option("--model", default=None, help="Model name to use.")
+def explain(
+    source: str,
+    error_file: str | None,
+    llm_provider: str | None,
+    model: str | None,
+) -> None:
+    """Explain a build error in plain English and suggest fixes."""
+    if error_file:
+        error_log = Path(error_file).read_text(encoding="utf-8")
+    else:
+        if sys.stdin.isatty():
+            click.echo(
+                "Paste the error log and press Ctrl+D (or use --error-file).",
+                err=True,
+            )
+        error_log = sys.stdin.read()
+
+    source_text = Path(source).read_text(encoding="utf-8")
+    result = explain_error(
+        error_log,
+        source=source_text,
+        llm_provider=llm_provider,
+        model=model,
+    )
+    click.echo(result)
+
+
+@main.group()
+def examples() -> None:
+    """Curated example projects."""
+
+
+@examples.command("list")
+def examples_list() -> None:
+    """List available curated examples."""
+    items = list_examples()
+    if not items:
+        click.echo("No examples found.")
+        return
+    for item in items:
+        click.echo(f"  {item['name']} - {item['description']}")
+
+
+@examples.command("run")
+@click.argument("name")
+@click.option(
+    "--llm-provider",
+    default=None,
+    help="LLM provider for auto-fixing failures (default: config/env).",
+)
+@click.option("--model", default=None, help="Model name to use.")
+@click.option(
+    "--max-iterations",
+    "-i",
+    type=int,
+    default=None,
+    help="Maximum fix iterations per source file.",
+)
+@click.option("--verbose", is_flag=True, help="Show full build output.")
+def examples_run(
+    name: str,
+    llm_provider: str | None,
+    model: str | None,
+    max_iterations: int | None,
+    verbose: bool,
+) -> None:
+    """Build and test a curated example by NAME."""
+    _setup_logging(verbose)
+    try:
+        result = run_example(
+            name,
+            build_kwargs={
+                "llm_provider": llm_provider,
+                "model": model,
+                "max_iterations": max_iterations,
+                "cache_enabled": False,
+            },
+        )
+    except ValueError as exc:
+        click.echo(str(exc), err=True)
+        sys.exit(1)
+
+    if verbose:
+        for item in result.get("results", []):
+            click.echo(
+                f"{', '.join(item['functions'])}: "
+                f"{'OK' if item['success'] else 'FAIL'} "
+                f"({item['iterations']} iterations)"
+            )
+
+    click.echo(
+        f"Build complete: {result['passed']}/{result['total']} succeeded. "
+        f"Output directory: {result['output_dir']}"
+    )
+    if not result["success"]:
+        sys.exit(1)
+
+
+@examples.command("create")
+@click.argument("name")
+@click.option(
+    "--prompt",
+    "-p",
+    required=True,
+    help="Natural language description for the new example.",
+)
+@click.option(
+    "--llm-provider",
+    default=None,
+    help="LLM provider to generate the example (default: config/env).",
+)
+@click.option("--model", default=None, help="Model name to use.")
+@click.option(
+    "--prompt-template",
+    default="v5_balanced",
+    help="System prompt template for generation.",
+)
+@click.option(
+    "--output-dir",
+    "-o",
+    type=click.Path(file_okay=False, path_type=str),
+    default=".",
+    help="Directory where the example folder will be created.",
+)
+def examples_create(
+    name: str,
+    prompt: str,
+    llm_provider: str | None,
+    model: str | None,
+    prompt_template: str,
+    output_dir: str,
+) -> None:
+    """Create a new example project from a prompt."""
+    project_dir = create_example(
+        name,
+        prompt,
+        output_dir=Path(output_dir),
+        llm_provider=llm_provider,
+        model=model,
+        prompt_template=prompt_template,
+    )
+    click.echo(f"Created example at {project_dir}")
 
 
 if __name__ == "__main__":

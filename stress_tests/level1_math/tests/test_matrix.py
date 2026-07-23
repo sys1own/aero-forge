@@ -1,5 +1,6 @@
 from matrix_multiply import matrix_multiply
 
+
 def test_matrix_multiply():
     a = [[1, 2], [3, 4]]
     b = [[5, 6], [7, 8]]

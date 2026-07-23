@@ -1,0 +1,8 @@
+project: advanced_walrus
+functions:
+  - file: walrus.py
+    name: walrus_func
+    tests: []
+output_dir: dist
+llm:
+  provider: none

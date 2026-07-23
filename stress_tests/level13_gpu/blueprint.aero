@@ -1,0 +1,9 @@
+project: gpu_mandelbrot
+functions:
+  - file: mandelbrot.py
+    name: mandelbrot
+    tests:
+      - tests/test_mandelbrot.py
+output_dir: dist
+llm:
+  provider: none

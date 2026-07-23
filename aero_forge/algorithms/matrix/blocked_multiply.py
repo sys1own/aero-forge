@@ -9,7 +9,9 @@ METADATA = {
 }
 
 
-def blocked_multiply(a: List[List[float]], b: List[List[float]], block: int = 32) -> List[List[float]]:
+def blocked_multiply(
+    a: List[List[float]], b: List[List[float]], block: int = 32
+) -> List[List[float]]:
     rows_a = len(a)
     cols_a = len(a[0])
     cols_b = len(b[0])

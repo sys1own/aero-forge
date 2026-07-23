@@ -38,8 +38,9 @@ def generate_variants(
         variant_dir = output_dir / f".variant_{i}"
         variant_dir.mkdir(parents=True, exist_ok=True)
         variant_constraints = (
-            f"{constraints}\n" if constraints else ""
-        ) + f"Variant {i + 1}: use a different algorithm or optimization strategy than the other variants."
+            (f"{constraints}\n" if constraints else "")
+            + f"Variant {i + 1}: use a different algorithm or optimization strategy than the other variants."
+        )
 
         start = time.perf_counter()
         result = generate_and_build(
@@ -78,6 +79,7 @@ def pareto_frontier(
     A variant dominates another if it has >= accuracy, <= time, and <= memory
     with at least one strict improvement.
     """
+
     def metrics(r: Dict[str, Any]) -> Tuple[float, float, float]:
         build = r.get("build") or {}
         passed = build.get("passed", 0)

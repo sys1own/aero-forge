@@ -1,0 +1,8 @@
+project: advanced_yield_gen
+functions:
+  - file: yield_gen.py
+    name: yield_func
+    tests: []
+output_dir: dist
+llm:
+  provider: none

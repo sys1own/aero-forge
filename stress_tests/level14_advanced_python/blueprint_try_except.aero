@@ -1,0 +1,8 @@
+project: advanced_try_except
+functions:
+  - file: try_except.py
+    name: try_func
+    tests: []
+output_dir: dist
+llm:
+  provider: none

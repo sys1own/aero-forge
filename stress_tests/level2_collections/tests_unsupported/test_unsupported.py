@@ -4,5 +4,6 @@ from slice_ops import head
 from enumerate_zip import sum_pairs
 from sum_builtin import total
 
+
 def test_all():
     pass

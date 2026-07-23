@@ -577,7 +577,24 @@ class RustGenerator:
             self._emit_expr(stmt.value, self.function_type)
             return ""
         if isinstance(stmt, (ast.With, ast.AsyncWith)):
-            raise UnsupportedError("io", node=stmt)
+            raise UnsupportedError(
+                "with statements / context managers are not supported", node=stmt
+            )
+        if isinstance(stmt, (ast.Try, getattr(ast, "TryStar", ()))):
+            raise UnsupportedError(
+                "try/except exception handling is not supported", node=stmt
+            )
+        if isinstance(stmt, (ast.Yield, ast.YieldFrom)):
+            raise UnsupportedError("yield / generators are not supported", node=stmt)
+        if isinstance(stmt, ast.AsyncFor):
+            raise UnsupportedError("async for loops are not supported", node=stmt)
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and isinstance(
+            getattr(stmt, "returns", None), ast.Await
+        ):
+            # This branch is not normally reachable; async def is handled earlier.
+            raise UnsupportedError("async/await is not supported", node=stmt)
+        if isinstance(stmt, ast.Match):
+            raise UnsupportedError("match/case is not supported", node=stmt)
         raise UnsupportedError(
             f"Unsupported statement: {type(stmt).__name__}", node=stmt
         )
@@ -704,10 +721,6 @@ class RustGenerator:
         else:
             raise UnsupportedError("range(...) with step is not supported", node=call)
         body = self._emit_body(stmt.body)
-        if self.function_type == "f64" and stmt.target.id != "_":
-            # The loop index is an integer, but the rest of the function expects
-            # f64. Shadow it as f64 inside the body so `return i` works.
-            body = f"    let {stmt.target.id} = {stmt.target.id} as f64;\n{body}"
         return f"for {stmt.target.id} in {range_expr} {{\n{body}\n}}"
 
     def _emit_body(self, stmts: List[ast.stmt]) -> str:
@@ -747,6 +760,12 @@ class RustGenerator:
             return self._emit_attribute(expr, ctx)
         if isinstance(expr, ast.Subscript):
             return self._emit_subscript(expr, ctx)
+        if isinstance(expr, ast.NamedExpr):
+            raise UnsupportedError("walrus operator (:=) is not supported", node=expr)
+        if isinstance(expr, (ast.Await, ast.Yield, ast.YieldFrom)):
+            raise UnsupportedError(
+                "async/await and yield expressions are not supported", node=expr
+            )
         raise UnsupportedError(
             f"Unsupported expression: {type(expr).__name__}", node=expr
         )
@@ -1235,6 +1254,7 @@ class ClassGenerator:
         self.orig_name = class_node.name
         self.class_name = _rust_identifier(class_node.name)
         self.class_names = (class_names or set()) | {class_node.name}
+        self._check_slots()
         self.methods: Dict[str, ast.FunctionDef] = {
             node.name: node
             for node in class_node.body
@@ -1242,6 +1262,24 @@ class ClassGenerator:
         }
         self.fields = self._collect_fields()
         self._used_traits: Set[str] = set()
+
+    def _check_slots(self) -> None:
+        """Reject ``__slots__`` early with a clear message."""
+        for node in self.class_node.body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == "__slots__":
+                        raise UnsupportedError(
+                            "__slots__ is not supported in PyO3 classes; "
+                            "declare class attributes as __init__ assignments instead",
+                            node=node,
+                        )
+            if isinstance(node, ast.AnnAssign):
+                if isinstance(node.target, ast.Name) and node.target.id == "__slots__":
+                    raise UnsupportedError(
+                        "__slots__ is not supported in PyO3 classes",
+                        node=node,
+                    )
 
     def shield_traits(self) -> Set[str]:
         return self._used_traits
@@ -1564,7 +1602,12 @@ def _find_top_level(tree: ast.AST, name: str) -> Tuple[Optional[ast.AST], bool]:
     for node in getattr(tree, "body", []):
         if isinstance(node, ast.ClassDef) and node.name == name:
             return node, True
-        if isinstance(node, ast.FunctionDef) and node.name == name:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == name
+        ):
+            if isinstance(node, ast.AsyncFunctionDef):
+                raise UnsupportedError("async/await is not supported", node=node)
             return node, False
     # Fallback: search the whole tree, but prefer classes when both exist.
     for node in ast.walk(tree):

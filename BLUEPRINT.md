@@ -105,6 +105,31 @@ aero-forge build --no-llm --dry-run
 
 # Use auto-discovery instead of a blueprint
 aero-forge build --auto src/my_module.py --no-llm
+
+# Auto-detect a standard project structure (src/ + tests/)
+aero-forge build --auto-detect
+
+# Show build progress with a progress bar
+aero-forge build blueprint.aero --progress
+
+# Explain a compilation error
+aero-forge explain src/broken.py --error-file error.log
+
+# List and run curated examples
+aero-forge examples list
+aero-forge examples run fibonacci
+
+# Create a new example from a prompt
+aero-forge examples create primes --prompt "fast prime sieve"
+
+# Generate from the algorithm library
+aero-forge generate --algorithm-library --prompt "sort a list quickly"
+
+# Generate and benchmark multiple variants
+aero-forge generate --variants 3 --prompt "fast prime check" --build
+
+# Generate with an explanation and self-review
+aero-forge generate --explain --review --prompt "fast gcd"
 ```
 
 ## Precedence

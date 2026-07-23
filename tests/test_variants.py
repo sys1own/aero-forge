@@ -10,7 +10,9 @@ import pytest
 from aero_forge.variants import pareto_frontier, select_best_variant
 
 
-def _make_variant(variant: int, passed: int, total: int, elapsed: float) -> Dict[str, Any]:
+def _make_variant(
+    variant: int, passed: int, total: int, elapsed: float
+) -> Dict[str, Any]:
     return {
         "variant": variant,
         "source_path": "/tmp/src/generated.py",
