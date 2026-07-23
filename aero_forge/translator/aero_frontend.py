@@ -39,9 +39,13 @@ def _is_io_call(expr: ast.Call) -> bool:
 
 def _lower_stmt(stmt: ast.stmt) -> Optional[dict]:
     if isinstance(stmt, (ast.With, ast.AsyncWith)):
-        raise UnsupportedError("with statements / context managers are not supported", node=stmt)
+        raise UnsupportedError(
+            "with statements / context managers are not supported", node=stmt
+        )
     if isinstance(stmt, (ast.Try, getattr(ast, "TryStar", ()))):
-        raise UnsupportedError("try/except exception handling is not supported", node=stmt)
+        raise UnsupportedError(
+            "try/except exception handling is not supported", node=stmt
+        )
     if isinstance(stmt, (ast.Yield, ast.YieldFrom)):
         raise UnsupportedError("yield / generators are not supported", node=stmt)
     if isinstance(stmt, ast.AsyncFor):
@@ -103,9 +107,13 @@ def _lower_expr(expr: Optional[ast.expr]) -> Optional[dict]:
     if isinstance(expr, ast.NamedExpr):
         raise UnsupportedError("walrus operator (:=) is not supported", node=expr)
     if isinstance(expr, (ast.Await, ast.Yield, ast.YieldFrom)):
-        raise UnsupportedError("async/await and yield expressions are not supported", node=expr)
+        raise UnsupportedError(
+            "async/await and yield expressions are not supported", node=expr
+        )
     if isinstance(expr, ast.ListComp):
-        raise UnsupportedError("list comprehensions are not supported by the UAST frontend", node=expr)
+        raise UnsupportedError(
+            "list comprehensions are not supported by the UAST frontend", node=expr
+        )
     if expr is None:
         return None
     if isinstance(expr, ast.Constant):

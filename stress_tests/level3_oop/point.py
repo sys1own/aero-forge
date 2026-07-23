@@ -6,5 +6,6 @@ class Point:
     def distance(self):
         return self.x + self.y
 
+
 def create_point(x, y):
     return Point(x, y).distance()

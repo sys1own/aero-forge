@@ -269,6 +269,46 @@ See `BLUEPRINT.md` for a complete field reference and a fully commented example.
 - Functions from different source files are compiled in parallel (configurable with `--jobs`).
 - `--distribute` uses process-based parallelism so each source file compiles in an isolated worker process (useful for local multi-core builds).
 
+## UX features
+
+### Better error messages with `--llm-fix`
+
+When a build fails, pass `--llm-fix` (with an LLM provider configured) to get a
+plain-English explanation of the error and suggested fixes.  You can also run
+`aero-forge explain <source.py>` with an `--error-file` to explain any error log.
+
+### Interactive chat
+
+`aero-forge chat` now supports action commands:
+
+- `build`, `test` – compile and test the current project
+- `benchmark` – build and time the result
+- `show` – display the generated source
+- `explain` – explain the last build error
+- `help` – list commands
+
+### Examples gallery
+
+Run `aero-forge examples list` to see curated examples, then
+`aero-forge examples run <name>` to build one.  Create a new example from a
+prompt with `aero-forge examples create <name> --prompt "..."`.
+
+### `.aeroignore`
+
+Create a `.aeroignore` file at the project root with `.gitignore`-style patterns
+to exclude files from `--auto-detect` builds.
+
+### `--auto-detect`
+
+Run `aero-forge build --auto-detect` in a project with `src/` and `tests/`
+directories.  Aero-Forge will discover public functions, match tests, build a
+temporary blueprint, and compile.
+
+### Progress bars
+
+Pass `--progress` to `aero-forge build` to display a real-time progress bar
+during compilation (TTY only; tests and `--quiet` keep plain logging).
+
 ## Configuration
 
 Aero-Forge merges configuration from (lowest to highest precedence):

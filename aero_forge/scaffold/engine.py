@@ -577,14 +577,20 @@ class RustGenerator:
             self._emit_expr(stmt.value, self.function_type)
             return ""
         if isinstance(stmt, (ast.With, ast.AsyncWith)):
-            raise UnsupportedError("with statements / context managers are not supported", node=stmt)
+            raise UnsupportedError(
+                "with statements / context managers are not supported", node=stmt
+            )
         if isinstance(stmt, (ast.Try, getattr(ast, "TryStar", ()))):
-            raise UnsupportedError("try/except exception handling is not supported", node=stmt)
+            raise UnsupportedError(
+                "try/except exception handling is not supported", node=stmt
+            )
         if isinstance(stmt, (ast.Yield, ast.YieldFrom)):
             raise UnsupportedError("yield / generators are not supported", node=stmt)
         if isinstance(stmt, ast.AsyncFor):
             raise UnsupportedError("async for loops are not supported", node=stmt)
-        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and isinstance(getattr(stmt, "returns", None), ast.Await):
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and isinstance(
+            getattr(stmt, "returns", None), ast.Await
+        ):
             # This branch is not normally reachable; async def is handled earlier.
             raise UnsupportedError("async/await is not supported", node=stmt)
         if isinstance(stmt, ast.Match):
@@ -757,7 +763,9 @@ class RustGenerator:
         if isinstance(expr, ast.NamedExpr):
             raise UnsupportedError("walrus operator (:=) is not supported", node=expr)
         if isinstance(expr, (ast.Await, ast.Yield, ast.YieldFrom)):
-            raise UnsupportedError("async/await and yield expressions are not supported", node=expr)
+            raise UnsupportedError(
+                "async/await and yield expressions are not supported", node=expr
+            )
         raise UnsupportedError(
             f"Unsupported expression: {type(expr).__name__}", node=expr
         )
@@ -1594,11 +1602,12 @@ def _find_top_level(tree: ast.AST, name: str) -> Tuple[Optional[ast.AST], bool]:
     for node in getattr(tree, "body", []):
         if isinstance(node, ast.ClassDef) and node.name == name:
             return node, True
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == name
+        ):
             if isinstance(node, ast.AsyncFunctionDef):
-                raise UnsupportedError(
-                    "async/await is not supported", node=node
-                )
+                raise UnsupportedError("async/await is not supported", node=node)
             return node, False
     # Fallback: search the whole tree, but prefer classes when both exist.
     for node in ast.walk(tree):

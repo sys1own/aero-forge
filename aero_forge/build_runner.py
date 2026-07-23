@@ -7,13 +7,17 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import traceback
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import click
+
 from aero_forge.blueprint import Blueprint, FunctionSpec, discover_functions
 from aero_forge.cache.build_cache import BuildCache
+from aero_forge.error_explainer import explain_error
 from aero_forge.gpu import compile_gpu_kernel, find_gpu_functions
 from aero_forge.orchestrator.orchestrator import Orchestrator
 from aero_forge.wasm import build_wasm_module
@@ -32,6 +36,7 @@ class BuildResult:
         artifact: Optional[Path] = None,
         logs: str = "",
         iterations: int = 0,
+        explanation: str = "",
     ):
         self.source = source
         self.function_names = function_names
@@ -39,6 +44,7 @@ class BuildResult:
         self.artifact = artifact
         self.logs = logs
         self.iterations = iterations
+        self.explanation = explanation
 
 
 class BuildRunner:
@@ -59,6 +65,7 @@ class BuildRunner:
         target: str = "native",
         distributed: bool = False,
         dry_run: bool = False,
+        progress: bool = False,
     ):
         self.blueprint = blueprint
         self.max_workers = max(1, max_workers)
@@ -70,6 +77,7 @@ class BuildRunner:
         self.gpu = gpu
         self.target = target
         self.distributed = distributed
+        self.progress = progress and sys.stderr.isatty()
         self._host_target = _host_target()
         env_cache = os.getenv("AERO_FORGE_CACHE_ENABLED", "true").lower() not in (
             "0",
@@ -107,10 +115,13 @@ class BuildRunner:
             )
 
         results: List[BuildResult] = []
-        if self.max_workers == 1 or len(source_specs) == 1:
+        bar_label = "Building"
+
+        def _run_single() -> None:
             for source, specs in source_specs:
                 results.append(self._safe_build_source(output_dir, source, specs))
-        else:
+
+        def _run_parallel() -> None:
             executor_class = (
                 concurrent.futures.ProcessPoolExecutor
                 if self.distributed
@@ -125,6 +136,40 @@ class BuildRunner:
                 }
                 for future in concurrent.futures.as_completed(futures):
                     results.append(future.result())
+
+        if self.progress:
+            with click.progressbar(
+                length=len(source_specs),
+                label=bar_label,
+                show_pos=True,
+            ) as bar:
+                if self.max_workers == 1 or len(source_specs) == 1:
+                    for source, specs in source_specs:
+                        results.append(
+                            self._safe_build_source(output_dir, source, specs)
+                        )
+                        bar.update(1)
+                else:
+                    executor_class = (
+                        concurrent.futures.ProcessPoolExecutor
+                        if self.distributed
+                        else concurrent.futures.ThreadPoolExecutor
+                    )
+                    with executor_class(max_workers=self.max_workers) as executor:
+                        futures = {
+                            executor.submit(
+                                self._safe_build_source, output_dir, source, specs
+                            ): source
+                            for source, specs in source_specs
+                        }
+                        for future in concurrent.futures.as_completed(futures):
+                            results.append(future.result())
+                            bar.update(1)
+        else:
+            if self.max_workers == 1 or len(source_specs) == 1:
+                _run_single()
+            else:
+                _run_parallel()
 
         return self._summarize(results)
 
@@ -290,6 +335,15 @@ class BuildRunner:
         result = orchestrator.run()
         success = result.get("success", False)
         artifact_path: Optional[Path] = None
+        explanation = ""
+        if not success:
+            explanation = explain_error(
+                result.get("error", result.get("logs", "")),
+                source=source_text,
+                llm_provider=self.llm_provider,
+                model=self.model,
+            )
+            logger.info("\n%s", explanation)
         if success and result.get("artifact"):
             artifact = Path(result["artifact"])
             if artifact.is_file():
@@ -305,6 +359,7 @@ class BuildRunner:
             artifact=artifact_path,
             logs=result.get("logs", ""),
             iterations=result.get("iterations", 0),
+            explanation=explanation,
         )
 
     def _combined_flags(self, specs: List[FunctionSpec]) -> List[str]:
@@ -359,6 +414,8 @@ class BuildRunner:
                 )
             if not r.success and not dry_run:
                 logger.error("%s failed:\n%s", r.source, r.logs)
+                if r.explanation:
+                    logger.error("Suggestion:\n%s", r.explanation)
 
         if dry_run:
             logger.info(

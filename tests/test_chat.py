@@ -46,3 +46,34 @@ def test_chat_cli_command(tmp_path):
 
     assert result.exit_code == 0
     assert "Aero-Forge chat mode" in result.output
+
+
+def test_chat_help_command(tmp_path):
+    """The ``help`` command lists available chat commands."""
+    from click.testing import CliRunner
+    from aero_forge.cli import main
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["chat", "--output-dir", str(tmp_path), "--llm-provider", "none"],
+        input="help\nexit\n",
+    )
+    assert result.exit_code == 0
+    assert "generate" in result.output
+    assert "build" in result.output
+
+
+def test_chat_show_without_code(tmp_path):
+    """The ``show`` command reports when no generated code exists yet."""
+    from click.testing import CliRunner
+    from aero_forge.cli import main
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        ["chat", "--output-dir", str(tmp_path), "--llm-provider", "none"],
+        input="show\nexit\n",
+    )
+    assert result.exit_code == 0
+    assert "No generated code" in result.output

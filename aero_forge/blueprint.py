@@ -264,6 +264,72 @@ def generate_blueprint(
     )
 
 
+def discover_project(
+    root: Path,
+    *,
+    src_dirs: Optional[List[str]] = None,
+    ignore_patterns: Optional[List[str]] = None,
+) -> List[FunctionSpec]:
+    """Discover all public Python functions in a project.
+
+    Searches ``src/`` (if it exists) and the project root for ``.py`` files,
+    skipping anything matched by ``ignore_patterns``.  For each source file,
+    associated tests are looked up in ``tests/`` or ``test_*.py`` next to the
+    file.
+    """
+    from aero_forge.ignore import is_ignored, parse_aeroignore
+
+    root = Path(root).resolve()
+    default_ignores = ["tests/", "test_*.py", "__pycache__/", "*.pyc", "dist/", ".git/"]
+    if ignore_patterns is None:
+        ignore_patterns = parse_aeroignore(root / ".aeroignore")
+    patterns = default_ignores + list(ignore_patterns or [])
+    candidates: List[Path] = []
+    search_dirs = [root]
+    src = root / "src"
+    if src.is_dir():
+        search_dirs.append(src)
+    if src_dirs:
+        for d in src_dirs:
+            p = Path(d)
+            if p.is_dir():
+                search_dirs.append(p)
+
+    for directory in search_dirs:
+        for path in directory.rglob("*.py"):
+            if path.name.startswith("_") or path.name == "setup.py":
+                continue
+            if is_ignored(path, patterns, root):
+                continue
+            candidates.append(path)
+
+    # Prefer src/ files; if both root and src contain the same relative path,
+    # keep the src/ one.
+    seen: set = set()
+    unique: List[Path] = []
+    for path in candidates:
+        rel = path.relative_to(root)
+        if rel not in seen:
+            seen.add(rel)
+            unique.append(path)
+
+    def _find_tests(func_name: str, source_path: Path) -> List[Path]:
+        candidates = [
+            root / "tests" / f"test_{func_name}.py",
+            root / "tests" / f"test_{source_path.stem}.py",
+            source_path.parent / f"test_{func_name}.py",
+            source_path.parent / f"test_{source_path.stem}.py",
+        ]
+        return [c for c in candidates if c.is_file()]
+
+    functions: List[FunctionSpec] = []
+    for source_path in unique:
+        for func in discover_functions(source_path):
+            func.tests = _find_tests(func.name, source_path)
+            functions.append(func)
+    return functions
+
+
 def write_blueprint(blueprint: Blueprint, path: Path) -> None:
     """Serialize a Blueprint to a YAML ``.aero`` file."""
     path.write_text(
