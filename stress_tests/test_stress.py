@@ -70,11 +70,11 @@ class TestLevel2Collections:
 
 
 class TestLevel3OOP:
-    def test_classes_are_unsupported(self):
+    def test_simple_class(self):
         blueprint = STRESS_DIR / "level3_oop" / "blueprint.aero"
         result = _run_build(blueprint)
-        assert result.returncode != 0
-        assert "Unsupported" in (result.stderr + result.stdout)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert "Build summary: 2 succeeded, 0 failed" in result.stderr
 
 
 class TestLevel4ControlFlow:
@@ -193,3 +193,17 @@ class TestLevel9BlueprintEdge:
         result = _run_build(blueprint)
         assert result.returncode != 0
         assert "not found" in (result.stderr + result.stdout).lower()
+
+
+class TestLevel10Classes:
+    def test_counter_class(self):
+        blueprint = STRESS_DIR / "level10_classes" / "blueprint.aero"
+        result = _run_build(blueprint)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert "Build summary: 1 succeeded, 0 failed" in result.stderr
+
+    def test_calculator_class(self):
+        blueprint = STRESS_DIR / "level10_classes" / "blueprint_calculator.aero"
+        result = _run_build(blueprint)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert "Build summary: 1 succeeded, 0 failed" in result.stderr

@@ -36,6 +36,7 @@ from aero_forge.sandbox.manager import Sandbox
 from aero_forge.scaffold.engine import (
     Engine,
     _find_function,
+    _find_top_level,
     _rust_identifier,
     ensure_init_files,
     ensure_sys_path,
@@ -323,8 +324,8 @@ class Orchestrator:
             ) from exc
 
         for name in self.function_names:
-            if _find_function(tree, name) is None:
-                raise _BuildFailure(f"Function {name!r} not found")
+            if _find_top_level(tree, name)[0] is None:
+                raise _BuildFailure(f"Function or class {name!r} not found")
 
         # Use the source stem for the module name so multiple functions from the
         # same file are compiled into a single extension.

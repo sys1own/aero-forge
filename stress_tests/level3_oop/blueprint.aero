@@ -1,6 +1,11 @@
 project: level3_oop
 functions:
   - file: point.py
+    name: Point
+  - file: point.py
     name: create_point
     tests:
       - tests/test_oop.py
+output_dir: dist
+llm:
+  provider: none

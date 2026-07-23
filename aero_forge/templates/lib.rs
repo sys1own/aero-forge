@@ -1,4 +1,6 @@
 use pyo3::prelude::*;
+#[allow(unused_imports)]
+use pyo3::types::PyType;
 {shield_imports}
 
 {functions}

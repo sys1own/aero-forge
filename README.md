@@ -272,11 +272,12 @@ directory covers real-world patterns:
   `math.radians`, `math.degrees`, and `math.pi`/`e`/`tau`.
 - Multi-source builds via `compile_all` and per-function `tests`.
 - Parallel builds (`--jobs`) and incremental build caching.
+- Simple Python classes with `__init__`, instance methods, `@staticmethod`, and `@classmethod`.
 
 **Currently unsupported (clear error messages):**
 - Lists, list comprehensions, slicing, `append`, `len`, `sum`, `enumerate`, `zip`.
 - Dictionaries and sets.
-- Classes, methods, properties, dataclasses.
+- Class inheritance, properties, and dataclasses.
 - `try`/`except`, `with`, `yield`, `async`/`await`.
 - `random`, `datetime`, `re`, `json`, and other non-math stdlib modules.
 - I/O (`print`, file access, network, `os`, `subprocess`, etc.).
