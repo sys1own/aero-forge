@@ -7,27 +7,32 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 class Sandbox:
-    """Isolate a source file and its test file in a temporary directory."""
+    """Isolate a source file and its test files in a temporary directory."""
 
     def __init__(
         self,
         source: Path,
         function_name: str,
         test_file: Optional[Path] = None,
-        extra_files: Optional[list] = None,
+        test_paths: Optional[List[Path]] = None,
+        extra_files: Optional[List[Path]] = None,
         project_root: Optional[Path] = None,
     ):
         self.source = Path(source)
         self.function_name = function_name
-        self.test_file = (
-            Path(test_file)
-            if test_file
-            else self.source.parent / f"test_{self.source.stem}.py"
-        )
+
+        if test_paths:
+            self.test_paths = [Path(p) for p in test_paths if p]
+        elif test_file:
+            self.test_paths = [Path(test_file)]
+        else:
+            self.test_paths = [self.source.parent / f"test_{self.source.stem}.py"]
+
+        self.test_file = self.test_paths[0]
         self.extra_files = [Path(f) for f in (extra_files or [])]
         self.project_root = project_root
         self._tmpdir = tempfile.TemporaryDirectory(prefix="aero-forge-sandbox-")
@@ -45,22 +50,24 @@ class Sandbox:
     def _populate(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         shutil.copy(self.source, self.source_in_sandbox)
-        if self.test_file and self.test_file.is_file():
-            shutil.copy(self.test_file, self.test_in_sandbox)
+        for test_path in self.test_paths:
+            if test_path and test_path.is_file():
+                shutil.copy(test_path, self.root / test_path.name)
         for extra in self.extra_files:
             if extra.is_file():
                 shutil.copy(extra, self.root / extra.name)
 
     def run_tests(self, timeout: int = 120) -> Dict[str, Any]:
-        """Run pytest or unittest on the sandboxed test file."""
-        if not self.test_in_sandbox.is_file():
+        """Run pytest or unittest on the sandboxed test files."""
+        present_tests = [p for p in self.test_paths if p.is_file()]
+        if not present_tests:
             return {
                 "passed": True,
                 "returncode": 0,
                 "logs": "No test file found; skipping.",
             }
 
-        cmd = [sys.executable, "-m", "pytest", str(self.test_in_sandbox), "-v"]
+        cmd = [sys.executable, "-m", "pytest", str(self.root), "-v"]
         try:
             result = subprocess.run(
                 cmd,
@@ -94,7 +101,7 @@ class Sandbox:
             "-s",
             str(self.root),
             "-p",
-            f"test_{self.source.stem}.py",
+            "test_*.py",
             "-v",
         ]
         result = subprocess.run(

@@ -78,6 +78,108 @@ Run the test suite:
 pytest
 ```
 
+## Multi-function builds with `aero-forge build`
+
+Create a project skeleton:
+
+```bash
+aero-forge init my_project
+cd my_project
+```
+
+`init` creates:
+
+```
+my_project/
+├── blueprint.aero
+├── src/
+│   └── example.py
+├── tests/
+│   └── test_example.py
+└── dist/
+```
+
+Build all functions listed in the blueprint:
+
+```bash
+aero-forge build
+```
+
+Build from a YAML blueprint:
+
+```bash
+aero-forge build blueprint.yaml
+```
+
+### Blueprint file format
+
+`blueprint.aero` (YAML-compatible):
+
+```aero
+project: "my_project"
+
+functions:
+  - file: "src/compute.py"
+    name: "mandelbrot"
+    tests: ["tests/test_compute.py"]
+  - file: "src/transform.py"
+    name: "fft"
+    tests: ["tests/test_transform.py"]
+
+compiler_flags:
+  - "-C target-cpu=native"
+  - "-C opt-level=3"
+
+output_dir: "./dist"
+
+llm:
+  provider: "gemini"
+  model: "gemini-2.0-flash"
+```
+
+Or `blueprint.yaml`:
+
+```yaml
+project: my_project
+functions:
+  - file: src/compute.py
+    name: mandelbrot
+    tests:
+      - tests/test_compute.py
+compiler_flags:
+  - -C target-cpu=native
+output_dir: ./dist
+llm:
+  provider: gemini
+  model: gemini-2.0-flash
+```
+
+### Auto-discovery
+
+`--auto` scans a Python file and compiles all public top-level functions:
+
+```bash
+aero-forge build --auto src/my_module.py --no-llm
+```
+
+### Build CLI flags
+
+- `--auto FILE` – auto-discover functions.
+- `--llm-provider {openai,openrouter,gemini,none}` – override provider.
+- `--model MODEL` – override model.
+- `--output-dir PATH` / `-o PATH` – override `output_dir`.
+- `--jobs N` / `-j N` – parallel build jobs (default `min(4, functions)`).
+- `--no-llm` – skip LLM-based healing.
+- `--no-cache` – disable the build cache.
+- `--write-blueprint` – when using `--auto`, write a generated `blueprint.aero`.
+- `--verbose` – show debug logs and per-function results.
+
+### Build caching and parallelism
+
+- Each source file's compilation result is cached under `~/.cache/aero-forge/build_cache/`.
+- Re-running `aero-forge build` skips unchanged functions.
+- Functions from different source files are compiled in parallel (configurable with `--jobs`).
+
 ## Configuration
 
 Aero-Forge merges configuration from (lowest to highest precedence):
@@ -138,3 +240,4 @@ Aero-Forge merges configuration from (lowest to highest precedence):
 - The first build may take a while as PyO3 is compiled.
 - `AERO_FORGE_LLM_PROVIDER` defaults to `none`, so no API calls are attempted unless explicitly configured.
 - Fix cache is stored in `~/.cache/aero-forge/fix_cache.json`.
+- Build cache is stored in `~/.cache/aero-forge/build_cache/`.
