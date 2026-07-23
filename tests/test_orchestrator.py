@@ -1,7 +1,6 @@
 """Integration tests for the build/orchestrate loop."""
 
 import shutil
-import sys
 from pathlib import Path
 
 import pytest
@@ -49,7 +48,7 @@ def test_orchestrator_compiles_valid_function(fibonacci_fixture, tmp_path):
     assert (fibonacci_fixture.parent / "libaero_forge_fibonacci.so").is_file()
 
 
-def test_orchestrator_requires_existing_function(fibonacci_fixture, tmp_path):
+def test_orchestrator_returns_partial_for_missing_function(fibonacci_fixture, tmp_path):
     orchestrator = Orchestrator(
         fibonacci_fixture,
         function_name="missing",
@@ -57,5 +56,20 @@ def test_orchestrator_requires_existing_function(fibonacci_fixture, tmp_path):
         max_iterations=1,
         use_llm=False,
     )
-    with pytest.raises(Exception):
-        orchestrator.run()
+    result = orchestrator.run()
+    assert not result["success"]
+    assert result.get("partial")
+    assert "missing" in result["error"].lower() or "not found" in result["error"].lower()
+
+
+def test_orchestrator_uses_cache_and_router_first(fibonacci_fixture, tmp_path):
+    orchestrator = Orchestrator(
+        fibonacci_fixture,
+        function_name="fibonacci",
+        test_path=tmp_path / "test_fibonacci.py",
+        max_iterations=1,
+        use_llm=False,
+    )
+    # A valid function should pass without ever touching the LLM.
+    result = orchestrator.run()
+    assert result["success"]
