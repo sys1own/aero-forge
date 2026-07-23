@@ -72,6 +72,22 @@ aero-forge fix broken.py --function bad_syntax --llm-provider openrouter --model
 aero-forge fix broken.py --function bad_syntax --llm-provider openai --model gpt-4o
 ```
 
+Generate code from a prompt:
+
+```bash
+aero-forge generate --prompt "write a function that returns the nth Fibonacci number" --build
+aero-forge generate --prompt-file request.txt --constraints "iterative only" --build
+```
+
+Start an interactive chat session:
+
+```bash
+aero-forge chat
+# then type:
+# > write a function that computes the greatest common divisor
+# > make it faster
+```
+
 Run the test suite:
 
 ```bash
@@ -322,6 +338,11 @@ directory covers real-world patterns:
 - Cross-compilation to arbitrary Rust target triples (e.g.
   `x86_64-pc-windows-gnu`, `aarch64-unknown-linux-gnu`); host tests are skipped
   when the target does not match the build machine.
+- Prompt-driven code generation (`aero-forge generate`) and interactive chat
+  (`aero-forge chat`) backed by the configured LLM provider.
+- An internal algorithm library (`aero_forge/algorithms/`) that the generator
+  can reference for common implementations (Fibonacci, GCD, prime testing,
+  matrix multiplication, quicksort).
 
 **Currently unsupported (clear error messages):**
 - List slicing, `append`, `extend`, `len`, `enumerate`, `zip`.

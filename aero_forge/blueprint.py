@@ -49,10 +49,12 @@ class Blueprint(BaseModel):
     """Normalized build blueprint."""
 
     project: str = "aero_forge_project"
-    functions: List[FunctionSpec]
+    functions: List[FunctionSpec] = Field(default_factory=list)
     compiler_flags: List[str] = Field(default_factory=list)
     output_dir: Path = Path("./dist")
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    prompt: Optional[str] = None
+    constraints: Optional[str] = None
 
     @model_validator(mode="after")
     def _validate_files(self) -> "Blueprint":
