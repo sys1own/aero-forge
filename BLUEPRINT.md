@@ -144,15 +144,22 @@ Settings are merged from lowest to highest priority:
 
 Aero-Forge's transpiler targets numerical and algorithmic Python. The following patterns are supported:
 
-- Scalar numeric types (`int`, `float`, `bool`) and `list`/`List[T]` type annotations.
+- Scalar numeric types (`int`, `float`, `bool`) and `list`/`List[T]` type annotations, plus `numpy.ndarray` which maps to `Vec<f64>`.
 - `for` and `while` loops, `if`/`elif`/`else`, `break`, `continue`, and early `return`.
-- `range(...)` with one or two arguments.
+- `range(...)` with one, two, or three arguments (step is supported).
 - List comprehensions, including nested comprehensions like `[[0 for _ in cols] for _ in rows]`.
-- Tuple unpacking assignments (`a, b = b, a + b`) inside loops.
+- Tuple unpacking assignments (`a, b = b, a + b`) inside loops and chain assignments (`i = j = 0`).
 - `enumerate()` and `zip()` in `for` loop iteration.
+- List slicing for reads (`a[:]`, `a[1:3]`, `a[2:]`) and assignment (`a[1:3] = b`).
 - `len()` on lists and nested list rows (`len(a)`, `len(a[0])`).
-- `append()` on list variables.
-- Nested `list[list[T]]` matrices with row/column indexing (`m[i][j]`).
+- `append()` and `extend()` on list variables.
+- Nested `list[list[T]]` matrices with row/column indexing (`m[i][j]`), including caching a row (`row = m[i]`) via `.clone()`.
+- `min()` and `max()` on two scalar values.
+
+The following are intentionally not supported and produce clear errors:
+
+- Nested function, class, or method definitions (refactor to top-level functions).
+- `try`/`except`, `with`, generators, `eval`/`exec`, dynamic imports, and complex class inheritance.
 
 ## Notes
 

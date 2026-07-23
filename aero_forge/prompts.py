@@ -47,7 +47,8 @@ Keep the code transpiler-friendly:
 - Do NOT use list comprehensions. Use explicit for loops instead.
 - Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 - Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
-For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`.
+For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
+Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
 """,
     "Minimal baseline prompt.",
 )
@@ -78,7 +79,8 @@ def function_name(param1: type, param2: type) -> return_type:
     \"\"\"Algorithm description\"\"\"
     # Implementation
     return result
-For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`.
+For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
+Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
 """,
     "Structured rules + output format.",
 )
@@ -100,7 +102,8 @@ RULES:
 9. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 10. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 11. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
-For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`.
+For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
+Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
 """,
     "Focus on algorithmic efficiency.",
 )
@@ -121,7 +124,8 @@ RULES:
 9. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 10. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 11. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
-For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`.
+For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
+Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
 """,
     "Focus on low-level performance and SIMD-friendly code.",
 )
@@ -148,7 +152,8 @@ def function_name(param1: type, param2: type) -> return_type:
     \"\"\"Short description of the algorithm.\"\"\"
     # efficient implementation
     return result
-For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`.
+For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
+Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
 """,
     "Balanced combination of V2, V3, and V4.",
 )
@@ -167,7 +172,8 @@ RULES:
 7. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 8. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 9. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
-For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`.
+For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
+Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
 """,
     "Encourage novel algorithm choices.",
 )
@@ -186,7 +192,8 @@ RULES:
 7. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 8. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 9. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
-For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`.
+For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
+Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
 """,
     "Use only well-known algorithms.",
 )
@@ -206,7 +213,8 @@ RULES:
 8. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 9. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 10. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
-For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`.
+For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
+Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
 """,
     "Optimizes with iterative feedback.",
 )
@@ -226,7 +234,8 @@ RULES:
 8. Keep code simple and explicit; avoid Python idioms that do not map directly to Rust.
 9. All return statements must return the same number of values.
 10. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
-For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`.
+For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
+Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
 """,
     "Explicitly forbids constructs that are hard for the transpiler to handle.",
 )
@@ -241,11 +250,12 @@ RULES:
 2. Prioritize correctness over cleverness. Use well-known, proven algorithms.
 3. Use explicit `for i in range(n):` loops and index-based list access.
 4. Avoid complex list slicing, tuple unpacking, and multi-target assignments when possible.
-5. For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`.
+5. For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
 6. Do NOT use list comprehensions. Use explicit for loops and `append()` instead.
 7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, `sum()`, `map()`, `filter()`, `eval()`, `exec()`, generators, `async`/`await`, `match`/`case`, or walrus operators.
-8. All return statements must return the same number of values.
-9. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+8. Do NOT define nested functions, classes, or lambdas inside the function.
+9. All return statements must return the same number of values.
+10. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 """,
     "Emphasizes algorithmic correctness and transpiler-friendly explicit loops.",
 )

@@ -1,0 +1,7 @@
+project: level31_matrix_borrow
+functions:
+  - file: matrix_multiply_borrow.py
+    name: matrix_multiply_borrow
+    tests:
+      - tests/test_matrix_borrow.py
+output_dir: dist

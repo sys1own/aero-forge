@@ -145,6 +145,13 @@ class RustGenerator:
             self.return_type = annotated_return
 
         self.assigned = self._collect_assigned()
+        for node in self.func.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                raise UnsupportedError(
+                    "Nested functions, classes, and methods are not supported; "
+                    "refactor them into top-level functions.",
+                    node=node,
+                )
         self.type_env: Dict[str, str] = {}
         for name, typ in zip(self.arg_names, self.arg_types):
             self.type_env[name] = typ
@@ -229,6 +236,15 @@ class RustGenerator:
                     rhs_type = self._infer_expr_type(stmt.value, types)
                     if rhs_type:
                         types[target.id] = self._unify(types.get(target.id), rhs_type)
+                    else:
+                        # Back-propagate from a known target type when the RHS
+                        # is ambiguous (e.g., ``ai = a[i]`` where ``ai`` is
+                        # later used as ``Vec<f64>``).
+                        target_type = types.get(target.id)
+                        if target_type:
+                            self._propagate_subscript_types(
+                                stmt.value, target_type, types
+                            )
                     self._propagate_subscript_types(stmt.value, rhs_type, types)
         elif isinstance(stmt, ast.AugAssign):
             target_type = None
@@ -275,22 +291,49 @@ class RustGenerator:
                 if len(target.elts) >= 1 and isinstance(target.elts[0], ast.Name):
                     types[target.elts[0].id] = "i64"
                 if len(target.elts) >= 2 and isinstance(target.elts[1], ast.Name):
+                    val = target.elts[1]
                     iterable = iter_expr.args[0] if iter_expr.args else None
                     if iterable is not None:
-                        types[target.elts[1].id] = self._infer_element_or_ref(
-                            self._infer_expr_type(iterable, types)
-                        )
+                        known_elt = types.get(val.id)
+                        if known_elt is None and isinstance(iterable, ast.Name):
+                            known_elt = self._infer_element_or_ref(
+                                types.get(iterable.id)
+                            )
+                        if known_elt is None:
+                            known_elt = self._infer_element_or_ref(
+                                self._infer_expr_type(iterable, types)
+                            )
+                        types[val.id] = self._unify(types.get(val.id), known_elt)
+                        if isinstance(iterable, ast.Name) and known_elt:
+                            types[iterable.id] = self._unify(
+                                types.get(iterable.id), f"Vec<{known_elt}>"
+                            )
             elif name == "zip" and isinstance(target, ast.Tuple):
                 for elt, arg in zip(target.elts, iter_expr.args):
                     if isinstance(elt, ast.Name):
-                        types[elt.id] = self._infer_element_or_ref(
-                            self._infer_expr_type(arg, types)
-                        )
+                        known_elt = types.get(elt.id)
+                        if known_elt is None and isinstance(arg, ast.Name):
+                            known_elt = self._infer_element_or_ref(types.get(arg.id))
+                        if known_elt is None:
+                            known_elt = self._infer_element_or_ref(
+                                self._infer_expr_type(arg, types)
+                            )
+                        types[elt.id] = self._unify(types.get(elt.id), known_elt)
+                        if isinstance(arg, ast.Name) and known_elt:
+                            types[arg.id] = self._unify(
+                                types.get(arg.id), f"Vec<{known_elt}>"
+                            )
             elif name not in ("range", "enumerate", "zip"):
                 pass
         elif isinstance(iter_expr, ast.Name) and isinstance(target, ast.Name):
-            types[target.id] = self._infer_element_or_ref(
-                types.get(iter_expr.id, self.function_type)
+            known_elt = types.get(target.id)
+            if known_elt is None:
+                known_elt = self._infer_element_or_ref(
+                    types.get(iter_expr.id, self.function_type)
+                )
+            types[target.id] = self._unify(types.get(target.id), known_elt)
+            types[iter_expr.id] = self._unify(
+                types.get(iter_expr.id), f"Vec<{known_elt}>"
             )
 
     def _infer_element_or_ref(self, container_type: Optional[str]) -> str:
@@ -398,6 +441,15 @@ class RustGenerator:
         elif isinstance(expr, ast.IfExp):
             self._propagate_subscript_types(expr.body, element_type, types)
             self._propagate_subscript_types(expr.orelse, element_type, types)
+        elif isinstance(expr, ast.Name):
+            # Propagate the expected scalar type to a plain variable (e.g., a
+            # loop variable used in an f64 expression).  Do not overwrite a
+            # container variable; that happens through subscript propagation.
+            current = types.get(expr.id)
+            if current is None or (
+                not current.startswith("Vec<") and not current.startswith("(")
+            ):
+                types[expr.id] = self._unify(current, element_type)
         elif isinstance(expr, ast.Tuple):
             for i, e in enumerate(expr.elts):
                 # Each tuple element must match the corresponding element type.
@@ -806,14 +858,33 @@ class RustGenerator:
 
     def _return_type(self) -> str:
         """Derive the Rust return type from the function's return statements."""
+
+        def _returns(func: ast.AST) -> List[ast.Return]:
+            returns: List[ast.Return] = []
+
+            def _visit(n: ast.AST) -> None:
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    return
+                if isinstance(n, ast.Return):
+                    returns.append(n)
+                if isinstance(n, ast.AST):
+                    for child in ast.iter_child_nodes(n):
+                        _visit(child)
+                elif isinstance(n, list):
+                    for child in n:
+                        _visit(child)
+
+            _visit(func.body)
+            return returns
+
         # If the function was explicitly annotated with a tuple type, trust it.
         if self.annotated_return and self.return_type.startswith("("):
             return self.return_type
 
         sizes: set[int] = set()
         return_values: List[ast.expr] = []
-        for node in ast.walk(self.func):
-            if isinstance(node, ast.Return) and node.value is not None:
+        for node in _returns(self.func):
+            if node.value is not None:
                 return_values.append(node.value)
                 if isinstance(node.value, (ast.Tuple, ast.List)):
                     sizes.add(len(_elements(node.value)))
@@ -1499,15 +1570,29 @@ class RustGenerator:
         )
 
     def _emit_subscript(self, expr: ast.Subscript, ctx: str) -> str:
-        base_type = self._type_of(expr.value)
+        """Emit a subscript (possibly a chain) and borrow/clone as needed."""
+
+        def _flatten(e: ast.expr, indices: List[ast.expr]) -> ast.expr:
+            """Collect consecutive non-slice subscripts into a single base+indices."""
+            if isinstance(e, ast.Subscript) and not isinstance(e.slice, ast.Slice):
+                return _flatten(e.value, [e.slice] + indices)
+            return e, indices
+
+        base, indices = _flatten(expr, [])
+        base_type = self._type_of(base)
         if not base_type.startswith("Vec<"):
             raise UnsupportedError(
                 "Subscript/indexing is only supported on Vec/list types", node=expr
             )
-        element_type = _element_type(base_type)
-        value_expr = self._emit_expr(expr.value, base_type)
 
-        if isinstance(expr.slice, ast.Slice):
+        if any(isinstance(i, ast.Slice) for i in indices):
+            # Slices are currently handled one level at a time.
+            base_type = self._type_of(expr.value)
+            if not base_type.startswith("Vec<"):
+                raise UnsupportedError(
+                    "Subscript/indexing is only supported on Vec/list types", node=expr
+                )
+            value_expr = self._emit_expr(expr.value, base_type)
             lower = (
                 self._emit_expr(expr.slice.lower, "i64")
                 if expr.slice.lower is not None
@@ -1530,9 +1615,22 @@ class RustGenerator:
                 ctx,
             )
 
-        index_expr = self._emit_expr(expr.slice, "i64")
-        access = f"{value_expr}[({index_expr}) as usize]"
-        return self._coerce(access, element_type, ctx)
+        base_expr = self._emit_expr(base, base_type)
+        final_type = base_type
+        parts: List[str] = []
+        for idx in indices:
+            element_type = _element_type(final_type)
+            index_expr = self._emit_expr(idx, "i64")
+            parts.append(f"[({index_expr}) as usize]")
+            final_type = element_type
+
+        access = f"{base_expr}{''.join(parts)}"
+        # When the final value is a non-Copy container and the context expects an
+        # owned value, clone it.  Scalar/copy types (i64, f64, bool) dereference
+        # automatically through the reference returned by indexing.
+        if final_type.startswith("Vec<") and ctx == final_type:
+            access = f"{access}.clone()"
+        return self._coerce(access, final_type, ctx)
 
     def _emit_unaryop(self, expr: ast.UnaryOp, ctx: str) -> str:
         if isinstance(expr.op, ast.Invert):

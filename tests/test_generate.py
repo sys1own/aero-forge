@@ -149,11 +149,11 @@ def test_optimize_runs_multiple_iterations(tmp_path):
     assert result["iterations"][-1]["build"]["success"] is True
 
 
-def test_generate_and_build_no_llm_fails():
+def test_generate_and_build_no_llm_fails(tmp_path):
     with pytest.raises(GenerationError):
         generate_and_build(
             "do something",
-            output_dir=Path("."),
+            output_dir=tmp_path,
             llm_provider="none",
         )
 
