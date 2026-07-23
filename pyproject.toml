@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=64.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aero-forge"
+version = "0.1.0"
+description = "LLM-integrated build tool that transpiles Python functions to native Rust extensions."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "openai>=1.0,<3.0",
+    "click>=8.0",
+    "tree-sitter",
+    "pydantic",
+    "numpy",
+    "networkx",
+    "z3-solver",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "black"]
+
+[project.scripts]
+aero-forge = "aero_forge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["aero_forge*"]
+
+[tool.setuptools.package-data]
+aero_forge = ["templates/*"]
