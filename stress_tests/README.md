@@ -30,6 +30,8 @@ fail with a clear `UnsupportedError` message rather than crashing.
 | 10 | Classes & methods | **Pass** | `Counter` and `Calculator` classes compile, including instance methods, read-only methods, `@staticmethod`, and `@classmethod`. |
 | 11 | Class `Vec` attributes | **Pass** | `Matrix` class with `rows`, `cols`, and `data: list[list[float]]` compiles; `multiply`, `transpose`, and `get` methods pass. |
 | 12 | NumPy-style 1D vectors | **Pass** | `np.array`, `np.zeros`, `np.ones`, `np.dot` (1D and 2D), `np.sum`, and elementwise `arr * 2 + 1` compile and pass. |
+| 13 | Incremental builds | **Pass** | `--force`, `--cache-dir`, `AERO_FORGE_CACHE_DIR`, and `rustc` version keys tested. |
+| 14 | GPU scaffolding | **Partial** | `--gpu` and `# @accelerate gpu` detection work; CPU fallback when `nvcc` is unavailable. |
 
 ## Adding a new stress test
 

@@ -81,11 +81,7 @@ def test_build_runner_caches_results(tmp_path):
     source = tmp_path / "calc.py"
     test = tmp_path / "test_calc.py"
     marker = tmp_path.name
-    source.write_text(
-        f"# {marker}\n"
-        "def square(n):\n"
-        "    return n * n\n"
-    )
+    source.write_text(f"# {marker}\n" "def square(n):\n" "    return n * n\n")
     test.write_text(
         "from calc import square\n"
         "def test_square():\n"
@@ -241,10 +237,7 @@ def test_build_runner_compile_all_mixed_types(tmp_path):
 def test_build_runner_dry_run(tmp_path):
     source = tmp_path / "utils.py"
     source.write_text(
-        "def add(a, b):\n"
-        "    return a + b\n"
-        "def _private():\n"
-        "    pass\n"
+        "def add(a, b):\n" "    return a + b\n" "def _private():\n" "    pass\n"
     )
     blueprint_path = tmp_path / "blueprint.aero"
     blueprint_path.write_text(
@@ -263,3 +256,76 @@ def test_build_runner_dry_run(tmp_path):
     assert result["total"] == 1
     assert result["results"][0]["functions"] == ["add"]
     assert not (tmp_path / "dist").exists()
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_build_runner_force_and_cache_dir(tmp_path):
+    source = tmp_path / "calc.py"
+    test = tmp_path / "test_calc.py"
+    source.write_text("def square(n):\n    return n * n\n")
+    test.write_text(
+        "from calc import square\n"
+        "def test_square():\n"
+        "    assert square(4) == 16\n"
+    )
+    blueprint_path = tmp_path / "blueprint.aero"
+    blueprint_path.write_text(
+        "project: cache_dir_test\n"
+        "functions:\n"
+        "  - file: calc.py\n"
+        "    name: square\n"
+        "    tests: [test_calc.py]\n"
+        "llm:\n"
+        "  provider: none\n"
+        "output_dir: ./dist\n"
+    )
+    cache_dir = tmp_path / "cache"
+
+    bp = parse_blueprint(blueprint_path)
+    runner1 = BuildRunner(bp, max_workers=1, cache_dir=cache_dir)
+    result1 = runner1.build()
+    assert result1["success"] is True
+    assert result1["results"][0]["iterations"] > 0
+
+    runner2 = BuildRunner(bp, max_workers=1, cache_dir=cache_dir)
+    result2 = runner2.build()
+    assert result2["results"][0]["iterations"] == 0
+
+    runner3 = BuildRunner(bp, max_workers=1, cache_dir=cache_dir, force=True)
+    result3 = runner3.build()
+    assert result3["results"][0]["iterations"] > 0
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_build_runner_gpu_fallback_to_cpu(tmp_path):
+    source = tmp_path / "gpu.py"
+    test = tmp_path / "test_gpu.py"
+    source.write_text("# @accelerate gpu\n" "def increment(n):\n" "    return n + 1\n")
+    test.write_text(
+        "from gpu import increment\n"
+        "def test_increment():\n"
+        "    assert increment(5) == 6\n"
+    )
+    blueprint_path = tmp_path / "blueprint.aero"
+    blueprint_path.write_text(
+        "project: gpu_fallback\n"
+        "functions:\n"
+        "  - file: gpu.py\n"
+        "    name: increment\n"
+        "    tests: [test_gpu.py]\n"
+        "llm:\n"
+        "  provider: none\n"
+        "output_dir: ./dist\n"
+    )
+
+    bp = parse_blueprint(blueprint_path)
+    runner = BuildRunner(bp, max_workers=1, gpu=True)
+    result = runner.build()
+    assert result["success"] is True
+    assert result["passed"] == 1

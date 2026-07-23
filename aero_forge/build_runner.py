@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from aero_forge.blueprint import Blueprint, FunctionSpec, discover_functions
 from aero_forge.cache.build_cache import BuildCache
+from aero_forge.gpu import compile_gpu_kernel, find_gpu_functions
 from aero_forge.orchestrator.orchestrator import Orchestrator
 
 logger = logging.getLogger("aero_forge.build")
@@ -50,6 +51,9 @@ class BuildRunner:
         max_iterations: Optional[int] = None,
         max_retries: Optional[int] = None,
         cache_enabled: bool = True,
+        cache_dir: Optional[Path] = None,
+        force: bool = False,
+        gpu: bool = False,
         dry_run: bool = False,
     ):
         self.blueprint = blueprint
@@ -58,12 +62,16 @@ class BuildRunner:
         self.model = model or blueprint.llm.model
         self.max_iterations = max_iterations
         self.max_retries = max_retries
+        self.force = force
+        self.gpu = gpu
         env_cache = os.getenv("AERO_FORGE_CACHE_ENABLED", "true").lower() not in (
             "0",
             "false",
             "no",
         )
-        self.cache = BuildCache(enabled=cache_enabled and env_cache)
+        effective_cache_enabled = cache_enabled and env_cache and not force
+        cache_root = cache_dir or _cache_dir_from_env()
+        self.cache = BuildCache(root=cache_root, enabled=effective_cache_enabled)
         self.dry_run = dry_run
 
     def build(self) -> Dict[str, Any]:
@@ -173,6 +181,30 @@ class BuildRunner:
         flags = self._combined_flags(specs)
 
         source_text = source.read_text(encoding="utf-8")
+
+        if self.gpu:
+            gpu_functions = find_gpu_functions(source_text)
+            if gpu_functions:
+                try:
+                    gpu_artifact = compile_gpu_kernel(source, gpu_functions)
+                    if gpu_artifact is not None:
+                        return BuildResult(
+                            source=source,
+                            function_names=gpu_functions,
+                            success=True,
+                            artifact=gpu_artifact,
+                            logs="GPU kernel compiled",
+                            iterations=0,
+                        )
+                except UnsupportedError as exc:
+                    return BuildResult(
+                        source=source,
+                        function_names=gpu_functions,
+                        success=False,
+                        logs=str(exc),
+                        iterations=0,
+                    )
+
         cache_key_name = f"{source.stem}_{'_'.join(function_names)}"
         cached = self.cache.get(source_text, flags, cache_key_name)
 
@@ -323,3 +355,8 @@ class BuildRunner:
                 for r in results
             ],
         }
+
+
+def _cache_dir_from_env() -> Optional[Path]:
+    env_dir = os.getenv("AERO_FORGE_CACHE_DIR")
+    return Path(env_dir) if env_dir else None

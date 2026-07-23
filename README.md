@@ -194,16 +194,20 @@ aero-forge build --dry-run
 - `--jobs N` / `-j N` – parallel build jobs (default `min(4, functions)`).
 - `--no-llm` – skip LLM-based healing.
 - `--no-cache` – disable the build cache.
+- `--force` – ignore the build cache and recompile.
+- `--cache-dir PATH` / `AERO_FORGE_CACHE_DIR` – custom cache directory.
 - `--write-blueprint` – when using `--auto`, write a generated `blueprint.aero`.
 - `--dry-run` – preview what would be built.
+- `--gpu` – route `# @accelerate gpu` functions through the GPU backend (falls back to CPU if `nvcc` is missing).
 - `--verbose` – show debug logs and per-function results.
 
 See `BLUEPRINT.md` for a complete field reference and a fully commented example.
 
 ### Build caching and parallelism
 
-- Each source file's compilation result is cached under `~/.cache/aero-forge/build_cache/`.
-- Re-running `aero-forge build` skips unchanged functions.
+- Each source file's compilation result is cached under `~/.cache/aero-forge/build_cache/` (or `--cache-dir`).
+- The cache key is a SHA-256 of the source file hash, sorted compiler flags, function name, and `rustc -Vv` output.
+- Re-running `aero-forge build` skips unchanged functions; use `--force` to rebuild.
 - Functions from different source files are compiled in parallel (configurable with `--jobs`).
 
 ## Configuration
@@ -278,9 +282,14 @@ directory covers real-world patterns:
   - `np.sum`
   - elementwise `arr * 2 + 1` on 1D vectors
 - Multi-source builds via `compile_all` and per-function `tests`.
-- Parallel builds (`--jobs`) and incremental build caching.
+- Parallel builds (`--jobs`).
+- Incremental builds with source-hash + compiler-flags + `rustc` version cache
+  keys, `--force` to ignore cache, and `--cache-dir` / `AERO_FORGE_CACHE_DIR`
+  to customize the cache location.
 - Simple Python classes with `__init__`, instance methods, `@staticmethod`,
   `@classmethod`, and class attributes with getter/setter access.
+- GPU scaffolding: functions annotated with `# @accelerate gpu` are detected
+  when `--gpu` is passed; if `nvcc` is unavailable the build falls back to CPU.
 
 **Currently unsupported (clear error messages):**
 - List slicing, `append`, `extend`, `len`, `enumerate`, `zip`.
