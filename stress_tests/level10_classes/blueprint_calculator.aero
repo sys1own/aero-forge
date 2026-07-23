@@ -1,0 +1,9 @@
+project: class_calculator
+functions:
+  - file: calculator.py
+    name: Calculator
+    tests:
+      - tests/test_calculator.py
+output_dir: dist
+llm:
+  provider: none

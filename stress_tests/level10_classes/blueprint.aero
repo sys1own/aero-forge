@@ -1,0 +1,9 @@
+project: class_counter
+functions:
+  - file: counter.py
+    name: Counter
+    tests:
+      - tests/test_counter.py
+output_dir: dist
+llm:
+  provider: none

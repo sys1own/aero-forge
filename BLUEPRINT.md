@@ -20,12 +20,12 @@ Blueprints can be written as `.aero` (YAML-compatible) or `.yaml` files.
 
 ## `functions` entries
 
-Each entry describes one or more Python functions to compile.
+Each entry describes one or more Python functions or classes to compile.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `file` | string/path | Yes | Python source file containing the function(s). Relative to the blueprint file. |
-| `name` | string | Yes* | Name of the function to compile. Use `"*"` or set `compile_all: true` to compile every public top-level function in `file`. |
+| `name` | string | Yes* | Name of the function or class to compile. Use `"*"` or set `compile_all: true` to compile every public top-level function in `file` (classes must be listed explicitly). |
 | `compile_all` | boolean | No | If `true`, compile every public function in `file` (those not starting with `_`). Default: `false`. |
 | `tests` | list of strings | No | Test file(s) to run against the compiled module. Relative to the blueprint file. |
 | `output_name` | string | No | Reserved for future per-function output naming. |

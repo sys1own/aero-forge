@@ -36,22 +36,36 @@ class Engine:
         src_dir.mkdir(parents=True)
 
         tree = ast.parse(source)
+        class_names = {
+            node.name for node in tree.body if isinstance(node, ast.ClassDef)
+        }
         function_blocks: List[str] = []
         module_init_lines: List[str] = []
         all_traits: Set[str] = set()
 
         for name in function_names:
-            func = _find_function(tree, name)
-            if func is None:
-                raise UnsupportedError(f"Function {name!r} not found in source")
+            node, is_class = _find_top_level(tree, name)
+            if node is None:
+                raise UnsupportedError(
+                    f"Function or class {name!r} not found in source"
+                )
             traits = traits_by_name.get(name, {}) or {}
-            generator = RustGenerator(func, module_name, traits)
-            block = generator.emit()
-            function_blocks.append(block)
-            module_init_lines.append(
-                f"    m.add_wrapped(wrap_pyfunction!({generator.rust_function_name}))?;"
-            )
-            all_traits.update(generator.shield_traits())
+            if is_class:
+                generator = ClassGenerator(node, module_name, traits)
+                block = generator.emit()
+                function_blocks.append(block)
+                module_init_lines.append(
+                    f"    m.add_class::<{_rust_identifier(node.name)}>()?;"
+                )
+                all_traits.update(generator.shield_traits())
+            else:
+                generator = RustGenerator(node, module_name, traits, class_names)
+                block = generator.emit()
+                function_blocks.append(block)
+                module_init_lines.append(
+                    f"    m.add_wrapped(wrap_pyfunction!({generator.rust_function_name}))?;"
+                )
+                all_traits.update(generator.shield_traits())
 
         cargo_template = (
             resources.files("aero_forge.templates").joinpath("Cargo.toml").read_text()
@@ -102,6 +116,7 @@ class RustGenerator:
         func: ast.FunctionDef,
         module_name: str,
         traits: Dict[str, Any],
+        class_names: Optional[Set[str]] = None,
     ):
         self.func = func
         self.orig_name = func.name
@@ -112,6 +127,7 @@ class RustGenerator:
         self.traits = traits
         self.function_type = traits.get("function_type", "i64")
         self.return_type = traits.get("return_type", self.function_type)
+        self.class_names = class_names or set()
 
         arg_names = [a.arg for a in func.args.args]
         arg_types = traits.get("arg_types") or [self.function_type] * len(arg_names)
@@ -304,6 +320,13 @@ class RustGenerator:
 
         defaults, body_stmts = self._initializers_and_body()
         body_lines = [self._emit_stmt(stmt) for stmt in body_stmts]
+        if (
+            body_stmts
+            and isinstance(body_stmts[-1], ast.If)
+            and not body_stmts[-1].orelse
+            and self._block_returns(body_stmts[-1].body)
+        ):
+            body_lines.append(f"return {self._zero()};")
         body = "\n".join(defaults + body_lines)
         indented = "\n".join("    " + line for line in body.splitlines())
         return f"{header}\n{indented}\n}}"
@@ -415,6 +438,15 @@ class RustGenerator:
             parts.append(f"else {{\n{else_body}\n}}")
 
         return " ".join(parts)
+
+    @staticmethod
+    def _block_returns(stmts: List[ast.stmt]) -> bool:
+        """Return True if the statement block contains an unconditional return."""
+        for stmt in stmts:
+            for node in ast.walk(stmt):
+                if isinstance(node, ast.Return):
+                    return True
+        return False
 
     def _emit_while(self, stmt: ast.While) -> str:
         cond = self._strip_outer_parens(self._emit_expr(stmt.test, "bool"))
@@ -641,6 +673,32 @@ class RustGenerator:
             for a in expr.args
         ]
 
+        # Class constructor call or chained constructor method call, e.g.
+        # ``Point(x, y).distance()`` -> ``Point::new(x, y).distance()``.
+        if (
+            isinstance(expr.func, ast.Attribute)
+            and isinstance(expr.func.value, ast.Call)
+            and _call_name(expr.func.value) in self.class_names
+        ):
+            class_name = _rust_identifier(_call_name(expr.func.value))
+            ctor_args = [
+                self._strip_outer_parens(self._emit_expr(a, self.function_type))
+                for a in expr.func.value.args
+            ]
+            method_args = [
+                self._strip_outer_parens(self._emit_expr(a, self.function_type))
+                for a in expr.args
+            ]
+            call = f"{class_name}::new({', '.join(ctor_args)})"
+            if expr.func.attr:
+                rust_method = f"_accel_{_rust_identifier(expr.func.attr)}"
+                call = f"{call}.{rust_method}({', '.join(method_args)})"
+            return call
+
+        if base is None and name in self.class_names:
+            class_name = _rust_identifier(name)
+            return f"{class_name}::new({', '.join(args)})"
+
         if base is None and name == self.func.name:
             if len(args) != len(self.arg_names):
                 raise UnsupportedError(
@@ -730,8 +788,304 @@ class RustGenerator:
 
 
 # ---------------------------------------------------------------------------
+# Class support
+# ---------------------------------------------------------------------------
+class ClassGenerator:
+    """Generate a Rust PyO3 class (struct + #[pymethods] impl) from a Python class."""
+
+    def __init__(
+        self,
+        class_node: ast.ClassDef,
+        module_name: str,
+        traits: Dict[str, Any],
+    ):
+        self.class_node = class_node
+        self.module_name = module_name
+        self.traits = traits
+        self.orig_name = class_node.name
+        self.class_name = _rust_identifier(class_node.name)
+        self.methods: Dict[str, ast.FunctionDef] = {
+            node.name: node
+            for node in class_node.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        self.fields = self._collect_fields()
+        self._used_traits: Set[str] = set()
+
+    def shield_traits(self) -> Set[str]:
+        return self._used_traits
+
+    def emit(self) -> str:
+        init = self.methods.get("__init__")
+        if init is None:
+            raise UnsupportedError(
+                f"Class {self.orig_name!r} must define __init__", node=self.class_node
+            )
+
+        field_decls = [f"    pub {name}: {typ}," for name, typ in self.fields.items()]
+        struct_block = (
+            f"#[pyclass]\n"
+            f"struct {self.class_name} {{\n"
+            f"{chr(10).join(field_decls)}\n"
+            f"}}"
+        )
+
+        init_gen = ClassMethodGenerator(
+            init,
+            self.module_name,
+            self.class_name,
+            self.fields,
+            self.traits,
+            is_new=True,
+        )
+        blocks = [init_gen.emit()]
+        self._used_traits.update(init_gen.shield_traits())
+
+        for method_name, method in self.methods.items():
+            if method_name == "__init__":
+                continue
+            gen = ClassMethodGenerator(
+                method,
+                self.module_name,
+                self.class_name,
+                self.fields,
+                self.traits,
+            )
+            blocks.append(gen.emit())
+            self._used_traits.update(gen.shield_traits())
+
+        impl_body = "\n\n".join(blocks)
+        impl_block = (
+            f"#[pymethods]\n" f"impl {self.class_name} {{\n" f"{impl_body}\n" f"}}"
+        )
+        return f"{struct_block}\n\n{impl_block}"
+
+    def _collect_fields(self) -> Dict[str, str]:
+        """Map field names to Rust types inferred from __init__ assignments."""
+        init = self.methods.get("__init__")
+        if init is None:
+            return {}
+        fields: Dict[str, str] = {}
+        function_type = self.traits.get("function_type", "i64")
+        for stmt in init.body:
+            if not isinstance(stmt, ast.Assign):
+                continue
+            for target in stmt.targets:
+                if (
+                    isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                ):
+                    fields[target.attr] = function_type
+        return fields
+
+
+class ClassMethodGenerator(RustGenerator):
+    """Generate Rust code for a single Python method inside a #[pymethods] impl."""
+
+    def __init__(
+        self,
+        func: ast.FunctionDef,
+        module_name: str,
+        class_name: str,
+        fields: Dict[str, str],
+        traits: Dict[str, Any],
+        is_new: bool = False,
+    ):
+        self.class_name = class_name
+        self.fields = fields
+        self.is_new = is_new
+        self.is_staticmethod = self._has_decorator(func, "staticmethod")
+        self.is_classmethod = self._has_decorator(func, "classmethod")
+        self.mutates_self = (
+            not self.is_staticmethod
+            and not self.is_classmethod
+            and self._method_mutates_self(func)
+        )
+        self.field_inits: Dict[str, str] = {}
+        super().__init__(func, module_name, traits)
+        # Methods always have `self` as the first parameter unless they are
+        # static or class methods.
+        if self.is_staticmethod:
+            self.arg_names = [a.arg for a in func.args.args]
+        elif self.is_classmethod:
+            self.arg_names = [a.arg for a in func.args.args[1:]]
+        else:
+            self.arg_names = [a.arg for a in func.args.args[1:]]
+        self.arg_types = traits.get("arg_types") or [self.function_type] * len(
+            self.arg_names
+        )
+        if len(self.arg_types) != len(self.arg_names):
+            self.arg_types = [self.function_type] * len(self.arg_names)
+
+    @staticmethod
+    def _has_decorator(func: ast.FunctionDef, name: str) -> bool:
+        return any(
+            isinstance(d, ast.Name) and d.id == name for d in func.decorator_list
+        )
+
+    def _method_mutates_self(self, func: ast.FunctionDef) -> bool:
+        """Return True when the method body assigns to a self.* field."""
+        for node in ast.walk(func):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                for target in node.targets:
+                    if self._is_self_attribute(target):
+                        return True
+            if isinstance(node, ast.AugAssign) and self._is_self_attribute(node.target):
+                return True
+        return False
+
+    @staticmethod
+    def _is_self_attribute(node: ast.AST) -> bool:
+        return (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+        )
+
+    def shield_traits(self) -> Set[str]:
+        return self.used_traits
+
+    def _return_type(self) -> str:
+        """Use ``Self`` as the return type for classmethods that construct instances."""
+        if self.is_classmethod:
+            return "Self"
+        return super()._return_type()
+
+    def _emit_function(self) -> str:
+        args = ", ".join(
+            f"{name}: {typ}" for name, typ in zip(self.arg_names, self.arg_types)
+        )
+        return_type = self._return_type()
+
+        if self.is_new:
+            header = f"#[new]\nfn new({args}) -> Self {{"
+            defaults, body_stmts = self._initializers_and_body()
+            for stmt in body_stmts:
+                self._emit_stmt(stmt)
+            field_lines = [
+                f"        {name}: {self.field_inits.get(name, self._zero_for_type(typ))},"
+                for name, typ in self.fields.items()
+            ]
+            body = "\n".join(["    Self {"] + field_lines + ["    }"])
+            return f"{header}\n{body}\n}}"
+
+        if self.is_staticmethod:
+            header = (
+                f'#[staticmethod]\n#[pyo3(name = "{self.orig_name}")]\n'
+                f"fn {self.rust_function_name}({args}) -> {return_type} {{"
+            )
+        elif self.is_classmethod:
+            if args:
+                sig_args = f"cls: &PyType, {args}"
+            else:
+                sig_args = "cls: &PyType"
+            header = (
+                f'#[classmethod]\n#[pyo3(name = "{self.orig_name}")]\n'
+                f"fn {self.rust_function_name}({sig_args}) -> {return_type} {{"
+            )
+        else:
+            receiver = "&mut self" if self.mutates_self else "&self"
+            if args:
+                sig_args = f"{receiver}, {args}"
+            else:
+                sig_args = receiver
+            header = (
+                f'#[pyo3(name = "{self.orig_name}")]\n'
+                f"fn {self.rust_function_name}({sig_args}) -> {return_type} {{"
+            )
+        defaults, body_stmts = self._initializers_and_body()
+        body_lines = [self._emit_stmt(s) for s in body_stmts]
+        if (
+            body_stmts
+            and isinstance(body_stmts[-1], ast.If)
+            and not body_stmts[-1].orelse
+            and self._block_returns(body_stmts[-1].body)
+        ):
+            body_lines.append(f"return {self._zero()};")
+        body = "\n".join(defaults + body_lines)
+        indented = "\n".join("    " + line for line in body.splitlines())
+        return f"{header}\n{indented}\n}}"
+
+    def _zero_for_type(self, typ: str) -> str:
+        return "0.0_f64" if typ == "f64" else "0_i64"
+
+    def _emit_expr(self, expr: ast.expr, ctx: str) -> str:
+        if (
+            isinstance(expr, ast.Attribute)
+            and isinstance(expr.value, ast.Name)
+            and expr.value.id == "self"
+            and expr.attr in self.fields
+        ):
+            return f"self.{expr.attr}"
+        return super()._emit_expr(expr, ctx)
+
+    def _emit_assign(self, stmt: ast.Assign) -> str:
+        if len(stmt.targets) == 1 and self._is_self_attribute(stmt.targets[0]):
+            field = stmt.targets[0].attr
+            value = self._strip_outer_parens(
+                self._emit_expr(stmt.value, self.function_type)
+            )
+            if self.is_new:
+                self.field_inits[field] = value
+                return ""
+            return f"self.{field} = {value};"
+        return super()._emit_assign(stmt)
+
+    def _emit_augassign(self, stmt: ast.AugAssign) -> str:
+        if self._is_self_attribute(stmt.target):
+            field = stmt.target.attr
+            fake = ast.BinOp(
+                left=ast.Attribute(
+                    value=ast.Name(id="self", ctx=ast.Load()),
+                    attr=field,
+                    ctx=ast.Load(),
+                ),
+                op=stmt.op,
+                right=stmt.value,
+            )
+            value = self._strip_outer_parens(self._emit_binop(fake, self.function_type))
+            return f"self.{field} = {value};"
+        return super()._emit_augassign(stmt)
+
+    def _emit_call(self, expr: ast.Call, ctx: str) -> str:
+        """Handle constructor calls like ``cls(...)`` or ``Matrix(...)`` inside methods."""
+        name = _call_name(expr)
+        if name == "cls" and self.is_classmethod:
+            args = [
+                self._strip_outer_parens(self._emit_expr(a, self.function_type))
+                for a in expr.args
+            ]
+            return f"Self::new({', '.join(args)})"
+        if name == self.class_name and self.class_name:
+            args = [
+                self._strip_outer_parens(self._emit_expr(a, self.function_type))
+                for a in expr.args
+            ]
+            return f"Self::new({', '.join(args)})"
+        return super()._emit_call(expr, ctx)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def _find_top_level(tree: ast.AST, name: str) -> Tuple[Optional[ast.AST], bool]:
+    """Find a top-level class or function by name."""
+    for node in getattr(tree, "body", []):
+        if isinstance(node, ast.ClassDef) and node.name == name:
+            return node, True
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node, False
+    # Fallback: search the whole tree, but prefer classes when both exist.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == name:
+            return node, True
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return node, False
+    return None, False
+
+
 def _find_function(tree: ast.AST, name: str) -> Optional[ast.FunctionDef]:
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == name:
@@ -839,6 +1193,7 @@ def _rust_identifier(name: str) -> str:
     if sanitized[0].isdigit() or sanitized in _RUST_KEYWORDS:
         sanitized = "a_" + sanitized
     return sanitized
+
 
 # ---------------------------------------------------------------------------
 # Package scaffolding helpers
