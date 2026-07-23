@@ -68,7 +68,7 @@ def main() -> None:
 @click.option(
     "--llm-provider",
     default=None,
-    help="LLM provider: openai, openrouter, gemini, or none (default: config/env).",
+    help="LLM provider: openai, openrouter, deepseek, gemini, or none (default: config/env).",
 )
 @click.option(
     "--model",
@@ -188,7 +188,7 @@ def fix(
 @click.option(
     "--llm-provider",
     default=None,
-    help="LLM provider: openai, openrouter, gemini, or none.",
+    help="LLM provider: openai, openrouter, deepseek, gemini, or none.",
 )
 @click.option("--model", default=None, help="Model name to use.")
 @click.option(
@@ -274,6 +274,24 @@ def fix(
     help="Attempt GPU acceleration for functions annotated with # @accelerate gpu.",
 )
 @click.option(
+    "--prompt-template",
+    type=click.Choice(
+        [
+            "v1_minimal",
+            "v2_structured",
+            "v3_algorithm",
+            "v4_performance",
+            "v5_balanced",
+            "v6_creative",
+            "v7_conservative",
+            "v8_iterative",
+        ],
+        case_sensitive=False,
+    ),
+    default="v5_balanced",
+    help="System prompt template for generated blueprints (default: v5_balanced).",
+)
+@click.option(
     "--verbose",
     is_flag=True,
     help="Show debug logs and full output.",
@@ -298,6 +316,7 @@ def build(
     target: str,
     gpu: bool,
     verbose: bool,
+    prompt_template: str,
 ) -> None:
     """Build all functions described by BLUEPRINT (default: blueprint.aero)."""
     _setup_logging(verbose)
@@ -329,6 +348,7 @@ def build(
                 project_name=bp.project,
                 llm_provider=llm_provider,
                 model=model,
+                prompt_template=prompt_template,
             )
     except (UserError, ValueError) as exc:
         click.echo(f"Invalid blueprint: {exc}", err=True)
@@ -428,7 +448,7 @@ def build(
 @click.option(
     "--llm-provider",
     default=None,
-    help="LLM provider: openai, openrouter, gemini, or none (default: config/env).",
+    help="LLM provider: openai, openrouter, deepseek, gemini, or none (default: config/env).",
 )
 @click.option(
     "--model",
@@ -458,6 +478,24 @@ def build(
     help="Skip LLM generation and only write stubs (not useful with --prompt).",
 )
 @click.option(
+    "--prompt-template",
+    type=click.Choice(
+        [
+            "v1_minimal",
+            "v2_structured",
+            "v3_algorithm",
+            "v4_performance",
+            "v5_balanced",
+            "v6_creative",
+            "v7_conservative",
+            "v8_iterative",
+        ],
+        case_sensitive=False,
+    ),
+    default="v5_balanced",
+    help="System prompt template for generation (default: v5_balanced).",
+)
+@click.option(
     "--verbose",
     is_flag=True,
     help="Show debug logs.",
@@ -475,6 +513,7 @@ def generate(
     max_iterations: int,
     no_llm: bool,
     verbose: bool,
+    prompt_template: str,
 ) -> None:
     """Generate Python code and tests from a natural language prompt."""
     _setup_logging(verbose)
@@ -500,6 +539,7 @@ def generate(
             model=model,
             max_iterations=max_iterations,
             optimize=optimize,
+            prompt_template=prompt_template,
             build_kwargs=(
                 {"max_workers": 1, "cache_enabled": False} if do_build else None
             ),
@@ -626,7 +666,7 @@ def init(project: str, path: str, fmt: str) -> None:
 @click.option(
     "--llm-provider",
     default=None,
-    help="LLM provider: openai, openrouter, gemini, or none (default: config/env).",
+    help="LLM provider: openai, openrouter, deepseek, gemini, or none (default: config/env).",
 )
 @click.option(
     "--model",
@@ -640,6 +680,24 @@ def init(project: str, path: str, fmt: str) -> None:
     help="Maximum optimization iterations (default: 5).",
 )
 @click.option(
+    "--prompt-template",
+    type=click.Choice(
+        [
+            "v1_minimal",
+            "v2_structured",
+            "v3_algorithm",
+            "v4_performance",
+            "v5_balanced",
+            "v6_creative",
+            "v7_conservative",
+            "v8_iterative",
+        ],
+        case_sensitive=False,
+    ),
+    default="v5_balanced",
+    help="System prompt template for generation (default: v5_balanced).",
+)
+@click.option(
     "--verbose",
     is_flag=True,
     help="Show debug logs.",
@@ -650,6 +708,7 @@ def chat(
     model: str | None,
     max_iterations: int,
     verbose: bool,
+    prompt_template: str,
 ) -> None:
     """Interactive chat session for prompt-driven generation and optimization."""
     _setup_logging(verbose)
@@ -660,6 +719,7 @@ def chat(
         llm_provider=llm_provider,
         model=model,
         max_iterations=max_iterations,
+        prompt_template=prompt_template,
     )
 
     click.echo("Aero-Forge chat mode. Type 'exit' or 'quit' to leave.")

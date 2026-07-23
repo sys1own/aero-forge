@@ -59,7 +59,9 @@ def test_orchestrator_returns_partial_for_missing_function(fibonacci_fixture, tm
     result = orchestrator.run()
     assert not result["success"]
     assert result.get("partial")
-    assert "missing" in result["error"].lower() or "not found" in result["error"].lower()
+    assert (
+        "missing" in result["error"].lower() or "not found" in result["error"].lower()
+    )
 
 
 def test_orchestrator_uses_cache_and_router_first(fibonacci_fixture, tmp_path):

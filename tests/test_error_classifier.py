@@ -47,4 +47,7 @@ def test_classify_exception():
         pytest.skip("openai not installed")
     response = MagicMock()
     response.request = MagicMock()
-    assert classify_exception(RateLimitError("x", response=response, body=None)) == ErrorClass.TRANSIENT
+    assert (
+        classify_exception(RateLimitError("x", response=response, body=None))
+        == ErrorClass.TRANSIENT
+    )

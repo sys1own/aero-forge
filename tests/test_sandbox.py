@@ -13,7 +13,9 @@ def temp_source(tmp_path):
     source = tmp_path / "calc.py"
     source.write_text("def add(a, b):\n    return a + b\n")
     test = tmp_path / "test_calc.py"
-    test.write_text("from calc import add\n\ndef test_add():\n    assert add(2, 3) == 5\n")
+    test.write_text(
+        "from calc import add\n\ndef test_add():\n    assert add(2, 3) == 5\n"
+    )
     return source
 
 
