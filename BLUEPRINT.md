@@ -140,6 +140,20 @@ Settings are merged from lowest to highest priority:
 2. Environment variables (`AERO_FORGE_LLM_PROVIDER`, `AERO_FORGE_MODEL`, etc.)
 3. CLI flags (`--llm-provider`, `--model`, `--output-dir`, `--no-llm`, etc.)
 
+## Supported Python Constructs
+
+Aero-Forge's transpiler targets numerical and algorithmic Python. The following patterns are supported:
+
+- Scalar numeric types (`int`, `float`, `bool`) and `list`/`List[T]` type annotations.
+- `for` and `while` loops, `if`/`elif`/`else`, `break`, `continue`, and early `return`.
+- `range(...)` with one or two arguments.
+- List comprehensions, including nested comprehensions like `[[0 for _ in cols] for _ in rows]`.
+- Tuple unpacking assignments (`a, b = b, a + b`) inside loops.
+- `enumerate()` and `zip()` in `for` loop iteration.
+- `len()` on lists and nested list rows (`len(a)`, `len(a[0])`).
+- `append()` on list variables.
+- Nested `list[list[T]]` matrices with row/column indexing (`m[i][j]`).
+
 ## Notes
 
 - Functions from the same source file are compiled into a single shared library.

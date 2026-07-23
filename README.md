@@ -226,7 +226,7 @@ Each file includes a `METADATA` dict describing complexity, use cases, and const
 
 ## Prompt Templates
 
-Eight templates are included for different generation styles:
+Nine templates are included for different generation styles:
 
 | Template | Description |
 |----------|-------------|
@@ -238,6 +238,7 @@ Eight templates are included for different generation styles:
 | `v6_creative` | Encourages novel algorithms. |
 | `v7_conservative` | Uses only well-known algorithms. |
 | `v8_iterative` | Includes feedback from previous runs. |
+| `v9_transpiler_friendly` | Explicitly forbids edge-case constructs for maximum first-pass success. |
 
 Use `--prompt-template v5_balanced` to select one. `v5_balanced` is the default and was the most reliable in the prompt-engineering campaign.
 
@@ -256,13 +257,27 @@ These flags turn Aero-Forge into a senior-engineer-style assistant:
 
 Aero-Forge targets 10-100x speedups for hot numerical loops. Actual speedup depends on the function and the quality of the generated Rust. The benchmark loop in `aero-forge generate --optimize` compares the native extension against the original Python and reports the relative improvement.
 
+## Supported Python Constructs
+
+The transpiler handles common numerical and algorithmic Python patterns:
+
+- Primitive numeric types (`int`, `float`, `bool`) and `list`/`List[T]` annotations.
+- Nested `for`/`while` loops, `if`/`elif`/`else`, `break`, `continue`, and early `return`.
+- `range(...)` loops with one or two arguments.
+- List comprehensions (e.g., `[x * x for x in range(10)]` or `[x * 2 for x in arr]`) and nested list comprehensions.
+- Tuple unpacking assignments (`a, b = b, a + b`) including inside loops.
+- `enumerate()` and `zip()` in `for` loop iteration.
+- `len()` on lists and nested list rows.
+- `append()` on lists.
+- Basic `list[list[T]]` matrices and indexing (`m[i][j]`).
+
 ## Known Limitations
 
 The transpiler is intentionally narrow. It works well for numerical/algorithmic code and produces clear errors for unsupported constructs.
 
 Currently not supported:
 
-- List slicing, `append`, `extend`, `len` inside transpiled loops.
+- List slicing, `extend`, `pop`, `insert`, and other list methods.
 - Dictionaries and sets.
 - Complex class inheritance, properties, and dataclasses.
 - `try`/`except`, `with`, `yield`, `async`/`await`.

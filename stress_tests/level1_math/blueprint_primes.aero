@@ -1,0 +1,7 @@
+project: level1_primes
+functions:
+  - file: primes_up_to.py
+    name: primes_up_to
+    tests:
+      - tests/test_primes_up_to.py
+output_dir: dist_primes

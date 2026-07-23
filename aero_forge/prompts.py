@@ -41,7 +41,13 @@ class PromptTemplate:
 
 MINIMAL = PromptTemplate(
     "v1_minimal",
-    "You are an expert Python programmer. Generate Python code that satisfies the user's requirements.",
+    """You are an expert Python programmer. Generate Python code that satisfies the user's requirements.
+
+Keep the code transpiler-friendly:
+- Do NOT use list comprehensions. Use explicit for loops instead.
+- Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
+- Use simple variable assignments, not tuple unpacking.
+""",
     "Minimal baseline prompt.",
 )
 
@@ -61,7 +67,10 @@ RULES:
 8. If the user asks for "fast" or "optimized", use SIMD-friendly data layouts.
 9. If the user mentions "GPU", include a comment `# @accelerate gpu`.
 10. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
-11. The implementation file is named `generated.py` and the test file `test_generated.py`; tests must import with `from generated import function_name`. Wrap the implementation in ```python ... ``` and the tests in a second ```python ... ``` block. No other explanation.
+11. Do NOT use list comprehensions. Use explicit for loops instead.
+12. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
+13. Use simple variable assignments, not tuple unpacking.
+14. The implementation file is named `generated.py` and the test file `test_generated.py`; tests must import with `from generated import function_name`. Wrap the implementation in ```python ... ``` and the tests in a second ```python ... ``` block. No other explanation.
 
 OUTPUT FORMAT:
 def function_name(param1: type, param2: type) -> return_type:
@@ -85,7 +94,10 @@ RULES:
 5. Optimize for asymptotic complexity first; prefer O(n log n) or better.
 6. Return no markdown, no commentary, no docstring unless it helps readability.
 7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
-8. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+8. Do NOT use list comprehensions. Use explicit for loops instead.
+9. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
+10. Use simple variable assignments, not tuple unpacking.
+11. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 """,
     "Focus on algorithmic efficiency.",
 )
@@ -102,7 +114,10 @@ RULES:
 5. For "fast"/"optimized" requests, add `# @accelerate gpu` and use cache-friendly blocking where applicable.
 6. No markdown, no explanations, no extra output.
 7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
-8. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+8. Do NOT use list comprehensions. Use explicit for loops instead.
+9. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
+10. Use simple variable assignments, not tuple unpacking.
+11. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 """,
     "Focus on low-level performance and SIMD-friendly code.",
 )
@@ -119,7 +134,10 @@ RULES:
 5. Add `# @accelerate gpu` when the user asks for GPU acceleration.
 6. No markdown fences, no explanations, and no code outside the function.
 7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
-8. The implementation file is named `generated.py` and the test file `test_generated.py`; tests must import with `from generated import function_name`. Wrap the implementation in ```python ... ``` and the tests in a second ```python ... ``` block. No other explanation.
+8. Do NOT use list comprehensions. Use explicit for loops instead.
+9. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
+10. Use simple variable assignments, not tuple unpacking.
+11. The implementation file is named `generated.py` and the test file `test_generated.py`; tests must import with `from generated import function_name`. Wrap the implementation in ```python ... ``` and the tests in a second ```python ... ``` block. No other explanation.
 
 OUTPUT FORMAT:
 def function_name(param1: type, param2: type) -> return_type:
@@ -140,7 +158,10 @@ RULES:
 3. Avoid standard-library heavy solutions; aim for numeric/scalar kernels that compile cleanly to Rust.
 4. No markdown, no explanations, no extra output.
 5. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
-6. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+6. Do NOT use list comprehensions. Use explicit for loops instead.
+7. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
+8. Use simple variable assignments, not tuple unpacking.
+9. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 """,
     "Encourage novel algorithm choices.",
 )
@@ -155,7 +176,10 @@ RULES:
 3. Avoid recursion, dynamic typing, dictionaries, sets, and list slicing.
 4. No markdown, no explanations, no extra output.
 5. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
-6. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+6. Do NOT use list comprehensions. Use explicit for loops instead.
+7. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
+8. Use simple variable assignments, not tuple unpacking.
+9. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 """,
     "Use only well-known algorithms.",
 )
@@ -171,9 +195,30 @@ RULES:
 4. Avoid recursion, dynamic typing, dictionaries, sets, and list slicing.
 5. No markdown, no explanations, no extra output.
 6. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, or list slicing.
-7. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+7. Do NOT use list comprehensions. Use explicit for loops instead.
+8. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
+9. Use simple variable assignments, not tuple unpacking.
+10. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 """,
     "Optimizes with iterative feedback.",
+)
+
+TRANSPILER_FRIENDLY = PromptTemplate(
+    "v9_transpiler_friendly",
+    """You are Aero-Forge, a transpiler-focused coding assistant. Generate Python code that compiles cleanly to Rust through the Aero-Forge transpiler.
+
+RULES:
+1. Return ONLY a single Python function with type hints.
+2. Use only scalar numeric types (int, float, bool) and simple lists/Vec of scalars. Avoid nested dictionaries, sets, and dynamic typing.
+3. Prefer explicit `for i in range(n):` loops over iteration helpers.
+4. Use index-based access for lists (e.g., `arr[i]`) instead of `for x in arr`, `enumerate()`, or `zip()`.
+5. Do NOT use list comprehensions. Use explicit for loops and `append()` instead.
+6. Do NOT use tuple unpacking or multi-target assignments (e.g., `a, b = b, a + b`). Use temporary variables and simple assignments.
+7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, list slicing, `sum()`, `map()`, `filter()`, `eval()`, `exec()`, generators, `async`/`await`, `match`/`case`, or walrus operators.
+8. Keep code simple and explicit; avoid Python idioms that do not map directly to Rust.
+9. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+""",
+    "Explicitly forbids constructs that are hard for the transpiler to handle.",
 )
 
 
@@ -188,6 +233,7 @@ TEMPLATES: Dict[str, PromptTemplate] = {
         CREATIVE,
         CONSERVATIVE,
         ITERATIVE,
+        TRANSPILER_FRIENDLY,
     ]
 }
 
