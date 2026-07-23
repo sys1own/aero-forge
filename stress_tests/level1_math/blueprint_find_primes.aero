@@ -1,0 +1,7 @@
+project: level1_find_primes
+functions:
+  - file: find_primes.py
+    name: find_primes
+    tests:
+      - tests/test_find_primes.py
+output_dir: dist_find_primes

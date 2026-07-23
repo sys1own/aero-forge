@@ -140,6 +140,7 @@ class RustGenerator:
         self.arg_types = arg_types
 
         annotated_return = _annotation_to_rust_type(func.returns, self.class_names)
+        self.annotated_return = bool(annotated_return)
         if annotated_return:
             self.return_type = annotated_return
 
@@ -147,7 +148,7 @@ class RustGenerator:
         self.type_env: Dict[str, str] = {}
         for name, typ in zip(self.arg_names, self.arg_types):
             self.type_env[name] = typ
-        self._scan_local_types()
+        self._infer_all_types()
         self._tmp_counter = 0
         self.used_traits: Set[str] = set()
 
@@ -170,69 +171,331 @@ class RustGenerator:
             types.append(typ or self.function_type)
         return types if any_annotation else None
 
-    def _scan_local_types(self) -> None:
-        """Infer types for local variables from assignments and loops."""
-        for stmt in self.func.body:
-            self._scan_stmt_types(stmt)
+    def _infer_all_types(self) -> None:
+        """Iteratively infer Rust types for arguments and locals from usage."""
+        # Start from unknown so subscript/append-driven inference can override
+        # the default scalar function_type.
+        types: Dict[str, Optional[str]] = {name: None for name in self.arg_names}
 
-    def _scan_stmt_types(self, stmt: ast.stmt) -> None:
+        for stmt in self.func.body:
+            self._infer_annotated_local(stmt, types)
+
+        for _ in range(20):
+            new_types = dict(types)
+            for stmt in self.func.body:
+                self._infer_stmt_types(stmt, new_types)
+            if new_types == types:
+                break
+            types = new_types
+
+        # Fall back to default/annotated arg types for anything still unknown.
+        for i, name in enumerate(self.arg_names):
+            if types.get(name) is None:
+                types[name] = self.arg_types[i]
+            self.arg_types[i] = types.get(name, self.arg_types[i])
+
+        self.type_env = {k: v for k, v in types.items() if v is not None}
+
+        if not self.annotated_return:
+            ret_type = types.get("__return__")
+            if ret_type:
+                self.return_type = ret_type
+
+    def _infer_annotated_local(self, stmt: ast.stmt, types: Dict[str, str]) -> None:
+        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+            typ = _annotation_to_rust_type(stmt.annotation, self.class_names)
+            if typ:
+                types[stmt.target.id] = typ
+        for child in ("body", "orelse"):
+            for child_stmt in getattr(stmt, child, []):
+                self._infer_annotated_local(child_stmt, types)
+
+    def _infer_stmt_types(self, stmt: ast.stmt, types: Dict[str, str]) -> None:
         if isinstance(stmt, ast.Assign):
             for target in stmt.targets:
                 if isinstance(target, ast.Name):
-                    self.type_env[target.id] = self._type_of(stmt.value)
-        elif isinstance(stmt, ast.AnnAssign):
+                    rhs_type = self._infer_expr_type(stmt.value, types)
+                    if rhs_type:
+                        types[target.id] = self._unify(types.get(target.id), rhs_type)
+                    self._propagate_subscript_types(stmt.value, rhs_type, types)
+        elif isinstance(stmt, ast.AugAssign):
+            target_type = None
             if isinstance(stmt.target, ast.Name):
-                typ = _annotation_to_rust_type(stmt.annotation, self.class_names)
-                if typ is None and stmt.value is not None:
-                    typ = self._type_of(stmt.value)
-                if typ:
-                    self.type_env[stmt.target.id] = typ
+                target_type = types.get(stmt.target.id)
+            rhs_type = (
+                target_type if target_type else self._infer_expr_type(stmt.value, types)
+            ) or self.function_type
+            if isinstance(stmt.target, ast.Name):
+                types[stmt.target.id] = self._unify(types.get(stmt.target.id), rhs_type)
+            self._propagate_subscript_types(stmt.value, rhs_type, types)
+        elif isinstance(stmt, ast.Expr):
+            if isinstance(stmt.value, ast.Call) and _call_name(stmt.value) == "append":
+                target_name = _call_base(stmt.value)
+                arg = stmt.value.args[0]
+                arg_type = self._infer_expr_type(arg, types) or self.function_type
+                if target_name:
+                    types[target_name] = self._unify(
+                        types.get(target_name), f"Vec<{arg_type}>"
+                    )
+                self._propagate_subscript_types(arg, arg_type, types)
+        elif isinstance(stmt, ast.Return):
+            if stmt.value is not None:
+                ret_type = (
+                    self._infer_expr_type(stmt.value, types) or self.function_type
+                )
+                types["__return__"] = self._unify(types.get("__return__"), ret_type)
+                self._propagate_subscript_types(stmt.value, ret_type, types)
         elif isinstance(stmt, ast.For):
-            self._scan_for_types(stmt)
-            for body_stmt in stmt.body + stmt.orelse:
-                self._scan_stmt_types(body_stmt)
-        elif isinstance(stmt, (ast.If, ast.While)):
-            for body_stmt in stmt.body + stmt.orelse:
-                self._scan_stmt_types(body_stmt)
+            self._infer_for_types(stmt, types)
 
-    def _scan_for_types(self, stmt: ast.For) -> None:
-        """Infer the type of every loop variable from the iterator."""
+        for child in ("body", "orelse"):
+            for child_stmt in getattr(stmt, child, []):
+                self._infer_stmt_types(child_stmt, types)
+
+    def _infer_for_types(self, stmt: ast.For, types: Dict[str, str]) -> None:
         target = stmt.target
         iter_expr = stmt.iter
         if isinstance(iter_expr, ast.Call):
             name = _call_name(iter_expr)
             if name == "range" and isinstance(target, ast.Name) and target.id != "_":
-                self.type_env[target.id] = "i64"
+                types[target.id] = "i64"
             elif name == "enumerate" and isinstance(target, ast.Tuple):
                 if len(target.elts) >= 1 and isinstance(target.elts[0], ast.Name):
-                    self.type_env[target.elts[0].id] = "i64"
+                    types[target.elts[0].id] = "i64"
                 if len(target.elts) >= 2 and isinstance(target.elts[1], ast.Name):
                     iterable = iter_expr.args[0] if iter_expr.args else None
                     if iterable is not None:
-                        self.type_env[target.elts[1].id] = self._element_or_ref_type(
-                            self._type_of(iterable)
+                        types[target.elts[1].id] = self._infer_element_or_ref(
+                            self._infer_expr_type(iterable, types)
                         )
             elif name == "zip" and isinstance(target, ast.Tuple):
                 for elt, arg in zip(target.elts, iter_expr.args):
                     if isinstance(elt, ast.Name):
-                        self.type_env[elt.id] = self._element_or_ref_type(
-                            self._type_of(arg)
+                        types[elt.id] = self._infer_element_or_ref(
+                            self._infer_expr_type(arg, types)
                         )
             elif name not in ("range", "enumerate", "zip"):
                 pass
         elif isinstance(iter_expr, ast.Name) and isinstance(target, ast.Name):
-            self.type_env[target.id] = self._element_or_ref_type(
-                self._type_of(iter_expr)
+            types[target.id] = self._infer_element_or_ref(
+                types.get(iter_expr.id, self.function_type)
             )
 
-    def _element_or_ref_type(self, container_type: str) -> str:
-        """Return the element type for a scalar Vec iteration, or &T otherwise."""
-        if not container_type.startswith("Vec<"):
+    def _infer_element_or_ref(self, container_type: Optional[str]) -> str:
+        if not container_type or not container_type.startswith("Vec<"):
             return self.function_type
         element = _element_type(container_type)
         if element in ("i64", "f64", "bool"):
             return element
         return f"&{element}"
+
+    def _infer_expr_type(self, expr: ast.expr, types: Dict[str, str]) -> Optional[str]:
+        if isinstance(expr, ast.Constant):
+            if isinstance(expr.value, bool):
+                return "bool"
+            if isinstance(expr.value, int):
+                return "i64"
+            if isinstance(expr.value, float):
+                return "f64"
+            if expr.value is None:
+                return "()"
+            return None
+        if isinstance(expr, ast.Name):
+            return types.get(expr.id)
+        if isinstance(expr, ast.Attribute):
+            return self._field_type(expr.value, expr.attr)
+        if isinstance(expr, ast.Subscript):
+            base_type = self._infer_expr_type(expr.value, types)
+            if base_type and base_type.startswith("Vec<"):
+                return _element_type(base_type)
+            return None
+        if isinstance(expr, ast.List):
+            if not expr.elts:
+                return f"Vec<{self.function_type}>"
+            inner = self._infer_expr_type(expr.elts[0], types) or self.function_type
+            return f"Vec<{inner}>"
+        if isinstance(expr, ast.ListComp):
+            inner = self._infer_expr_type(expr.elt, types) or self.function_type
+            return f"Vec<{inner}>"
+        if isinstance(expr, ast.Tuple):
+            elts = [self._infer_expr_type(e, types) for e in expr.elts]
+            if all(elts):
+                return f"({', '.join(elts)})"
+            return None
+        if isinstance(expr, ast.BinOp):
+            left = self._infer_expr_type(expr.left, types)
+            right = self._infer_expr_type(expr.right, types)
+            if isinstance(expr.op, ast.Mult):
+                if left and left.startswith("Vec<"):
+                    return left
+                if right and right.startswith("Vec<"):
+                    return right
+            return self._unify(left, right)
+        if isinstance(expr, ast.UnaryOp):
+            return self._infer_expr_type(expr.operand, types)
+        if isinstance(expr, (ast.Compare, ast.BoolOp)):
+            return "bool"
+        if isinstance(expr, ast.IfExp):
+            return self._unify(
+                self._infer_expr_type(expr.body, types),
+                self._infer_expr_type(expr.orelse, types),
+            )
+        if isinstance(expr, ast.Call):
+            name = _call_name(expr)
+            base = _call_base(expr)
+            if name == "len" and base is None:
+                return "i64"
+            if base == "math" and name in _FLOAT_MATH_FUNCS:
+                return "f64"
+            if name in ("sqrt", "sin", "cos", "tan", "exp", "log", "log10"):
+                return "f64"
+            if name == self.func.name:
+                return self.return_type or self.function_type
+            if name in self.class_names:
+                return name
+        return None
+
+    def _propagate_subscript_types(
+        self, expr: ast.expr, element_type: Optional[str], types: Dict[str, str]
+    ) -> None:
+        if element_type is None:
+            return
+        if isinstance(expr, ast.Subscript):
+            base = expr.value
+            if isinstance(base, ast.Name):
+                current = types.get(base.id)
+                types[base.id] = self._unify(current, f"Vec<{element_type}>")
+            elif isinstance(base, ast.Subscript):
+                self._propagate_subscript_types(base, f"Vec<{element_type}>", types)
+            else:
+                self._propagate_subscript_types(base, f"Vec<{element_type}>", types)
+        elif isinstance(expr, ast.BinOp):
+            self._propagate_subscript_types(expr.left, element_type, types)
+            self._propagate_subscript_types(expr.right, element_type, types)
+        elif isinstance(expr, ast.UnaryOp):
+            self._propagate_subscript_types(expr.operand, element_type, types)
+        elif isinstance(expr, ast.Compare):
+            for op in expr.comparators:
+                self._propagate_subscript_types(op, element_type, types)
+        elif isinstance(expr, ast.BoolOp):
+            for v in expr.values:
+                self._propagate_subscript_types(v, element_type, types)
+        elif isinstance(expr, ast.IfExp):
+            self._propagate_subscript_types(expr.body, element_type, types)
+            self._propagate_subscript_types(expr.orelse, element_type, types)
+        elif isinstance(expr, ast.Tuple):
+            for i, e in enumerate(expr.elts):
+                # Each tuple element must match the corresponding element type.
+                # element_type is itself a tuple type if we are propagating into a tuple.
+                if element_type.startswith("(") and element_type.endswith(")"):
+                    inner = self._tuple_element_at(element_type, i)
+                    self._propagate_subscript_types(e, inner, types)
+                else:
+                    self._propagate_subscript_types(e, element_type, types)
+
+    def _tuple_element_at(self, tuple_type: str, index: int) -> Optional[str]:
+        """Return the i-th element type of a Rust tuple type string."""
+        if not (tuple_type.startswith("(") and tuple_type.endswith(")")):
+            return None
+        inner = tuple_type[1:-1]
+        if not inner:
+            return None
+        # Simple split on top-level commas.
+        parts = []
+        depth = 0
+        current = ""
+        for ch in inner:
+            if ch in "(<":
+                depth += 1
+            elif ch in ")>":
+                depth -= 1
+            if ch == "," and depth == 0:
+                parts.append(current.strip())
+                current = ""
+            else:
+                current += ch
+        parts.append(current.strip())
+        if index < len(parts):
+            return parts[index]
+        return None
+
+    def _unify(self, t1: Optional[str], t2: Optional[str]) -> Optional[str]:
+        if t1 is None:
+            return t2
+        if t2 is None:
+            return t1
+        if t1 == t2:
+            return t1
+        # A scalar placeholder should be overridden by a concrete container type.
+        if (
+            t1.startswith("Vec<")
+            and not t2.startswith("Vec<")
+            and t2
+            in (
+                "i64",
+                "f64",
+                "bool",
+            )
+        ):
+            return t1
+        if (
+            t2.startswith("Vec<")
+            and not t1.startswith("Vec<")
+            and t1
+            in (
+                "i64",
+                "f64",
+                "bool",
+            )
+        ):
+            return t2
+        if t1.startswith("Vec<") and t2.startswith("Vec<"):
+            e1 = _element_type(t1)
+            e2 = _element_type(t2)
+            unified = self._unify(e1, e2)
+            if unified:
+                return f"Vec<{unified}>"
+        if (
+            t1.startswith("(")
+            and t1.endswith(")")
+            and t2.startswith("(")
+            and t2.endswith(")")
+        ):
+            parts1 = self._tuple_element_types(t1)
+            parts2 = self._tuple_element_types(t2)
+            if len(parts1) == len(parts2):
+                unified = [self._unify(a, b) for a, b in zip(parts1, parts2)]
+                if all(unified):
+                    return f"({', '.join(unified)})"
+        if "f64" in (t1, t2):
+            return "f64"
+        if "i64" in (t1, t2):
+            return "i64"
+        if "bool" in (t1, t2):
+            return "i64" if "i64" in (t1, t2) else "bool"
+        return t1
+
+    def _tuple_element_types(self, tuple_type: str) -> List[str]:
+        if not (tuple_type.startswith("(") and tuple_type.endswith(")")):
+            return []
+        inner = tuple_type[1:-1]
+        if not inner:
+            return []
+        parts = []
+        depth = 0
+        current = ""
+        for ch in inner:
+            if ch in "(<":
+                depth += 1
+            elif ch in ")>":
+                depth -= 1
+            if ch == "," and depth == 0:
+                parts.append(current.strip())
+                current = ""
+            else:
+                current += ch
+        parts.append(current.strip())
+        return parts
 
     def _type_of(self, expr: ast.expr) -> str:
         """Return the Rust type of an expression without emitting it."""
@@ -484,7 +747,14 @@ class RustGenerator:
                 ):
                     mutable = self._is_mutable(name)
                     mut = "mut " if mutable else ""
-                    rhs_type = self._type_of(stmt.value)
+                    if (
+                        isinstance(stmt.value, ast.List)
+                        and not stmt.value.elts
+                        and name in self.type_env
+                    ):
+                        rhs_type = self.type_env[name]
+                    else:
+                        rhs_type = self._type_of(stmt.value)
                     value = self._strip_outer_parens(
                         self._emit_expr(stmt.value, rhs_type)
                     )
@@ -524,9 +794,15 @@ class RustGenerator:
 
     def _return_type(self) -> str:
         """Derive the Rust return type from the function's return statements."""
+        # If the function was explicitly annotated with a tuple type, trust it.
+        if self.annotated_return and self.return_type.startswith("("):
+            return self.return_type
+
         sizes: set[int] = set()
+        return_values: List[ast.expr] = []
         for node in ast.walk(self.func):
             if isinstance(node, ast.Return) and node.value is not None:
+                return_values.append(node.value)
                 if isinstance(node.value, (ast.Tuple, ast.List)):
                     sizes.add(len(_elements(node.value)))
                 else:
@@ -538,7 +814,21 @@ class RustGenerator:
                 "All return statements must return the same tuple size",
                 node=self.func,
             )
-        return f"({', '.join([self.return_type] * sizes.pop())})"
+
+        n = sizes.pop()
+        element_types: List[Optional[str]] = [None] * n
+        for rv in return_values:
+            if isinstance(rv, (ast.Tuple, ast.List)):
+                elts = _elements(rv)
+            else:
+                elts = [rv]
+            for i, elt in enumerate(elts):
+                typ = self._infer_expr_type(elt, self.type_env)
+                element_types[i] = self._unify(element_types[i], typ)
+        for i in range(n):
+            if element_types[i] is None:
+                element_types[i] = self.return_type
+        return f"({', '.join(element_types)})"
 
     def _next_tmp(self) -> str:
         self._tmp_counter += 1
@@ -666,7 +956,14 @@ class RustGenerator:
             target = stmt.targets[0]
             if isinstance(target, ast.Name):
                 name = target.id
-                rhs_type = self._type_of(stmt.value)
+                if (
+                    isinstance(stmt.value, ast.List)
+                    and not stmt.value.elts
+                    and name in self.type_env
+                ):
+                    rhs_type = self.type_env[name]
+                else:
+                    rhs_type = self._type_of(stmt.value)
                 value = self._strip_outer_parens(self._emit_expr(stmt.value, rhs_type))
                 return f"{name} = {value};"
             if isinstance(target, (ast.Tuple, ast.List)):
@@ -938,7 +1235,16 @@ class RustGenerator:
         if isinstance(expr, ast.ListComp):
             return self._emit_listcomp(expr, ctx)
         if isinstance(expr, ast.Tuple):
-            return f"({', '.join(self._emit_expr(e, ctx) for e in expr.elts)})"
+            tuple_parts: List[str] = []
+            if ctx and ctx.startswith("(") and ctx.endswith(")"):
+                parts = self._tuple_element_types(ctx)
+                tuple_parts = [
+                    self._emit_expr(e, parts[i] if i < len(parts) else ctx)
+                    for i, e in enumerate(expr.elts)
+                ]
+            else:
+                tuple_parts = [self._emit_expr(e, ctx) for e in expr.elts]
+            return f"({', '.join(tuple_parts)})"
         if isinstance(expr, ast.Attribute):
             return self._emit_attribute(expr, ctx)
         if isinstance(expr, ast.Subscript):
@@ -2048,6 +2354,19 @@ def _annotation_to_rust_type(
             if inner is None:
                 return None
             return f"Vec<{inner}>"
+        if base_name in ("tuple", "Tuple"):
+            inner = _annotation_to_rust_type(annotation.slice, class_names)
+            if inner and inner.startswith("(") and inner.endswith(")"):
+                return inner
+            # ``tuple[int, float]`` becomes ``(i64, f64)``.
+            if isinstance(annotation.slice, ast.Tuple):
+                parts = [
+                    _annotation_to_rust_type(elt, class_names)
+                    for elt in annotation.slice.elts
+                ]
+                if all(parts):
+                    return f"({', '.join(parts)})"
+            return None
         if base_name == "ndarray":
             inner = _annotation_to_rust_type(annotation.slice, class_names)
             if inner:

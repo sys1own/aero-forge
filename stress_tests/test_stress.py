@@ -56,11 +56,32 @@ class TestLevel1Math:
         assert result.returncode == 0, result.stderr + result.stdout
         assert "Build summary: 1 succeeded, 0 failed" in result.stderr
 
+    def test_matrix_multiply_append(self):
+        """Matrix multiplication with append-based nested list building works."""
+        blueprint = STRESS_DIR / "level1_math" / "blueprint_matrix_append.aero"
+        result = _run_build(blueprint)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert "Build summary: 1 succeeded, 0 failed" in result.stderr
+
+    def test_find_primes_tuple_return(self):
+        """Functions returning consistent tuples compile and pass tests."""
+        blueprint = STRESS_DIR / "level1_math" / "blueprint_find_primes.aero"
+        result = _run_build(blueprint)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert "Build summary: 1 succeeded, 0 failed" in result.stderr
+
     def test_primes_up_to(self):
         blueprint = STRESS_DIR / "level1_math" / "blueprint_primes.aero"
         result = _run_build(blueprint)
         assert result.returncode == 0, result.stderr + result.stdout
         assert "Build summary: 1 succeeded, 0 failed" in result.stderr
+
+    def test_mismatched_return_tuple_sizes(self):
+        """Functions with mismatched return tuple sizes are rejected early."""
+        blueprint = STRESS_DIR / "level1_math" / "blueprint_mismatched.aero"
+        result = _run_build(blueprint)
+        assert result.returncode != 0
+        assert "same number of values" in (result.stderr + result.stdout)
 
 
 class TestLevel2Collections:
