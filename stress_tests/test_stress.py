@@ -49,12 +49,18 @@ class TestLevel1Math:
         assert result.returncode == 0, result.stderr + result.stdout
         assert "Build summary: 3 succeeded, 0 failed" in result.stderr
 
-    def test_matrix_multiply_is_unsupported(self):
-        """Matrix multiplication uses lists/len/append which are not yet supported."""
+    def test_matrix_multiply(self):
+        """Matrix multiplication now works via list comprehensions, len, and indexing."""
         blueprint = STRESS_DIR / "level1_math" / "blueprint_matrix.aero"
         result = _run_build(blueprint)
-        assert result.returncode != 0
-        assert "Unsupported" in result.stderr or "Unsupported" in result.stdout
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert "Build summary: 1 succeeded, 0 failed" in result.stderr
+
+    def test_primes_up_to(self):
+        blueprint = STRESS_DIR / "level1_math" / "blueprint_primes.aero"
+        result = _run_build(blueprint)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert "Build summary: 1 succeeded, 0 failed" in result.stderr
 
 
 class TestLevel2Collections:

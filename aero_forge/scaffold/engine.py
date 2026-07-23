@@ -188,13 +188,51 @@ class RustGenerator:
                 if typ:
                     self.type_env[stmt.target.id] = typ
         elif isinstance(stmt, ast.For):
-            if isinstance(stmt.target, ast.Name) and stmt.target.id != "_":
-                self.type_env[stmt.target.id] = "i64"
+            self._scan_for_types(stmt)
             for body_stmt in stmt.body + stmt.orelse:
                 self._scan_stmt_types(body_stmt)
         elif isinstance(stmt, (ast.If, ast.While)):
             for body_stmt in stmt.body + stmt.orelse:
                 self._scan_stmt_types(body_stmt)
+
+    def _scan_for_types(self, stmt: ast.For) -> None:
+        """Infer the type of every loop variable from the iterator."""
+        target = stmt.target
+        iter_expr = stmt.iter
+        if isinstance(iter_expr, ast.Call):
+            name = _call_name(iter_expr)
+            if name == "range" and isinstance(target, ast.Name) and target.id != "_":
+                self.type_env[target.id] = "i64"
+            elif name == "enumerate" and isinstance(target, ast.Tuple):
+                if len(target.elts) >= 1 and isinstance(target.elts[0], ast.Name):
+                    self.type_env[target.elts[0].id] = "i64"
+                if len(target.elts) >= 2 and isinstance(target.elts[1], ast.Name):
+                    iterable = iter_expr.args[0] if iter_expr.args else None
+                    if iterable is not None:
+                        self.type_env[target.elts[1].id] = self._element_or_ref_type(
+                            self._type_of(iterable)
+                        )
+            elif name == "zip" and isinstance(target, ast.Tuple):
+                for elt, arg in zip(target.elts, iter_expr.args):
+                    if isinstance(elt, ast.Name):
+                        self.type_env[elt.id] = self._element_or_ref_type(
+                            self._type_of(arg)
+                        )
+            elif name not in ("range", "enumerate", "zip"):
+                pass
+        elif isinstance(iter_expr, ast.Name) and isinstance(target, ast.Name):
+            self.type_env[target.id] = self._element_or_ref_type(
+                self._type_of(iter_expr)
+            )
+
+    def _element_or_ref_type(self, container_type: str) -> str:
+        """Return the element type for a scalar Vec iteration, or &T otherwise."""
+        if not container_type.startswith("Vec<"):
+            return self.function_type
+        element = _element_type(container_type)
+        if element in ("i64", "f64", "bool"):
+            return element
+        return f"&{element}"
 
     def _type_of(self, expr: ast.expr) -> str:
         """Return the Rust type of an expression without emitting it."""
@@ -313,6 +351,8 @@ class RustGenerator:
         if to_type.startswith("&") and from_type == to_type[1:]:
             return expr
         if from_type.startswith("&") and to_type == from_type[1:]:
+            if to_type.startswith("Vec<"):
+                return f"({expr}).clone()"
             return expr
         if from_type.startswith("Vec<") and to_type.startswith("Vec<"):
             return expr
@@ -351,13 +391,32 @@ class RustGenerator:
         return False
 
     def _is_mutable(self, name: str) -> bool:
-        """Return True if ``name`` is assigned more than once or inside a loop."""
+        """Return True if ``name`` is assigned more than once, in a loop, or appended to."""
         count = self._count_targets_in_body(name, self.func.body, in_loop=False)
+        if self._has_append_call(name, self.func.body):
+            return True
         if name in self.arg_names:
             # The parameter is the first binding; any target assignment is a
             # reassignment, so the local shadow needs to be mutable.
             return count > 0
         return count > 1
+
+    def _has_append_call(self, name: str, stmts: List[ast.stmt]) -> bool:
+        for stmt in stmts:
+            if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+                call = stmt.value
+                if (
+                    isinstance(call.func, ast.Attribute)
+                    and isinstance(call.func.value, ast.Name)
+                    and call.func.value.id == name
+                    and call.func.attr == "append"
+                ):
+                    return True
+            for child in ("body", "orelse"):
+                body = getattr(stmt, child, [])
+                if body and self._has_append_call(name, body):
+                    return True
+        return False
 
     @staticmethod
     def _rhs_uses_only(expr: ast.expr, allowed: set[str]) -> bool:
@@ -425,8 +484,9 @@ class RustGenerator:
                 ):
                     mutable = self._is_mutable(name)
                     mut = "mut " if mutable else ""
+                    rhs_type = self._type_of(stmt.value)
                     value = self._strip_outer_parens(
-                        self._emit_expr(stmt.value, self.function_type)
+                        self._emit_expr(stmt.value, rhs_type)
                     )
                     defaults.append(f"let {mut}{name} = {value};")
                     declared.add(name)
@@ -574,6 +634,8 @@ class RustGenerator:
                 stmt.value.value, str
             ):
                 return ""
+            if isinstance(stmt.value, ast.Call) and _call_name(stmt.value) == "append":
+                return self._emit_append(stmt.value)
             self._emit_expr(stmt.value, self.function_type)
             return ""
         if isinstance(stmt, (ast.With, ast.AsyncWith)):
@@ -604,9 +666,8 @@ class RustGenerator:
             target = stmt.targets[0]
             if isinstance(target, ast.Name):
                 name = target.id
-                value = self._strip_outer_parens(
-                    self._emit_expr(stmt.value, self.function_type)
-                )
+                rhs_type = self._type_of(stmt.value)
+                value = self._strip_outer_parens(self._emit_expr(stmt.value, rhs_type))
                 return f"{name} = {value};"
             if isinstance(target, (ast.Tuple, ast.List)):
                 return self._emit_tuple_unpack(target, stmt.value)
@@ -615,6 +676,22 @@ class RustGenerator:
             "Only single-target or tuple unpacking assignments are supported",
             node=stmt,
         )
+
+    def _emit_append(self, expr: ast.Call) -> str:
+        if not isinstance(expr.func, ast.Attribute):
+            raise UnsupportedError("append() must be a method call", node=expr)
+        if len(expr.args) != 1:
+            raise UnsupportedError("append() takes exactly one argument", node=expr)
+        target = expr.func.value
+        container_type = self._type_of(target)
+        if not container_type.startswith("Vec<"):
+            raise UnsupportedError(
+                "append() is only supported on list/Vec types", node=expr
+            )
+        element_type = _element_type(container_type)
+        target_str = self._emit_expr(target, container_type)
+        arg_str = self._emit_expr(expr.args[0], element_type)
+        return f"{target_str}.push({arg_str});"
 
     def _emit_tuple_unpack(self, target: ast.AST, value: ast.expr) -> str:
         names = _names_in_target(target)
@@ -627,7 +704,11 @@ class RustGenerator:
                 "Tuple unpack requires a tuple/list on the right", node=value
             )
 
-        elements = [self._emit_expr(e, self.function_type) for e in _elements(value)]
+        value_elts = _elements(value)
+        elements = [
+            self._strip_outer_parens(self._emit_expr(e, self._type_of(e)))
+            for e in value_elts
+        ]
         tmp = self._next_tmp()
         # The parentheses here form a Rust tuple literal, so we keep them.
         lines = [f"let {tmp} = ({', '.join(elements)});"]
@@ -638,12 +719,13 @@ class RustGenerator:
     def _emit_augassign(self, stmt: ast.AugAssign) -> str:
         if isinstance(stmt.target, ast.Name):
             name = stmt.target.id
+            target_type = self._type_of(stmt.target)
             fake = ast.BinOp(
                 left=ast.Name(id=name, ctx=ast.Load()),
                 op=stmt.op,
                 right=stmt.value,
             )
-            value = self._strip_outer_parens(self._emit_binop(fake, self.function_type))
+            value = self._strip_outer_parens(self._emit_binop(fake, target_type))
             return f"{name} = {value};"
         target_type = self._type_of(stmt.target)
         lvalue = self._emit_lvalue(stmt.target, target_type)
@@ -695,15 +777,34 @@ class RustGenerator:
         return f"while {cond} {{\n{body}\n}}"
 
     def _emit_for(self, stmt: ast.For) -> str:
-        if not isinstance(stmt.target, ast.Name):
+        target = stmt.target
+        iter_expr = stmt.iter
+        if isinstance(iter_expr, ast.Call):
+            name = _call_name(iter_expr)
+            if name == "range":
+                return self._emit_for_range(stmt)
+            if name == "enumerate":
+                return self._emit_for_enumerate(stmt)
+            if name == "zip":
+                return self._emit_for_zip(stmt)
             raise UnsupportedError(
-                "Only a single loop variable is supported", node=stmt
+                f"Unsupported for-loop iterator: {name}", node=iter_expr
             )
-        if not isinstance(stmt.iter, ast.Call):
-            raise UnsupportedError("Only range(...) loops are supported", node=stmt)
+        if isinstance(iter_expr, ast.Name) and isinstance(target, ast.Name):
+            return self._emit_for_list_variable(target.id, iter_expr, stmt)
+        raise UnsupportedError(
+            "Only range, enumerate, zip, and list variable loops are supported",
+            node=stmt,
+        )
+
+    def _emit_for_range(self, stmt: ast.For) -> str:
+        target = stmt.target
+        if not isinstance(target, ast.Name):
+            raise UnsupportedError(
+                "Only a single loop variable is supported for range(...)", node=stmt
+            )
         call = stmt.iter
-        if _call_name(call) != "range":
-            raise UnsupportedError("Only range(...) loops are supported", node=call)
+        assert isinstance(call, ast.Call)
         if len(call.args) == 1:
             stop = self._emit_expr(call.args[0], self.function_type)
             if self.function_type == "f64":
@@ -721,7 +822,89 @@ class RustGenerator:
         else:
             raise UnsupportedError("range(...) with step is not supported", node=call)
         body = self._emit_body(stmt.body)
-        return f"for {stmt.target.id} in {range_expr} {{\n{body}\n}}"
+        return f"for {target.id} in {range_expr} {{\n{body}\n}}"
+
+    def _emit_for_enumerate(self, stmt: ast.For) -> str:
+        target = stmt.target
+        if not isinstance(target, ast.Tuple) or len(target.elts) != 2:
+            raise UnsupportedError(
+                "enumerate() requires a two-element tuple target", node=stmt
+            )
+        idx_name, val_name = target.elts[0].id, target.elts[1].id
+        call = stmt.iter
+        assert isinstance(call, ast.Call)
+        iterable = call.args[0]
+        iterable_type = self._type_of(iterable)
+        if not iterable_type.startswith("Vec<"):
+            raise UnsupportedError(
+                "enumerate() is only supported on list/Vec types", node=stmt
+            )
+        element_type = _element_type(iterable_type)
+        iter_rust = self._emit_expr(iterable, iterable_type)
+        if element_type in ("i64", "f64", "bool"):
+            iterator = f"{iter_rust}.iter().copied().enumerate()"
+        else:
+            iterator = f"{iter_rust}.iter().enumerate()"
+        body = self._emit_body(stmt.body)
+        return (
+            f"for ({idx_name}, {val_name}) in {iterator} {{\n"
+            f"    let {idx_name} = {idx_name} as i64;\n"
+            f"{body}\n"
+            f"}}"
+        )
+
+    def _emit_for_zip(self, stmt: ast.For) -> str:
+        target = stmt.target
+        call = stmt.iter
+        assert isinstance(call, ast.Call)
+        if not isinstance(target, ast.Tuple) or len(target.elts) != len(call.args):
+            raise UnsupportedError(
+                "zip() target must match the number of iterables", node=stmt
+            )
+        names = [elt.id for elt in target.elts if isinstance(elt, ast.Name)]
+        if len(names) != len(target.elts):
+            raise UnsupportedError(
+                "Only plain names are supported in a zip() target", node=target
+            )
+        iterators: List[str] = []
+        for arg in call.args:
+            arg_type = self._type_of(arg)
+            if not arg_type.startswith("Vec<"):
+                raise UnsupportedError(
+                    "zip() is only supported on list/Vec types", node=stmt
+                )
+            element_type = _element_type(arg_type)
+            arg_rust = self._emit_expr(arg, arg_type)
+            if element_type in ("i64", "f64", "bool"):
+                iterators.append(f"{arg_rust}.iter().copied()")
+            else:
+                iterators.append(f"{arg_rust}.iter()")
+        if len(iterators) > 2:
+            raise UnsupportedError(
+                "zip() with more than two iterables is not supported", node=stmt
+            )
+        zip_expr = iterators[0]
+        for it in iterators[1:]:
+            zip_expr = f"{zip_expr}.zip({it})"
+        body = self._emit_body(stmt.body)
+        return f"for ({', '.join(names)}) in {zip_expr} {{\n{body}\n}}"
+
+    def _emit_for_list_variable(
+        self, target_name: str, iter_expr: ast.Name, stmt: ast.For
+    ) -> str:
+        iter_type = self._type_of(iter_expr)
+        if not iter_type.startswith("Vec<"):
+            raise UnsupportedError(
+                "for ... in variable only supports list/Vec types", node=stmt
+            )
+        element_type = _element_type(iter_type)
+        iter_rust = self._emit_expr(iter_expr, iter_type)
+        if element_type in ("i64", "f64", "bool"):
+            iterator = f"{iter_rust}.iter().copied()"
+        else:
+            iterator = f"{iter_rust}.iter()"
+        body = self._emit_body(stmt.body)
+        return f"for {target_name} in {iterator} {{\n{body}\n}}"
 
     def _emit_body(self, stmts: List[ast.stmt]) -> str:
         lines = [self._emit_stmt(s) for s in stmts]
@@ -815,44 +998,125 @@ class RustGenerator:
         return f"vec![{', '.join(elements)}]"
 
     def _emit_listcomp(self, expr: ast.ListComp, ctx: str) -> str:
-        """Emit ``[elt for x in range(n)]`` as a Rust ``for`` loop block."""
+        """Emit a list comprehension as a Rust ``for`` loop block."""
         if len(expr.generators) != 1 or expr.generators[0].ifs:
             raise UnsupportedError(
-                "Only simple list comprehensions over range are supported", node=expr
+                "Only simple list comprehensions are supported", node=expr
             )
         gen = expr.generators[0]
-        if not isinstance(gen.target, ast.Name):
-            raise UnsupportedError(
-                "Only a single loop variable is supported in list comprehensions",
-                node=expr,
-            )
-        if not isinstance(gen.iter, ast.Call) or _call_name(gen.iter) != "range":
-            raise UnsupportedError(
-                "List comprehensions must iterate over range(...)", node=expr
-            )
-        if len(gen.iter.args) != 1:
-            raise UnsupportedError(
-                "List comprehension range must have a single argument", node=expr
-            )
         element_type = _element_type(ctx)
-        count = self._emit_expr(gen.iter.args[0], "i64")
-        loop_name = gen.target.id
+        loop_vars, iterator, var_types = self._emit_listcomp_iterator(gen, expr)
         tmp = self._next_tmp()
-        if loop_name != "_":
-            old_type = self.type_env.get(loop_name)
-            self.type_env[loop_name] = "i64"
-        else:
-            loop_name = self._next_tmp()
-        element = self._emit_expr(expr.elt, element_type)
-        if gen.target.id != "_":
-            if old_type is not None:
-                self.type_env[loop_name] = old_type
+        old_types: Dict[str, Optional[str]] = {}
+        for name, typ in var_types:
+            old_types[name] = self.type_env.get(name)
+            self.type_env[name] = typ
+        body_lines: List[str] = []
+        if (
+            isinstance(gen.iter, ast.Call)
+            and _call_name(gen.iter) == "enumerate"
+            and len(loop_vars) >= 2
+        ):
+            body_lines.append(f"let {loop_vars[0]} = {loop_vars[0]} as i64;")
+        body_lines.append(f"{tmp}.push({self._emit_expr(expr.elt, element_type)});")
+        body = "\n".join("    " + line for line in body_lines)
+        for name, _ in var_types:
+            if old_types[name] is not None:
+                self.type_env[name] = old_types[name]  # type: ignore[assignment]
             else:
-                self.type_env.pop(loop_name, None)
+                self.type_env.pop(name, None)
         return (
             f"{{ let mut {tmp} = Vec::<{element_type}>::new(); "
-            f"for {loop_name} in 0_i64..({count}) {{ {tmp}.push({element}); }} "
+            f"for ({', '.join(loop_vars)}) in {iterator} {{\n{body}\n}} "
             f"{tmp} }}"
+        )
+
+    def _emit_listcomp_iterator(
+        self, gen: ast.comprehension, expr: ast.ListComp
+    ) -> Tuple[List[str], str, List[Tuple[str, str]]]:
+        """Return (loop variable names, Rust iterator expression, variable types)."""
+        if isinstance(gen.target, ast.Name):
+            name = gen.target.id
+            if isinstance(gen.iter, ast.Call):
+                call = gen.iter
+                call_name = _call_name(call)
+                if call_name == "range":
+                    if len(call.args) == 1:
+                        count = self._emit_expr(call.args[0], "i64")
+                        return [name], f"0_i64..({count})", [(name, "i64")]
+                    if len(call.args) == 2:
+                        start = self._emit_expr(call.args[0], "i64")
+                        stop = self._emit_expr(call.args[1], "i64")
+                        return [name], f"({start})..({stop})", [(name, "i64")]
+                    raise UnsupportedError(
+                        "List comprehension range(...) with step is not supported",
+                        node=expr,
+                    )
+                if call_name == "enumerate":
+                    raise UnsupportedError(
+                        "Use a tuple target for enumerate() in list comprehensions",
+                        node=expr,
+                    )
+            if isinstance(gen.iter, ast.Name):
+                iter_type = self._type_of(gen.iter)
+                element_type = _element_type(iter_type)
+                iter_rust = self._emit_expr(gen.iter, iter_type)
+                if element_type in ("i64", "f64", "bool"):
+                    return (
+                        [name],
+                        f"{iter_rust}.iter().copied()",
+                        [(name, element_type)],
+                    )
+                return [name], f"{iter_rust}.iter()", [(name, f"&{element_type}")]
+        if isinstance(gen.target, ast.Tuple):
+            names = [elt.id for elt in gen.target.elts if isinstance(elt, ast.Name)]
+            if len(names) != len(gen.target.elts):
+                raise UnsupportedError(
+                    "Only plain names are supported in a list comprehension target",
+                    node=expr,
+                )
+            if isinstance(gen.iter, ast.Call):
+                call = gen.iter
+                call_name = _call_name(call)
+                if call_name == "enumerate" and len(names) == 2:
+                    iterable = call.args[0]
+                    iterable_type = self._type_of(iterable)
+                    element_type = _element_type(iterable_type)
+                    iter_rust = self._emit_expr(iterable, iterable_type)
+                    if element_type in ("i64", "f64", "bool"):
+                        iterator = f"{iter_rust}.iter().copied().enumerate()"
+                    else:
+                        iterator = f"{iter_rust}.iter().enumerate()"
+                    return (
+                        names,
+                        iterator,
+                        [(names[0], "i64"), (names[1], element_type)],
+                    )
+                if call_name == "zip":
+                    if len(names) != len(call.args) or len(names) > 2:
+                        raise UnsupportedError(
+                            "zip() in list comprehensions supports two iterables",
+                            node=expr,
+                        )
+                    iterators: List[str] = []
+                    var_types: List[Tuple[str, str]] = []
+                    for elt, arg in zip(gen.target.elts, call.args):
+                        if not isinstance(elt, ast.Name):
+                            continue
+                        arg_type = self._type_of(arg)
+                        element_type = _element_type(arg_type)
+                        arg_rust = self._emit_expr(arg, arg_type)
+                        if element_type in ("i64", "f64", "bool"):
+                            iterators.append(f"{arg_rust}.iter().copied()")
+                        else:
+                            iterators.append(f"{arg_rust}.iter()")
+                        var_types.append((elt.id, element_type))
+                    zip_expr = iterators[0]
+                    for it in iterators[1:]:
+                        zip_expr = f"{zip_expr}.zip({it})"
+                    return names, zip_expr, var_types
+        raise UnsupportedError(
+            "Unsupported list comprehension iterator or target", node=expr
         )
 
     def _emit_subscript(self, expr: ast.Subscript, ctx: str) -> str:
@@ -1135,6 +1399,16 @@ class RustGenerator:
             for a in args[1:]:
                 result = f"({result}.{method}({a}))"
             return result
+
+        if base is None and name == "len":
+            if len(expr.args) != 1:
+                raise UnsupportedError("len() takes exactly one argument", node=expr)
+            arg_node = expr.args[0]
+            container_type = self._type_of(arg_node)
+            if isinstance(arg_node, ast.Subscript):
+                container_type = self._type_of(arg_node.value)
+            arg_str = self._emit_expr(arg_node, container_type)
+            return f"(({arg_str}).len() as i64)"
 
         if base in ("np", "numpy"):
             return self._emit_numpy_call(name, expr, ctx)
