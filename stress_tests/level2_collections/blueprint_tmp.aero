@@ -1,4 +1,0 @@
-project: tmp
-functions:
-  - file: sum_builtin.py
-    name: sum  # not reliable
