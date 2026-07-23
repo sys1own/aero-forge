@@ -63,8 +63,8 @@ def test_parse_generated_response_no_blocks():
 def test_find_algorithm_for_prompt():
     from aero_forge.algorithms import find_algorithm
 
-    source = find_algorithm("compute the fibonacci number")
-    assert source is not None and "def fibonacci" in source
+    algo = find_algorithm("compute the fibonacci number")
+    assert algo is not None and "def fibonacci" in algo.source
 
 
 def test_list_algorithms():

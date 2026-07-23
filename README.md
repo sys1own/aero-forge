@@ -241,6 +241,17 @@ Eight templates are included for different generation styles:
 
 Use `--prompt-template v5_balanced` to select one. `v5_balanced` is the default and was the most reliable in the prompt-engineering campaign.
 
+## Advanced LLM Intelligence (D-series)
+
+These flags turn Aero-Forge into a senior-engineer-style assistant:
+
+- `--algorithm-library` selects a reference implementation from the built-in `aero_forge/algorithms/` library and asks the LLM to adapt it.
+- `--selected-algorithm <name>` forces a specific library entry.
+- `--variants N` generates N implementations, compiles each, and selects the fastest variant that passes all tests using a Pareto frontier over accuracy and build time.
+- `--explain` requests an `## Explanation` section covering algorithm choice, complexity, and tradeoffs.
+- `--discover` lets the LLM design a new algorithm when the library has no match.
+- `--review` runs a second LLM pass that checks the generated code for correctness, performance, security, and style.
+
 ## Performance
 
 Aero-Forge targets 10-100x speedups for hot numerical loops. Actual speedup depends on the function and the quality of the generated Rust. The benchmark loop in `aero-forge generate --optimize` compares the native extension against the original Python and reports the relative improvement.

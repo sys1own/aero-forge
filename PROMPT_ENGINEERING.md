@@ -69,6 +69,17 @@ The script writes `prompt_engineering_report.json` with per-case metrics.
 - Added `aero_forge/prompt_engineering.py` campaign harness and
   `tests/test_prompt_engineering.py`.
 
+## Explanations and Reviews
+
+Newer prompts support structured explanation output:
+
+- `--explain` appends a request for an `## Explanation` section describing
+  algorithm choice, complexity, and tradeoffs.  The response is parsed by
+  `extract_explanation()` and displayed to the user.
+- `--review` adds a second LLM pass with a senior-engineer system prompt that
+  checks correctness, performance, security, and style, then outputs a corrected
+  implementation in a single fenced code block.
+
 ## Recommendations
 
 1. Use `v5_balanced` for general prompt-to-build workflows.

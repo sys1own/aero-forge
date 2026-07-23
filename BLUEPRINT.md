@@ -121,6 +121,15 @@ aero-forge examples run fibonacci
 
 # Create a new example from a prompt
 aero-forge examples create primes --prompt "fast prime sieve"
+
+# Generate from the algorithm library
+aero-forge generate --algorithm-library --prompt "sort a list quickly"
+
+# Generate and benchmark multiple variants
+aero-forge generate --variants 3 --prompt "fast prime check" --build
+
+# Generate with an explanation and self-review
+aero-forge generate --explain --review --prompt "fast gcd"
 ```
 
 ## Precedence

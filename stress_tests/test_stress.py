@@ -321,3 +321,110 @@ class TestLevel25AutoDetect:
         output = result.stdout + result.stderr
         assert result.returncode == 0, output
         assert "1 succeeded" in output
+
+
+class TestLevel15AlgorithmSelection:
+    def test_library_selects_quicksort_for_sorting(self):
+        from aero_forge.algorithms import find_algorithm
+
+        algo = find_algorithm("build a fast sorting function")
+        assert algo is not None
+        assert algo.category == "sorting"
+
+    def test_library_selects_prime_algorithm(self):
+        from aero_forge.algorithms import find_algorithm
+
+        algo = find_algorithm("check whether a number is prime")
+        assert algo is not None
+        assert "prime" in algo.name
+
+
+class TestLevel16MultiVariant:
+    def test_pareto_selection_prefers_fastest_passing_variant(self):
+        from aero_forge.variants import pareto_frontier
+
+        variants = [
+            {
+                "variant": 0,
+                "elapsed_seconds": 2.0,
+                "build": {"success": True, "passed": 1, "total": 1},
+            },
+            {
+                "variant": 1,
+                "elapsed_seconds": 1.0,
+                "build": {"success": True, "passed": 1, "total": 1},
+            },
+            {
+                "variant": 2,
+                "elapsed_seconds": 3.0,
+                "build": {"success": True, "passed": 1, "total": 1},
+            },
+        ]
+        front = pareto_frontier(variants)
+        assert len(front) == 1
+        assert front[0]["variant"] == 1
+
+
+class TestLevel17Explainable:
+    def test_extract_explanation_from_llm_response(self):
+        from aero_forge.generate import extract_explanation
+
+        text = (
+            "```python\ndef f():\n    pass\n```\n\n"
+            "## Explanation\n"
+            "This algorithm runs in O(n log n) time with O(n) space.\n"
+        )
+        explanation = extract_explanation(text)
+        assert "O(n log n)" in explanation
+
+
+class TestLevel18Discovery:
+    def test_discover_flag_allows_unknown_prompt(self):
+        """With --discover, the CLI accepts prompts not in the algorithm library."""
+        from click.testing import CliRunner
+        from aero_forge.cli import main
+        from unittest.mock import patch, MagicMock
+
+        runner = CliRunner()
+        client = MagicMock()
+        client.generate.return_value = (
+            "```python\ndef novel(n: int) -> int:\n    return n * 2\n```"
+        )
+
+        with patch("aero_forge.generate.get_llm_client", return_value=client):
+            result = runner.invoke(
+                main,
+                [
+                    "generate",
+                    "--prompt",
+                    "solve a brand new unseen problem",
+                    "--algorithm-library",
+                    "--discover",
+                    "--llm-provider",
+                    "openai",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+
+
+class TestLevel19CodeReview:
+    def test_review_code_returns_corrected_implementation(self):
+        from unittest.mock import patch, MagicMock
+        from aero_forge.generate import _review_code
+
+        response = (
+            "Use an iterative loop to avoid recursion depth.\n\n"
+            "```python\ndef factorial(n: int) -> int:\n"
+            "    result = 1\n"
+            "    for i in range(2, n + 1):\n"
+            "        result *= i\n"
+            "    return result\n```"
+        )
+        client = MagicMock()
+        client.generate.return_value = response
+        original = "def factorial(n: int) -> int:\n    return n * factorial(n - 1)"
+
+        with patch("aero_forge.generate.get_llm_client", return_value=client):
+            corrected = _review_code(original, "factorial", None, "openai", None, 3)
+
+        assert "result = 1" in corrected
