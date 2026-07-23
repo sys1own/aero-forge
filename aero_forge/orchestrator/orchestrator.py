@@ -26,7 +26,7 @@ from aero_forge.orchestrator.error_classifier import (
     classify_exception,
     is_fatal,
 )
-from aero_forge.orchestrator.model_client import ModelClient
+from aero_forge.llm import get_llm_client
 from aero_forge.orchestrator.prompt_builder import PromptBuilder
 from aero_forge.precision_shield.shield import Shield
 from aero_forge.sandbox.manager import Sandbox
@@ -57,6 +57,7 @@ class Orchestrator:
         test_path: Optional[str | Path] = None,
         max_iterations: Optional[int] = None,
         use_llm: Optional[bool] = None,
+        llm_provider: Optional[str] = None,
         model: Optional[str] = None,
         model_priority: Optional[List[str]] = None,
         max_retries: Optional[int] = None,
@@ -66,20 +67,25 @@ class Orchestrator:
         overrides: Dict[str, Any] = {}
         if max_iterations is not None:
             overrides["MAX_ITERATIONS"] = max_iterations
-        if use_llm is not None:
-            overrides["USE_LLM"] = use_llm
         if max_retries is not None:
             overrides["MAX_RETRIES"] = max_retries
         if cache_enabled is not None:
             overrides["CACHE_ENABLED"] = cache_enabled
-        if fallback_model is not None:
-            overrides["FALLBACK_MODEL"] = fallback_model
-
-        # Backward compat: --model sets a single-model priority list.
+        if llm_provider is not None:
+            overrides["LLM_PROVIDER"] = llm_provider
         if model is not None:
-            overrides["MODEL_PRIORITY"] = [model]
+            overrides["MODEL"] = model
+
+        # Backward compat: --model sets the model name; --model-priority uses its first entry.
         if model_priority is not None:
-            overrides["MODEL_PRIORITY"] = model_priority
+            if isinstance(model_priority, list) and model_priority:
+                overrides["MODEL"] = model_priority[0]
+            elif isinstance(model_priority, str):
+                overrides["MODEL"] = model_priority.split(",")[0].strip()
+
+        # Backward compat: use_llm=False forces provider to none.
+        if use_llm is False:
+            overrides["LLM_PROVIDER"] = "none"
 
         file_config = load_config()
         self.settings = resolve_settings(file_config, **overrides)
@@ -89,14 +95,23 @@ class Orchestrator:
         self.test_path = Path(test_path) if test_path else None
         self._project_root: Optional[Path] = None
         self.max_iterations = self.settings["MAX_ITERATIONS"]
-        self.use_llm = self.settings["USE_LLM"]
+        self.use_llm = self.settings.get("LLM_PROVIDER", "none") != "none"
 
         self.cache = FixCache(enabled=self.settings["CACHE_ENABLED"])
         self.prompt_builder = PromptBuilder()
-        self.model_client = ModelClient(
-            models=self.settings["MODEL_PRIORITY"],
-            max_retries=self.settings["MAX_RETRIES"],
-        )
+        self.llm_client: Optional[Any] = None
+        if self.use_llm:
+            self.llm_client = get_llm_client(
+                self.settings.get("LLM_PROVIDER"),
+                model=self.settings.get("MODEL"),
+                max_retries=self.settings["MAX_RETRIES"],
+            )
+            if self.llm_client is None:
+                logger.warning(
+                    "LLM provider %s could not be configured; falling back to router-only mode",
+                    self.settings.get("LLM_PROVIDER"),
+                )
+                self.use_llm = False
         self._cargo_target = Path.home() / ".cache" / "aero-forge" / "target"
 
     def run(self) -> Dict[str, Any]:
@@ -229,17 +244,17 @@ class Orchestrator:
             return cached
 
         # 3. LLM fallback.
-        if not self.use_llm:
+        if not self.use_llm or self.llm_client is None:
             logger.info("LLM disabled; no fix available")
             return None
 
         func_source = self._extract_function_source(source)
         messages = self.prompt_builder.build(self.function_name, func_source)
 
-        logger.info("Requesting LLM fix from %s", self.settings["MODEL_PRIORITY"])
-        answer = self.model_client.complete(messages)
+        logger.info("Requesting LLM fix from %s", self.settings.get("LLM_PROVIDER"))
+        answer = self.llm_client.generate(messages)
         if answer is None:
-            logger.error("All LLM models failed to produce a fix")
+            logger.error("LLM failed to produce a fix")
             return None
 
         new_func = _extract_function_body(answer, self.function_name)
