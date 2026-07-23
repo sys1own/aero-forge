@@ -35,6 +35,7 @@ fail with a clear `UnsupportedError` message rather than crashing.
 | 15 | WASM target | **Pass** | `--target wasm32-unknown-unknown` compiles scalar functions to `.wasm` and a `.js` loader; verified with Node.js. |
 | 16 | Distributed builds | **Partial** | `--distribute` compiles multiple source files in parallel worker processes locally; cross-machine worker pool is future work. |
 | 17 | Cross-compilation | **Pass** | `--target` builds for `x86_64-pc-windows-gnu` (`.dll`) and `x86_64-unknown-linux-gnu` (`.so`); non-host targets skip test execution. |
+| 18 | Prompt-driven generation | **Pass** | `aero-forge generate` and `aero-forge build` with a `prompt` field create, test, and compile code. `aero-forge chat` maintains conversation state. |
 
 ## Adding a new stress test
 

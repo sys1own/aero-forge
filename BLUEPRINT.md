@@ -17,6 +17,8 @@ Blueprints can be written as `.aero` (YAML-compatible) or `.yaml` files.
 | `compiler_flags` | list of strings | No | Extra `RUSTFLAGS` applied to every function. Default: `[]`. |
 | `output_dir` | string/path | No | Directory for compiled `.so` and loader `.py` files. Default: `./dist`. |
 | `llm` | object | No | LLM provider/model configuration. See below. |
+| `prompt` | string | No | Natural language prompt used by `aero-forge generate` to produce `src/generated.py` and `tests/test_generated.py`. |
+| `constraints` | string | No | Optional constraints for generated code (e.g. "iterative only", "O(n) time"). |
 
 ## `functions` entries
 

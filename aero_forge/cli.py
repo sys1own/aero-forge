@@ -314,6 +314,22 @@ def build(
                 click.echo(f"Wrote blueprint: {blueprint_path}")
         else:
             bp = parse_blueprint(Path(blueprint))
+
+        if bp.prompt:
+            from .generate import generate_project
+
+            if not llm_provider:
+                llm_provider = os.getenv("AERO_FORGE_LLM_PROVIDER") or bp.llm.provider
+            if not model:
+                model = os.getenv("AERO_FORGE_MODEL") or bp.llm.model
+            _, _, bp, _, _ = generate_project(
+                bp.prompt,
+                constraints=bp.constraints,
+                output_dir=Path(output_dir) if output_dir else bp.output_dir,
+                project_name=bp.project,
+                llm_provider=llm_provider,
+                model=model,
+            )
     except (UserError, ValueError) as exc:
         click.echo(f"Invalid blueprint: {exc}", err=True)
         sys.exit(1)
@@ -375,6 +391,135 @@ def build(
     )
     if not result["success"]:
         sys.exit(1)
+
+
+@main.command("generate")
+@click.option(
+    "--prompt",
+    "-p",
+    default=None,
+    help="Natural language description of the function to generate.",
+)
+@click.option(
+    "--prompt-file",
+    "-P",
+    type=click.Path(exists=True, dir_okay=False, path_type=str),
+    default=None,
+    help="Path to a file containing the prompt.",
+)
+@click.option(
+    "--constraints",
+    "-c",
+    default=None,
+    help="Optional constraints for the generated code (e.g. 'iterative only').",
+)
+@click.option(
+    "--output-dir",
+    "-o",
+    type=click.Path(file_okay=False, writable=True, path_type=str),
+    default=".",
+    help="Directory where src/generated.py and tests/test_generated.py will be written.",
+)
+@click.option(
+    "--project",
+    default="generated_project",
+    help="Project name to use in the generated blueprint.",
+)
+@click.option(
+    "--llm-provider",
+    default=None,
+    help="LLM provider: openai, openrouter, gemini, or none (default: config/env).",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="Model name to use (default depends on provider).",
+)
+@click.option(
+    "--build",
+    "do_build",
+    is_flag=True,
+    help="Run aero-forge build after generating the code.",
+)
+@click.option(
+    "--optimize",
+    is_flag=True,
+    help="Run an iterative optimization loop after the initial build.",
+)
+@click.option(
+    "--max-iterations",
+    type=int,
+    default=5,
+    help="Maximum optimization iterations (default: 5).",
+)
+@click.option(
+    "--no-llm",
+    is_flag=True,
+    help="Skip LLM generation and only write stubs (not useful with --prompt).",
+)
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="Show debug logs.",
+)
+def generate(
+    prompt: str | None,
+    prompt_file: str | None,
+    constraints: str | None,
+    output_dir: str,
+    project: str,
+    llm_provider: str | None,
+    model: str | None,
+    do_build: bool,
+    optimize: bool,
+    max_iterations: int,
+    no_llm: bool,
+    verbose: bool,
+) -> None:
+    """Generate Python code and tests from a natural language prompt."""
+    _setup_logging(verbose)
+
+    if no_llm:
+        llm_provider = "none"
+
+    if prompt_file:
+        prompt = Path(prompt_file).read_text(encoding="utf-8").strip()
+    if not prompt:
+        click.echo("Error: --prompt or --prompt-file is required.", err=True)
+        sys.exit(1)
+
+    try:
+        from .generate import generate_and_build
+
+        result = generate_and_build(
+            prompt,
+            constraints=constraints,
+            output_dir=Path(output_dir),
+            project_name=project,
+            llm_provider=llm_provider,
+            model=model,
+            max_iterations=max_iterations,
+            optimize=optimize,
+            build_kwargs=(
+                {"max_workers": 1, "cache_enabled": False} if do_build else None
+            ),
+        )
+    except Exception as exc:
+        click.echo(f"Generation failed: {exc}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Generated: {result['source_path']}")
+    click.echo(f"Tests:     {result['test_path']}")
+    click.echo(f"Blueprint: {result['blueprint_path']}")
+
+    if result.get("build"):
+        build_result = result["build"]
+        click.echo(
+            f"Build: {build_result.get('passed', 0)}/{build_result.get('total', 0)} "
+            f"succeeded ({build_result.get('output_dir', '')})"
+        )
+        if not build_result.get("success"):
+            sys.exit(1)
 
 
 def _blueprint_from_auto(
@@ -468,6 +613,79 @@ def init(project: str, path: str, fmt: str) -> None:
     except OSError as exc:
         click.echo(f"Failed to initialize project: {exc}", err=True)
         sys.exit(1)
+
+
+@main.command()
+@click.option(
+    "--output-dir",
+    "-o",
+    type=click.Path(file_okay=False, writable=True, path_type=str),
+    default=".",
+    help="Directory for generated files and builds.",
+)
+@click.option(
+    "--llm-provider",
+    default=None,
+    help="LLM provider: openai, openrouter, gemini, or none (default: config/env).",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="Model name to use (default depends on provider).",
+)
+@click.option(
+    "--max-iterations",
+    type=int,
+    default=5,
+    help="Maximum optimization iterations (default: 5).",
+)
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="Show debug logs.",
+)
+def chat(
+    output_dir: str,
+    llm_provider: str | None,
+    model: str | None,
+    max_iterations: int,
+    verbose: bool,
+) -> None:
+    """Interactive chat session for prompt-driven generation and optimization."""
+    _setup_logging(verbose)
+    from .chat import ChatSession
+
+    session = ChatSession(
+        Path(output_dir),
+        llm_provider=llm_provider,
+        model=model,
+        max_iterations=max_iterations,
+    )
+
+    click.echo("Aero-Forge chat mode. Type 'exit' or 'quit' to leave.")
+    while True:
+        try:
+            user_input = click.prompt("> ", prompt_suffix="")
+        except (EOFError, click.exceptions.Abort):
+            break
+        text = user_input.strip()
+        if not text:
+            continue
+        if text.lower() in {"exit", "quit"}:
+            break
+
+        action_result = session.handle_command(text)
+        if action_result:
+            build = action_result.get("build")
+            if build:
+                click.echo(
+                    f"Build: {build.get('passed', 0)}/{build.get('total', 0)} succeeded"
+                )
+            else:
+                click.echo("Action completed.")
+
+        response = session.reply(text)
+        click.echo(response)
 
 
 if __name__ == "__main__":
