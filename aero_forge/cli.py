@@ -264,9 +264,9 @@ def fix(
 )
 @click.option(
     "--target",
-    type=click.Choice(["native", "wasm32-unknown-unknown"]),
+    type=click.STRING,
     default="native",
-    help="Build target (default: native).",
+    help="Build target triple (default: native; e.g. wasm32-unknown-unknown, x86_64-unknown-linux-musl).",
 )
 @click.option(
     "--gpu",

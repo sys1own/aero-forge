@@ -6,6 +6,7 @@ import concurrent.futures
 import logging
 import os
 import shutil
+import subprocess
 import traceback
 from collections import defaultdict
 from pathlib import Path
@@ -69,6 +70,7 @@ class BuildRunner:
         self.gpu = gpu
         self.target = target
         self.distributed = distributed
+        self._host_target = _host_target()
         env_cache = os.getenv("AERO_FORGE_CACHE_ENABLED", "true").lower() not in (
             "0",
             "false",
@@ -186,6 +188,9 @@ class BuildRunner:
         all_tests = sorted(
             {str(t.resolve()) for spec in specs for t in spec.tests if t.is_file()}
         )
+        # Skip running tests when cross-compiling to a different host.
+        if self.target not in ("native", self._host_target):
+            all_tests = []
         flags = self._combined_flags(specs)
 
         source_text = source.read_text(encoding="utf-8")
@@ -239,7 +244,7 @@ class BuildRunner:
                 )
 
         cache_key_name = f"{source.stem}_{'_'.join(function_names)}"
-        cached = self.cache.get(source_text, flags, cache_key_name)
+        cached = self.cache.get(source_text, flags, cache_key_name, target=self.target)
 
         if cached is not None:
             try:
@@ -280,6 +285,7 @@ class BuildRunner:
             cache_enabled=False,
             compiler_flags=flags,
             output_dir=source_output,
+            target=self.target if self.target != "native" else None,
         )
         result = orchestrator.run()
         success = result.get("success", False)
@@ -287,7 +293,9 @@ class BuildRunner:
         if success and result.get("artifact"):
             artifact = Path(result["artifact"])
             if artifact.is_file():
-                self.cache.put(source_text, flags, cache_key_name, artifact)
+                self.cache.put(
+                    source_text, flags, cache_key_name, artifact, target=self.target
+                )
                 artifact_path = source_output / artifact.name
 
         return BuildResult(
@@ -385,6 +393,23 @@ class BuildRunner:
                 for r in results
             ],
         }
+
+
+def _host_target() -> str:
+    try:
+        result = subprocess.run(
+            ["rustc", "-vV"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        for line in result.stdout.splitlines():
+            if line.startswith("host:"):
+                return line.split(":", 1)[1].strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return "unknown"
 
 
 def _cache_dir_from_env() -> Optional[Path]:
