@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ast
 import re
+import logging
+import sys
 import tempfile
 from importlib import resources
 from pathlib import Path
@@ -11,6 +13,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from aero_forge._constants import IO_MODULES, IO_NAMES, MATH_ATTRS, MATH_CONSTANTS
 from aero_forge.errors import UnsupportedError
+
+logger = logging.getLogger("aero_forge.scaffold.engine")
 
 
 class Engine:
@@ -819,3 +823,53 @@ def _rust_identifier(name: str) -> str:
     if sanitized[0].isdigit() or sanitized in _RUST_KEYWORDS:
         sanitized = "a_" + sanitized
     return sanitized
+
+# ---------------------------------------------------------------------------
+# Package scaffolding helpers
+# ---------------------------------------------------------------------------
+def find_project_root(start: Path) -> Path:
+    """Locate the project root by searching for common markers.
+
+    Falls back to the current working directory when no marker is found, but
+    if ``start`` is outside the working directory the directory containing
+    ``start`` is used so the source file is always inside the returned root.
+    """
+    start = Path(start).resolve()
+    directory = start if start.is_dir() else start.parent
+    for parent in [directory] + list(directory.parents):
+        if (
+            (parent / ".git").is_dir()
+            or (parent / "pyproject.toml").is_file()
+            or (parent / ".aero-forge-root").is_file()
+        ):
+            return parent
+
+    cwd = Path.cwd().resolve()
+    if cwd == directory or cwd in directory.parents:
+        return cwd
+    return directory
+
+
+def ensure_init_files(target: Path, project_root: Optional[Path] = None) -> None:
+    """Create ``__init__.py`` files from ``target``'s directory up to ``project_root``."""
+    target = Path(target).resolve()
+    if project_root is None:
+        project_root = find_project_root(target.parent)
+    project_root = project_root.resolve()
+
+    current = target.parent
+    while current != project_root and project_root in current.parents:
+        init_file = current / "__init__.py"
+        if not init_file.exists():
+            init_file.write_text("# Created by aero-forge\n", encoding="utf-8")
+            logger.info("Created %s", init_file)
+        current = current.parent
+
+
+def ensure_sys_path(root: Optional[Path] = None) -> None:
+    """Insert ``root`` at the front of ``sys.path`` if it is not already present."""
+    root = (root or find_project_root(Path.cwd())).resolve()
+    str_root = str(root)
+    if str_root not in sys.path:
+        sys.path.insert(0, str_root)
+        logger.info("Added %s to sys.path", str_root)

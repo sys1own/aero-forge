@@ -30,7 +30,14 @@ from aero_forge.orchestrator.model_client import ModelClient
 from aero_forge.orchestrator.prompt_builder import PromptBuilder
 from aero_forge.precision_shield.shield import Shield
 from aero_forge.sandbox.manager import Sandbox
-from aero_forge.scaffold.engine import Engine, _find_function, _rust_identifier
+from aero_forge.scaffold.engine import (
+    Engine,
+    _find_function,
+    _rust_identifier,
+    ensure_init_files,
+    ensure_sys_path,
+    find_project_root,
+)
 from aero_forge.translator import UASTToHINTranslator, python_source_to_uast
 
 logger = logging.getLogger("aero_forge.orchestrator")
@@ -80,6 +87,7 @@ class Orchestrator:
         self.source_path = Path(source_path)
         self.function_name = function_name
         self.test_path = Path(test_path) if test_path else None
+        self._project_root: Optional[Path] = None
         self.max_iterations = self.settings["MAX_ITERATIONS"]
         self.use_llm = self.settings["USE_LLM"]
 
@@ -94,6 +102,8 @@ class Orchestrator:
     def run(self) -> Dict[str, Any]:
         """Run the build/heal loop and return the final result."""
         logger.info("Starting forge for %s::%s", self.source_path, self.function_name)
+        self._project_root = find_project_root(self.source_path)
+        ensure_sys_path(self._project_root)
         check_toolchain()
         if not self.source_path.is_file():
             raise UserError(f"Source file not found: {self.source_path}")
@@ -109,7 +119,10 @@ class Orchestrator:
             logger.info("Forge iteration %d/%d", iteration, self.max_iterations)
 
             with Sandbox(
-                self.source_path, self.function_name, self.test_path
+                self.source_path,
+                self.function_name,
+                self.test_path,
+                project_root=self._project_root,
             ) as sandbox:
                 sandbox.source_in_sandbox.write_text(source, encoding="utf-8")
 
@@ -310,14 +323,15 @@ class Orchestrator:
     def _install_native_module(self, sandbox: Sandbox, artifact: Path) -> None:
         """Place the compiled extension next to a Python loader in the sandbox."""
         crate_name = _rust_identifier(f"aero_forge_{self.source_path.stem}")
-        so_path = sandbox.root / artifact.name
+        loader = sandbox.source_in_sandbox
+        so_path = loader.parent / artifact.name
+        loader.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(artifact, so_path)
-
-        loader = sandbox.root / self.source_path.name
         loader.write_text(
             self._loader_source(so_path, crate_name, [self.function_name]),
             encoding="utf-8",
         )
+        ensure_init_files(loader, project_root=sandbox.root)
 
     def _loader_source(
         self, so_path: Path, module_name: str, function_names: List[str]
@@ -341,8 +355,11 @@ class Orchestrator:
         dest_dir = self.source_path.parent
         so_dest = dest_dir / artifact.name
         loader_dest = dest_dir / self.source_path.name
-        shutil.copy(sandbox.root / self.source_path.name, loader_dest)
+        shutil.copy(sandbox.source_in_sandbox, loader_dest)
         shutil.copy(artifact, so_dest)
+        if self._project_root is None:
+            self._project_root = find_project_root(self.source_path)
+        ensure_init_files(loader_dest, project_root=self._project_root)
 
     def _extract_function_source(self, source: str) -> str:
         try:

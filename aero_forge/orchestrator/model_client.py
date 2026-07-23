@@ -10,23 +10,15 @@ from typing import Any, Dict, List, Optional, Tuple
 logger = logging.getLogger("aero_forge.model_client")
 
 
-def _detect_provider(model: str) -> Tuple[str, str, Optional[str]]:
-    """Return (base_url, api_key_env, actual_model_name) for ``model``."""
+def _detect_provider(model: str) -> Tuple[str, str]:
+    """Return (base_url, actual_model_name) for ``model``."""
     model = model.strip()
     if model.startswith("openrouter/"):
         name = model.split("/", 1)[1] or "openai/gpt-4"
-        return (
-            "https://openrouter.ai/api/v1",
-            "OPENROUTER_API_KEY",
-            name,
-        )
+        return ("https://openrouter.ai/api/v1", name)
     if model.startswith("gemini-") or "/gemini" in model:
-        return (
-            "https://generativelanguage.googleapis.com/v1beta/openai/",
-            "GEMINI_API_KEY",
-            model,
-        )
-    return ("https://api.openai.com/v1", "OPENAI_API_KEY", model)
+        return ("https://generativelanguage.googleapis.com/v1beta/openai/", model)
+    return ("https://api.openai.com/v1", model)
 
 
 class ModelClient:
@@ -38,29 +30,20 @@ class ModelClient:
         max_retries: int = 3,
         backoff_initial: float = 1.0,
         backoff_max: float = 30.0,
+        api_key: Optional[str] = None,
     ):
         self.models = list(models) if models else ["gpt-4"]
         self.max_retries = max(1, max_retries)
         self.backoff_initial = backoff_initial
         self.backoff_max = backoff_max
-
-    @staticmethod
-    def _api_key(env_name: str) -> Optional[str]:
-        key = os.getenv(env_name)
-        if key:
-            return key
-        # Fallback to generic OpenAI key if provider key is not set.
-        if env_name != "OPENAI_API_KEY":
-            return os.getenv("OPENAI_API_KEY")
-        return None
+        self.api_key = api_key or os.getenv("AERO_FORGE_API_KEY")
 
     def _client_for(self, model: str) -> Tuple[Any, str]:
         from openai import OpenAI
 
-        base_url, key_env, actual_model = _detect_provider(model)
-        # Allow explicit environment overrides.
-        base_url = os.getenv("OPENAI_BASE_URL", base_url)
-        api_key = self._api_key(key_env)
+        base_url, actual_model = _detect_provider(model)
+        base_url = os.getenv("AERO_FORGE_BASE_URL") or base_url
+        api_key = self.api_key
         if not api_key:
             # Some local endpoints don't require a key.
             api_key = "dummy-key"
