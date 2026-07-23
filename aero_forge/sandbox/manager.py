@@ -19,6 +19,7 @@ class Sandbox:
         function_name: str,
         test_file: Optional[Path] = None,
         extra_files: Optional[list] = None,
+        project_root: Optional[Path] = None,
     ):
         self.source = Path(source)
         self.function_name = function_name
@@ -28,6 +29,7 @@ class Sandbox:
             else self.source.parent / f"test_{self.source.stem}.py"
         )
         self.extra_files = [Path(f) for f in (extra_files or [])]
+        self.project_root = project_root
         self._tmpdir = tempfile.TemporaryDirectory(prefix="aero-forge-sandbox-")
         self.root = Path(self._tmpdir.name)
         self._populate()

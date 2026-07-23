@@ -107,13 +107,12 @@ def fix(
         priority = [m.strip() for m in model_priority.split(",") if m.strip()]
 
     use_llm = not no_llm
-    if use_llm and not _has_any_api_key():
+    if use_llm and not os.getenv("AERO_FORGE_API_KEY"):
         click.echo(
-            "No API key found (OPENAI_API_KEY, OPENROUTER_API_KEY, or GEMINI_API_KEY). "
-            "Set one or use --no-llm.",
+            "AERO_FORGE_API_KEY not set; falling back to router-only mode.",
             err=True,
         )
-        sys.exit(1)
+        use_llm = False
 
     try:
         orchestrator = Orchestrator(
@@ -163,18 +162,6 @@ def fix(
     else:
         click.echo(f"Forge failed: {result.get('error', 'unknown')}", err=True)
         sys.exit(1)
-
-
-def _has_any_api_key() -> bool:
-    return any(
-        os.getenv(name)
-        for name in (
-            "OPENAI_API_KEY",
-            "OPENROUTER_API_KEY",
-            "GEMINI_API_KEY",
-            "GOOGLE_API_KEY",
-        )
-    )
 
 
 if __name__ == "__main__":

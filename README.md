@@ -12,10 +12,9 @@ Aero-Forge is an LLM-integrated build tool that automatically generates, compile
 ## Setup
 
 1. Install Rust and cargo: https://rustup.rs/
-2. Set one or more API keys:
-   - OpenAI: `export OPENAI_API_KEY="sk-..."`
-   - OpenRouter: `export OPENROUTER_API_KEY="sk-or-..."`
-   - Google Gemini: `export GEMINI_API_KEY="..."` or `export GOOGLE_API_KEY="..."`
+2. Set your LLM API key:
+   - `export AERO_FORGE_API_KEY="<your-key>"`
+   - Optionally override the base URL with `export AERO_FORGE_BASE_URL="<url>"`.
 3. Install the package in editable mode:
    ```bash
    pip install -e ".[dev]"
@@ -62,6 +61,8 @@ Aero-Forge merges configuration from (lowest to highest precedence):
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `AERO_FORGE_API_KEY` | API key for the selected LLM provider | (unset) |
+| `AERO_FORGE_BASE_URL` | Override the provider base URL | (provider default) |
 | `AERO_FORGE_MODEL_PRIORITY` | Comma-separated LLM priority list | `openrouter/free,gpt-4` |
 | `AERO_FORGE_FALLBACK_MODEL` | Final fallback model | `openrouter/free` |
 | `AERO_FORGE_MAX_RETRIES` | Retries per model | `3` |
@@ -95,12 +96,12 @@ Aero-Forge merges configuration from (lowest to highest precedence):
 
 ## Free-tier / low-quota usage
 
-- `openrouter/free` is included as the first default model. Set `OPENROUTER_API_KEY` to use it.
+- `openrouter/free` is included as the first default model. Set `AERO_FORGE_API_KEY` to your OpenRouter key to use it.
 - If a model rate-limits or errors, Aero-Forge waits with exponential backoff and tries the next model in the list.
 - Disable the LLM entirely with `--no-llm` to rely on the router and cache.
 
 ## Notes
 
 - The first build may take a while as PyO3 is compiled.
-- Without any API key, `--no-llm` mode still compiles valid functions but cannot repair broken ones.
+- Without `AERO_FORGE_API_KEY`, the CLI falls back to router-only mode. It still compiles valid functions but cannot repair broken ones with an LLM.
 - Fix cache is stored in `~/.cache/aero-forge/fix_cache.json`.
