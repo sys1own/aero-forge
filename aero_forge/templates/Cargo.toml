@@ -1,0 +1,12 @@
+[package]
+name = "{crate_name}"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "{crate_name}"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = {{ version = "0.20", features = ["extension-module"] }}
+{extra_deps}

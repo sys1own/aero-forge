@@ -1,0 +1,11 @@
+*.egg-info
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.aero-forge-cache/
+.cache/
+*.so
+*.dylib
+*.dll
+*.bak
