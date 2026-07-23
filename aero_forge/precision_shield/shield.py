@@ -87,6 +87,7 @@ class Shield:
 
         uses_float = function_type == "f64"
         recursive = _is_recursive(func)
+        return_type = _infer_return_type(func, function_type)
 
         traits = ["Integer"]
         if uses_float:
@@ -95,7 +96,7 @@ class Shield:
         return {
             "function_name": func_name,
             "arg_types": [function_type] * len(arg_names),
-            "return_type": function_type,
+            "return_type": return_type,
             "function_type": function_type,
             "arg_names": arg_names,
             "recursive": recursive,
@@ -141,6 +142,32 @@ def _infer_number_type(func: ast.FunctionDef) -> str:
                 ):
                     return "f64"
     return "i64"
+
+
+def _infer_return_type(func: ast.FunctionDef, function_type: str) -> str:
+    """Return 'bool' if every return statement yields a boolean expression."""
+    bool_returns: List[bool] = []
+    for node in ast.walk(func):
+        if isinstance(node, ast.Return) and node.value is not None:
+            bool_returns.append(_is_bool_expr(node.value))
+    if bool_returns and all(bool_returns) and any(bool_returns):
+        return "bool"
+    return function_type
+
+
+def _is_bool_expr(expr: ast.expr) -> bool:
+    """Heuristic: True/False, comparisons, and logical/boolean operations are booleans."""
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, bool):
+        return True
+    if isinstance(expr, ast.Compare):
+        return True
+    if isinstance(expr, ast.BoolOp):
+        return all(_is_bool_expr(v) for v in expr.values)
+    if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not):
+        return _is_bool_expr(expr.operand)
+    if isinstance(expr, ast.IfExp):
+        return _is_bool_expr(expr.body) and _is_bool_expr(expr.orelse)
+    return False
 
 
 def _is_recursive(func: ast.FunctionDef) -> bool:
