@@ -235,6 +235,11 @@ def fix(
     help="When using --auto, write a generated blueprint.aero next to the file.",
 )
 @click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Preview what would be built without compiling.",
+)
+@click.option(
     "--verbose",
     is_flag=True,
     help="Show debug logs and full output.",
@@ -251,6 +256,7 @@ def build(
     output_dir: str | None,
     jobs: int | None,
     write_blueprint_flag: bool,
+    dry_run: bool,
     verbose: bool,
 ) -> None:
     """Build all functions described by BLUEPRINT (default: blueprint.aero)."""
@@ -291,6 +297,7 @@ def build(
         max_iterations=max_iterations,
         max_retries=max_retries,
         cache_enabled=not no_cache,
+        dry_run=dry_run,
     )
 
     try:
@@ -309,6 +316,13 @@ def build(
                 f"{'OK' if item['success'] else 'FAIL'} "
                 f"({item['iterations']} iterations)"
             )
+
+    if result.get("dry_run"):
+        click.echo(
+            f"Dry-run complete: {result['total']} function(s) would be built "
+            f"into {result['output_dir']}"
+        )
+        return
 
     click.echo(
         f"Build complete: {result['passed']}/{result['total']} succeeded. "

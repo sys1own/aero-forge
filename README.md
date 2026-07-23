@@ -162,6 +162,29 @@ llm:
 aero-forge build --auto src/my_module.py --no-llm
 ```
 
+### Compile all public functions in a file
+
+Use `name: "*"` or `compile_all: true` to compile every public top-level function in a source file:
+
+```aero
+functions:
+  - file: src/utils.py
+    name: "*"
+    tests: [tests/test_utils.py]
+  - file: src/transform.py
+    compile_all: true
+```
+
+Functions from the same file are compiled into one shared library.
+
+### Preview a build
+
+```bash
+aero-forge build --dry-run
+```
+
+`--dry-run` parses the blueprint, expands wildcards, and lists what would be compiled without invoking `cargo`.
+
 ### Build CLI flags
 
 - `--auto FILE` – auto-discover functions.
@@ -172,7 +195,10 @@ aero-forge build --auto src/my_module.py --no-llm
 - `--no-llm` – skip LLM-based healing.
 - `--no-cache` – disable the build cache.
 - `--write-blueprint` – when using `--auto`, write a generated `blueprint.aero`.
+- `--dry-run` – preview what would be built.
 - `--verbose` – show debug logs and per-function results.
+
+See `BLUEPRINT.md` for a complete field reference and a fully commented example.
 
 ### Build caching and parallelism
 

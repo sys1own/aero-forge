@@ -14,16 +14,23 @@ logger = logging.getLogger("aero_forge.blueprint")
 
 
 class FunctionSpec(BaseModel):
-    """A single function to compile."""
+    """A single function or a wildcard entry that compiles every public function in ``file``."""
 
     file: Path
-    name: str
+    name: Optional[str] = None
+    compile_all: bool = False
     tests: List[Path] = Field(default_factory=list)
     output_name: Optional[str] = None
     compiler_flags: List[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def _resolve_relative_paths(self) -> "FunctionSpec":
+    def _resolve(self) -> "FunctionSpec":
+        if self.name == "*":
+            self.compile_all = True
+        if self.compile_all:
+            self.name = self.name or "*"
+        if not self.compile_all and not self.name:
+            raise ValueError("FunctionSpec requires 'name' unless 'compile_all' is true")
         if self.output_name is None:
             self.output_name = self.name
         return self
