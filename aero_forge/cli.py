@@ -341,7 +341,7 @@ def build(
                 llm_provider = os.getenv("AERO_FORGE_LLM_PROVIDER") or bp.llm.provider
             if not model:
                 model = os.getenv("AERO_FORGE_MODEL") or bp.llm.model
-            _, _, bp, _, _ = generate_project(
+            _, _, bp, _, _, _ = generate_project(
                 bp.prompt,
                 constraints=bp.constraints,
                 output_dir=Path(output_dir) if output_dir else bp.output_dir,
@@ -496,6 +496,38 @@ def build(
     help="System prompt template for generation (default: v5_balanced).",
 )
 @click.option(
+    "--algorithm-library",
+    is_flag=True,
+    help="Select and adapt from the built-in algorithm library instead of free-form generation.",
+)
+@click.option(
+    "--selected-algorithm",
+    default=None,
+    help="Use a specific library algorithm by name (requires --algorithm-library or overrides selection).",
+)
+@click.option(
+    "--variants",
+    "-v",
+    type=int,
+    default=1,
+    help="Generate N variants, compile each, and select the best (default: 1).",
+)
+@click.option(
+    "--discover",
+    is_flag=True,
+    help="Allow the LLM to design a new algorithm when no library match exists.",
+)
+@click.option(
+    "--explain",
+    is_flag=True,
+    help="Request and display an explanation of the chosen algorithm and tradeoffs.",
+)
+@click.option(
+    "--review",
+    is_flag=True,
+    help="Run an LLM self-review step on the generated code before compilation.",
+)
+@click.option(
     "--verbose",
     is_flag=True,
     help="Show debug logs.",
@@ -514,6 +546,12 @@ def generate(
     no_llm: bool,
     verbose: bool,
     prompt_template: str,
+    algorithm_library: bool,
+    selected_algorithm: str | None,
+    variants: int,
+    discover: bool,
+    explain: bool,
+    review: bool,
 ) -> None:
     """Generate Python code and tests from a natural language prompt."""
     _setup_logging(verbose)
@@ -540,6 +578,12 @@ def generate(
             max_iterations=max_iterations,
             optimize=optimize,
             prompt_template=prompt_template,
+            algorithm_library=algorithm_library,
+            selected_algorithm=selected_algorithm,
+            variants=variants,
+            discover=discover,
+            explain=explain,
+            review=review,
             build_kwargs=(
                 {"max_workers": 1, "cache_enabled": False} if do_build else None
             ),
@@ -551,6 +595,19 @@ def generate(
     click.echo(f"Generated: {result['source_path']}")
     click.echo(f"Tests:     {result['test_path']}")
     click.echo(f"Blueprint: {result['blueprint_path']}")
+
+    if explain and result.get("explanation"):
+        click.echo("\nExplanation:\n" + result["explanation"])
+
+    if variants > 1 and "variants" in result:
+        click.echo(f"Variants generated: {len(result['variants'])}")
+        for vr in result["variants"]:
+            build = vr.get("build") or {}
+            click.echo(
+                f"  variant {vr['variant']}: "
+                f"{build.get('passed', 0)}/{build.get('total', 0)} passed "
+                f"({vr.get('elapsed_seconds', 0.0):.3f}s)"
+            )
 
     if result.get("build"):
         build_result = result["build"]

@@ -12,7 +12,13 @@ from aero_forge.blueprint import Blueprint, FunctionSpec, discover_functions
 from aero_forge.build_runner import BuildRunner
 from aero_forge.llm.clients import get_llm_client
 from aero_forge.prompts import get_default_template, get_template
-from aero_forge.algorithms import algorithm_prompt_context
+from aero_forge.algorithms import (
+    Algorithm,
+    algorithm_prompt_context,
+    find_algorithm,
+    get_algorithm,
+    select_algorithm,
+)
 
 logger = logging.getLogger("aero_forge.generate")
 
@@ -104,6 +110,31 @@ def parse_generated_response(text: str) -> Tuple[str, str]:
     return source, ""
 
 
+def extract_explanation(text: str) -> str:
+    """Extract a free-form explanation section from an LLM response.
+
+    Looks for an '## Explanation' or '### Explanation' markdown section and
+    returns the text up to the next heading or code fence.  Returns an empty
+    string if no explanation section is found.
+    """
+    match = re.search(
+        r"(?:^|\n)\s*#+\s*Explanation\s*\n(.*?)(?=\n\s*#+ |\n```|\Z)",
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).strip()
+    # Fallback: look for an explicit EXPLANATION: marker.
+    match = re.search(
+        r"(?:^|\n)\s*EXPLANATION:\s*(.*?)(?=\n\s*[A-Z][A-Z_\s]{2,}:\s|\Z)",
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
 def _extract_functions_from_text(text: str) -> Tuple[str, str]:
     """Extract the first implementation and any test functions from raw text."""
     lines = text.splitlines()
@@ -134,6 +165,10 @@ def generate_from_prompt(
     max_retries: int = 3,
     system_prompt: Optional[str] = None,
     prompt_template: Optional[str] = None,
+    algorithm_library: bool = False,
+    selected_algorithm: Optional[str] = None,
+    discover: bool = False,
+    explain: bool = False,
 ) -> str:
     """Call the configured LLM and return the raw generated text."""
     client = get_llm_client(llm_provider, model=model, max_retries=max_retries)
@@ -151,12 +186,44 @@ def generate_from_prompt(
     else:
         template = get_default_template()
 
-    algorithm_context = algorithm_prompt_context(prompt)
+    selected: Optional[Algorithm] = None
+    if selected_algorithm:
+        selected = get_algorithm(selected_algorithm)
+    elif algorithm_library:
+        selected = select_algorithm(prompt, llm_provider=llm_provider, model=model)
+        if selected is None and not discover:
+            raise GenerationError(
+                "No library algorithm matched the prompt. Use --discover to "
+                "design a new algorithm."
+            )
+    else:
+        selected = find_algorithm(prompt)
+
+    algorithm_context = algorithm_prompt_context(
+        prompt, selected=selected, algorithm_library=algorithm_library
+    )
+    user_prompt = _build_user_prompt(prompt, constraints, algorithm_context)
+    if algorithm_library and selected:
+        user_prompt += (
+            "\nAdapt the selected reference algorithm to the request. "
+            "Only use the algorithm above; do not invent a different approach."
+        )
+    if algorithm_library and selected is None and discover:
+        user_prompt += (
+            "\nNo existing algorithm in the library matched this request. "
+            "Design a novel algorithm, explain your approach, and implement it."
+        )
+    if explain:
+        user_prompt += (
+            "\nAfter the code blocks, add an '## Explanation' section describing "
+            "the algorithm choice, complexity, and tradeoffs."
+        )
+
     messages: List[Dict[str, str]] = [
         {"role": "system", "content": template.system_prompt},
         {
             "role": "user",
-            "content": _build_user_prompt(prompt, constraints, algorithm_context),
+            "content": user_prompt,
         },
     ]
 
@@ -228,7 +295,65 @@ def _token_function_names(source: str) -> List[str]:
     return [n for n in names if not n.startswith("_")]
 
 
-GeneratedProject = Tuple[Path, Path, Blueprint, str, str]
+GeneratedProject = Tuple[Path, Path, Blueprint, str, str, str]
+
+
+def _review_code(
+    implementation: str,
+    prompt: str,
+    constraints: Optional[str],
+    llm_provider: Optional[str],
+    model: Optional[str],
+    max_retries: int,
+    prompt_template: Optional[str] = None,
+) -> str:
+    """Ask the LLM to review and improve generated code.
+
+    Returns the corrected implementation. If the LLM is unavailable or the
+    response cannot be parsed, the original implementation is returned.
+    """
+    client = get_llm_client(llm_provider, model=model, max_retries=max_retries)
+    if client is None:
+        return implementation
+
+    system = (
+        "You are a senior engineer doing a strict code review. Check the code "
+        "for correctness, performance, security, and style. If you find issues, "
+        "output a corrected version in a ```python block. If no issues are "
+        "found, return the original code unchanged."
+    )
+    user = (
+        f"Original request: {prompt}\n"
+        f"Constraints: {constraints or 'None'}\n\n"
+        f"Implementation to review:\n```python\n{implementation}\n```\n\n"
+        "Provide a brief review note and the corrected code in a single "
+        "```python block."
+    )
+    response = client.generate(
+        [
+            {
+                "role": "system",
+                "content": (
+                    get_template(prompt_template).system_prompt
+                    if prompt_template
+                    else get_default_template().system_prompt
+                ),
+            },
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        temperature=0.2,
+    )
+    if not response:
+        return implementation
+    try:
+        blocks = extract_code_blocks(response)
+        for _, code in blocks:
+            if code.strip():
+                return code
+    except Exception:
+        pass
+    return implementation
 
 
 def generate_smoke_tests(implementation: str) -> str:
@@ -329,10 +454,15 @@ def generate_project(
     model: Optional[str] = None,
     max_retries: int = 3,
     prompt_template: Optional[str] = None,
+    algorithm_library: bool = False,
+    selected_algorithm: Optional[str] = None,
+    discover: bool = False,
+    explain: bool = False,
+    review: bool = False,
 ) -> GeneratedProject:
     """Generate code from a prompt and write the project files.
 
-    Returns ``(source_path, test_path, blueprint, implementation, tests)``.
+    Returns ``(source_path, test_path, blueprint, implementation, tests, explanation)``.
     """
     response = generate_from_prompt(
         prompt,
@@ -341,15 +471,31 @@ def generate_project(
         model=model,
         max_retries=max_retries,
         prompt_template=prompt_template,
+        algorithm_library=algorithm_library,
+        selected_algorithm=selected_algorithm,
+        discover=discover,
+        explain=explain,
     )
     implementation, tests = parse_generated_response(response)
     implementation = sanitize_generated_code(implementation)
+    if review:
+        implementation = _review_code(
+            implementation,
+            prompt,
+            constraints,
+            llm_provider,
+            model,
+            max_retries,
+            prompt_template=prompt_template,
+        )
+        implementation = sanitize_generated_code(implementation)
+    explanation = extract_explanation(response) if explain else ""
     if not tests.strip():
         tests = generate_smoke_tests(implementation)
     source_path, test_path, blueprint = write_generated_project(
         output_dir, implementation, tests, project_name=project_name
     )
-    return source_path, test_path, blueprint, implementation, tests
+    return source_path, test_path, blueprint, implementation, tests, explanation
 
 
 def generate_and_build(
@@ -365,17 +511,47 @@ def generate_and_build(
     build_kwargs: Optional[Dict[str, Any]] = None,
     optimize: bool = False,
     prompt_template: Optional[str] = None,
+    algorithm_library: bool = False,
+    selected_algorithm: Optional[str] = None,
+    variants: int = 1,
+    discover: bool = False,
+    explain: bool = False,
+    review: bool = False,
 ) -> Dict[str, Any]:
     """Generate code from a prompt and optionally build/optimize it.
 
     Returns a dictionary describing the generated files and build result.
     """
+    if variants > 1:
+        from aero_forge.variants import generate_variants, select_best_variant
+
+        variant_results = generate_variants(
+            prompt,
+            variants=variants,
+            output_dir=output_dir,
+            project_name=project_name,
+            constraints=constraints,
+            llm_provider=llm_provider,
+            model=model,
+            max_retries=max_retries,
+            prompt_template=prompt_template,
+            algorithm_library=algorithm_library,
+            selected_algorithm=selected_algorithm,
+            discover=discover,
+            explain=explain,
+            review=review,
+        )
+        best = select_best_variant(variant_results, output_dir=output_dir)
+        best["variants"] = variant_results
+        return best
+
     (
         source_path,
         test_path,
         blueprint,
         implementation,
         tests,
+        explanation,
     ) = generate_project(
         prompt,
         constraints=constraints,
@@ -385,6 +561,11 @@ def generate_and_build(
         model=model,
         max_retries=max_retries,
         prompt_template=prompt_template,
+        algorithm_library=algorithm_library,
+        selected_algorithm=selected_algorithm,
+        discover=discover,
+        explain=explain,
+        review=review,
     )
 
     result: Dict[str, Any] = {
@@ -393,6 +574,7 @@ def generate_and_build(
         "blueprint_path": str(output_dir / "blueprint.aero"),
         "implementation": implementation,
         "tests": tests,
+        "explanation": explanation,
         "build": None,
         "iterations": [],
     }

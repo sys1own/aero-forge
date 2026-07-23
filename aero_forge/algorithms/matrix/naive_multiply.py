@@ -1,15 +1,15 @@
 from typing import List
 
 METADATA = {
-    "name": "matrix_multiply",
+    "name": "naive_multiply",
     "category": "matrix",
     "complexity": {"time": "O(n^3)", "space": "O(n^2)"},
-    "use_cases": ["dense matrix multiplication", "reference implementation"],
-    "constraints": ["cubic time", "assumes compatible dimensions"],
+    "use_cases": ["small dense matrices", "reference implementation"],
+    "constraints": ["cubic time"],
 }
 
 
-def matrix_multiply(a: List[List[float]], b: List[List[float]]) -> List[List[float]]:
+def naive_multiply(a: List[List[float]], b: List[List[float]]) -> List[List[float]]:
     rows_a = len(a)
     cols_a = len(a[0])
     cols_b = len(b[0])
