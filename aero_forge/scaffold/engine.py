@@ -373,11 +373,15 @@ class RustGenerator:
         return sum(self._count_targets(name, stmt, in_loop) for stmt in stmts)
 
     def _count_targets(self, name: str, stmt: ast.stmt, in_loop: bool) -> int:
-        if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+        if isinstance(stmt, ast.Assign):
             for target in stmt.targets:
                 if name in _names_in_target(target):
                     # An assignment inside a loop may execute multiple times.
                     return 2 if in_loop else 1
+            return 0
+        if isinstance(stmt, ast.AnnAssign):
+            if stmt.value and name in _names_in_target(stmt.target):
+                return 2 if in_loop else 1
             return 0
         if isinstance(stmt, ast.AugAssign):
             if name in _names_in_target(stmt.target):
@@ -563,8 +567,13 @@ class RustGenerator:
         if isinstance(stmt, ast.Pass):
             return ""
         if isinstance(stmt, ast.Expr):
-            # Validate the expression so I/O and unsupported calls cannot
-            # slip through as ignored statements.
+            # Docstrings and standalone string constants have no side effects;
+            # skip them. Other expressions are validated to ensure I/O and
+            # unsupported calls do not slip through as ignored statements.
+            if isinstance(stmt.value, ast.Constant) and isinstance(
+                stmt.value.value, str
+            ):
+                return ""
             self._emit_expr(stmt.value, self.function_type)
             return ""
         if isinstance(stmt, (ast.With, ast.AsyncWith)):

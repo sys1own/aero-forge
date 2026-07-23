@@ -24,6 +24,7 @@ Aero-Forge is an LLM-integrated build tool that automatically generates, compile
 |----------|-----------------------------|------------------|-------------------------|
 | OpenAI | `openai` | `OPENAI_API_KEY` | `AERO_FORGE_MODEL` (default `gpt-4`) |
 | OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | `AERO_FORGE_MODEL` (default `openrouter/free`) |
+| DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` | `AERO_FORGE_MODEL` (default `deepseek-chat`) |
 | Gemini | `gemini` | `GEMINI_API_KEY` + `pip install google-generativeai` | `AERO_FORGE_MODEL` (default `gemini-2.0-flash`) |
 | Router only | `none` | none | none |
 
@@ -48,6 +49,10 @@ pip install google-generativeai
 # Generic key fallback
 export AERO_FORGE_LLM_PROVIDER=openai
 export AERO_FORGE_API_KEY="sk-..."
+
+# DeepSeek
+export AERO_FORGE_LLM_PROVIDER=deepseek
+export DEEPSEEK_API_KEY="sk-..."
 ```
 
 ## Usage
@@ -76,8 +81,19 @@ Generate code from a prompt:
 
 ```bash
 aero-forge generate --prompt "write a function that returns the nth Fibonacci number" --build
-aero-forge generate --prompt-file request.txt --constraints "iterative only" --build
+aero-forge generate --prompt-file request.txt --constraints "iterative only" --build --prompt-template v5_balanced
 ```
+
+Available prompt templates: `v1_minimal`, `v2_structured`, `v3_algorithm`, `v4_performance`, `v5_balanced` (default), `v6_creative`, `v7_conservative`, `v8_iterative`.
+
+Run a prompt-engineering campaign and produce a report:
+
+```bash
+export DEEPSEEK_API_KEY=...
+python -m aero_forge.prompt_engineering
+```
+
+See [`PROMPT_ENGINEERING.md`](PROMPT_ENGINEERING.md) for the latest results.
 
 Start an interactive chat session:
 

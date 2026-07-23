@@ -284,6 +284,28 @@ class OpenRouterClient(OpenAIClient):
         return content
 
 
+class DeepSeekClient(OpenAIClient):
+    """DeepSeek API uses an OpenAI-compatible endpoint."""
+
+    def __init__(self, model: str, **kwargs: Any):
+        kwargs.setdefault("base_url", "https://api.deepseek.com/v1")
+        super().__init__(model, **kwargs)
+
+    def _call(
+        self,
+        prompt: Union[str, List[Dict[str, str]]],
+        temperature: float,
+        **kwargs: Any,
+    ) -> str:
+        api_key = self._resolve_key(["DEEPSEEK_API_KEY", "AERO_FORGE_API_KEY"])
+        if not api_key:
+            raise LLMError(
+                "DeepSeek API key not found. "
+                "Set DEEPSEEK_API_KEY or AERO_FORGE_API_KEY."
+            )
+        return super()._call(prompt, temperature, **kwargs)
+
+
 class GeminiClient(BaseLLMClient):
     """Google Gemini client using the google-generativeai SDK."""
 
@@ -379,6 +401,20 @@ def get_llm_client(
             model=resolved_model, max_retries=max_retries, api_key=key
         )
 
+    if provider == "deepseek":
+        resolved_model = model or os.getenv("AERO_FORGE_MODEL") or "deepseek-chat"
+        key = (
+            api_key or os.getenv("DEEPSEEK_API_KEY") or os.getenv("AERO_FORGE_API_KEY")
+        )
+        if not key:
+            logger.error(
+                "DeepSeek provider selected but DEEPSEEK_API_KEY or AERO_FORGE_API_KEY is not set."
+            )
+            return None
+        return DeepSeekClient(
+            model=resolved_model, max_retries=max_retries, api_key=key
+        )
+
     if provider == "gemini":
         resolved_model = model or os.getenv("AERO_FORGE_MODEL") or "gemini-2.0-flash"
         if importlib.util.find_spec("google.generativeai") is None:
@@ -395,7 +431,7 @@ def get_llm_client(
         return GeminiClient(model=resolved_model, max_retries=max_retries, api_key=key)
 
     logger.error(
-        "Unknown LLM provider: %s. Supported: openai, openrouter, gemini, none.",
+        "Unknown LLM provider: %s. Supported: openai, openrouter, deepseek, gemini, none.",
         provider,
     )
     return None

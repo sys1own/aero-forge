@@ -23,12 +23,14 @@ class ChatSession:
         model: Optional[str] = None,
         max_iterations: int = 5,
         max_retries: int = 3,
+        prompt_template: Optional[str] = None,
     ):
         self.output_dir = output_dir
         self.llm_provider = llm_provider
         self.model = model
         self.max_iterations = max_iterations
         self.max_retries = max_retries
+        self.prompt_template = prompt_template
         self.messages: List[Dict[str, str]] = []
         self.system_prompt = (
             "You are an expert Python/Rust engineer embedded in Aero-Forge, "
@@ -97,6 +99,7 @@ class ChatSession:
             model=self.model,
             max_retries=self.max_retries,
             max_iterations=self.max_iterations,
+            prompt_template=self.prompt_template,
             build_kwargs={"max_workers": 1, "cache_enabled": False},
         )
 
@@ -110,6 +113,7 @@ class ChatSession:
                 model=self.model,
                 max_retries=self.max_retries,
                 max_iterations=self.max_iterations,
+                prompt_template=self.prompt_template,
             ),
         }
 
@@ -121,5 +125,6 @@ class ChatSession:
             llm_provider=self.llm_provider,
             model=self.model,
             max_retries=self.max_retries,
+            prompt_template=self.prompt_template,
             build_kwargs={"max_workers": 1, "cache_enabled": False},
         )

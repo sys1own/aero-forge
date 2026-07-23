@@ -1,0 +1,380 @@
+[
+  {
+    "template": "v2_structured",
+    "total": 4,
+    "first_attempt_rate": 1.0,
+    "success_rate": 1.0,
+    "average_iterations": 1.0,
+    "average_benchmark_seconds": 5.3526430769998115,
+    "cases": [
+      {
+        "template": "v2_structured",
+        "case": "fibonacci",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 3.873431284000617,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v2_structured",
+        "case": "factorial",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 2.9694201959991915,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v2_structured",
+        "case": "gcd",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 2.9420754900002066,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v2_structured",
+        "case": "is_prime",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 11.62564533799923,
+        "speedup": null,
+        "error": null
+      }
+    ]
+  },
+  {
+    "template": "v3_algorithm",
+    "total": 4,
+    "first_attempt_rate": 0.75,
+    "success_rate": 0.75,
+    "average_iterations": 2.0,
+    "average_benchmark_seconds": 3.172195487999943,
+    "cases": [
+      {
+        "template": "v3_algorithm",
+        "case": "fibonacci",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 3.0259568149995175,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v3_algorithm",
+        "case": "factorial",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 2.5869755240000814,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v3_algorithm",
+        "case": "gcd",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 2.8311019470002066,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v3_algorithm",
+        "case": "is_prime",
+        "success": false,
+        "iterations": 5,
+        "first_attempt_success": false,
+        "compile_passed": false,
+        "benchmark_seconds": 4.244747665999967,
+        "speedup": null,
+        "error": null
+      }
+    ]
+  },
+  {
+    "template": "v4_performance",
+    "total": 4,
+    "first_attempt_rate": 1.0,
+    "success_rate": 1.0,
+    "average_iterations": 1.0,
+    "average_benchmark_seconds": 2.036851592250059,
+    "cases": [
+      {
+        "template": "v4_performance",
+        "case": "fibonacci",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 2.1236622460000945,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v4_performance",
+        "case": "factorial",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 2.054066882999905,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v4_performance",
+        "case": "gcd",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 1.86747178800033,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v4_performance",
+        "case": "is_prime",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 2.1022054519999074,
+        "speedup": null,
+        "error": null
+      }
+    ]
+  },
+  {
+    "template": "v5_balanced",
+    "total": 4,
+    "first_attempt_rate": 1.0,
+    "success_rate": 1.0,
+    "average_iterations": 1.0,
+    "average_benchmark_seconds": 2.9319694932505627,
+    "cases": [
+      {
+        "template": "v5_balanced",
+        "case": "fibonacci",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 2.8744980300016323,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v5_balanced",
+        "case": "factorial",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 2.6404917410000053,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v5_balanced",
+        "case": "gcd",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 3.254404835000969,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v5_balanced",
+        "case": "is_prime",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 2.958483366999644,
+        "speedup": null,
+        "error": null
+      }
+    ]
+  },
+  {
+    "template": "v6_creative",
+    "total": 4,
+    "first_attempt_rate": 1.0,
+    "success_rate": 1.0,
+    "average_iterations": 1.0,
+    "average_benchmark_seconds": 2.4351258647507166,
+    "cases": [
+      {
+        "template": "v6_creative",
+        "case": "fibonacci",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 2.661149823001324,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v6_creative",
+        "case": "factorial",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 1.7318514390008204,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v6_creative",
+        "case": "gcd",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 1.7239011930014385,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v6_creative",
+        "case": "is_prime",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 3.6236010039992834,
+        "speedup": null,
+        "error": null
+      }
+    ]
+  },
+  {
+    "template": "v7_conservative",
+    "total": 4,
+    "first_attempt_rate": 1.0,
+    "success_rate": 1.0,
+    "average_iterations": 1.0,
+    "average_benchmark_seconds": 2.637866027999735,
+    "cases": [
+      {
+        "template": "v7_conservative",
+        "case": "fibonacci",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 2.2580795239991858,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v7_conservative",
+        "case": "factorial",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 2.221835086998908,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v7_conservative",
+        "case": "gcd",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 1.9645846010007517,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v7_conservative",
+        "case": "is_prime",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 4.106964900000094,
+        "speedup": null,
+        "error": null
+      }
+    ]
+  },
+  {
+    "template": "v8_iterative",
+    "total": 4,
+    "first_attempt_rate": 1.0,
+    "success_rate": 1.0,
+    "average_iterations": 1.0,
+    "average_benchmark_seconds": 2.2698739019997447,
+    "cases": [
+      {
+        "template": "v8_iterative",
+        "case": "fibonacci",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 2.7269458649989247,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v8_iterative",
+        "case": "factorial",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 2.4388642350004375,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v8_iterative",
+        "case": "gcd",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 1.8955291169986594,
+        "speedup": null,
+        "error": null
+      },
+      {
+        "template": "v8_iterative",
+        "case": "is_prime",
+        "success": true,
+        "iterations": 1,
+        "first_attempt_success": true,
+        "compile_passed": true,
+        "benchmark_seconds": 2.0181563910009572,
+        "speedup": null,
+        "error": null
+      }
+    ]
+  }
+]

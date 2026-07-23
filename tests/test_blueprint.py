@@ -61,10 +61,7 @@ def test_parse_yaml_blueprint(tmp_path):
 def test_parse_blueprint_missing_file_raises(tmp_path):
     blueprint_path = tmp_path / "blueprint.aero"
     blueprint_path.write_text(
-        "project: bad\n"
-        "functions:\n"
-        "  - file: missing.py\n"
-        "    name: missing\n"
+        "project: bad\n" "functions:\n" "  - file: missing.py\n" "    name: missing\n"
     )
     with pytest.raises(ValueError, match="missing file"):
         parse_blueprint(blueprint_path)
@@ -106,17 +103,11 @@ def test_generate_and_write_blueprint(tmp_path):
 def test_parse_compile_all_wildcard(tmp_path):
     source = tmp_path / "utils.py"
     source.write_text(
-        "def add(a, b):\n"
-        "    return a + b\n"
-        "def mul(a, b):\n"
-        "    return a * b\n"
+        "def add(a, b):\n" "    return a + b\n" "def mul(a, b):\n" "    return a * b\n"
     )
     blueprint_path = tmp_path / "blueprint.aero"
     blueprint_path.write_text(
-        "project: wild\n"
-        "functions:\n"
-        "  - file: utils.py\n"
-        '    name: "*"\n'
+        "project: wild\n" "functions:\n" "  - file: utils.py\n" '    name: "*"\n'
     )
 
     bp = parse_blueprint(blueprint_path)
@@ -129,10 +120,7 @@ def test_parse_compile_all_flag(tmp_path):
     source.write_text("def f(): pass\n")
     blueprint_path = tmp_path / "blueprint.yaml"
     blueprint_path.write_text(
-        "project: all\n"
-        "functions:\n"
-        "  - file: utils.py\n"
-        "    compile_all: true\n"
+        "project: all\n" "functions:\n" "  - file: utils.py\n" "    compile_all: true\n"
     )
 
     bp = parse_blueprint(blueprint_path)

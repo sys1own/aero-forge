@@ -60,7 +60,9 @@ def test_fix_creates_init_files_and_imports_nested_module(nested_fibonacci_proje
 
     # __init__.py should be created automatically so the package is importable.
     init_file = src.parent / "__init__.py"
-    assert init_file.is_file(), "Expected __init__.py to be created in package directory"
+    assert (
+        init_file.is_file()
+    ), "Expected __init__.py to be created in package directory"
 
     # The module should be importable as a normal Python package.
     str_root = str(project_root)
