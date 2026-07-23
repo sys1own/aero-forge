@@ -283,12 +283,39 @@ directory covers real-world patterns:
 
 See `stress_tests/README.md` for the full campaign report.
 
-## Free-tier / low-quota usage
+## LLM healing
 
-- Use `aero-forge fix ... --llm-provider openrouter --model openrouter/free` and set `OPENROUTER_API_KEY` to leverage OpenRouter's free models.
-- Use `aero-forge fix ... --llm-provider gemini` with `GEMINI_API_KEY` and `pip install google-generativeai` for Google Gemini.
-- If the provider is not configured or the key is missing, Aero-Forge logs a clear message and falls back to router-only mode.
-- Disable the LLM entirely with `--no-llm` or `AERO_FORGE_LLM_PROVIDER=none` to rely on the router and cache.
+When compilation or tests fail, Aero-Forge can prompt a configured LLM to fix the source code:
+
+```bash
+export AERO_FORGE_LLM_PROVIDER=openrouter
+export OPENROUTER_API_KEY="sk-or-..."
+export AERO_FORGE_MODEL=openrouter/free
+aero-forge fix broken.py --function bad_syntax
+```
+
+Supported providers: `openai`, `openrouter`, `gemini`, `none`.
+Missing or invalid keys always fall back to router-only mode (or `--no-llm`) without crashing.
+
+### What LLM healing can fix
+
+- Simple syntax errors such as a missing colon (`if x > 0\n    ...`).
+- Type mismatches such as `return a / b` in an `int`-declared function.
+- Single broken functions inside a multi-function source file (the other functions are preserved).
+- Missing imports when the router has a matching rule.
+
+### Retry and rate-limit behavior
+
+- Every LLM call retries up to `AERO_FORGE_MAX_RETRIES` (default 3) with exponential backoff.
+- Backoff honors server-provided retry hints (`Retry-After` headers for OpenAI/OpenRouter, `google.rpc.retry_delay` blocks for Gemini) up to the `backoff_max` cap.
+- After exhausting retries, the forge loop returns a partial result and the original source is left untouched.
+
+### Limitations
+
+- The LLM only edits the target function; it does not add new files or change the project structure.
+- Healing is limited to the supported Python constructs listed above (numeric/scalar code).
+- Free-tier API keys can be rate-limited or quota-exhausted; if you hit limits, the tool will retry and then fall back to router-only mode.
+- Results depend on the model. `openrouter/free` and `gemini-2.0-flash` work for the bundled stress tests, but more complex broken code may need a stronger model.
 
 ## Notes
 

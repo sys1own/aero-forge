@@ -1,0 +1,9 @@
+project: llm_syntax
+functions:
+  - file: broken_syntax.py
+    name: broken_syntax
+    tests:
+      - tests/test_broken_syntax.py
+llm:
+  provider: openrouter
+  model: openrouter/free

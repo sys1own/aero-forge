@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+import re
 import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Union
@@ -16,7 +17,9 @@ class LLMError(Exception):
     """Raised when the LLM client cannot complete a request."""
 
 
-def _normalize_messages(prompt: Union[str, List[Dict[str, str]]]) -> List[Dict[str, str]]:
+def _normalize_messages(
+    prompt: Union[str, List[Dict[str, str]]],
+) -> List[Dict[str, str]]:
     if isinstance(prompt, str):
         return [{"role": "user", "content": prompt}]
     messages = []
@@ -68,7 +71,12 @@ class BaseLLMClient(ABC):
         temperature: float = 0.2,
         **kwargs: Any,
     ) -> Optional[str]:
-        """Generate a completion with exponential backoff retry."""
+        """Generate a completion with exponential backoff retry.
+
+        Honors server-provided retry delays (e.g. ``Retry-After`` headers or
+        Google RPC ``retry_delay``) while still capping the wait at
+        ``backoff_max``.
+        """
         delay = self.backoff_initial
         last_error: Optional[Exception] = None
         for attempt in range(self.max_retries):
@@ -81,7 +89,6 @@ class BaseLLMClient(ABC):
                     self.max_retries,
                 )
                 time.sleep(delay)
-                delay = min(delay * 2, self.backoff_max)
             try:
                 return self._call(prompt, temperature, **kwargs)
             except LLMError:
@@ -95,6 +102,13 @@ class BaseLLMClient(ABC):
                     exc,
                 )
                 last_error = exc
+                server_delay = self._extract_retry_delay(exc)
+                if server_delay is not None:
+                    delay = min(
+                        max(server_delay, self.backoff_initial), self.backoff_max
+                    )
+                else:
+                    delay = min(delay * 2, self.backoff_max)
                 continue
             except Exception as exc:
                 logger.error(
@@ -112,6 +126,51 @@ class BaseLLMClient(ABC):
                 self.max_retries,
                 last_error,
             )
+        return None
+
+    @staticmethod
+    def _extract_retry_delay(exc: Exception) -> Optional[float]:
+        """Return the server-suggested retry delay in seconds, if any."""
+        # OpenAI-compatible errors sometimes expose a parsed retry_after value.
+        retry_after = getattr(exc, "retry_after", None)
+        if retry_after is not None:
+            try:
+                return float(retry_after)
+            except (TypeError, ValueError):
+                pass
+
+        # Generic HTTP response with Retry-After header.
+        response = getattr(exc, "response", None)
+        if response is not None:
+            headers = getattr(response, "headers", {}) or {}
+            for key in ("retry-after", "Retry-After"):
+                if key in headers:
+                    try:
+                        return float(headers[key])
+                    except (TypeError, ValueError):
+                        pass
+
+        # Google API exceptions may carry a retry_delay timedelta.
+        retry_delay = getattr(exc, "retry_delay", None)
+        if retry_delay is not None:
+            try:
+                return float(retry_delay.total_seconds())
+            except (TypeError, AttributeError, ValueError):
+                pass
+
+        # Fallback: parse the textual repr for google.rpc.retryinfo blocks.
+        try:
+            text = str(exc)
+            match = re.search(
+                r"retry_delay\s*\{\s*seconds:\s*(\d+)\s*\}",
+                text,
+                re.IGNORECASE | re.DOTALL,
+            )
+            if match:
+                return float(match.group(1))
+        except (TypeError, ValueError):
+            pass
+
         return None
 
     @abstractmethod
@@ -164,7 +223,11 @@ class OpenAIClient(BaseLLMClient):
                 "OpenAI API key not found. Set OPENAI_API_KEY or AERO_FORGE_API_KEY."
             )
 
-        base_url = os.getenv("AERO_FORGE_BASE_URL") or self.base_url or "https://api.openai.com/v1"
+        base_url = (
+            os.getenv("AERO_FORGE_BASE_URL")
+            or self.base_url
+            or "https://api.openai.com/v1"
+        )
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
         messages = _normalize_messages(prompt)
         response = client.chat.completions.create(
@@ -331,5 +394,8 @@ def get_llm_client(
             return None
         return GeminiClient(model=resolved_model, max_retries=max_retries, api_key=key)
 
-    logger.error("Unknown LLM provider: %s. Supported: openai, openrouter, gemini, none.", provider)
+    logger.error(
+        "Unknown LLM provider: %s. Supported: openai, openrouter, gemini, none.",
+        provider,
+    )
     return None

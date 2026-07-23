@@ -1,8 +1,8 @@
 project: no_llm
 functions:
-  - file: broken_func.py
-    name: broken_sum
+  - file: no_llm_broken.py
+    name: no_llm_broken
     tests:
-      - tests/test_broken.py
+      - tests/test_no_llm_broken.py
 llm:
   provider: none

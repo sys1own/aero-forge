@@ -1,9 +1,0 @@
-project: llm_heal
-functions:
-  - file: broken_func.py
-    name: broken_sum
-    tests:
-      - tests/test_broken.py
-llm:
-  provider: openrouter
-  model: openrouter/free

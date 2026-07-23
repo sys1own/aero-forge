@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import os
 import shutil
+import traceback
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -56,7 +58,12 @@ class BuildRunner:
         self.model = model or blueprint.llm.model
         self.max_iterations = max_iterations
         self.max_retries = max_retries
-        self.cache = BuildCache(enabled=cache_enabled)
+        env_cache = os.getenv("AERO_FORGE_CACHE_ENABLED", "true").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+        self.cache = BuildCache(enabled=cache_enabled and env_cache)
         self.dry_run = dry_run
 
     def build(self) -> Dict[str, Any]:
@@ -87,14 +94,14 @@ class BuildRunner:
         results: List[BuildResult] = []
         if self.max_workers == 1 or len(source_specs) == 1:
             for source, specs in source_specs:
-                results.append(self._build_source(output_dir, source, specs))
+                results.append(self._safe_build_source(output_dir, source, specs))
         else:
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=self.max_workers
             ) as executor:
                 futures = {
                     executor.submit(
-                        self._build_source, output_dir, source, specs
+                        self._safe_build_source, output_dir, source, specs
                     ): source
                     for source, specs in source_specs
                 }
@@ -102,6 +109,24 @@ class BuildRunner:
                     results.append(future.result())
 
         return self._summarize(results)
+
+    def _safe_build_source(
+        self,
+        output_dir: Path,
+        source: Path,
+        specs: List[FunctionSpec],
+    ) -> BuildResult:
+        """Wrap ``_build_source`` so one broken source file cannot crash the whole build."""
+        try:
+            return self._build_source(output_dir, source, specs)
+        except Exception as exc:
+            logger.error("Unexpected error building %s: %s", source, exc)
+            return BuildResult(
+                source=source,
+                function_names=[spec.name for spec in specs],
+                success=False,
+                logs=f"{exc}\n{traceback.format_exc()}",
+            )
 
     def _expand_specs(self) -> List[FunctionSpec]:
         """Expand any compile-all specs into individual function specs."""
@@ -234,10 +259,12 @@ class BuildRunner:
             "import pathlib\n"
             f'_SO = pathlib.Path(__file__).parent / "{so_name}"\n'
             f'_SPEC = importlib.util.spec_from_file_location("{module_name}", _SO)\n'
-            '_MOD = importlib.util.module_from_spec(_SPEC)\n'
-            '_SPEC.loader.exec_module(_MOD)\n'
+            "_MOD = importlib.util.module_from_spec(_SPEC)\n"
+            "_SPEC.loader.exec_module(_MOD)\n"
             + "".join(f"{name} = _MOD.{name}\n" for name in function_names)
-            + '\n__all__ = [' + ', '.join(f'"{n}"' for n in function_names) + ']\n',
+            + "\n__all__ = ["
+            + ", ".join(f'"{n}"' for n in function_names)
+            + "]\n",
             encoding="utf-8",
         )
         return loader
@@ -246,9 +273,7 @@ class BuildRunner:
         self, results: List[BuildResult], dry_run: bool = False
     ) -> Dict[str, Any]:
         total_functions = sum(len(r.function_names) for r in results)
-        passed_functions = sum(
-            len(r.function_names) for r in results if r.success
-        )
+        passed_functions = sum(len(r.function_names) for r in results if r.success)
         failed_functions = total_functions - passed_functions
 
         for r in results:

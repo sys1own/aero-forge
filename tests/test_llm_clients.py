@@ -45,13 +45,10 @@ class TestGetLLMClient:
         assert "OPENROUTER_API_KEY or AERO_FORGE_API_KEY is not set" in caplog.text
 
     def test_gemini_missing_package_raises_import_error(self, monkeypatch, caplog):
-        import logging
-
-        # No google-generativeai in test environment, so this will first fail on import.
-        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        monkeypatch.delenv("AERO_FORGE_API_KEY", raising=False)
-        with pytest.raises(ImportError, match="google-generativeai"):
-            get_llm_client("gemini")
+        # Simulate the package not being installed.
+        with patch("importlib.util.find_spec", return_value=None):
+            with pytest.raises(ImportError, match="google-generativeai"):
+                get_llm_client("gemini")
 
     def test_openai_uses_provider_key(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
@@ -105,8 +102,8 @@ class TestOpenAIClient:
         monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
         client = OpenAIClient(model="gpt-4", api_key="sk-openai")
         with patch("openai.OpenAI") as mock_openai:
-            mock_openai.return_value.chat.completions.create.return_value = self._make_response(
-                "fixed"
+            mock_openai.return_value.chat.completions.create.return_value = (
+                self._make_response("fixed")
             )
             result = client.generate("fix this")
         assert result == "fixed"
@@ -148,7 +145,9 @@ class TestOpenRouterClient:
             create.return_value = response
             result = client.generate("fix")
         assert result == "fallback"
-        assert mock_openai.call_args.kwargs["base_url"] == "https://openrouter.ai/api/v1"
+        assert (
+            mock_openai.call_args.kwargs["base_url"] == "https://openrouter.ai/api/v1"
+        )
         assert mock_openai.call_args.kwargs["api_key"] == "sk-or"
 
 
@@ -174,7 +173,9 @@ class TestGeminiClient:
         mock_genai.GenerativeModel.return_value = mock_model
         mock_genai.configure = MagicMock()
 
-        with patch("aero_forge.llm.clients.importlib.import_module", return_value=mock_genai):
+        with patch(
+            "aero_forge.llm.clients.importlib.import_module", return_value=mock_genai
+        ):
             result = client.generate(
                 [
                     {"role": "system", "content": "You are a helpful assistant."},

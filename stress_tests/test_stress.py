@@ -8,6 +8,7 @@ can turn an ``xfail`` or failure-assertion test into a passing one.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -19,19 +20,25 @@ STRESS_DIR = Path(__file__).parent
 AERO_FORGE = [sys.executable, "-m", "aero_forge.cli"]
 
 
-def _run_build(blueprint: Path, cwd: Path | None = None) -> subprocess.CompletedProcess:
+def _run_build(
+    blueprint: Path,
+    cwd: Path | None = None,
+    env: dict | None = None,
+) -> subprocess.CompletedProcess:
     cmd = [*AERO_FORGE, "build", str(blueprint)]
-    env = {k: v for k, v in os.environ.items() if "API" not in k.upper()}
+    # Start from the real environment but remove provider overrides that may
+    # have been injected for this session. Tests that need a provider set it
+    # explicitly via the ``env`` argument.
+    run_env = os.environ.copy()
+    run_env.pop("AERO_FORGE_LLM_PROVIDER", None)
+    run_env.update(env or {})
     return subprocess.run(
         cmd,
         cwd=cwd or blueprint.parent,
         capture_output=True,
         text=True,
-        env=env,
+        env=run_env,
     )
-
-
-import os  # noqa: E402
 
 
 class TestLevel1Math:
@@ -95,23 +102,68 @@ class TestLevel6CrossFile:
 
 
 class TestLevel7LLMHealing:
-    @pytest.mark.skipif(
-        not os.getenv("OPENROUTER_API_KEY") and not os.getenv("GEMINI_API_KEY"),
-        reason="No LLM API key available",
+    @staticmethod
+    def _is_api_limit_error(output: str) -> bool:
+        lowered = output.lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "rate limit",
+                "quota",
+                "key limit",
+                "401",
+                "403",
+                "429",
+            )
+        )
+
+    @pytest.mark.parametrize(
+        "blueprint,summary",
+        [
+            ("blueprint_syntax.aero", "1 succeeded, 0 failed"),
+            ("blueprint_type.aero", "1 succeeded, 0 failed"),
+            ("blueprint_multi.aero", "3 succeeded, 0 failed"),
+        ],
     )
-    def test_llm_heals_broken_function(self):
-        blueprint = STRESS_DIR / "level7_llm_healing" / "blueprint.aero"
-        result = _run_build(blueprint)
-        # Allow partial success: the tool should not crash and should report results.
-        assert result.returncode in (0, 1)
+    def test_openrouter_heals_broken_functions(self, blueprint, summary):
+        if not os.getenv("OPENROUTER_API_KEY"):
+            pytest.skip("OPENROUTER_API_KEY not set")
+        bp = STRESS_DIR / "level7_llm_healing" / blueprint
+        out_dir = bp.parent / "dist"
+        if out_dir.exists():
+            shutil.rmtree(out_dir)
+        result = _run_build(bp, env={"AERO_FORGE_LLM_PROVIDER": "openrouter"})
+        output = result.stderr + result.stdout
+        if result.returncode != 0 and self._is_api_limit_error(output):
+            pytest.xfail(f"OpenRouter API limit hit: {output[:200]}")
+        assert result.returncode == 0, output
+        assert summary in result.stderr, output
+
+    def test_gemini_heals_syntax_error(self):
+        if not os.getenv("GEMINI_API_KEY"):
+            pytest.skip("GEMINI_API_KEY not set")
+        bp = STRESS_DIR / "level7_llm_healing" / "blueprint_gemini_syntax.aero"
+        out_dir = bp.parent / "dist"
+        if out_dir.exists():
+            shutil.rmtree(out_dir)
+        result = _run_build(bp, env={"AERO_FORGE_LLM_PROVIDER": "gemini"})
+        output = result.stderr + result.stdout
+        if result.returncode != 0 and self._is_api_limit_error(output):
+            pytest.xfail(f"Gemini API limit hit: {output[:200]}")
+        assert result.returncode == 0, output
+        assert "1 succeeded, 0 failed" in result.stderr, output
 
     def test_no_llm_graceful_failure(self):
         """A broken function with provider: none should fail gracefully without crashing."""
         blueprint = STRESS_DIR / "level7_llm_healing" / "blueprint_no_llm.aero"
-        if not blueprint.exists():
-            pytest.skip("no-llm stress blueprint not present")
-        result = _run_build(blueprint)
+        result = _run_build(blueprint, env={"AERO_FORGE_CACHE_ENABLED": "false"})
         assert result.returncode != 0
+        output = result.stderr + result.stdout
+        assert (
+            "LLM disabled" in output
+            or "could not be fixed" in output
+            or "Syntax error" in output
+        )
 
 
 class TestLevel8Performance:
@@ -135,7 +187,9 @@ class TestLevel9BlueprintEdge:
         assert "missing file" in (result.stderr + result.stdout).lower()
 
     def test_missing_function_gives_clear_error(self):
-        blueprint = STRESS_DIR / "level9_blueprint_edge" / "blueprint_missing_function.aero"
+        blueprint = (
+            STRESS_DIR / "level9_blueprint_edge" / "blueprint_missing_function.aero"
+        )
         result = _run_build(blueprint)
         assert result.returncode != 0
         assert "not found" in (result.stderr + result.stdout).lower()

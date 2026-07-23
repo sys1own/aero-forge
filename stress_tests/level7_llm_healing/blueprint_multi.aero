@@ -1,0 +1,9 @@
+project: llm_multi
+functions:
+  - file: multi.py
+    compile_all: true
+    tests:
+      - tests/test_multi.py
+llm:
+  provider: openrouter
+  model: openrouter/free

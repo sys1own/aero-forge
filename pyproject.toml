@@ -27,7 +27,7 @@ gemini = ["google-generativeai>=0.7.0"]
 aero-forge = "aero_forge.cli:main"
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "stress_tests/test_stress.py"]
+testpaths = ["tests", "stress_tests/test_stress.py", "stress_tests/test_llm_rate_limits.py"]
 
 [tool.setuptools.packages.find]
 where = ["."]
