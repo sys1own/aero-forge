@@ -1,11 +1,13 @@
 """Unit tests for the simplified sandbox manager."""
 
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
-from aero_forge.sandbox.manager import Sandbox
+from aero_forge.errors import SemanticRegressionError
+from aero_forge.sandbox.manager import Sandbox, TraceVerifier
 
 
 @pytest.fixture
@@ -40,3 +42,61 @@ def test_sandbox_reports_failure(temp_source):
         result = sandbox.run_tests()
         assert not result["passed"]
         assert result["returncode"] != 0
+
+
+def _write_script(tmp_path: Path, name: str, body: str) -> Path:
+    script = tmp_path / name
+    script.write_text(body, encoding="utf-8")
+    return script
+
+
+def test_trace_verifier_passes_for_matching_output(tmp_path: Path) -> None:
+    """Identical reference and target executions should verify cleanly."""
+    ref = _write_script(tmp_path, "ref.py", "print('hello')\n")
+    tgt = _write_script(tmp_path, "tgt.py", "print('hello')\n")
+
+    verifier = TraceVerifier()
+    result = verifier.verify([sys.executable, str(ref)], [sys.executable, str(tgt)])
+    assert result["verification_passed"] is True
+    assert result["semantic_delta"] == 0
+
+
+def test_trace_verifier_fails_on_stdout_mismatch(tmp_path: Path) -> None:
+    """A difference in stdout raises SemanticRegressionError with a diff report."""
+    ref = _write_script(tmp_path, "ref.py", "print('hello')\n")
+    tgt = _write_script(tmp_path, "tgt.py", "print('world')\n")
+
+    verifier = TraceVerifier()
+    with pytest.raises(SemanticRegressionError) as exc_info:
+        verifier.verify([sys.executable, str(ref)], [sys.executable, str(tgt)])
+
+    assert "stdout" in exc_info.value.report
+    assert exc_info.value.delta == 1
+
+
+def test_trace_verifier_fails_on_exit_code_mismatch(tmp_path: Path) -> None:
+    """A non-zero target exit code raises SemanticRegressionError."""
+    ref = _write_script(tmp_path, "ref.py", "print('ok')\n")
+    tgt = _write_script(tmp_path, "tgt.py", "import sys; sys.exit(1)\n")
+
+    verifier = TraceVerifier()
+    with pytest.raises(SemanticRegressionError) as exc_info:
+        verifier.verify([sys.executable, str(ref)], [sys.executable, str(tgt)])
+
+    assert "returncode" in exc_info.value.report
+    assert exc_info.value.delta >= 1
+
+
+def test_trace_verifier_captures_stdin(tmp_path: Path) -> None:
+    """The verifier should pass stdin to both reference and target."""
+    ref = _write_script(tmp_path, "ref.py", "import sys; print(sys.stdin.read().strip())")
+    tgt = _write_script(tmp_path, "tgt.py", "import sys; print(sys.stdin.read().strip())")
+
+    verifier = TraceVerifier()
+    result = verifier.verify(
+        [sys.executable, str(ref)],
+        [sys.executable, str(tgt)],
+        input_text="hello",
+    )
+    assert result["verification_passed"] is True
+    assert result["reference"].stdout == result["target"].stdout == "hello\n"

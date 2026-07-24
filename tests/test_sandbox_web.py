@@ -10,8 +10,10 @@ from pathlib import Path
 
 import pytest
 
+import sys
+
 from aero_forge.sandbox import manager as manager_module
-from aero_forge.sandbox.manager import SandboxManager, ensure_cargo_in_path
+from aero_forge.sandbox.manager import SandboxManager, TraceVerifier, ensure_cargo_in_path
 
 
 @pytest.fixture
@@ -170,3 +172,21 @@ def test_ensure_cargo_in_path_does_nothing_when_cargo_present(monkeypatch, tmp_p
     assert os.environ["PATH"] == "/usr/bin"
 
     os.environ["PATH"] = original_path
+
+
+def test_sandbox_manager_isolated_trace_verification(manager):
+    """TraceVerifier can run reference and target scripts inside a session sandbox."""
+    session_id = str(uuid.uuid4())
+    sdir = manager.create_session_sandbox(session_id)
+
+    (sdir / "ref.py").write_text("print('session ok')\n", encoding="utf-8")
+    (sdir / "target.py").write_text("print('session ok')\n", encoding="utf-8")
+
+    verifier = TraceVerifier()
+    result = verifier.verify(
+        [sys.executable, "ref.py"],
+        [sys.executable, "target.py"],
+        cwd=sdir,
+    )
+    assert result["verification_passed"] is True
+    assert result["semantic_delta"] == 0

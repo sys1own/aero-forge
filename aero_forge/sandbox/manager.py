@@ -2,18 +2,187 @@
 
 from __future__ import annotations
 
+import difflib
 import io
+import logging
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
+from aero_forge.errors import SemanticRegressionError
 
 CARGO_BIN_DIR = Path(os.path.expanduser("~/.cargo/bin"))
+logger = logging.getLogger("aero_forge.sandbox")
+
+
+@dataclass
+class ExecutionTrace:
+    """Captured output and metadata from a sandboxed program execution."""
+
+    command: Sequence[str]
+    stdout: str
+    stderr: str
+    returncode: int
+    syscalls: Optional[List[str]]
+    elapsed_seconds: float
+    timed_out: bool
+
+
+class TraceVerifier:
+    """Execute reference and target programs and assert semantic equivalence."""
+
+    def __init__(self, timeout: int = 30) -> None:
+        self.timeout = timeout
+
+    def capture(
+        self,
+        command: Sequence[str],
+        input_text: Optional[str] = None,
+        *,
+        trace_syscalls: bool = False,
+        cwd: Optional[Path] = None,
+        env: Optional[Dict[str, str]] = None,
+    ) -> ExecutionTrace:
+        """Run ``command`` in an isolated subprocess and record its execution trace."""
+        command = [str(c) for c in command]
+        syscalls: Optional[List[str]] = None
+        strace_file: Optional[Path] = None
+        run_cmd = list(command)
+
+        if trace_syscalls and shutil.which("strace"):
+            strace_fd, strace_path = tempfile.mkstemp(prefix="aero-strace-", suffix=".log")
+            os.close(strace_fd)
+            strace_file = Path(strace_path)
+            run_cmd = ["strace", "-f", "-o", str(strace_file), *command]
+
+        start = time.perf_counter()
+        try:
+            result = subprocess.run(
+                run_cmd,
+                input=input_text,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+                cwd=cwd,
+                env=env,
+            )
+            timed_out = False
+        except subprocess.TimeoutExpired as exc:
+            result = subprocess.CompletedProcess(
+                args=run_cmd,
+                returncode=-1,
+                stdout=exc.stdout or "",
+                stderr=exc.stderr or f"Timed out after {self.timeout}s",
+            )
+            timed_out = True
+        finally:
+            elapsed = time.perf_counter() - start
+
+        if strace_file and strace_file.is_file():
+            try:
+                syscalls = strace_file.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError as exc:
+                logger.warning("Could not read strace output: %s", exc)
+            finally:
+                strace_file.unlink(missing_ok=True)
+
+        return ExecutionTrace(
+            command=command,
+            stdout=result.stdout or "",
+            stderr=result.stderr or "",
+            returncode=result.returncode,
+            syscalls=syscalls,
+            elapsed_seconds=elapsed,
+            timed_out=timed_out,
+        )
+
+    def verify(
+        self,
+        reference_cmd: Sequence[str],
+        target_cmd: Sequence[str],
+        input_text: Optional[str] = None,
+        *,
+        trace_syscalls: bool = False,
+        cwd: Optional[Path] = None,
+        env: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        """Run reference and target commands and compare their execution traces.
+
+        Raises ``SemanticRegressionError`` when stdout, stderr, returncode, or the
+        optional system-call trace diverge (semantic delta ``\u0394 != 0``).
+        """
+        reference = self.capture(
+            reference_cmd,
+            input_text,
+            trace_syscalls=trace_syscalls,
+            cwd=cwd,
+            env=env,
+        )
+        target = self.capture(
+            target_cmd,
+            input_text,
+            trace_syscalls=trace_syscalls,
+            cwd=cwd,
+            env=env,
+        )
+
+        stdout_match = reference.stdout == target.stdout
+        stderr_match = reference.stderr == target.stderr
+        returncode_match = reference.returncode == target.returncode
+        syscall_match: Optional[bool] = None
+        if trace_syscalls and reference.syscalls is not None and target.syscalls is not None:
+            syscall_match = reference.syscalls == target.syscalls
+
+        checks = [
+            ("stdout", stdout_match, reference.stdout, target.stdout),
+            ("stderr", stderr_match, reference.stderr, target.stderr),
+            ("returncode", returncode_match, str(reference.returncode), str(target.returncode)),
+        ]
+        if syscall_match is not None:
+            checks.append(
+                ("syscalls", syscall_match, "\n".join(reference.syscalls or []), "\n".join(target.syscalls or []))
+            )
+
+        delta = sum(0 if passed else 1 for _, passed, _, _ in checks)
+        if delta == 0:
+            return {
+                "verification_passed": True,
+                "semantic_delta": 0,
+                "reference": reference,
+                "target": target,
+            }
+
+        report_parts: List[str] = []
+        for name, passed, ref_value, tgt_value in checks:
+            if not passed:
+                report_parts.append(
+                    f"{name} diverged:\n"
+                    f"--- reference\n"
+                    f"+++ target\n"
+                    + "".join(
+                        difflib.unified_diff(
+                            ref_value.splitlines(keepends=True),
+                            tgt_value.splitlines(keepends=True),
+                            fromfile="reference",
+                            tofile="target",
+                            lineterm="",
+                        )
+                    )
+                )
+
+        report = "\n\n".join(report_parts)
+        raise SemanticRegressionError(
+            f"Semantic regression detected (\u0394={delta}):\n{report}",
+            delta=delta,
+            report=report,
+        )
 
 
 class Sandbox:
