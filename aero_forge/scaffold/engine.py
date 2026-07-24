@@ -259,31 +259,45 @@ class Engine:
         if not blueprint.manifest:
             return
 
-        # Map manifest paths to the generated crate artifacts.
+        # Map manifest paths and identify declared Cargo.toml / lib.rs directories.
         manifest_paths = {entry.path: entry for entry in blueprint.manifest}
-        cargo_entry = next(
-            (p for p in manifest_paths if Path(p).name == "Cargo.toml"), None
-        )
-        if cargo_entry is None:
-            return
+        cargo_dirs = {Path(p).parent for p in manifest_paths if Path(p).name == "Cargo.toml"}
+        lib_paths = {Path(p) for p in manifest_paths if Path(p).name == "lib.rs"}
 
-        crate_dir_rel = Path(cargo_entry).parent
-        dest_root = workspace_root / crate_dir_rel
-        dest_root.mkdir(parents=True, exist_ok=True)
+        crate_dirs: List[Path] = []
+        for cargo_dir in sorted(cargo_dirs, key=lambda p: str(p)):
+            if (cargo_dir / "src" / "lib.rs") in lib_paths:
+                crate_dirs.append(cargo_dir)
 
-        # Copy the Cargo.toml and src/lib.rs to the declared crate root.
-        cargo_dest = dest_root / "Cargo.toml"
-        cargo_dest.write_text((crate_root / "Cargo.toml").read_text(encoding="utf-8"), encoding="utf-8")
+        if not crate_dirs:
+            # No crate layout declared; fall back to the first Cargo.toml.
+            crate_dirs = [sorted(cargo_dirs, key=lambda p: str(p))[0]]
 
-        lib_entry = next(
-            (p for p in manifest_paths if Path(p).name == "lib.rs"), None
-        )
-        if lib_entry is not None:
-            lib_dir_rel = Path(lib_entry).parent
-            lib_dest_dir = workspace_root / lib_dir_rel
-            lib_dest_dir.mkdir(parents=True, exist_ok=True)
-            lib_dest = lib_dest_dir / "lib.rs"
-            lib_dest.write_text((crate_root / "src" / "lib.rs").read_text(encoding="utf-8"), encoding="utf-8")
+        # Copy the generated crate into every declared crate directory.
+        for crate_dir in crate_dirs:
+            dest_dir = workspace_root / crate_dir
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            (dest_dir / "Cargo.toml").write_text(
+                (crate_root / "Cargo.toml").read_text(encoding="utf-8"), encoding="utf-8"
+            )
+            src_dir = dest_dir / "src"
+            src_dir.mkdir(parents=True, exist_ok=True)
+            (src_dir / "lib.rs").write_text(
+                (crate_root / "src" / "lib.rs").read_text(encoding="utf-8"), encoding="utf-8"
+            )
+
+        # If a root Cargo.toml exists without a corresponding lib.rs, make it a
+        # workspace manifest that references the discovered crate directories.
+        root_cargo = Path(".") in cargo_dirs
+        root_lib = (Path(".") / "src" / "lib.rs") in lib_paths
+        if root_cargo and not root_lib and crate_dirs:
+            members = [str(d) for d in crate_dirs if d != Path(".")]
+            workspace_toml = (
+                "[workspace]\n"
+                f'members = {json.dumps(members)}\n'
+                'resolver = "2"\n'
+            )
+            (workspace_root / "Cargo.toml").write_text(workspace_toml, encoding="utf-8")
 
         # Validate that every manifest file now exists in the workspace.
         try:

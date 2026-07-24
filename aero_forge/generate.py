@@ -10,7 +10,12 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from aero_forge.blueprint import Blueprint, FunctionSpec, discover_functions
+from aero_forge.blueprint import (
+    Blueprint,
+    FunctionSpec,
+    discover_functions,
+    generate_blueprint,
+)
 from aero_forge.build_runner import BuildRunner
 from aero_forge.config import ConfigOverride
 from aero_forge.errors import UserError
@@ -356,6 +361,7 @@ def write_generated_project(
     tests: str,
     project_name: str = "generated_project",
     prompt: str = "",
+    constraints: Optional[str] = None,
     module_name: Optional[str] = None,
     validate: bool = True,
 ) -> Tuple[Path, Path, Blueprint]:
@@ -435,17 +441,20 @@ def write_generated_project(
     else:
         init_path.write_text("# Generated Aero-Forge module\n", encoding="utf-8")
 
-    blueprint = Blueprint(
+    functions = [
+        FunctionSpec(
+            file=source_path,
+            name=name,
+            tests=[test_path],
+        )
+        for name in _detect_function_names(implementation)
+    ]
+    blueprint = generate_blueprint(
         project=project_name,
-        functions=[
-            FunctionSpec(
-                file=source_path,
-                name=name,
-                tests=[test_path],
-            )
-            for name in _detect_function_names(implementation)
-        ],
+        functions=functions,
         output_dir=output_dir / "dist",
+        prompt=prompt,
+        constraints=constraints,
     )
     blueprint_path = output_dir / "blueprint.aero"
     from aero_forge.blueprint import write_blueprint
@@ -729,6 +738,7 @@ def generate_project(
         tests,
         project_name=project_name,
         prompt=prompt,
+        constraints=constraints,
         module_name=module_name,
     )
     if progress_callback:

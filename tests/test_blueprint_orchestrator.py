@@ -142,7 +142,9 @@ def test_plan_workspace_detects_batch_processing_polyglot(tmp_path: Path) -> Non
         llm_provider="none",
     )
     assert blueprint.architecture == "hybrid_rust_python"
-    assert blueprint.toolchains == ["python", "cargo"]
+    assert "python" in blueprint.toolchains
+    assert "rust" in blueprint.toolchains
+    assert "cargo" in blueprint.toolchains
     paths = {entry.path for entry in blueprint.manifest}
     assert "rust_core/src/lib.rs" in paths
     assert "python_engine/src/batch_processor/__init__.py" in paths

@@ -371,11 +371,14 @@ def get_llm_client(
     max_retries: int = 3,
     api_key: Optional[str] = None,
     config_override: Optional[ConfigOverride] = None,
+    raise_on_error: bool = False,
 ) -> Optional[BaseLLMClient]:
     """Return a configured LLM client for ``provider``.
 
     Returns ``None`` when provider is ``none``/empty or when a required key is
-    missing, after logging a clear error.
+    missing, after logging a clear error. When ``raise_on_error`` is ``True``,
+    missing API keys or unsupported providers raise ``LLMError`` instead of
+    silently returning ``None``.
     """
     override = config_override or current_override()
     if override is not None:
@@ -397,9 +400,10 @@ def get_llm_client(
         resolved_model = model or os.getenv("AERO_FORGE_MODEL") or "gpt-4"
         key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("AERO_FORGE_API_KEY")
         if not key:
-            logger.error(
-                "OpenAI provider selected but OPENAI_API_KEY or AERO_FORGE_API_KEY is not set."
-            )
+            msg = "OpenAI provider selected but OPENAI_API_KEY or AERO_FORGE_API_KEY is not set."
+            logger.error(msg)
+            if raise_on_error:
+                raise LLMError(msg)
             return None
         return OpenAIClient(model=resolved_model, max_retries=max_retries, api_key=key)
 
@@ -411,9 +415,10 @@ def get_llm_client(
             or os.getenv("AERO_FORGE_API_KEY")
         )
         if not key:
-            logger.error(
-                "OpenRouter provider selected but OPENROUTER_API_KEY or AERO_FORGE_API_KEY is not set."
-            )
+            msg = "OpenRouter provider selected but OPENROUTER_API_KEY or AERO_FORGE_API_KEY is not set."
+            logger.error(msg)
+            if raise_on_error:
+                raise LLMError(msg)
             return None
         return OpenRouterClient(
             model=resolved_model, max_retries=max_retries, api_key=key
@@ -425,9 +430,10 @@ def get_llm_client(
             api_key or os.getenv("DEEPSEEK_API_KEY") or os.getenv("AERO_FORGE_API_KEY")
         )
         if not key:
-            logger.error(
-                "DeepSeek provider selected but DEEPSEEK_API_KEY or AERO_FORGE_API_KEY is not set."
-            )
+            msg = "DeepSeek provider selected but DEEPSEEK_API_KEY or AERO_FORGE_API_KEY is not set."
+            logger.error(msg)
+            if raise_on_error:
+                raise LLMError(msg)
             return None
         return DeepSeekClient(
             model=resolved_model, max_retries=max_retries, api_key=key
@@ -442,14 +448,18 @@ def get_llm_client(
             )
         key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("AERO_FORGE_API_KEY")
         if not key:
-            logger.error(
-                "Gemini provider selected but GEMINI_API_KEY or AERO_FORGE_API_KEY is not set."
-            )
+            msg = "Gemini provider selected but GEMINI_API_KEY or AERO_FORGE_API_KEY is not set."
+            logger.error(msg)
+            if raise_on_error:
+                raise LLMError(msg)
             return None
         return GeminiClient(model=resolved_model, max_retries=max_retries, api_key=key)
 
-    logger.error(
-        "Unknown LLM provider: %s. Supported: openai, openrouter, deepseek, gemini, none.",
-        provider,
+    msg = (
+        f"Unknown LLM provider: {provider}. "
+        "Supported: openai, openrouter, deepseek, gemini, none."
     )
+    logger.error(msg)
+    if raise_on_error:
+        raise LLMError(msg)
     return None

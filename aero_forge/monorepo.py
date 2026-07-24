@@ -520,7 +520,7 @@ def generate_monorepo(
     final_blueprint = Blueprint(
         project=safe_project,
         architecture="hybrid_rust_python",
-        toolchains=["python", "cargo"],
+        toolchains=["python", "rust", "cargo"],
         manifest=manifest,
         contracts=contracts,
         output_dir=output_dir / "dist",

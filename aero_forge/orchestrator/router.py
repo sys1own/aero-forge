@@ -656,7 +656,9 @@ def classify_build_intent(prompt: str) -> str:
 def toolchains_for_intent(intent: str) -> List[str]:
     """Return the toolchains associated with a build intent."""
     if intent == BUILD_INTENT_HYBRID_RUST_PYTHON:
-        return ["python", "cargo"]
+        # Include the Rust language and the Cargo build tool so validators can
+        # check for either convention.
+        return ["python", "rust", "cargo"]
     if intent == BUILD_INTENT_PURE_RUST:
         return ["rust", "cargo"]
     return ["python"]
