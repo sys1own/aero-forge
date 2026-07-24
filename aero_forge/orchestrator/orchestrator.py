@@ -35,6 +35,7 @@ from aero_forge.orchestrator.error_classifier import (
     is_fatal,
 )
 from aero_forge.orchestrator.prompt_builder import PromptBuilder
+from aero_forge.orchestrator.router import HIN_COMPUTE, classify
 from aero_forge.precision_shield.shield import Shield
 from aero_forge.sandbox.manager import Sandbox, ensure_cargo_in_path
 from aero_forge.scaffold.engine import (
@@ -205,13 +206,34 @@ class Orchestrator:
         self._project_root = find_project_root(self.source_path)
         ensure_sys_path(self._project_root)
         ensure_cargo_in_path()
-        check_toolchain()
         if not self.source_path.is_file():
             raise UserError(f"Source file not found: {self.source_path}")
 
         original_source = self.source_path.read_text(encoding="utf-8")
         source = original_source
 
+        try:
+            tree = ast.parse(source)
+        except SyntaxError as exc:
+            return self._partial_result(
+                0,
+                None,
+                f"Build failed and could not be fixed: Syntax error in source: {exc} "
+                f"(line {exc.lineno})",
+                "",
+            )
+
+        for name in self.function_names:
+            if _find_top_level(tree, name)[0] is None:
+                return self._partial_result(
+                    0, None, f"Function or class {name!r} not found", ""
+                )
+
+        route_payload = classify(source, function_names=self.function_names)
+        if route_payload["route"] != HIN_COMPUTE:
+            return self._run_general_purpose(source, route_payload)
+
+        check_toolchain()
         last_working_source: Optional[str] = None
         last_working_artifact: Optional[Path] = None
 
@@ -318,6 +340,69 @@ class Orchestrator:
         if artifact is not None:
             result["artifact"] = str(artifact)
         return result
+
+    def _run_general_purpose(
+        self, source: str, route_payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Execute dynamic/general-purpose code through the native Python runtime."""
+        logger.info("Routing %s as general-purpose code", ", ".join(self.function_names))
+        specific = next(
+            (
+                r
+                for r in route_payload["reasons"]
+                if any(k in r for k in ("uses ", "calls ", "contains ", "imports ", "not found"))
+            ),
+            None,
+        )
+        base_error = specific or (route_payload["reasons"][0] if route_payload["reasons"] else "General-purpose code")
+        # Hard routing blocks (missing functions, unsupported constructs) fail
+        # immediately rather than being silently treated as passing builds.
+        if "not found" in base_error:
+            return {
+                "success": False,
+                "iterations": 0,
+                "route": route_payload["route"],
+                "reasons": route_payload["reasons"],
+                "target_functions": route_payload["target_functions"],
+                "error": base_error,
+                "logs": "",
+            }
+        if not self.test_paths or not any(p.is_file() for p in self.test_paths):
+            return {
+                "success": False,
+                "iterations": 0,
+                "route": route_payload["route"],
+                "reasons": route_payload["reasons"],
+                "target_functions": route_payload["target_functions"],
+                "error": f"{base_error}: general-purpose code requires tests to verify",
+                "logs": "",
+            }
+        with Sandbox(
+            self.source_path,
+            self.function_name,
+            test_paths=self.test_paths,
+            project_root=self._project_root,
+        ) as sandbox:
+            sandbox.source_in_sandbox.write_text(source, encoding="utf-8")
+            result = sandbox.run_tests()
+            if result["passed"]:
+                return {
+                    "success": True,
+                    "iterations": 0,
+                    "route": route_payload["route"],
+                    "reasons": route_payload["reasons"],
+                    "target_functions": route_payload["target_functions"],
+                    "logs": result["logs"],
+                }
+            return {
+                "success": False,
+                "iterations": 0,
+                "route": route_payload["route"],
+                "reasons": route_payload["reasons"],
+                "target_functions": route_payload["target_functions"],
+                "error": f"{base_error}: general-purpose tests failed",
+                "logs": result["logs"],
+            }
 
     def _attempt_fix(self, source: str, error_log: str) -> Optional[str]:
         """Try deterministic router and cached fixes.

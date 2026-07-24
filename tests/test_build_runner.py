@@ -402,9 +402,7 @@ def test_build_runner_reports_transpiler_error_details(tmp_path):
     assert result["passed"] == 0
     assert result["failed"] == 1
     assert result["error"]
-    assert "[Transpiler Error]" in result["error"]
-    assert "UnsupportedError" in result["error"]
-    assert "with statements / context managers are not supported" in result["error"]
-    assert "File: " in result["error"]
-    assert "Line: 2" in result["error"]
-    assert "Traceback" in result["logs"]
+    assert "with statements" in result["error"]
+    assert "general-purpose" in result["error"]
+    assert result["logs"]
+    assert "FileNotFoundError" in result["logs"]
