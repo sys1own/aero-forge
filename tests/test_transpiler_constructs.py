@@ -370,3 +370,25 @@ def test_tuple_subscript(tmp_path: Path) -> None:
         "    assert tuple_first((1.0, 2.0)) == 1.0\n"
         "    assert tuple_first((3.0, 4.0)) == 3.0\n",
     )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_local_function_call(tmp_path: Path) -> None:
+    source = (
+        "def helper(x: int) -> int:\n"
+        "    return x + 1\n"
+        "\n"
+        "def main(n: int) -> int:\n"
+        "    return helper(n)\n"
+    )
+    _run_case(
+        tmp_path,
+        "main",
+        source,
+        "def test_main():\n"
+        "    assert main(5) == 6\n"
+        "    assert main(0) == 1\n",
+    )

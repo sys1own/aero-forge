@@ -39,7 +39,13 @@ _BINDING_KINDS = {"binding", "assignment", "let", "variable_declaration"}
 _REFERENCE_KINDS = {"reference", "identifier", "name", "var"}
 _LITERAL_KINDS = {"literal", "constant", "number", "string", "value"}
 _IF_KINDS = {"if", "if_statement", "conditional", "if_else"}
-_CALL_KINDS = {"call", "application", "apply", "call_expression"}
+_CALL_KINDS = {
+    "call",
+    "application",
+    "apply",
+    "call_expression",
+    "user_function_call",
+}
 _CONTAINER_KINDS = {
     "module",
     "translation_unit",

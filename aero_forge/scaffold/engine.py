@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from aero_forge._constants import IO_MODULES, IO_NAMES, MATH_ATTRS, MATH_CONSTANTS
 from aero_forge.errors import UnsupportedError
-from aero_forge.precision_shield.shield import _FLOAT_MATH_FUNCS
+from aero_forge.precision_shield.shield import Shield, _FLOAT_MATH_FUNCS
 
 logger = logging.getLogger("aero_forge.scaffold.engine")
 
@@ -58,7 +58,7 @@ class Engine:
         source: str,
     ) -> Path:
         """Create a temporary crate, write Cargo.toml and src/lib.rs, and return its path."""
-        traits_by_name = self._traits(annotated_graph)
+        traits_by_name = dict(self._traits(annotated_graph))
         crate_root = Path(tempfile.mkdtemp(prefix="accelerator-crate-"))
         src_dir = crate_root / "src"
         src_dir.mkdir(parents=True)
@@ -67,11 +67,42 @@ class Engine:
         class_names = {
             node.name for node in tree.body if isinstance(node, ast.ClassDef)
         }
+        local_function_nodes = {
+            node.name: node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+        }
+
+        # Expand the requested set to include any locally-defined helpers that
+        # are called transitively, so references resolve in the generated crate.
+        expanded_names: Set[str] = set(function_names)
+        queue: List[str] = list(function_names)
+        while queue:
+            current = queue.pop()
+            node = local_function_nodes.get(current)
+            if node is None:
+                continue
+            for child in ast.walk(node):
+                if isinstance(child, ast.Call) and isinstance(child.func, ast.Name):
+                    callee = child.func.id
+                    if callee in local_function_nodes and callee not in expanded_names:
+                        expanded_names.add(callee)
+                        queue.append(callee)
+
+        # Ensure every emitted function has trait information.
+        for name in expanded_names:
+            if name not in traits_by_name:
+                traits = Shield().analyze(
+                    annotated_graph, func_name=name, source=source
+                )
+                traits["function_name"] = name
+                traits_by_name[name] = traits
+
         function_blocks: List[str] = []
         module_init_lines: List[str] = []
         all_traits: Set[str] = set()
 
-        for name in function_names:
+        for name in sorted(expanded_names):
             node, is_class = _find_top_level(tree, name)
             if node is None:
                 raise UnsupportedError(
@@ -79,7 +110,13 @@ class Engine:
                 )
             traits = traits_by_name.get(name, {}) or {}
             if is_class:
-                generator = ClassGenerator(node, module_name, traits, class_names)
+                generator = ClassGenerator(
+                    node,
+                    module_name,
+                    traits,
+                    class_names,
+                    local_function_nodes=local_function_nodes,
+                )
                 block = generator.emit()
                 function_blocks.append(block)
                 module_init_lines.append(
@@ -87,7 +124,13 @@ class Engine:
                 )
                 all_traits.update(generator.shield_traits())
             else:
-                generator = RustGenerator(node, module_name, traits, class_names)
+                generator = RustGenerator(
+                    node,
+                    module_name,
+                    traits,
+                    class_names,
+                    local_function_nodes=local_function_nodes,
+                )
                 block = generator.emit()
                 function_blocks.append(block)
                 module_init_lines.append(
@@ -145,6 +188,7 @@ class RustGenerator:
         module_name: str,
         traits: Dict[str, Any],
         class_names: Optional[Set[str]] = None,
+        local_function_nodes: Optional[Dict[str, ast.FunctionDef]] = None,
     ):
         self.func = func
         self.orig_name = func.name
@@ -156,6 +200,7 @@ class RustGenerator:
         self.function_type = traits.get("function_type", "i64")
         self.return_type = traits.get("return_type", self.function_type)
         self.class_names = class_names or set()
+        self.local_function_nodes = local_function_nodes or {}
 
         arg_names = [a.arg for a in func.args.args]
         arg_types = self._annotated_arg_types(func, arg_names)
@@ -2256,6 +2301,31 @@ class RustGenerator:
         if base is None and name == "sorted":
             return self._emit_sorted(expr, ctx)
 
+        if base is None and name in self.local_function_nodes and name != self.func.name:
+            callee = self.local_function_nodes[name]
+            callee_arg_names = [a.arg for a in callee.args.args]
+            callee_arg_types = self._annotated_arg_types(callee, callee_arg_names)
+            if callee_arg_types is None:
+                callee_arg_types = [self.function_type] * len(callee_arg_names)
+            if len(args) != len(callee_arg_types):
+                raise UnsupportedError(
+                    f"Call to {name} has {len(callee_arg_types)} parameter(s) but "
+                    f"{len(args)} argument(s) were given",
+                    node=expr,
+                )
+            typed_args = [
+                self._coerce(arg_str, self._type_of(arg_expr), callee_arg_type)
+                for arg_expr, callee_arg_type, arg_str in zip(
+                    expr.args, callee_arg_types, args
+                )
+            ]
+            callee_return = _annotation_to_rust_type(callee.returns, self.class_names)
+            if not callee_return:
+                callee_return = self.function_type
+            rust_name = f"_accel_{_rust_identifier(name)}"
+            call_expr = f"{rust_name}({', '.join(typed_args)})"
+            return self._coerce(call_expr, callee_return, ctx)
+
         if base is not None and name == "pop":
             if expr.args:
                 raise UnsupportedError(
@@ -2400,6 +2470,7 @@ class ClassGenerator:
         module_name: str,
         traits: Dict[str, Any],
         class_names: Optional[Set[str]] = None,
+        local_function_nodes: Optional[Dict[str, ast.FunctionDef]] = None,
     ):
         self.class_node = class_node
         self.module_name = module_name
@@ -2407,6 +2478,7 @@ class ClassGenerator:
         self.orig_name = class_node.name
         self.class_name = _rust_identifier(class_node.name)
         self.class_names = (class_names or set()) | {class_node.name}
+        self.local_function_nodes = local_function_nodes or {}
         self._check_slots()
         self.methods: Dict[str, ast.FunctionDef] = {
             node.name: node
@@ -2477,6 +2549,7 @@ class ClassGenerator:
             self.fields,
             self.traits,
             class_names=self.class_names,
+            local_function_nodes=self.local_function_nodes,
             is_new=True,
             init_arg_types=init_arg_types,
         )
@@ -2493,6 +2566,7 @@ class ClassGenerator:
                 self.fields,
                 self.traits,
                 class_names=self.class_names,
+                local_function_nodes=self.local_function_nodes,
                 init_arg_types=init_arg_types,
             )
             blocks.append(gen.emit())
@@ -2552,6 +2626,7 @@ class ClassMethodGenerator(RustGenerator):
         fields: Dict[str, str],
         traits: Dict[str, Any],
         class_names: Optional[Set[str]] = None,
+        local_function_nodes: Optional[Dict[str, ast.FunctionDef]] = None,
         is_new: bool = False,
         init_arg_types: Optional[List[str]] = None,
     ):
@@ -2567,7 +2642,13 @@ class ClassMethodGenerator(RustGenerator):
             and self._method_mutates_self(func)
         )
         self.field_inits: Dict[str, str] = {}
-        super().__init__(func, module_name, traits, class_names=class_names)
+        super().__init__(
+            func,
+            module_name,
+            traits,
+            class_names=class_names,
+            local_function_nodes=local_function_nodes,
+        )
         # Methods always have `self`/`cls` as the first parameter unless they are
         # static methods.
         if self.is_staticmethod:

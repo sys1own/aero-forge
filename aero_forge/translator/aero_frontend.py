@@ -17,6 +17,9 @@ from aero_forge.errors import UnsupportedError
 def python_source_to_uast(source: str) -> dict:
     """Parse Python ``source`` and return a normalized UAST ``module`` dict."""
     tree = ast.parse(source)
+    _lower_expr.local_functions = {
+        node.name for node in tree.body if isinstance(node, ast.FunctionDef)
+    }
     children: List[dict] = []
     for stmt in tree.body:
         node = _lower_stmt(stmt)
@@ -127,11 +130,15 @@ def _lower_expr(expr: Optional[ast.expr]) -> Optional[dict]:
     if isinstance(expr, ast.Call):
         if _is_io_call(expr):
             raise UnsupportedError("io", node=expr)
-        arg = expr.args[0] if expr.args else None
+        local_functions = getattr(_lower_expr, "local_functions", set())
+        callee_name = expr.func.id if isinstance(expr.func, ast.Name) else None
+        args = [_lower_expr(a) for a in expr.args]
+        call_type = "user_function_call" if callee_name in local_functions else "call"
         return {
-            "type": "call",
+            "type": call_type,
             "function": _lower_expr(expr.func),
-            "argument": _lower_expr(arg),
+            "argument": args[0] if args else None,
+            "arguments": args,
         }
     if isinstance(expr, ast.IfExp):
         return {
