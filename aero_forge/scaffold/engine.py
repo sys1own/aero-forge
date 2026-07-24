@@ -23,6 +23,7 @@ from aero_forge._constants import (
 )
 from aero_forge.errors import UnsupportedError
 from aero_forge.precision_shield.shield import Shield, _FLOAT_MATH_FUNCS
+from aero_forge.translator import TargetMode
 
 logger = logging.getLogger("aero_forge.scaffold.engine")
 
@@ -65,6 +66,7 @@ class Engine:
         module_name: str,
         function_names: List[str],
         source: str,
+        target_mode: str = TargetMode.PYO3,
     ) -> Path:
         """Create a temporary crate, write Cargo.toml and src/lib.rs, and return its path."""
         traits_by_name = dict(self._traits(annotated_graph))
@@ -119,6 +121,10 @@ class Engine:
                 )
             traits = traits_by_name.get(name, {}) or {}
             if is_class:
+                if target_mode == TargetMode.C_ABI:
+                    raise UnsupportedError(
+                        "C-ABI target does not support Python classes", node=node
+                    )
                 generator = ClassGenerator(
                     node,
                     module_name,
@@ -139,20 +145,18 @@ class Engine:
                     traits,
                     class_names,
                     local_function_nodes=local_function_nodes,
+                    target_mode=target_mode,
                 )
                 block = generator.emit()
                 function_blocks.append(block)
-                module_init_lines.append(
-                    f"    m.add_wrapped(wrap_pyfunction!({generator.rust_function_name}))?;"
-                )
+                if target_mode == TargetMode.C_ABI:
+                    wrapper = generator.emit_c_abi_wrapper()
+                    function_blocks.append(wrapper)
+                else:
+                    module_init_lines.append(
+                        f"    m.add_wrapped(wrap_pyfunction!({generator.rust_function_name}))?;"
+                    )
                 all_traits.update(generator.shield_traits())
-
-        cargo_template = (
-            resources.files("aero_forge.templates").joinpath("Cargo.toml").read_text()
-        )
-        lib_template = (
-            resources.files("aero_forge.templates").joinpath("lib.rs").read_text()
-        )
 
         crate_name = _rust_identifier(module_name)
         extra_deps = (
@@ -160,13 +164,58 @@ class Engine:
             if all_traits
             else ""
         )
-        cargo = cargo_template.format(crate_name=crate_name, extra_deps=extra_deps)
-        lib = lib_template.format(
-            shield_imports=_shield_imports(all_traits),
-            functions="\n\n".join(function_blocks),
-            module_init="\n".join(module_init_lines),
-            module_name=crate_name,
-        )
+
+        if target_mode == TargetMode.C_ABI:
+            cargo = (
+                f"[package]\n"
+                f"name = \"{crate_name}\"\n"
+                f"version = \"0.1.0\"\n"
+                f"edition = \"2021\"\n"
+                f"\n"
+                f"[lib]\n"
+                f"name = \"{crate_name}\"\n"
+                f'crate-type = ["cdylib"]\n'
+                f"\n"
+                f"[dependencies]\n"
+                f"{extra_deps}\n"
+            ).strip()
+            functions_section = "\n\n".join(function_blocks)
+            lib = (
+                "#![allow(unused_imports)]\n"
+                f"{_shield_imports(all_traits)}\n"
+                "use std::collections::HashMap;\n"
+                "\n"
+                f"{functions_section}"
+                "\n\n"
+                "#[no_mangle]\n"
+                "pub extern \"C\" fn free_buffer_i64(ptr: *mut i64, len: usize) {\n"
+                "    if !ptr.is_null() { unsafe { let _ = Vec::from_raw_parts(ptr, len, len); } }\n"
+                "}\n"
+                "\n"
+                "#[no_mangle]\n"
+                "pub extern \"C\" fn free_buffer_f64(ptr: *mut f64, len: usize) {\n"
+                "    if !ptr.is_null() { unsafe { let _ = Vec::from_raw_parts(ptr, len, len); } }\n"
+                "}\n"
+                "\n"
+                "#[no_mangle]\n"
+                "pub extern \"C\" fn free_buffer_bool(ptr: *mut bool, len: usize) {\n"
+                "    if !ptr.is_null() { unsafe { let _ = Vec::from_raw_parts(ptr, len, len); } }\n"
+                "}\n"
+            )
+        else:
+            cargo_template = (
+                resources.files("aero_forge.templates").joinpath("Cargo.toml").read_text()
+            )
+            lib_template = (
+                resources.files("aero_forge.templates").joinpath("lib.rs").read_text()
+            )
+            cargo = cargo_template.format(crate_name=crate_name, extra_deps=extra_deps)
+            lib = lib_template.format(
+                shield_imports=_shield_imports(all_traits),
+                functions="\n\n".join(function_blocks),
+                module_init="\n".join(module_init_lines),
+                module_name=crate_name,
+            )
 
         (crate_root / "Cargo.toml").write_text(cargo, encoding="utf-8")
         (src_dir / "lib.rs").write_text(lib, encoding="utf-8")
@@ -198,8 +247,10 @@ class RustGenerator:
         traits: Dict[str, Any],
         class_names: Optional[Set[str]] = None,
         local_function_nodes: Optional[Dict[str, ast.FunctionDef]] = None,
+        target_mode: str = TargetMode.PYO3,
     ):
         self.func = func
+        self.target_mode = target_mode
         self.orig_name = func.name
         self.safe_name = _rust_identifier(func.name)
         self.rust_function_name = f"_accel_{self.safe_name}"
@@ -1252,10 +1303,13 @@ class RustGenerator:
             f"{name}: {typ}" for name, typ in zip(self.arg_names, self.arg_types)
         )
         return_type = self._return_type()
-        header = (
-            f'#[pyfunction(name = "{self.orig_name}")]\n'
-            f"fn {self.rust_function_name}({args}) -> {return_type} {{"
-        )
+        if self.target_mode == TargetMode.C_ABI:
+            header = f"fn {self.rust_function_name}({args}) -> {return_type} {{"
+        else:
+            header = (
+                f'#[pyfunction(name = "{self.orig_name}")]\n'
+                f"fn {self.rust_function_name}({args}) -> {return_type} {{"
+            )
 
         defaults, body_stmts = self._initializers_and_body()
         body_lines = [self._emit_stmt(stmt) for stmt in body_stmts]
@@ -1269,6 +1323,63 @@ class RustGenerator:
         body = "\n".join(defaults + body_lines)
         indented = "\n".join("    " + line for line in body.splitlines())
         return f"{header}\n{indented}\n}}"
+
+    def emit_c_abi_wrapper(self) -> str:
+        """Generate a #[no_mangle] pub extern "C" wrapper for the internal function."""
+        c_args: List[str] = []
+        call_args: List[str] = []
+        for name, typ in zip(self.arg_names, self.arg_types):
+            if typ in ("i64", "f64", "bool"):
+                c_args.append(f"{name}: {typ}")
+                call_args.append(name)
+            elif typ.startswith("Vec<") and typ.endswith(">"):
+                elem = typ[4:-1]
+                if elem not in ("i64", "f64", "bool"):
+                    raise UnsupportedError(
+                        f"C-ABI does not support argument type {typ}", node=self.func
+                    )
+                c_args.append(f"{name}: *const {elem}")
+                c_args.append(f"{name}_len: usize")
+                call_args.append(
+                    f"unsafe {{ std::slice::from_raw_parts({name}, {name}_len).to_vec() }}"
+                )
+            else:
+                raise UnsupportedError(
+                    f"C-ABI does not support argument type {typ}", node=self.func
+                )
+
+        return_type = self.return_type
+        if return_type in ("i64", "f64", "bool"):
+            c_ret = return_type
+            body = f"{self.rust_function_name}({', '.join(call_args)})"
+        elif return_type.startswith("Vec<") and return_type.endswith(">"):
+            elem = return_type[4:-1]
+            if elem not in ("i64", "f64", "bool"):
+                raise UnsupportedError(
+                    f"C-ABI does not support return type {return_type}", node=self.func
+                )
+            c_ret = f"*mut {elem}"
+            c_args.append("out_len: *mut usize")
+            body = (
+                f"let __result = {self.rust_function_name}({', '.join(call_args)});\n"
+                "    let mut __boxed = __result.into_boxed_slice();\n"
+                "    let __ptr = __boxed.as_mut_ptr();\n"
+                "    let __len = __boxed.len();\n"
+                "    unsafe { *out_len = __len; }\n"
+                "    std::mem::forget(__boxed);\n"
+                "    __ptr"
+            )
+        else:
+            raise UnsupportedError(
+                f"C-ABI does not support return type {return_type}", node=self.func
+            )
+
+        return (
+            f'#[no_mangle]\n'
+            f'pub extern "C" fn {self.safe_name}({", ".join(c_args)}) -> {c_ret} {{\n'
+            f"    {body}\n"
+            f"}}"
+        )
 
     def _emit_stmt(self, stmt: ast.stmt) -> str:
         if isinstance(stmt, ast.Return):
@@ -3486,6 +3597,45 @@ def _rust_identifier(name: str) -> str:
     if sanitized[0].isdigit() or sanitized in _RUST_KEYWORDS:
         sanitized = "a_" + sanitized
     return sanitized
+
+
+def _python_annotation(node: Optional[ast.expr]) -> str:
+    """Convert a Python annotation AST node back to source text."""
+    if node is None:
+        return "Any"
+    try:
+        return ast.unparse(node)
+    except AttributeError:
+        return "Any"
+
+
+def _generate_pyi(
+    source: str,
+    function_names: List[str],
+    output_path: Path,
+) -> None:
+    """Write a Python stub file (.pyi) for the compiled functions."""
+    tree = ast.parse(source)
+    lines = ["from typing import Any", ""]
+    all_names: List[str] = []
+    for func in tree.body:
+        if (
+            isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and func.name in function_names
+        ):
+            all_names.append(func.name)
+            args = []
+            for arg in func.args.args:
+                ann = _python_annotation(arg.annotation)
+                args.append(f"{arg.arg}: {ann}")
+            ret = _python_annotation(func.returns)
+            lines.append(f"def {func.name}({', '.join(args)}) -> {ret}:")
+            lines.append("    ...")
+            lines.append("")
+    if all_names:
+        lines.append(f"__all__ = {all_names!r}")
+        lines.append("")
+    output_path.write_text("\n".join(lines), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------

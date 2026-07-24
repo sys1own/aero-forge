@@ -23,6 +23,15 @@ from aero_forge.hin_vm import (
 )
 
 
+class TargetMode:
+    """Build target modes for code generation."""
+
+    NATIVE = "native"
+    PYO3 = "pyo3"
+    C_ABI = "c_abi"
+    WASM = "wasm"
+
+
 def _kind(node: dict) -> str:
     return (
         node.get("canonical_kind") or node.get("kind") or node.get("type") or "unknown"
@@ -457,4 +466,4 @@ class UASTToHINTranslator:
             seen.add(key)
 
 
-__all__ = ["UASTToHINTranslator", "BoundaryPortNode"]
+__all__ = ["UASTToHINTranslator", "BoundaryPortNode", "TargetMode"]
