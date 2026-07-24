@@ -384,3 +384,65 @@ def get_template(name: str) -> PromptTemplate:
 def get_default_template() -> PromptTemplate:
     """Return the default prompt template."""
     return BALANCED
+
+
+# ---------------------------------------------------------------------------
+# Blueprint planning prompt material
+# ---------------------------------------------------------------------------
+
+BLUEPRINT_PLAN_INSTRUCTIONS = """You are a systems architect. Given the user prompt and constraints, produce a valid YAML blueprint.aero with exactly these top-level keys:
+project, architecture, toolchains, manifest, contracts, output_dir, prompt, constraints, llm.
+
+- architecture must be one of: pure_python, pure_rust, hybrid_rust_python, hybrid_polyglot.
+- If the prompt mentions Python and Rust together, PyO3, Maturin, FFI, a native core, or polyglot/hybrid orchestration, architecture MUST be hybrid_rust_python and toolchains MUST be [python, cargo].
+- If the prompt is purely Rust/cargo, use pure_rust with toolchains [rust, cargo].
+- If the prompt is purely Python, use pure_python with toolchains [python].
+- manifest is a list of objects with keys: path, lang, purpose. Use relative paths.
+- contracts is a list of objects with keys: name, signature, language, python_name, purpose.
+- output_dir should be "dist".
+- llm should be an object with provider and model keys, or null.
+
+Keep the blueprint minimal and accurate."""
+
+POLYGLOT_BLUEPRINT_EXAMPLE = """Example polyglot blueprint.aero for a Python-Rust batch processor:
+
+project: batch_processor
+architecture: hybrid_rust_python
+toolchains:
+  - python
+  - cargo
+manifest:
+  - path: Cargo.toml
+    lang: toml
+    purpose: Rust workspace manifest
+  - path: rust_core/Cargo.toml
+    lang: toml
+    purpose: PyO3 crate manifest
+  - path: rust_core/src/lib.rs
+    lang: rust
+    purpose: Rust native core exposing compute_batch
+  - path: python_engine/pyproject.toml
+    lang: toml
+    purpose: Python package and Maturin configuration
+  - path: python_engine/src/batch_engine/__init__.py
+    lang: python
+    purpose: Python driver package exports
+  - path: python_engine/src/batch_engine/core.py
+    lang: python
+    purpose: Python wrapper importing rust_core
+  - path: python_engine/tests/test_core.py
+    lang: python
+    purpose: pytest tests
+contracts:
+  - name: compute_batch
+    signature: def compute_batch(data: list[float]) -> list[float]
+    language: python/rust
+    python_name: batch_engine.core.compute_batch
+    purpose: Native/PyO3 exported core function
+output_dir: dist
+prompt: Build a Python-Rust batch processor
+constraints: none
+llm:
+  provider: deepseek
+  model: deepseek-chat
+"""
