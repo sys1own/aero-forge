@@ -506,3 +506,51 @@ def test_infinity_constants(tmp_path: Path) -> None:
         "    assert infinity_constants(-1) == float('-inf')\n"
         "    assert infinity_constants(0) == float('inf')\n",
     )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_bitwise_augassign(tmp_path: Path) -> None:
+    source = (
+        "def bitwise_flags(x: int) -> int:\n"
+        "    x |= 0b0010\n"
+        "    x &= 0b1111\n"
+        "    x ^= 0b0100\n"
+        "    x <<= 1\n"
+        "    x >>= 1\n"
+        "    return x\n"
+    )
+    _run_case(
+        tmp_path,
+        "bitwise_flags",
+        source,
+        "def test_bitwise_flags():\n"
+        "    assert bitwise_flags(0b0001) == 0b0111\n",
+    )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_string_constants_and_dict(tmp_path: Path) -> None:
+    source = (
+        "def string_dict_lookup(score: int) -> str:\n"
+        "    labels = {'A': 90, 'B': 80, 'C': 70}\n"
+        "    if 'A' in labels and labels['A'] <= score:\n"
+        "        return 'A'\n"
+        "    if 'B' in labels and labels['B'] <= score:\n"
+        "        return 'B'\n"
+        "    return 'F'\n"
+    )
+    _run_case(
+        tmp_path,
+        "string_dict_lookup",
+        source,
+        "def test_string_dict_lookup():\n"
+        "    assert string_dict_lookup(95) == 'A'\n"
+        "    assert string_dict_lookup(85) == 'B'\n"
+        "    assert string_dict_lookup(50) == 'F'\n",
+    )

@@ -242,6 +242,18 @@ def _lower_expr(expr: Optional[ast.expr]) -> Optional[dict]:
             # object fields and safe stdlib attributes do not fail lowering.
             return {"type": "reference", "name": f"{expr.value.id}.{expr.attr}"}
         return _lower_expr(expr.value)
+    if isinstance(expr, ast.Dict):
+        return {
+            "type": "literal",
+            "value": {
+                "type": "dict",
+                "pairs": [
+                    {"key": _lower_expr(k), "value": _lower_expr(v)}
+                    for k, v in zip(expr.keys, expr.values)
+                    if k is not None
+                ],
+            },
+        }
     return None
 
 
