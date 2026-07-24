@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from aero_forge.builder import (
@@ -284,3 +287,69 @@ def test_list_literal_emits() -> None:
     assert "vec![" in rust
     cpp = build_engine(spec, target_language="cpp").source
     assert "std::vector" in cpp or "{" in cpp
+
+
+@pytest.mark.integration
+def test_polyglot_materializer_builds_shared_object(tmp_path: Path) -> None:
+    """End-to-end: a hybrid blueprint is materialised, compiled, and tested."""
+    from aero_forge.blueprint import Blueprint, ContractEntry, ManifestEntry
+    from aero_forge.scaffold.polyglot_materializer import PolyglotMaterializer
+
+    workspace = tmp_path / "poly"
+    blueprint = Blueprint(
+        project="polyglot_demo",
+        architecture="hybrid_rust_python",
+        toolchains=["python", "rust", "cargo"],
+        manifest=[
+            ManifestEntry(path="Cargo.toml", lang="toml", purpose="workspace manifest"),
+            ManifestEntry(path="rust_core/Cargo.toml", lang="toml", purpose="crate manifest"),
+            ManifestEntry(path="rust_core/src/lib.rs", lang="rust", purpose="Rust core"),
+            ManifestEntry(path="aero_polyglot_runner/__init__.py", lang="python", purpose="package init"),
+            ManifestEntry(path="aero_polyglot_runner/orchestrator.py", lang="python", purpose="Python orchestrator"),
+            ManifestEntry(path="run_demo.py", lang="python", purpose="demo"),
+            ManifestEntry(path="tests/test_polyglot.py", lang="python", purpose="tests"),
+            ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python packaging"),
+            ManifestEntry(path="README.md", lang="markdown", purpose="docs"),
+        ],
+        contracts=[
+            ContractEntry(
+                name="fast_vector_transform",
+                signature="def fast_vector_transform(v: list[float], scalar: float) -> list[float]",
+            ),
+            ContractEntry(
+                name="get_engine_status",
+                signature="def get_engine_status() -> dict[str, str]",
+            ),
+        ],
+    )
+    updated = PolyglotMaterializer(workspace).materialize(blueprint, build=True)
+
+    so_files = list((workspace / "dist").glob("*.so"))
+    assert so_files, "Expected a compiled .so in dist/"
+
+    script = workspace / "check_backend.py"
+    script.write_text(
+        'import sys\n'
+        'sys.path.insert(0, ".")\n'
+        'from aero_polyglot_runner.orchestrator import PolyglotEngine\n'
+        'engine = PolyglotEngine()\n'
+        'assert engine.backend == "rust"\n'
+        'assert engine.fast_vector_transform([1.0, 2.0, 3.0], 2.0) == [2.0, 4.0, 6.0]\n'
+        'assert engine.get_engine_status()["status"] == "ok"\n'
+    )
+    result = subprocess.run(
+        ["python", str(script)], cwd=workspace, capture_output=True, text=True
+    )
+    assert result.returncode == 0, f"Native backend smoke test failed: {result.stderr}"
+
+    pytest_result = subprocess.run(
+        ["python", "-m", "pytest", "tests/test_polyglot.py", "-q"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+    )
+    assert pytest_result.returncode == 0, f"Generated tests failed:\n{pytest_result.stdout}\n{pytest_result.stderr}"
+
+    assert any(f.name == "fast_vector_transform" for f in updated.functions)
+    assert any(f.name == "get_engine_status" for f in updated.functions)
+    assert any(f.name == "PolyglotEngine" for f in updated.functions)
