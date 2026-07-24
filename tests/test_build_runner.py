@@ -366,3 +366,45 @@ def test_build_runner_distributed(tmp_path):
     assert result["success"] is True
     assert result["total"] == 2
     assert result["passed"] == 2
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_build_runner_reports_transpiler_error_details(tmp_path):
+    source = tmp_path / "bad.py"
+    test = tmp_path / "test_bad.py"
+    source.write_text(
+        "def bad():\n"
+        "    with open(\"x\") as f:\n"
+        "        return f.read()\n"
+    )
+    test.write_text("from bad import bad\n\ndef test_bad():\n    assert bad()\n")
+    blueprint_path = tmp_path / "blueprint.aero"
+    blueprint_path.write_text(
+        "project: transpiler_error\n"
+        "functions:\n"
+        "  - file: bad.py\n"
+        "    name: bad\n"
+        "    tests: [test_bad.py]\n"
+        "llm:\n"
+        "  provider: none\n"
+        "output_dir: ./dist\n"
+    )
+
+    bp = parse_blueprint(blueprint_path)
+    runner = BuildRunner(bp, max_workers=1, cache_enabled=False)
+    result = runner.build()
+
+    assert result["success"] is False
+    assert result["total"] == 1
+    assert result["passed"] == 0
+    assert result["failed"] == 1
+    assert result["error"]
+    assert "[Transpiler Error]" in result["error"]
+    assert "UnsupportedError" in result["error"]
+    assert "with statements / context managers are not supported" in result["error"]
+    assert "File: " in result["error"]
+    assert "Line: 2" in result["error"]
+    assert "Traceback" in result["logs"]
