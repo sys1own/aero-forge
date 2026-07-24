@@ -1461,7 +1461,13 @@ def examples_create(
 
 
 @main.command("web")
-@click.option("--port", "-p", default=8080, help="Port to bind the web server.", type=int)
+@click.option(
+    "--port",
+    "-p",
+    default=None,
+    help="Port to bind the web server (default: $PORT or 8080).",
+    type=int,
+)
 @click.option(
     "--no-browser", is_flag=True, help="Do not automatically open the browser."
 )
