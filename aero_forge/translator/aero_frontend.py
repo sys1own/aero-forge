@@ -10,7 +10,13 @@ from __future__ import annotations
 import ast
 from typing import List, Optional
 
-from aero_forge._constants import IO_MODULES, IO_NAMES, MATH_CONSTANTS
+from aero_forge._constants import (
+    IO_MODULES,
+    IO_NAMES,
+    MATH_CONSTANTS,
+    SAFE_BUILTINS,
+    SAFE_STD_MODULES,
+)
 from aero_forge.errors import UnsupportedError
 
 
@@ -40,7 +46,40 @@ def _is_io_call(expr: ast.Call) -> bool:
     return False
 
 
+def _call_base_and_name(expr: ast.Call):
+    """Return (base, name) for a call, e.g. ("math", "sin") for math.sin(x)."""
+    if isinstance(expr.func, ast.Name):
+        return (None, expr.func.id)
+    if isinstance(expr.func, ast.Attribute) and isinstance(expr.func.value, ast.Name):
+        return (expr.func.value.id, expr.func.attr)
+    return (None, "")
+
+
+def _lower_external_call(expr: ast.Call) -> dict:
+    """Lower a call to a generic external function stub used by the HIN VM."""
+    base, name = _call_base_and_name(expr)
+    args = [_lower_expr(a) for a in expr.args]
+    if base is None:
+        function_name = name
+    elif base in SAFE_STD_MODULES:
+        function_name = f"{base}.{name}"
+    else:
+        # Generic object method: include the receiver as the first argument.
+        function_name = f"{base}.{name}"
+        args = [_lower_expr(expr.func.value)] + args
+    return {
+        "type": "call",
+        "function": {"type": "reference", "name": function_name},
+        "argument": args[0] if args else None,
+        "arguments": args,
+    }
+
+
 def _lower_stmt(stmt: ast.stmt) -> Optional[dict]:
+    # Import statements have no runtime effect in the generated numeric code;
+    # skip them so safe standard library imports do not fail lowering.
+    if isinstance(stmt, (ast.Import, ast.ImportFrom)):
+        return None
     if isinstance(stmt, (ast.With, ast.AsyncWith)):
         raise UnsupportedError(
             "with statements / context managers are not supported", node=stmt
@@ -129,6 +168,9 @@ def _lower_expr(expr: Optional[ast.expr]) -> Optional[dict]:
         return {"type": "reference", "name": expr.id}
     if isinstance(expr, ast.Call):
         if _is_io_call(expr):
+            base, name = _call_base_and_name(expr)
+            if base in SAFE_STD_MODULES or name in SAFE_BUILTINS:
+                return _lower_external_call(expr)
             raise UnsupportedError("io", node=expr)
         local_functions = getattr(_lower_expr, "local_functions", set())
         callee_name = expr.func.id if isinstance(expr.func, ast.Name) else None
@@ -195,6 +237,10 @@ def _lower_expr(expr: Optional[ast.expr]) -> Optional[dict]:
             and expr.attr in MATH_CONSTANTS
         ):
             return {"type": "literal", "value": MATH_CONSTANTS[expr.attr]}
+        if isinstance(expr.value, ast.Name):
+            # Generic attribute access becomes an external reference so that
+            # object fields and safe stdlib attributes do not fail lowering.
+            return {"type": "reference", "name": f"{expr.value.id}.{expr.attr}"}
         return _lower_expr(expr.value)
     return None
 
