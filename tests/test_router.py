@@ -34,7 +34,7 @@ def test_classify_build_intent(prompt: str, expected: str) -> None:
 def test_toolchains_for_intent() -> None:
     assert toolchains_for_intent(BUILD_INTENT_PURE_PYTHON) == ["python"]
     assert toolchains_for_intent(BUILD_INTENT_PURE_RUST) == ["rust", "cargo"]
-    assert toolchains_for_intent(BUILD_INTENT_HYBRID_RUST_PYTHON) == ["python", "cargo"]
+    assert toolchains_for_intent(BUILD_INTENT_HYBRID_RUST_PYTHON) == ["python", "rust", "cargo"]
 
 
 def test_required_manifest_for_hybrid() -> None:

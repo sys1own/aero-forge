@@ -36,7 +36,12 @@ from aero_forge.overlay import OverlayManager, ReapplyStatus
 from aero_forge.precision_shield.rust_shield import RustSemanticShield
 from aero_forge.scaffold.active_merge import find_compiled_library, merge_active
 from aero_forge.scaffold.import_pruner import prune_source
-from aero_forge.scaffold.pre_write_validator import PreWriteValidator, ValidationError
+from aero_forge.scaffold.pre_write_validator import (
+    BlueprintValidationError,
+    PreWriteValidator,
+    ValidationError,
+    validate_blueprint_intent,
+)
 from aero_forge.scaffold.workspace import OutOfTreeWorkspace
 from aero_forge.errors import (
     UnsupportedError,
@@ -45,7 +50,7 @@ from aero_forge.errors import (
     classify_cargo_error,
 )
 from aero_forge.healing.router import try_auto_fix
-from aero_forge.llm import get_llm_client
+from aero_forge.llm import LLMError, get_llm_client
 from aero_forge.orchestrator.error_classifier import (
     ErrorClass,
     classify_exception,
@@ -945,20 +950,10 @@ def _validate_blueprint_against_intent(
     blueprint: Blueprint,
 ) -> Optional[str]:
     """Return an error string if the blueprint conflicts with the prompt intent."""
-    intent = classify_build_intent(prompt)
-    if intent == BUILD_INTENT_HYBRID_RUST_PYTHON and blueprint.architecture != BUILD_INTENT_HYBRID_RUST_PYTHON:
-        return (
-            f"User prompt requests a Python/Rust polyglot build, but the generated "
-            f"blueprint has architecture={blueprint.architecture!r}. "
-            f"Set architecture to '{BUILD_INTENT_HYBRID_RUST_PYTHON}' and toolchains to "
-            f"{toolchains_for_intent(intent)!r} and include rust_core and python_engine "
-            "manifest entries."
-        )
-    if "cargo" in toolchains_for_intent(intent) and "cargo" not in blueprint.toolchains:
-        return (
-            f"User prompt requests Rust/cargo tooling, but the generated blueprint "
-            f"toolchains {blueprint.toolchains!r} does not include 'cargo'."
-        )
+    try:
+        validate_blueprint_intent(prompt, blueprint)
+    except BlueprintValidationError as exc:
+        return str(exc)
     return None
 
 
@@ -1006,19 +1001,24 @@ def _llm_plan_blueprint(
         correction_context=correction_context,
     )
 
-    from aero_forge.llm import get_llm_client
+    try:
+        client = get_llm_client(
+            llm_provider,
+            model=model,
+            max_retries=max_retries,
+            config_override=config_override,
+            raise_on_error=True,
+        )
+    except LLMError as exc:
+        raise UserError(
+            f"LLM provider '{llm_provider}' is not configured or no API key is set"
+        ) from exc
 
-    client = get_llm_client(
-        llm_provider,
-        model=model,
-        max_retries=max_retries,
-        config_override=config_override,
-    )
     try:
         raw = client.generate(plan_prompt, max_tokens=max_tokens)
     except Exception as exc:
         logger.warning("LLM planning call failed: %s", exc)
-        return None
+        raise UserError(f"LLM planning call failed for provider '{llm_provider}': {exc}") from exc
 
     return _parse_llm_blueprint(raw, llm_provider, model)
 
@@ -1070,11 +1070,16 @@ def plan_workspace(
                     config_override,
                     correction_context=correction_context,
                 )
+            except UserError:
+                # Provider misconfiguration or LLM call failure should be explicit,
+                # not silently converted to a deterministic fallback.
+                raise
             except Exception as exc:
                 logger.warning("LLM planning failed, using deterministic fallback: %s", exc)
                 break
 
             if blueprint is None:
+                # Parse failure; stop retrying and let the deterministic fallback run.
                 break
 
             mismatch = _validate_blueprint_against_intent(prompt, blueprint)

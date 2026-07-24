@@ -10,6 +10,13 @@ from typing import Any, Dict, List, Optional
 import yaml
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
+from aero_forge.orchestrator.router import (
+    BUILD_INTENT_HYBRID_RUST_PYTHON,
+    BUILD_INTENT_PURE_RUST,
+    classify_build_intent,
+    toolchains_for_intent,
+)
+
 logger = logging.getLogger("aero_forge.blueprint")
 
 
@@ -276,13 +283,39 @@ def generate_blueprint(
     functions: List[FunctionSpec],
     output_dir: Path = Path("./dist"),
     compiler_flags: Optional[List[str]] = None,
+    prompt: Optional[str] = None,
+    constraints: Optional[str] = None,
 ) -> Blueprint:
-    """Create a Blueprint from discovered or supplied function specs."""
+    """Create a Blueprint from discovered or supplied function specs.
+
+    If ``prompt`` is provided, the architecture, toolchains, and manifest are
+    inferred from prompt keywords (``rust``, ``pyo3``, ``ffi``, ``polyglot``,
+    ``c++``) so multi-language requests are not silently downgraded to
+    ``pure_python``.
+    """
+    intent = classify_build_intent(prompt or "")
+    toolchains = toolchains_for_intent(intent)
+    # For a single generated project, emit a minimal Rust/PyO3 crate manifest.
+    # The full monorepo layout (rust_core/, python_engine/) is added later by
+    # the monorepo packager.
+    if intent in (BUILD_INTENT_HYBRID_RUST_PYTHON, BUILD_INTENT_PURE_RUST):
+        manifest_entries = [
+            ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust crate manifest"),
+            ManifestEntry(path="src/lib.rs", lang="rust", purpose="Rust core library"),
+        ]
+    else:
+        manifest_entries = []
     return Blueprint(
         project=project,
+        architecture=intent,
+        toolchains=toolchains,
+        manifest=manifest_entries,
         functions=functions,
         output_dir=output_dir,
         compiler_flags=compiler_flags or [],
+        llm=LLMConfig(provider="none"),
+        prompt=prompt,
+        constraints=constraints,
     )
 
 

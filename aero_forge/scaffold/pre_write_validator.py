@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from aero_forge.orchestrator.router import classify_build_intent
 from aero_forge.scaffold.workspace import OutOfTreeWorkspace
 
 
@@ -71,6 +72,38 @@ def validate_blueprint_manifest(
         raise BlueprintValidationError(
             f"Missing declared file {missing[0]} from blueprint.aero",
             output=f"Missing declared files: {', '.join(missing)}",
+        )
+
+
+def validate_blueprint_intent(prompt: str, blueprint: Any) -> None:
+    """Raise ``BlueprintValidationError`` if a polyglot prompt was downgraded.
+
+    When the prompt explicitly requests multi-language / Rust integration, the
+    resulting ``blueprint.aero`` must not silently fall back to ``pure_python``.
+    """
+    intent = classify_build_intent(prompt)
+    if intent != "hybrid_rust_python":
+        return
+
+    architecture = getattr(blueprint, "architecture", "pure_python")
+    toolchains = getattr(blueprint, "toolchains", [])
+    manifest = getattr(blueprint, "manifest", [])
+    manifest_paths = {getattr(entry, "path", "") for entry in manifest}
+
+    if architecture == "pure_python":
+        raise BlueprintValidationError(
+            f"Prompt requests a hybrid Rust/Python build, but blueprint architecture is {architecture!r}",
+            output="Set architecture to a hybrid/polyglot value such as 'hybrid_rust_python'.",
+        )
+    if "python" not in toolchains or "rust" not in toolchains:
+        raise BlueprintValidationError(
+            f"Prompt requests a hybrid Rust/Python build, but toolchains {toolchains!r} are missing 'python' or 'rust'",
+            output="Include both 'python' and 'rust' (or 'cargo') in toolchains.",
+        )
+    if "Cargo.toml" not in {Path(p).name for p in manifest_paths}:
+        raise BlueprintValidationError(
+            "Prompt requests a hybrid Rust/Python build, but manifest is missing Cargo.toml",
+            output="Add a Cargo.toml entry to the blueprint manifest.",
         )
 
 
