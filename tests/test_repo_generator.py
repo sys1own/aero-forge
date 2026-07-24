@@ -104,6 +104,47 @@ def test_incremental_feature_merge_preserves_user_edit(generator: UniversalRepoG
     assert "def sub" in merged
 
 
+def test_polyglot_blueprint_materializes_files(tmp_path: Path) -> None:
+    from aero_forge.blueprint import Blueprint, ContractEntry, ManifestEntry
+    from aero_forge.scaffold.polyglot_materializer import PolyglotMaterializer
+
+    workspace = tmp_path / "poly"
+    blueprint = Blueprint(
+        project="polyglot_demo",
+        architecture="hybrid_rust_python",
+        toolchains=["python", "rust", "cargo"],
+        manifest=[
+            ManifestEntry(path="Cargo.toml", lang="toml", purpose="workspace manifest"),
+            ManifestEntry(path="rust_core/Cargo.toml", lang="toml", purpose="crate manifest"),
+            ManifestEntry(path="rust_core/src/lib.rs", lang="rust", purpose="Rust core"),
+            ManifestEntry(path="aero_polyglot_runner/__init__.py", lang="python", purpose="package init"),
+            ManifestEntry(path="aero_polyglot_runner/orchestrator.py", lang="python", purpose="Python orchestrator"),
+            ManifestEntry(path="run_demo.py", lang="python", purpose="demo"),
+            ManifestEntry(path="tests/test_polyglot.py", lang="python", purpose="tests"),
+            ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python packaging"),
+            ManifestEntry(path="README.md", lang="markdown", purpose="docs"),
+        ],
+        contracts=[
+            ContractEntry(name="fast_vector_transform", signature="def fast_vector_transform(v: list[float], scalar: float) -> list[float]"),
+            ContractEntry(name="get_engine_status", signature="def get_engine_status() -> dict[str, str]"),
+        ],
+    )
+    updated = PolyglotMaterializer(workspace).materialize(blueprint)
+
+    assert (workspace / "Cargo.toml").is_file()
+    assert (workspace / "rust_core" / "Cargo.toml").is_file()
+    assert (workspace / "rust_core" / "src" / "lib.rs").is_file()
+    assert (workspace / "aero_polyglot_runner" / "orchestrator.py").is_file()
+    assert (workspace / "aero_polyglot_runner" / "__init__.py").is_file()
+    assert (workspace / "run_demo.py").is_file()
+    assert (workspace / "tests" / "test_polyglot.py").is_file()
+    assert (workspace / "pyproject.toml").is_file()
+    assert (workspace / "README.md").is_file()
+    assert any(f.name == "fast_vector_transform" for f in updated.functions)
+    assert any(f.name == "get_engine_status" for f in updated.functions)
+    assert any(f.name == "PolyglotEngine" for f in updated.functions)
+
+
 def test_invisible_config_generates_repo(tmp_path: Path) -> None:
     engine = InvisibleConfigEngine(tmp_path)
     content = (
