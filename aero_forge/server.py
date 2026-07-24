@@ -40,6 +40,19 @@ logger = logging.getLogger("aero_forge.server")
 
 DEFAULT_PORT = 8080
 
+
+def _resolve_port(port: Optional[int] = None) -> int:
+    """Return the effective port, honoring CLI args > PORT env > default."""
+    if port is not None and port > 0:
+        return port
+    env_port = os.getenv("PORT")
+    if env_port:
+        try:
+            return int(env_port)
+        except ValueError:
+            logger.warning("Ignoring non-integer PORT environment variable: %r", env_port)
+    return DEFAULT_PORT
+
 _CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type, X-Api-Key, X-API-Key, Authorization",
@@ -1216,22 +1229,58 @@ async def _aiohttp_ws_handler(request: web.Request) -> web.WebSocketResponse:
 class AioForgeServer:
     """Combined HTTP + WebSocket server using aiohttp on a single port."""
 
-    def __init__(self, port: int = DEFAULT_PORT) -> None:
-        self.port = port
+    DEFAULT_HOST = "0.0.0.0"
+    MAX_PORT_RETRIES = 10
+
+    def __init__(self, port: Optional[int] = None, host: str = DEFAULT_HOST) -> None:
+        self.requested_port = _resolve_port(port)
+        self.port = self.requested_port
+        self.host = host
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event: Optional[asyncio.Event] = None
+        self._serve_error: Optional[Exception] = None
         self.runner: Optional[web.AppRunner] = None
         self.app = web.Application()
         self.app.router.add_get("/ws/terminal", _aiohttp_ws_handler)
-        self.app.router.add_route("*", "/{tail:.*}", functools.partial(_aiohttp_http_handler, port=port))
+        self.app.router.add_route("*", "/{tail:.*}", functools.partial(_aiohttp_http_handler, port=self.port))
 
     async def _serve(self) -> None:
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
-        site = web.TCPSite(self.runner, host="", port=self.port)
-        await site.start()
+        site: Optional[web.TCPSite] = None
+        try_port = self.requested_port
+        for attempt in range(self.MAX_PORT_RETRIES):
+            try:
+                site = web.TCPSite(self.runner, host=self.host, port=try_port)
+                await site.start()
+                break
+            except OSError as exc:
+                if exc.errno in (98, 48) and attempt < self.MAX_PORT_RETRIES - 1:
+                    logger.warning(
+                        "Port %s (%s) is already in use; trying port %s",
+                        try_port,
+                        self.host,
+                        try_port + 1,
+                    )
+                    try_port += 1
+                    continue
+                logger.error(
+                    "Could not bind server to %s:%s after %d attempt(s): %s",
+                    self.host,
+                    try_port,
+                    attempt + 1,
+                    exc,
+                )
+                raise
+        if site is None:
+            raise RuntimeError("Failed to bind server after exhausting port retries")
         _set_event_loop()
+        # Capture the actual bound port in case the OS assigned a different one.
+        if site._server and site._server.sockets:
+            self.port = site._server.sockets[0].getsockname()[1]
+        else:
+            self.port = try_port
         self._stop_event = asyncio.Event()
         await self._stop_event.wait()
         await self.runner.cleanup()
@@ -1241,6 +1290,9 @@ class AioForgeServer:
         asyncio.set_event_loop(self._loop)
         try:
             self._loop.run_until_complete(self._serve())
+        except OSError as exc:
+            self._serve_error = exc
+            logger.error("Server failed to start: %s", exc)
         finally:
             self._loop.close()
 
@@ -1253,15 +1305,15 @@ class AioForgeServer:
 
     @property
     def server_address(self) -> tuple:
-        return ("", self.port)
+        return (self.host, self.port)
 
 
-def make_server(port: int = DEFAULT_PORT) -> AioForgeServer:
+def make_server(port: Optional[int] = None, host: str = AioForgeServer.DEFAULT_HOST) -> AioForgeServer:
     """Return an aiohttp-based server bound to the given port."""
-    return AioForgeServer(port)
+    return AioForgeServer(port=port, host=host)
 
 
-def run_server(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
+def run_server(port: Optional[int] = None, open_browser: bool = True) -> None:
     """Start the web server and optionally open the user's browser."""
     _static_dir.mkdir(parents=True, exist_ok=True)
     server = make_server(port)
@@ -1275,7 +1327,18 @@ def run_server(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
 
-    url = f"http://localhost:{port}"
+    # Wait briefly for the server to bind so the URL reflects the actual port.
+    import time
+    for _ in range(50):
+        if server.port != server.requested_port or server._serve_error is not None:
+            break
+        time.sleep(0.05)
+
+    if server._serve_error is not None:
+        logger.error("Aero-Forge web server failed to start on %s", server.server_address)
+        return
+
+    url = f"http://localhost:{server.port}"
     logger.info("Aero-Forge web server running at %s (HTTP + WebSocket on one port)", url)
 
     if open_browser:

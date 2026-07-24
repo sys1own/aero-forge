@@ -13,7 +13,7 @@ import pytest
 import websockets
 
 from aero_forge.sandbox.manager import SandboxManager
-from aero_forge.server import make_server
+from aero_forge.server import _resolve_port, make_server
 
 
 def _free_port() -> int:
@@ -380,3 +380,46 @@ def _collect_paths(node, prefix=""):
     for child in node.get("children", []):
         paths.extend(_collect_paths(child, dir_prefix))
     return paths
+
+
+def test_resolve_port_precedence(monkeypatch):
+    monkeypatch.setenv("PORT", "9876")
+    assert _resolve_port() == 9876
+    assert _resolve_port(1234) == 1234
+    monkeypatch.delenv("PORT")
+    assert _resolve_port() == 8080
+    assert _resolve_port(5678) == 5678
+
+
+def test_port_fallback_on_collision(tmp_path, monkeypatch):
+    """When the requested port is in use, the server should fall back to the next port."""
+    manager = SandboxManager(base_dir=tmp_path / "web-sessions")
+    monkeypatch.setattr("aero_forge.server._manager", manager)
+
+    # Bind a socket to an ephemeral port and keep it open to simulate occupation.
+    occupant = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    occupant.bind(("127.0.0.1", 0))
+    occupied_port = occupant.getsockname()[1]
+    occupant.listen(1)
+
+    server = make_server(port=occupied_port, host="127.0.0.1")
+    http_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    http_thread.start()
+
+    import time
+    for _ in range(30):
+        if server.port != occupied_port or server._serve_error is not None:
+            break
+        time.sleep(0.1)
+
+    try:
+        assert server._serve_error is None, server._serve_error
+        actual_port = server.server_address[1]
+        assert actual_port != occupied_port
+        status, body = _get(f"http://127.0.0.1:{actual_port}/")
+        assert status == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+        occupant.close()
+        http_thread.join(timeout=2)
