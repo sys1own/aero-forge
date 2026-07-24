@@ -583,6 +583,24 @@ class RustGenerator:
                 right_type = self._type_of(expr.right)
                 if right_type.startswith("Vec<") or isinstance(expr.right, ast.List):
                     return right_type
+            if isinstance(expr.op, ast.Add):
+                left_type = self._type_of(expr.left)
+                right_type = self._type_of(expr.right)
+                left_is_vec = left_type.startswith("Vec<") or isinstance(
+                    expr.left, ast.List
+                )
+                right_is_vec = right_type.startswith("Vec<") or isinstance(
+                    expr.right, ast.List
+                )
+                if left_is_vec and right_is_vec:
+                    if left_type.startswith("Vec<"):
+                        return left_type
+                    if right_type.startswith("Vec<"):
+                        return right_type
+                    if isinstance(expr.left, ast.List) and isinstance(
+                        expr.right, ast.List
+                    ):
+                        return f"Vec<{self._type_of(expr.left.elts[0])}>"
             left_type = self._type_of(expr.left)
             right_type = self._type_of(expr.right)
             if "f64" in (left_type, right_type):
@@ -1423,6 +1441,11 @@ class RustGenerator:
         value = expr.value
         if isinstance(value, bool):
             return "true" if value else "false"
+        if isinstance(value, complex):
+            raise UnsupportedError(
+                "Complex numbers are not supported. Use real and imaginary parts separately.",
+                node=expr,
+            )
         if isinstance(value, (int, float)):
             if ctx == "f64":
                 if isinstance(value, float):
@@ -1674,6 +1697,25 @@ class RustGenerator:
         left_type = self._type_of(expr.left)
         right_type = self._type_of(expr.right)
 
+        # Vector concatenation: [a] + [b] or left + right for Python lists.
+        left_is_vec = _is_vec_type(left_type) or isinstance(expr.left, ast.List)
+        right_is_vec = _is_vec_type(right_type) or isinstance(expr.right, ast.List)
+        if isinstance(op, ast.Add) and left_is_vec and right_is_vec:
+            result_type = self._type_of(expr)
+            element_type = (
+                _element_type(result_type)
+                if result_type.startswith("Vec<")
+                else self.function_type
+            )
+            if element_type == "?":
+                element_type = self.function_type
+            left = self._emit_expr(expr.left, result_type)
+            right = self._emit_expr(expr.right, result_type)
+            return (
+                f"({left}).iter().chain(({right}).iter())"
+                f".cloned().collect::<Vec<{element_type}>>().clone()"
+            )
+
         # NumPy-style elementwise vector <op> scalar.
         if _is_vec_type(left_type) and _is_numeric_scalar(right_type):
             return self._emit_elementwise_vec_scalar(
@@ -1831,6 +1873,11 @@ class RustGenerator:
     def _emit_call(self, expr: ast.Call, ctx: str) -> str:
         name = _call_name(expr)
         base = _call_base(expr)
+        if base is None and name == "complex":
+            raise UnsupportedError(
+                "complex() is not supported. Use real and imaginary parts separately.",
+                node=expr,
+            )
         args = [
             self._strip_outer_parens(self._emit_expr(a, self.function_type))
             for a in expr.args

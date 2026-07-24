@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -54,6 +56,43 @@ def _resolve_llm_provider(
         )
         return "none"
     return llm_provider
+
+
+def _emit_json_or_text(
+    json_obj: Any, text: str, *, json_output: bool, err: bool = False
+) -> None:
+    """Print ``json_obj`` as JSON or ``text`` depending on ``json_output``."""
+    if json_output:
+        click.echo(json.dumps(json_obj, default=str))
+    else:
+        click.echo(text, err=err)
+
+
+def _output_generate_json(
+    result: dict[str, Any],
+    prompt: str,
+    elapsed: float,
+    summary: str,
+) -> None:
+    """Emit the final JSON payload for ``aero-forge generate --json``."""
+    build = result.get("build") or {}
+    output: dict[str, Any] = {
+        "success": build.get("success", False) if build else True,
+        "prompt": prompt,
+        "source_path": result.get("source_path"),
+        "test_path": result.get("test_path"),
+        "blueprint_path": result.get("blueprint_path"),
+        "elapsed_seconds": round(elapsed, 3),
+        "summary": summary,
+    }
+    if build:
+        output["build"] = {
+            "success": build.get("success", False),
+            "passed": build.get("passed", 0),
+            "total": build.get("total", 0),
+            "output_dir": build.get("output_dir", ""),
+        }
+    click.echo(json.dumps(output, default=str))
 
 
 @click.group()
@@ -334,6 +373,12 @@ def fix(
     is_flag=True,
     help="Show a real-time progress bar during the build.",
 )
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    help="Output structured JSON instead of human-readable text.",
+)
 def build(
     blueprint: str,
     auto_file: str | None,
@@ -358,9 +403,11 @@ def build(
     verbose: bool,
     prompt_template: str,
     progress: bool,
+    json_output: bool,
 ) -> None:
     """Build all functions described by BLUEPRINT (default: blueprint.aero)."""
     _setup_logging(verbose)
+    start = time.perf_counter()
 
     try:
         if auto_file:
@@ -400,10 +447,20 @@ def build(
                 prompt_template=prompt_template,
             )
     except (UserError, ValueError) as exc:
-        click.echo(f"Invalid blueprint: {exc}", err=True)
+        _emit_json_or_text(
+            {"success": False, "error": f"Invalid blueprint: {exc}"},
+            f"Invalid blueprint: {exc}",
+            json_output=json_output,
+            err=True,
+        )
         sys.exit(1)
     except ImportError as exc:
-        click.echo(str(exc), err=True)
+        _emit_json_or_text(
+            {"success": False, "error": str(exc)},
+            str(exc),
+            json_output=json_output,
+            err=True,
+        )
         sys.exit(1)
 
     if output_dir:
@@ -437,10 +494,20 @@ def build(
     try:
         result = runner.build()
     except UserError as exc:
-        click.echo(str(exc), err=True)
+        _emit_json_or_text(
+            {"success": False, "error": str(exc)},
+            str(exc),
+            json_output=json_output,
+            err=True,
+        )
         sys.exit(1)
     except Exception as exc:
-        click.echo(f"Unexpected error: {exc}", err=True)
+        _emit_json_or_text(
+            {"success": False, "error": f"Unexpected error: {exc}"},
+            f"Unexpected error: {exc}",
+            json_output=json_output,
+            err=True,
+        )
         sys.exit(1)
 
     if verbose:
@@ -451,11 +518,18 @@ def build(
                 f"({item['iterations']} iterations)"
             )
 
+    elapsed = time.perf_counter() - start
+
     if result.get("dry_run"):
-        click.echo(
-            f"Dry-run complete: {result['total']} function(s) would be built "
-            f"into {result['output_dir']}"
-        )
+        if json_output:
+            click.echo(
+                json.dumps({"success": True, "dry_run": True, **result}, default=str)
+            )
+        else:
+            click.echo(
+                f"Dry-run complete: {result['total']} function(s) would be built "
+                f"into {result['output_dir']}"
+            )
         return
 
     if result.get("success"):
@@ -465,12 +539,28 @@ def build(
             llm_provider=llm_provider,
             model=model,
         )
-        click.echo(f"\n{summary}")
+        if json_output:
+            click.echo(
+                json.dumps(
+                    {
+                        "success": True,
+                        "summary": summary,
+                        "elapsed_seconds": round(elapsed, 3),
+                        **result,
+                    },
+                    default=str,
+                )
+            )
+        else:
+            click.echo(f"\n{summary}")
     else:
-        click.echo(
-            f"Build complete: {result['passed']}/{result['total']} succeeded. "
-            f"Output directory: {result['output_dir']}"
-        )
+        if json_output:
+            click.echo(json.dumps({"success": False, **result}, default=str))
+        else:
+            click.echo(
+                f"Build complete: {result['passed']}/{result['total']} succeeded. "
+                f"Output directory: {result['output_dir']}"
+            )
         sys.exit(1)
 
 
@@ -591,6 +681,18 @@ def build(
     help="Run an LLM self-review step on the generated code before compilation.",
 )
 @click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    help="Output structured JSON instead of human-readable text.",
+)
+@click.option(
+    "--stream",
+    "stream_progress",
+    is_flag=True,
+    help="Emit NDJSON progress events during generation/build.",
+)
+@click.option(
     "--verbose",
     is_flag=True,
     help="Show debug logs.",
@@ -615,9 +717,12 @@ def generate(
     discover: bool,
     explain: bool,
     review: bool,
+    json_output: bool,
+    stream_progress: bool,
 ) -> None:
     """Generate Python code and tests from a natural language prompt."""
     _setup_logging(verbose)
+    start = time.perf_counter()
 
     if no_llm:
         llm_provider = "none"
@@ -627,6 +732,17 @@ def generate(
     if not prompt:
         click.echo("Error: --prompt or --prompt-file is required.", err=True)
         sys.exit(1)
+
+    def _progress(message: str) -> None:
+        if stream_progress:
+            click.echo(
+                json.dumps({"type": "progress", "message": message}, default=str)
+            )
+        elif json_output:
+            # NDJSON events are the same for --json; final summary is printed at end.
+            click.echo(
+                json.dumps({"type": "progress", "message": message}, default=str)
+            )
 
     try:
         from .generate import generate_and_build
@@ -650,10 +766,33 @@ def generate(
             build_kwargs=(
                 {"max_workers": 1, "cache_enabled": False} if do_build else None
             ),
+            progress_callback=_progress,
         )
     except Exception as exc:
-        click.echo(f"Generation failed: {exc}", err=True)
+        _emit_json_or_text(
+            {"success": False, "error": str(exc), "prompt": prompt},
+            f"Generation failed: {exc}",
+            json_output=json_output,
+        )
         sys.exit(1)
+    elapsed = time.perf_counter() - start
+
+    summary = ""
+    if result.get("build"):
+        build_result = result["build"]
+        if build_result.get("success"):
+            summary = format_build_summary(
+                build_result,
+                output_dir=Path(result.get("blueprint_path", output_dir)).parent
+                / "dist",
+                prompt=prompt,
+                llm_provider=llm_provider,
+                model=model,
+            )
+
+    if json_output:
+        _output_generate_json(result, prompt, elapsed, summary)
+        return
 
     click.echo(f"Generated: {result['source_path']}")
     click.echo(f"Tests:     {result['test_path']}")
@@ -675,14 +814,6 @@ def generate(
     if result.get("build"):
         build_result = result["build"]
         if build_result.get("success"):
-            summary = format_build_summary(
-                build_result,
-                output_dir=Path(result.get("blueprint_path", output_dir)).parent
-                / "dist",
-                prompt=prompt,
-                llm_provider=llm_provider,
-                model=model,
-            )
             click.echo(f"\n{summary}")
         else:
             click.echo(
@@ -857,6 +988,12 @@ def init(project: str, path: str, fmt: str) -> None:
     help="Resume a previous chat session (default: start a new one).",
 )
 @click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    help="Output chat turns and progress as NDJSON.",
+)
+@click.option(
     "--verbose",
     is_flag=True,
     help="Show debug logs.",
@@ -869,13 +1006,19 @@ def chat(
     verbose: bool,
     prompt_template: str,
     session_id: str | None,
+    json_output: bool,
 ) -> None:
     """Interactive chat session for prompt-driven generation and optimization."""
     _setup_logging(verbose)
     from .chat import ChatSession
 
     def _progress(message: str) -> None:
-        click.echo(f"[{message}]")
+        if json_output:
+            click.echo(
+                json.dumps({"type": "progress", "message": message}, default=str)
+            )
+        else:
+            click.echo(f"[{message}]")
 
     session = ChatSession(
         Path(output_dir),
@@ -887,10 +1030,22 @@ def chat(
         progress_callback=_progress,
     )
 
-    click.echo("Aero-Forge chat is ready. What would you like to build?")
-    if session_id:
-        click.echo(f"(Resuming session {session.session_id})")
-    click.echo("Type 'help' for ideas or 'exit' to leave.")
+    if json_output:
+        click.echo(
+            json.dumps(
+                {
+                    "type": "welcome",
+                    "message": "Aero-Forge chat is ready. What would you like to build?",
+                    "session_id": session.session_id,
+                },
+                default=str,
+            )
+        )
+    else:
+        click.echo("Aero-Forge chat is ready. What would you like to build?")
+        if session_id:
+            click.echo(f"(Resuming session {session.session_id})")
+        click.echo("Type 'help' for ideas or 'exit' to leave.")
 
     while True:
         try:
@@ -901,15 +1056,36 @@ def chat(
         if not text:
             continue
         if text.lower() in {"exit", "quit"}:
-            click.secho("Goodbye!", fg="green")
+            if json_output:
+                click.echo(json.dumps({"type": "goodbye"}, default=str))
+            else:
+                click.secho("Goodbye!", fg="green")
             break
 
+        if json_output:
+            click.echo(json.dumps({"type": "user", "message": text}, default=str))
+
         response = session.process(text)
-        _print_chat_response(session, response)
+        _print_chat_response(session, response, json_output=json_output)
 
 
-def _print_chat_response(session: Any, response: str) -> None:
-    """Print a chat response with color based on the last build state."""
+def _print_chat_response(
+    session: Any, response: str, *, json_output: bool = False
+) -> None:
+    """Print a chat response with color or as JSON."""
+    if json_output:
+        build = (session.last_build_result or {}).get("build") or {}
+        click.echo(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": response,
+                    "build_success": build.get("success") if build else None,
+                },
+                default=str,
+            )
+        )
+        return
     build = (session.last_build_result or {}).get("build") or {}
     lowered = response.lower()
     if not build.get("success") and (

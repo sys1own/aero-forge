@@ -170,6 +170,7 @@ The following are intentionally not supported and produce clear errors:
 - Natural commands are recognized: `Build a ...`, `Make it faster`, `Use less memory`, `Benchmark it`, `Show me the code`, `Explain the algorithm`, `Explain`, `help`, `exit`/`quit`.
 - Unrecognized input falls back to the LLM for a conversational reply. Typos are matched against the command list and a suggestion is offered.
 - Progress messages are printed during generation, compilation, testing, and optimization.
+- Add `--json` to emit NDJSON events and a final structured response for website integration.
 
 ## Post-Build Summaries
 

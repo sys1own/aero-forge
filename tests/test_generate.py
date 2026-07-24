@@ -234,3 +234,84 @@ def test_blueprint_prompt_generates_and_builds(tmp_path):
 
     assert result.exit_code == 0
     assert (tmp_path / "dist" / "src" / "generated.py").is_file()
+
+
+def test_cli_generate_command_json_output(tmp_path):
+    """``aero-forge generate --json --build`` emits a JSON result."""
+    response = (
+        "```python\n"
+        "def double(n):\n    return n * 2\n"
+        "```\n\n"
+        "```python\n"
+        "from generated import double\n\n"
+        "def test_double():\n    assert double(3) == 6\n"
+        "```"
+    )
+    from click.testing import CliRunner
+    from aero_forge.cli import main
+
+    runner = CliRunner()
+    with patch(
+        "aero_forge.generate.get_llm_client", return_value=_make_mock_client(response)
+    ):
+        result = runner.invoke(
+            main,
+            [
+                "generate",
+                "--prompt",
+                "write a function that doubles a number",
+                "--build",
+                "--output-dir",
+                str(tmp_path),
+                "--llm-provider",
+                "openai",
+                "--json",
+            ],
+        )
+
+    assert result.exit_code == 0
+    import json
+
+    payload = json.loads(result.output.splitlines()[-1])
+    assert payload["success"] is True
+    assert "summary" in payload
+    assert payload["build"]["passed"] == payload["build"]["total"]
+
+
+def test_cli_generate_command_streams_progress(tmp_path):
+    """``aero-forge generate --stream`` emits NDJSON progress events."""
+    response = (
+        "```python\n"
+        "def double(n):\n    return n * 2\n"
+        "```\n\n"
+        "```python\n"
+        "from generated import double\n\n"
+        "def test_double():\n    assert double(3) == 6\n"
+        "```"
+    )
+    from click.testing import CliRunner
+    from aero_forge.cli import main
+
+    runner = CliRunner()
+    with patch(
+        "aero_forge.generate.get_llm_client", return_value=_make_mock_client(response)
+    ):
+        result = runner.invoke(
+            main,
+            [
+                "generate",
+                "--prompt",
+                "write a function that doubles a number",
+                "--build",
+                "--output-dir",
+                str(tmp_path),
+                "--llm-provider",
+                "openai",
+                "--stream",
+            ],
+        )
+
+    assert result.exit_code == 0
+    lines = [line for line in result.output.splitlines() if line.strip()]
+    assert any("progress" in line for line in lines)
+    assert lines[-1].startswith("Done!") or "passed" in lines[-1].lower()

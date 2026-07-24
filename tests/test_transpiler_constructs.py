@@ -138,3 +138,41 @@ def test_zip_loop(tmp_path: Path) -> None:
         source,
         "def test_sum_pairs():\n    assert sum_pairs([1, 2, 3], [4, 5, 6]) == 32\n",
     )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_list_concatenation(tmp_path: Path) -> None:
+    source = (
+        "def concat(a: list[int], b: list[int]) -> list[int]:\n" "    return a + b\n"
+    )
+    _run_case(
+        tmp_path,
+        "concat",
+        source,
+        "def test_concat():\n    assert concat([1, 2], [3, 4]) == [1, 2, 3, 4]\n",
+    )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_complex_literal_rejected(tmp_path: Path) -> None:
+    source = "def bad(x: int) -> int:\n    return x + 1j\n"
+    src = tmp_path / "bad.py"
+    src.write_text(source)
+    test = tmp_path / "test_bad.py"
+    test.write_text("from bad import bad\ndef test_bad():\n    assert bad(0) == 1\n")
+    orchestrator = Orchestrator(
+        src,
+        function_name="bad",
+        test_path=test,
+        max_iterations=1,
+        use_llm=False,
+    )
+    result = orchestrator.run()
+    assert not result["success"]
+    assert "Complex numbers are not supported" in result.get("error", "")
