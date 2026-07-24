@@ -109,6 +109,14 @@ def format_build_summary(
         except Exception as exc:
             logger.warning("LLM summary generation failed: %s", exc)
 
+    raw_logs = build_result.get("logs") or ""
+    if "[HIN Bypass]" in raw_logs:
+        return (
+            f"Done! I generated {name_str} and routed it to the standard Python runtime "
+            f"because it contains non-numerical logic that is not suitable for HIN. "
+            f"{test_note}{timing} The package is in `{output_dir}`. "
+            f"You can import it with `from generated import <function_name>`."
+        )
     return (
         f"Done! I generated {name_str}, compiled it to a Rust extension, and ran the tests. "
         f"{test_note}{timing} The compiled library is in `{output_dir}`. "
