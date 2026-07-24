@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import ast
-import re
 import logging
+import math
+import re
 import sys
 import tempfile
 from importlib import resources
@@ -1692,6 +1693,13 @@ class RustGenerator:
                 node=expr,
             )
         if isinstance(value, (int, float)):
+            if isinstance(value, float) and math.isinf(value):
+                rust_inf = "-f64::INFINITY" if value < 0 else "f64::INFINITY"
+                if ctx == "f64":
+                    return rust_inf
+                if ctx == "i64":
+                    return f"({rust_inf} as i64)"
+                return f"({rust_inf} as {ctx})"
             if ctx == "f64":
                 if isinstance(value, float):
                     return f"{value}_f64"
@@ -1701,6 +1709,17 @@ class RustGenerator:
                     "Float literal in an integer-typed function", node=expr
                 )
             return f"{value}_i64"
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            is_neg = lowered.startswith("-")
+            is_inf = lowered in {"inf", "infinity", "+inf", "+infinity", "-inf", "-infinity"}
+            if is_inf:
+                rust_inf = "-f64::INFINITY" if is_neg else "f64::INFINITY"
+                if ctx == "f64":
+                    return rust_inf
+                if ctx == "i64":
+                    return f"({rust_inf} as i64)"
+                return f"({rust_inf} as {ctx})"
         if value is None:
             raise UnsupportedError("None is not a numeric value", node=expr)
         raise UnsupportedError(f"Unsupported literal: {value!r}", node=expr)
@@ -2378,7 +2397,9 @@ class RustGenerator:
                     f"{name}() takes exactly one argument", node=expr
                 )
             arg_node = expr.args[0]
-            arg_ctx = self._type_of(arg_node)
+            # Evaluate float() arguments in an f64 context so that string
+            # infinity literals like float('inf') map to f64::INFINITY.
+            arg_ctx = "f64" if name == "float" else self._type_of(arg_node)
             arg = self._strip_outer_parens(self._emit_expr(arg_node, arg_ctx))
             if name == "int":
                 return f"({arg} as i64)"
