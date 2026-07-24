@@ -186,6 +186,12 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_upload_zip()
             if path == "/api/save-file":
                 return self._handle_save_file()
+            if path == "/api/create-node":
+                return self._handle_create_node()
+            if path == "/api/rename-node":
+                return self._handle_rename_node()
+            if path == "/api/delete-node":
+                return self._handle_delete_node()
 
             return _send_json(self, 404, {"error": "Not found"})
         except Exception as exc:
@@ -426,6 +432,123 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             return _send_json(self, 400, {"error": str(exc)})
         except Exception as exc:  # pragma: no cover
             logger.exception("Upload endpoint failed")
+            return _send_json(self, 500, {"error": str(exc)})
+
+    def _handle_create_node(self) -> None:
+        try:
+            body = _parse_json_body(self)
+            session_id = body.get("session_id", "").strip()
+            file_path = body.get("path", "").strip()
+            is_dir = bool(body.get("is_dir", False))
+            if not session_id or not file_path:
+                return _send_json(self, 400, {"error": "Missing 'session_id' and/or 'path'"})
+
+            session_dir = _manager.create_session_sandbox(session_id)
+            try:
+                target = _resolve_file(session_dir, file_path)
+            except ValueError:
+                return _send_json(self, 400, {"error": "Invalid path"})
+
+            if target.exists():
+                return _send_json(self, 409, {"error": "Node already exists"})
+
+            if is_dir:
+                target.mkdir(parents=True, exist_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("", encoding="utf-8")
+
+            return _send_json(
+                self,
+                200,
+                {
+                    "session_id": session_id,
+                    "path": file_path,
+                    "is_dir": is_dir,
+                    "status": "created",
+                },
+            )
+        except ValueError as exc:
+            return _send_json(self, 400, {"error": str(exc)})
+        except Exception as exc:
+            logger.exception("Create-node endpoint failed")
+            return _send_json(self, 500, {"error": str(exc)})
+
+    def _handle_rename_node(self) -> None:
+        try:
+            body = _parse_json_body(self)
+            session_id = body.get("session_id", "").strip()
+            old_path = body.get("old_path", "").strip()
+            new_path = body.get("new_path", "").strip()
+            if not session_id or not old_path or not new_path:
+                return _send_json(self, 400, {"error": "Missing 'session_id', 'old_path', and/or 'new_path'"})
+
+            session_dir = _manager.create_session_sandbox(session_id)
+            try:
+                source = _resolve_file(session_dir, old_path)
+                target = _resolve_file(session_dir, new_path)
+            except ValueError:
+                return _send_json(self, 400, {"error": "Invalid path"})
+
+            if not source.exists():
+                return _send_json(self, 404, {"error": "Source not found"})
+            if target.exists():
+                return _send_json(self, 409, {"error": "Target already exists"})
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            source.rename(target)
+
+            return _send_json(
+                self,
+                200,
+                {
+                    "session_id": session_id,
+                    "old_path": old_path,
+                    "new_path": new_path,
+                    "status": "renamed",
+                },
+            )
+        except ValueError as exc:
+            return _send_json(self, 400, {"error": str(exc)})
+        except Exception as exc:
+            logger.exception("Rename-node endpoint failed")
+            return _send_json(self, 500, {"error": str(exc)})
+
+    def _handle_delete_node(self) -> None:
+        try:
+            body = _parse_json_body(self)
+            session_id = body.get("session_id", "").strip()
+            file_path = body.get("path", "").strip()
+            if not session_id or not file_path:
+                return _send_json(self, 400, {"error": "Missing 'session_id' and/or 'path'"})
+
+            session_dir = _manager.create_session_sandbox(session_id)
+            try:
+                target = _resolve_file(session_dir, file_path)
+            except ValueError:
+                return _send_json(self, 400, {"error": "Invalid path"})
+
+            if not target.exists():
+                return _send_json(self, 404, {"error": "Node not found"})
+
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+
+            return _send_json(
+                self,
+                200,
+                {
+                    "session_id": session_id,
+                    "path": file_path,
+                    "status": "deleted",
+                },
+            )
+        except ValueError as exc:
+            return _send_json(self, 400, {"error": str(exc)})
+        except Exception as exc:
+            logger.exception("Delete-node endpoint failed")
             return _send_json(self, 500, {"error": str(exc)})
 
     def _handle_download_zip(self, query: Dict[str, List[str]]) -> None:

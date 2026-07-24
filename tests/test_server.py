@@ -154,6 +154,51 @@ def test_api_save_file(server):
     assert status == 400
 
 
+def test_api_create_rename_delete_node(server):
+    session_id = "test-session-crud"
+
+    status, body = _post_json(
+        server + "/api/create-node",
+        {"session_id": session_id, "path": "src/new.py", "is_dir": False},
+    )
+    assert status == 200
+    assert body["status"] == "created"
+
+    status, body = _post_json(
+        server + "/api/create-node",
+        {"session_id": session_id, "path": "lib", "is_dir": True},
+    )
+    assert status == 200
+    assert body["is_dir"] is True
+
+    status, body = _post_json(
+        server + "/api/rename-node",
+        {"session_id": session_id, "old_path": "src/new.py", "new_path": "src/renamed.py"},
+    )
+    assert status == 200
+    assert body["status"] == "renamed"
+
+    status, body = _get(server + f"/api/files?session_id={session_id}")
+    assert status == 200
+    tree = json.loads(body.decode("utf-8"))
+    paths = _collect_paths(tree["tree"])
+    assert "src/renamed.py" in paths
+    assert "src/new.py" not in paths
+    assert _node_exists(tree["tree"], "lib", "directory")
+
+    status, body = _post_json(
+        server + "/api/delete-node",
+        {"session_id": session_id, "path": "lib"},
+    )
+    assert status == 200
+    assert body["status"] == "deleted"
+
+    status, body = _get(server + f"/api/files?session_id={session_id}")
+    assert status == 200
+    tree = json.loads(body.decode("utf-8"))
+    assert not _node_exists(tree["tree"], "lib", "directory")
+
+
 def test_api_download_zip(server):
     session_id = "test-session-download"
     zip_bytes = _make_zip({"data.txt": "hello"})
@@ -276,6 +321,15 @@ def test_websocket_terminal(server):
 
     output = asyncio.run(_client())
     assert b"aero_forge_terminal_test" in output
+
+
+def _node_exists(node, name, node_type):
+    if node["name"] == name and node["type"] == node_type:
+        return True
+    for child in node.get("children", []):
+        if _node_exists(child, name, node_type):
+            return True
+    return False
 
 
 def _collect_paths(node, prefix=""):
