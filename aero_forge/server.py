@@ -194,12 +194,9 @@ async def _handle_build_async(request: web.Request) -> web.Response:
             config_override=config,
             progress_callback=progress_callback,
         )
+        _notify_tree_changed(session_id)
         return web.json_response(
-            {
-                "session_id": session_id,
-                "status": "success" if result.get("build", {}).get("success") else "failure",
-                "result": result,
-            },
+            _build_web_response(session_id, session_dir, result),
             headers=_CORS_HEADERS,
         )
     except Exception as exc:
@@ -333,7 +330,7 @@ def _build_tree(directory: Path, rel: Optional[Path] = None) -> Dict[str, Any]:
     for path in sorted(directory.iterdir()):
         child_rel = rel / path.name
         if path.is_dir():
-            if path.name in {"__pycache__", ".git", ".variant_0", ".variant_1", ".variant_2"}:
+            if path.name in {"__pycache__", ".git", ".aero", ".build_cache", ".overlays", ".variant_0", ".variant_1", ".variant_2"}:
                 continue
             node["children"].append(_build_tree(path, child_rel))
         else:
@@ -346,6 +343,48 @@ def _build_tree(directory: Path, rel: Optional[Path] = None) -> Dict[str, Any]:
                 }
             )
     return node
+
+
+def _build_file_list(directory: Path) -> List[Dict[str, Any]]:
+    """Return a flat list of file entries relative to *directory*."""
+    files: List[Dict[str, Any]] = []
+    for path in directory.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.name == ".gitkeep":
+            continue
+        try:
+            rel = path.relative_to(directory)
+        except ValueError:
+            continue
+        if any(part.startswith(".") and part in {".aero", ".build_cache", ".overlays"} for part in rel.parts):
+            continue
+        files.append(
+            {
+                "path": str(rel),
+                "size": path.stat().st_size,
+                "type": "file",
+            }
+        )
+    return sorted(files, key=lambda x: x["path"])
+
+
+def _build_web_response(
+    session_id: str,
+    session_dir: Path,
+    result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Wrap a generation/build result with structured file updates and tree changes."""
+    files = _build_file_list(session_dir)
+    tree = _build_tree(session_dir)
+    build = result.get("build") or {}
+    return {
+        "session_id": session_id,
+        "status": "success" if build.get("success") else "failure",
+        "files": files,
+        "tree": tree,
+        "result": result,
+    }
 
 
 def _resolve_file(session_dir: Path, file_path: str) -> Path:
@@ -485,15 +524,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 config_override=config,
             )
 
-            return _send_json(
-                self,
-                200,
-                {
-                    "session_id": session_id,
-                    "status": "success" if result.get("build", {}).get("success") else "failure",
-                    "result": result,
-                },
-            )
+            _notify_tree_changed(session_id)
+            return _send_json(self, 200, _build_web_response(session_id, session_dir, result))
         except Exception as exc:  # pragma: no cover
             logger.exception("Build endpoint failed")
             return _send_json(self, 500, {"error": str(exc)})

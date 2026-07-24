@@ -1167,15 +1167,21 @@
       finally { setBusy(false); }
     }
 
-    function formatBuildSummary(result) {
-      const r = result || {};
+    function formatBuildSummary(data) {
+      const r = (data && data.result) ? data.result : (data || {});
+      const files = (data && data.files) ? data.files : [];
       const build = r.build || {};
       const success = !!build.success;
       const lines = [`## Build ${success ? 'Succeeded ✅' : 'Failed ❌'}`];
 
-      if (r.explanation) {
-        lines.push('### Architectural overview');
-        lines.push(r.explanation);
+      if (files.length) {
+        lines.push('### Created or modified files');
+        files.forEach(f => lines.push(`- \`${f.path}\` (${f.size} bytes)`));
+      } else {
+        lines.push('### Created or modified files');
+        if (r.source_path) lines.push(`- Source: \`${r.source_path}\``);
+        if (r.test_path) lines.push(`- Tests: \`${r.test_path}\``);
+        if (r.blueprint_path) lines.push(`- Blueprint: \`${r.blueprint_path}\``);
       }
 
       // Extract top-level class/function names from generated source.
@@ -1188,14 +1194,6 @@
         lines.push('### Generated components/classes');
         lines.push(defs.join(', '));
       }
-
-      lines.push('### Created or modified files');
-      if (r.source_path) lines.push(`- Source: \`${r.source_path}\``);
-      if (r.test_path) lines.push(`- Tests: \`${r.test_path}\``);
-      if (r.blueprint_path) lines.push(`- Blueprint: \`${r.blueprint_path}\``);
-      const artifacts = new Set();
-      (build.results || []).forEach(res => { if (res.artifact) artifacts.add(res.artifact); });
-      artifacts.forEach(a => lines.push(`- Compiled artifact: \`${a}\``));
 
       lines.push('### Unit test status');
       if (build.total !== undefined && build.total !== null) {
@@ -1225,15 +1223,11 @@
           if (it.explanation) lines.push(`  - ${it.explanation}`);
         });
       }
-      (build.results || []).forEach(res => {
-        if (res.iterations > 1) lines.push(`- \`${res.source}\` required ${res.iterations} compilation attempt(s).`);
-        if (res.explanation) lines.push(`- Fix for \`${res.source}\`: ${res.explanation}`);
-      });
 
-      if (build.logs) {
+      if (!success && build.logs) {
         lines.push('### Build logs');
         lines.push('```');
-        lines.push(build.logs.slice(0, 2000));
+        lines.push(build.logs.slice(0, 1000));
         lines.push('```');
       }
 
@@ -1253,7 +1247,7 @@
         try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
         ui.settingSession.value = state.sessionId;
 
-        const summary = formatBuildSummary(data.result);
+        const summary = formatBuildSummary(data);
         if (data.result && data.result.build) {
           const b = data.result.build;
           if (b.success) log(`Build succeeded: ${b.passed || 0}/${b.total || 0} tests`, 'success');
