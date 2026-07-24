@@ -389,6 +389,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_files(query)
             if path == "/api/file-content":
                 return self._handle_file_content(query)
+            if path == "/api/files/download":
+                return self._handle_files_download(query)
             if path == "/api/download-zip":
                 return self._handle_download_zip(query)
             if path in ("/favicon.ico", "/static/logo.png"):
@@ -410,9 +412,13 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_chat()
             if path == "/api/upload-zip":
                 return self._handle_upload_zip()
+            if path == "/api/files/upload":
+                return self._handle_files_upload()
             if path == "/api/save-file":
                 return self._handle_save_file()
             if path == "/api/create-node":
+                return self._handle_create_node()
+            if path == "/api/files/create":
                 return self._handle_create_node()
             if path == "/api/rename-node":
                 return self._handle_rename_node()
@@ -420,6 +426,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_delete_node()
             if path == "/api/run":
                 return self._handle_run()
+            if path == "/api/workspace/clean":
+                return self._handle_workspace_clean()
 
             return _send_json(self, 404, {"error": "Not found"})
         except Exception as exc:
@@ -791,6 +799,138 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             return _send_json(self, 400, {"error": str(exc)})
         except Exception as exc:
             logger.exception("Delete-node endpoint failed")
+            return _send_json(self, 500, {"error": str(exc)})
+
+    def _handle_files_download(self, query: Dict[str, List[str]]) -> None:
+        session_id = _first(query, "session_id")
+        file_path = _first(query, "path")
+        if not session_id or not file_path:
+            return _send_json(self, 400, {"error": "Missing 'session_id' and/or 'path'"})
+
+        session_dir = _session_dir(session_id)
+        try:
+            target = _resolve_file(session_dir, file_path)
+        except ValueError:
+            return _send_json(self, 400, {"error": "Invalid path"})
+
+        if not target.is_file():
+            return _send_json(self, 404, {"error": "File not found"})
+
+        data = target.read_bytes()
+        content_type, _ = mimetypes.guess_type(str(target))
+        content_type = content_type or "application/octet-stream"
+        return _send_bytes(
+            self,
+            200,
+            data,
+            content_type,
+            {
+                "Content-Disposition": f'attachment; filename="{target.name}"',
+            },
+        )
+
+    def _handle_files_upload(self) -> None:
+        """Upload one or more files (raw body or multipart) into the workspace."""
+        try:
+            parsed = urlparse(self.path)
+            query = parse_qs(parsed.query)
+            session_id = _first(query, "session_id") or ""
+            target_path = (_first(query, "target_path") or "").strip() or "."
+            filename = (_first(query, "filename") or "").strip()
+
+            if not session_id:
+                return _send_json(self, 400, {"error": "Missing 'session_id'"})
+
+            session_dir = _manager.create_session_sandbox(session_id)
+            body = _read_body(self)
+            if not body:
+                return _send_json(self, 400, {"error": "Empty body"})
+
+            content_type = self.headers.get("Content-Type", "")
+            if "multipart/form-data" in content_type and not filename:
+                match = re.search(r'boundary=([^;\s]+)', content_type)
+                if match:
+                    boundary = match.group(1).encode("utf-8")
+                    file_bytes = _parse_multipart(body, boundary)
+                    # Attempt to extract the filename from the first file part header.
+                    parts = body.split(b"--" + boundary)
+                    for part in parts:
+                        if b"Content-Disposition:" in part:
+                            header_end = part.find(b"\r\n\r\n")
+                            if header_end != -1:
+                                headers = part[:header_end].decode("utf-8", errors="ignore")
+                                name_match = re.search(r'filename="([^"]+)"', headers)
+                                if name_match:
+                                    filename = name_match.group(1)
+                                    body = file_bytes or b""
+                                    break
+                    else:
+                        body = file_bytes or b""
+
+            if not filename:
+                return _send_json(self, 400, {"error": "Missing 'filename'"})
+
+            if target_path and target_path != ".":
+                if any(part == ".." for part in Path(target_path).parts):
+                    return _send_json(self, 400, {"error": "Invalid target_path"})
+                dest_dir = session_dir / target_path
+            else:
+                dest_dir = session_dir
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / filename
+            try:
+                dest = dest.resolve()
+                dest.relative_to(session_dir.resolve())
+            except ValueError:
+                return _send_json(self, 400, {"error": "Invalid filename"})
+
+            if filename.lower().endswith(".zip"):
+                _extract_zip_safely(body, dest_dir, archive_name=filename)
+            else:
+                dest.write_bytes(body)
+
+            _notify_tree_changed(session_id)
+
+            return _send_json(
+                self,
+                200,
+                {
+                    "session_id": session_id,
+                    "status": "uploaded",
+                    "path": str(dest.relative_to(session_dir)),
+                    "tree": _build_tree(session_dir),
+                },
+            )
+        except ValueError as exc:
+            return _send_json(self, 400, {"error": str(exc)})
+        except Exception as exc:
+            logger.exception("Files upload endpoint failed")
+            return _send_json(self, 500, {"error": str(exc)})
+
+    def _handle_workspace_clean(self) -> None:
+        """Reset a session sandbox to a clean workspace."""
+        try:
+            body = _parse_json_body(self)
+            session_id = body.get("session_id", "").strip()
+            if not session_id:
+                return _send_json(self, 400, {"error": "Missing 'session_id'"})
+
+            _manager.clean_session_sandbox(session_id)
+            session_dir = _manager.create_session_sandbox(session_id)
+
+            _notify_tree_changed(session_id)
+
+            return _send_json(
+                self,
+                200,
+                {
+                    "session_id": session_id,
+                    "status": "cleaned",
+                    "tree": _build_tree(session_dir),
+                },
+            )
+        except Exception as exc:
+            logger.exception("Workspace clean endpoint failed")
             return _send_json(self, 500, {"error": str(exc)})
 
     def _handle_run(self) -> None:
