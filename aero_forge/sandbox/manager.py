@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import os
 import shutil
 import subprocess
 import sys
@@ -10,6 +11,9 @@ import tempfile
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+
+CARGO_BIN_DIR = Path(os.path.expanduser("~/.cargo/bin"))
 
 
 class Sandbox:
@@ -138,6 +142,21 @@ class Sandbox:
     def __exit__(self, *exc: Any) -> None:
         if self._own_root:
             self.cleanup()
+
+
+def ensure_cargo_in_path() -> None:
+    """Prepend ``~/.cargo/bin`` to ``PATH`` when cargo is not otherwise found."""
+    if shutil.which("cargo") is not None:
+        return
+    cargo_bin = CARGO_BIN_DIR
+    if not (cargo_bin / "cargo").is_file():
+        # Nothing to add; the caller will raise a diagnostic later.
+        return
+    current_path = os.environ.get("PATH", "")
+    if current_path:
+        os.environ["PATH"] = f"{cargo_bin}{os.pathsep}{current_path}"
+    else:
+        os.environ["PATH"] = str(cargo_bin)
 
 
 class SandboxManager:
