@@ -28,12 +28,18 @@ from .examples import create_example, list_examples, run_example
 from .orchestrator.orchestrator import ForgeError, Orchestrator
 
 
-def _setup_logging(verbose: bool) -> None:
-    level = logging.DEBUG if verbose else logging.INFO
+def _setup_logging(verbose: bool, json_output: bool = False) -> None:
+    if verbose:
+        level = logging.DEBUG
+    elif json_output:
+        level = logging.CRITICAL
+    else:
+        level = logging.INFO
     logging.basicConfig(
         level=level,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
+    logging.getLogger().setLevel(level)
 
 
 def _resolve_llm_provider(
@@ -161,6 +167,12 @@ def main() -> None:
     is_flag=True,
     help="Print full compiler/test output and debug logs.",
 )
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    help="Output structured JSON instead of human-readable text.",
+)
 def fix(
     file: str,
     function: str,
@@ -173,11 +185,27 @@ def fix(
     llm_fix: bool,
     no_cache: bool,
     verbose: bool,
+    json_output: bool,
 ) -> None:
     """Compile and test FILE's FUNCTION, healing failures automatically."""
-    _setup_logging(verbose)
+    _setup_logging(verbose, json_output)
 
+    start = time.perf_counter()
     llm_provider = _resolve_llm_provider(llm_provider, no_llm, llm_fix=llm_fix)
+
+    def _error_json(error: str, error_type: str = "build_error") -> dict[str, Any]:
+        return {
+            "status": "failure",
+            "execution_time_ms": round((time.perf_counter() - start) * 1000, 2),
+            "error": {
+                "type": error_type,
+                "message": error,
+                "details": "",
+                "suggestion": "Add type hints, simplify the construct, or run with --llm-fix.",
+            },
+            "files_generated": [],
+            "rust_extensions": [],
+        }
 
     try:
         orchestrator = Orchestrator(
@@ -190,43 +218,86 @@ def fix(
             max_retries=max_retries,
             cache_enabled=not no_cache,
         )
-    except UserError as exc:
-        click.echo(str(exc), err=True)
-        sys.exit(1)
-    except ImportError as exc:
-        click.echo(str(exc), err=True)
+    except (UserError, ImportError) as exc:
+        payload = _error_json(str(exc), error_type="invalid_input")
+        if json_output:
+            click.echo(json.dumps(payload))
+        else:
+            click.echo(str(exc), err=True)
         sys.exit(1)
 
     try:
         result = orchestrator.run()
     except UserError as exc:
-        click.echo(str(exc), err=True)
+        payload = _error_json(str(exc), error_type="unsupported_construct")
+        if json_output:
+            click.echo(json.dumps(payload))
+        else:
+            click.echo(str(exc), err=True)
         sys.exit(1)
     except ForgeError as exc:
-        click.echo(f"Forge failed: {exc}", err=True)
+        payload = _error_json(str(exc), error_type="build_error")
+        if json_output:
+            click.echo(json.dumps(payload))
+        else:
+            click.echo(f"Forge failed: {exc}", err=True)
         sys.exit(1)
     except Exception as exc:
-        click.echo(f"Unexpected error: {exc}", err=True)
+        payload = _error_json(str(exc), error_type="unexpected_error")
+        if json_output:
+            click.echo(json.dumps(payload))
+        else:
+            click.echo(f"Unexpected error: {exc}", err=True)
         sys.exit(1)
 
-    if verbose:
-        click.echo(result.get("logs", ""))
+    elapsed_ms = round((time.perf_counter() - start) * 1000, 2)
+    artifact = result.get("artifact")
+    source_file = str(Path(file).resolve())
+    extensions = [str(Path(artifact).resolve())] if artifact else []
 
     if result.get("success"):
-        click.echo(
-            f"Success after {result['iterations']} iteration(s). Native extension built."
-        )
-    elif result.get("partial"):
-        click.echo(
-            f"Partial success after {result['iterations']} iteration(s). "
-            f"{result.get('error', '')}",
-            err=True,
-        )
-        if result.get("artifact"):
-            click.echo(f"Best compiled artifact: {result['artifact']}", err=True)
-        sys.exit(1)
+        payload: dict[str, Any] = {
+            "status": "success",
+            "execution_time_ms": elapsed_ms,
+            "files_generated": [source_file],
+            "rust_extensions": extensions,
+            "iterations": result.get("iterations"),
+            "error": None,
+        }
+        if json_output:
+            click.echo(json.dumps(payload))
+        else:
+            if verbose:
+                click.echo(result.get("logs", ""))
+            click.echo(
+                f"Success after {result['iterations']} iteration(s). Native extension built."
+            )
     else:
-        click.echo(f"Forge failed: {result.get('error', 'unknown')}", err=True)
+        error_text = result.get("error", "unknown")
+        payload = {
+            "status": "failure",
+            "execution_time_ms": elapsed_ms,
+            "files_generated": [source_file],
+            "rust_extensions": extensions,
+            "iterations": result.get("iterations"),
+            "error": {
+                "type": "build_error",
+                "message": error_text,
+                "details": result.get("logs", ""),
+                "suggestion": "Run with --llm-fix to let the LLM repair the code.",
+            },
+        }
+        if json_output:
+            click.echo(json.dumps(payload))
+        else:
+            if verbose:
+                click.echo(result.get("logs", ""))
+            click.echo(
+                f"Partial success after {result['iterations']} iteration(s). {error_text}",
+                err=True,
+            )
+            if artifact:
+                click.echo(f"Best compiled artifact: {artifact}", err=True)
         sys.exit(1)
 
 
@@ -429,7 +500,7 @@ def build(
     json_output: bool,
 ) -> None:
     """Build all functions described by BLUEPRINT (default: blueprint.aero)."""
-    _setup_logging(verbose)
+    _setup_logging(verbose, json_output)
     start = time.perf_counter()
 
     if project_dir or upload_zip:
@@ -806,7 +877,7 @@ def generate(
     stream_progress: bool,
 ) -> None:
     """Generate Python code and tests from a natural language prompt."""
-    _setup_logging(verbose)
+    _setup_logging(verbose, json_output)
     start = time.perf_counter()
 
     if no_llm:
@@ -1135,7 +1206,7 @@ def chat(
     json_output: bool,
 ) -> None:
     """Interactive chat session for prompt-driven generation and optimization."""
-    _setup_logging(verbose)
+    _setup_logging(verbose, json_output)
     from .chat import ChatSession
 
     def _progress(message: str) -> None:

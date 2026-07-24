@@ -49,6 +49,8 @@ Keep the code transpiler-friendly:
 - Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
 Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
+Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
+You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
 """,
     "Minimal baseline prompt.",
 )
@@ -81,6 +83,8 @@ def function_name(param1: type, param2: type) -> return_type:
     return result
 For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
 Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
+Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
+You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
 """,
     "Structured rules + output format.",
 )
@@ -104,6 +108,8 @@ RULES:
 11. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
 Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
+Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
+You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
 """,
     "Focus on algorithmic efficiency.",
 )
@@ -126,6 +132,8 @@ RULES:
 11. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
 Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
+Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
+You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
 """,
     "Focus on low-level performance and SIMD-friendly code.",
 )
@@ -154,6 +162,8 @@ def function_name(param1: type, param2: type) -> return_type:
     return result
 For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
 Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
+Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
+You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
 """,
     "Balanced combination of V2, V3, and V4.",
 )
@@ -174,6 +184,8 @@ RULES:
 9. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
 Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
+Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
+You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
 """,
     "Encourage novel algorithm choices.",
 )
@@ -194,6 +206,8 @@ RULES:
 9. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
 Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
+Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
+You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
 """,
     "Use only well-known algorithms.",
 )
@@ -215,6 +229,8 @@ RULES:
 10. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
 Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
+Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
+You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
 """,
     "Optimizes with iterative feedback.",
 )
@@ -236,6 +252,8 @@ RULES:
 10. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
 Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
+Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
+You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
 """,
     "Explicitly forbids constructs that are hard for the transpiler to handle.",
 )
@@ -255,7 +273,9 @@ RULES:
 7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, `sum()`, `map()`, `filter()`, `eval()`, `exec()`, generators, `async`/`await`, `match`/`case`, or walrus operators.
 8. Do NOT define nested functions, classes, or lambdas inside the function.
 9. All return statements must return the same number of values.
-10. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+10. Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays.
+11. You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
+12. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 """,
     "Emphasizes algorithmic correctness and transpiler-friendly explicit loops.",
 )

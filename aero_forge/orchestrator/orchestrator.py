@@ -351,7 +351,7 @@ class Orchestrator:
             for ret in _returns(node):
                 if ret.value is None:
                     continue
-                if isinstance(ret.value, (ast.Tuple, ast.List)):
+                if isinstance(ret.value, ast.Tuple):
                     size = len(ret.value.elts)
                 else:
                     size = 1

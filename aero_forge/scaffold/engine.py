@@ -633,6 +633,12 @@ class RustGenerator:
                 return "Self"
             if name in self.class_names:
                 return name
+            if base is None and name in {"int", "float"}:
+                return "i64" if name == "int" else "f64"
+            if base is None and name == "sorted":
+                if expr.args:
+                    return self._type_of(expr.args[0])
+                return "Vec<?>"
         return self.function_type
 
     def _type_of_numpy_call(self, name: str, expr: ast.Call) -> str:
@@ -904,7 +910,7 @@ class RustGenerator:
         for node in _returns(self.func):
             if node.value is not None:
                 return_values.append(node.value)
-                if isinstance(node.value, (ast.Tuple, ast.List)):
+                if isinstance(node.value, ast.Tuple):
                     sizes.add(len(_elements(node.value)))
                 else:
                     sizes.add(1)
@@ -1101,11 +1107,14 @@ class RustGenerator:
                 return self._emit_tuple_unpack(target, stmt.value)
 
         # Chain assignment: ``a = b = expr`` becomes a temporary plus assignments.
-        if all(isinstance(t, ast.Name) for t in stmt.targets):
-            first_name = stmt.targets[0].id
+        if all(isinstance(t, (ast.Name, ast.Subscript)) for t in stmt.targets):
+            first_name = (
+                stmt.targets[0].id if isinstance(stmt.targets[0], ast.Name) else None
+            )
             if (
                 isinstance(stmt.value, ast.List)
                 and not stmt.value.elts
+                and first_name
                 and first_name in self.type_env
             ):
                 rhs_type = self.type_env[first_name]
@@ -1115,7 +1124,12 @@ class RustGenerator:
             tmp = self._next_tmp()
             lines = [f"let {tmp} = {value};"]
             for target in stmt.targets:
-                lines.append(f"{target.id} = {tmp};")
+                if isinstance(target, ast.Name):
+                    lines.append(f"{target.id} = {tmp};")
+                else:
+                    target_type = self._type_of(target)
+                    lvalue = self._emit_lvalue(target, target_type)
+                    lines.append(f"{lvalue} = {tmp};")
             return "\n".join(lines)
 
         raise UnsupportedError(
@@ -1140,26 +1154,31 @@ class RustGenerator:
         return f"{target_str}.push({arg_str});"
 
     def _emit_tuple_unpack(self, target: ast.AST, value: ast.expr) -> str:
-        names = _names_in_target(target)
-        if len(names) != len(_elements(target)):
-            raise UnsupportedError(
-                "Only plain names may appear in a tuple unpack", node=target
-            )
+        target_elts = _elements(target)
         if not isinstance(value, (ast.Tuple, ast.List)):
             raise UnsupportedError(
                 "Tuple unpack requires a tuple/list on the right", node=value
             )
 
         value_elts = _elements(value)
-        elements = [
-            self._strip_outer_parens(self._emit_expr(e, self._type_of(e)))
-            for e in value_elts
-        ]
+        if len(target_elts) != len(value_elts):
+            raise UnsupportedError(
+                "Tuple unpack target and value length mismatch", node=target
+            )
+
+        elements = []
+        for t, e in zip(target_elts, value_elts):
+            target_type = self._type_of(t)
+            elements.append(self._strip_outer_parens(self._emit_expr(e, target_type)))
         tmp = self._next_tmp()
         # The parentheses here form a Rust tuple literal, so we keep them.
         lines = [f"let {tmp} = ({', '.join(elements)});"]
-        for i, name in enumerate(names):
-            lines.append(f"{name} = {tmp}.{i};")
+        for i, t in enumerate(target_elts):
+            if isinstance(t, ast.Name):
+                lines.append(f"{t.id} = {tmp}.{i};")
+            else:
+                lvalue = self._emit_lvalue(t, self._type_of(t))
+                lines.append(f"{lvalue} = {tmp}.{i};")
         return "\n".join(lines)
 
     def _emit_augassign(self, stmt: ast.AugAssign) -> str:
@@ -1472,9 +1491,9 @@ class RustGenerator:
 
     def _emit_listcomp(self, expr: ast.ListComp, ctx: str) -> str:
         """Emit a list comprehension as a Rust ``for`` loop block."""
-        if len(expr.generators) != 1 or expr.generators[0].ifs:
+        if len(expr.generators) != 1:
             raise UnsupportedError(
-                "Only simple list comprehensions are supported", node=expr
+                "Only single-generator list comprehensions are supported", node=expr
             )
         gen = expr.generators[0]
         element_type = _element_type(ctx)
@@ -1491,7 +1510,11 @@ class RustGenerator:
             and len(loop_vars) >= 2
         ):
             body_lines.append(f"let {loop_vars[0]} = {loop_vars[0]} as i64;")
-        body_lines.append(f"{tmp}.push({self._emit_expr(expr.elt, element_type)});")
+        push = f"{tmp}.push({self._emit_expr(expr.elt, element_type)});"
+        for cond in reversed(gen.ifs):
+            cond_code = self._strip_outer_parens(self._emit_expr(cond, "bool"))
+            push = f"if {cond_code} {{ {push} }}"
+        body_lines.append(push)
         body = "\n".join("    " + line for line in body_lines)
         for name, _ in var_types:
             if old_types[name] is not None:
@@ -1521,8 +1544,18 @@ class RustGenerator:
                         start = self._emit_expr(call.args[0], "i64")
                         stop = self._emit_expr(call.args[1], "i64")
                         return [name], f"({start})..({stop})", [(name, "i64")]
+                    if len(call.args) == 3:
+                        start = self._emit_expr(call.args[0], "i64")
+                        stop = self._emit_expr(call.args[1], "i64")
+                        step = self._emit_expr(call.args[2], "i64")
+                        step_usize = f"(({step} as i64) as usize)"
+                        return (
+                            [name],
+                            f"({start}..({stop})).step_by({step_usize})",
+                            [(name, "i64")],
+                        )
                     raise UnsupportedError(
-                        "List comprehension range(...) with step is not supported",
+                        "range(...) in list comprehensions requires 1, 2, or 3 arguments",
                         node=expr,
                     )
                 if call_name == "enumerate":
@@ -1541,6 +1574,22 @@ class RustGenerator:
                         [(name, element_type)],
                     )
                 return [name], f"{iter_rust}.iter()", [(name, f"&{element_type}")]
+            # General expression iterator (e.g. a slice like ``arr[1:]``).
+            iter_type = self._type_of(gen.iter)
+            if iter_type.startswith("Vec<"):
+                element_type = _element_type(iter_type)
+                iter_rust = self._emit_expr(gen.iter, iter_type)
+                if element_type in ("i64", "f64", "bool"):
+                    return (
+                        [name],
+                        f"({iter_rust}).iter().copied()",
+                        [(name, element_type)],
+                    )
+                return (
+                    [name],
+                    f"({iter_rust}).iter()",
+                    [(name, f"&{element_type}")],
+                )
         if isinstance(gen.target, ast.Tuple):
             names = [elt.id for elt in gen.target.elts if isinstance(elt, ast.Name)]
             if len(names) != len(gen.target.elts):
@@ -1601,15 +1650,9 @@ class RustGenerator:
                 return _flatten(e.value, [e.slice] + indices)
             return e, indices
 
-        base, indices = _flatten(expr, [])
-        base_type = self._type_of(base)
-        if not base_type.startswith("Vec<"):
-            raise UnsupportedError(
-                "Subscript/indexing is only supported on Vec/list types", node=expr
-            )
-
-        if any(isinstance(i, ast.Slice) for i in indices):
-            # Slices are currently handled one level at a time.
+        # Handle a top-level slice (e.g. ``arr[1:]``) directly so we do not
+        # recurse through the subscript emitter.
+        if isinstance(expr.slice, ast.Slice):
             base_type = self._type_of(expr.value)
             if not base_type.startswith("Vec<"):
                 raise UnsupportedError(
@@ -1636,6 +1679,13 @@ class RustGenerator:
                 f"{value_expr}[({lower}) as usize..({upper}) as usize].to_vec()",
                 base_type,
                 ctx,
+            )
+
+        base, indices = _flatten(expr, [])
+        base_type = self._type_of(base)
+        if not base_type.startswith("Vec<"):
+            raise UnsupportedError(
+                "Subscript/indexing is only supported on Vec/list types", node=expr
             )
 
         base_expr = self._emit_expr(base, base_type)
@@ -1976,9 +2026,49 @@ class RustGenerator:
         if base == "math" and name in self.MATH_ATTRS:
             return self._emit_math_call(name, args, ctx)
 
+        if base is None and name in {"int", "float"}:
+            if len(expr.args) != 1:
+                raise UnsupportedError(
+                    f"{name}() takes exactly one argument", node=expr
+                )
+            arg_node = expr.args[0]
+            arg_ctx = self._type_of(arg_node)
+            arg = self._strip_outer_parens(self._emit_expr(arg_node, arg_ctx))
+            if name == "int":
+                return f"({arg} as i64)"
+            return f"({arg} as f64)"
+
+        if base is None and name == "sorted":
+            return self._emit_sorted(expr, ctx)
+
         if base in self.IO_MODULES or name in self.IO_NAMES:
             raise UnsupportedError("io", node=expr)
         raise UnsupportedError(f"Unsupported call: {name}", node=expr)
+
+    def _emit_sorted(self, expr: ast.Call, ctx: str) -> str:
+        """Emit ``sorted(arr)`` as a sorted clone of the input vector."""
+        if len(expr.args) != 1:
+            raise UnsupportedError(
+                "sorted() with key/reverse is not supported", node=expr
+            )
+        arg = expr.args[0]
+        arg_type = self._type_of(arg)
+        if not arg_type.startswith("Vec<"):
+            raise UnsupportedError(
+                "sorted() is only supported on list/Vec types", node=expr
+            )
+        element_type = _element_type(arg_type)
+        arg_str = self._emit_expr(arg, arg_type)
+        tmp = self._next_tmp()
+        if element_type == "bool":
+            return (
+                f"{{ let mut {tmp} = ({arg_str}).to_vec(); "
+                f"{tmp}.sort_by(|a, b| a.cmp(b)); {tmp} }}"
+            )
+        return (
+            f"{{ let mut {tmp} = ({arg_str}).to_vec(); "
+            f"{tmp}.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)); {tmp} }}"
+        )
 
     def _emit_math_call(self, name: str, args: List[str], ctx: str) -> str:
         if name == "pow":
