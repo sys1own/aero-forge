@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Aero-Forge Web</title>
+  <style>
+    :root { --bg: #0b0f17; --panel: #111827; --text: #e5e7eb; --accent: #22d3ee; --border: #374151; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
+    header { padding: 1.5rem 2rem; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+    h1 { margin: 0; font-size: 1.5rem; color: var(--accent); }
+    main { padding: 2rem; max-width: 1200px; margin: 0 auto; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 0.75rem; padding: 1.25rem; }
+    label { display: block; margin: 0.75rem 0 0.25rem; font-size: 0.875rem; color: #9ca3af; }
+    input, textarea, select, button { font: inherit; border: 1px solid var(--border); border-radius: 0.375rem; padding: 0.5rem 0.75rem; background: var(--bg); color: var(--text); width: 100%; }
+    button { cursor: pointer; background: var(--accent); color: #000; font-weight: 600; border: none; margin-top: 1rem; }
+    button:hover { opacity: 0.9; }
+    textarea { min-height: 6rem; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    pre { background: var(--bg); border: 1px solid var(--border); border-radius: 0.375rem; padding: 1rem; overflow: auto; min-height: 8rem; }
+    .row { display: flex; gap: 1rem; }
+    .row > * { flex: 1; }
+    #file-tree ul { list-style: none; padding-left: 1.25rem; margin: 0; }
+    #file-tree li { cursor: pointer; padding: 0.25rem 0; }
+    #file-tree li:hover { color: var(--accent); }
+    .small { font-size: 0.8rem; color: #9ca3af; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Aero-Forge</h1>
+    <span class="small">Prompt-driven Python to Rust extensions</span>
+  </header>
+  <main>
+    <div class="grid">
+      <div class="panel">
+        <h2>Build</h2>
+        <label for="session">Session ID</label>
+        <input id="session" placeholder="leave blank to create one">
+
+        <label for="provider">Provider</label>
+        <select id="provider">
+          <option value="deepseek">deepseek</option>
+          <option value="openai">openai</option>
+          <option value="openrouter">openrouter</option>
+          <option value="gemini">gemini</option>
+          <option value="none">none</option>
+        </select>
+
+        <label for="api-key">API Key</label>
+        <input id="api-key" type="password" placeholder="optional">
+
+        <label for="prompt">Prompt</label>
+        <textarea id="prompt" placeholder="Build a fast iterative Fibonacci function"></textarea>
+
+        <label><input type="checkbox" id="variants" style="width:auto"> Generate 3 variants</label>
+        <button id="build-btn">Build</button>
+      </div>
+
+      <div class="panel">
+        <h2>Chat</h2>
+        <label for="chat-session">Session ID</label>
+        <input id="chat-session" placeholder="leave blank to create one">
+        <label for="message">Message</label>
+        <textarea id="message" placeholder="Make it faster"></textarea>
+        <button id="chat-btn">Send</button>
+      </div>
+
+      <div class="panel">
+        <h2>Files</h2>
+        <button id="refresh-files">Refresh</button>
+        <div id="file-tree">No session selected</div>
+        <label for="file-content">File content</label>
+        <textarea id="file-content" readonly></textarea>
+      </div>
+
+      <div class="panel">
+        <h2>Upload / Download</h2>
+        <label for="upload">Upload project zip</label>
+        <input id="upload" type="file" accept=".zip">
+        <button id="upload-btn">Upload</button>
+        <button id="download-btn">Download Session Zip</button>
+        <pre id="status">Ready</pre>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    const status = msg => { $("status").textContent = msg; };
+    const sessionId = () => $("session").value || $("chat-session").value || "";
+
+    async function postJSON(url, body) {
+      const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const data = await res.json();
+      return data;
+    }
+
+    $("build-btn").onclick = async () => {
+      status("Building...");
+      const payload = {
+        prompt: $("prompt").value,
+        session_id: $("session").value || undefined,
+        provider: $("provider").value,
+        api_key: $("api-key").value || undefined,
+        variants: $("variants").checked,
+      };
+      const data = await postJSON("/api/build", payload);
+      if (data.session_id) $("session").value = data.session_id;
+      $("chat-session").value = $("session").value;
+      status(JSON.stringify(data, null, 2));
+      refreshFiles();
+    };
+
+    $("chat-btn").onclick = async () => {
+      status("Chatting...");
+      const data = await postJSON("/api/chat", {
+        message: $("message").value,
+        session_id: $("chat-session").value || undefined,
+        provider: $("provider").value,
+        api_key: $("api-key").value || undefined,
+      });
+      if (data.session_id) $("chat-session").value = data.session_id;
+      $("session").value = data.session_id;
+      status(JSON.stringify(data, null, 2));
+      refreshFiles();
+    };
+
+    async function refreshFiles() {
+      const sid = sessionId();
+      if (!sid) return;
+      const res = await fetch(`/api/files?session_id=${sid}`);
+      const data = await res.json();
+      $("file-tree").innerHTML = renderTree(data.tree);
+      $("file-tree").querySelectorAll("li").forEach(li => {
+        li.onclick = async () => {
+          const path = li.dataset.path;
+          const r = await fetch(`/api/file-content?session_id=${sid}&path=${encodeURIComponent(path)}`);
+          const d = await r.json();
+          $("file-content").value = d.content || d.error || "";
+        };
+      });
+    }
+
+    function renderTree(node) {
+      if (node.type === "file") return `<li data-path="${node.path}">${node.name}</li>`;
+      const children = node.children.map(renderTree).join("");
+      return `<li>${node.name}<ul>${children}</ul></li>`;
+    }
+
+    $("refresh-files").onclick = refreshFiles;
+
+    $("upload-btn").onclick = async () => {
+      const file = $("upload").files[0];
+      if (!file) return status("Select a zip file first");
+      status("Uploading...");
+      const sid = $("session").value || "";
+      const url = sid ? `/api/upload-zip?session_id=${sid}` : "/api/upload-zip";
+      const res = await fetch(url, { method: "POST", body: file, headers: { "Content-Type": "application/zip" } });
+      const data = await res.json();
+      if (data.session_id) { $("session").value = data.session_id; $("chat-session").value = data.session_id; }
+      status(JSON.stringify(data, null, 2));
+      refreshFiles();
+    };
+
+    $("download-btn").onclick = async () => {
+      const sid = sessionId();
+      if (!sid) return status("No session selected");
+      window.open(`/api/download-zip?session_id=${sid}`);
+    };
+  </script>
+</body>
+</html>

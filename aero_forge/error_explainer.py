@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from aero_forge.config import ConfigOverride
 from aero_forge.errors import UnsupportedError, classify_cargo_error
 from aero_forge.llm import get_llm_client
 
@@ -20,13 +21,20 @@ def explain_error(
     source: Optional[str] = None,
     llm_provider: Optional[str] = None,
     model: Optional[str] = None,
+    config_override: Optional[ConfigOverride] = None,
 ) -> str:
     """Return a formatted explanation and fix suggestions for ``error_log``.
 
     The function first tries to use a configured LLM.  If no provider is
     available (or no API key is set), it falls back to local heuristics.
     """
-    client = get_llm_client(llm_provider, model=model) if llm_provider else None
+    client = (
+        get_llm_client(
+            llm_provider, model=model, config_override=config_override
+        )
+        if llm_provider
+        else None
+    )
     if client is not None:
         prompt = _build_explain_prompt(error_log, source)
         try:

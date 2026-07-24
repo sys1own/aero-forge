@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from aero_forge.build_summary import format_build_summary
+from aero_forge.config import ConfigOverride
 from aero_forge.error_explainer import explain_error
 from aero_forge.generate import generate_and_build, optimize_generated_code
 from aero_forge.llm.clients import get_llm_client
@@ -59,20 +60,32 @@ class ChatSession:
         *,
         llm_provider: Optional[str] = None,
         model: Optional[str] = None,
+        api_key: Optional[str] = None,
         max_iterations: int = 5,
         max_retries: int = 3,
         prompt_template: Optional[str] = None,
         session_id: Optional[str] = None,
         progress_callback: Optional[ProgressCallback] = None,
+        config_override: Optional[ConfigOverride] = None,
     ):
         self.output_dir = Path(output_dir)
         self.llm_provider = llm_provider
         self.model = model
+        self.api_key = api_key
         self.max_iterations = max_iterations
         self.max_retries = max_retries
         self.prompt_template = prompt_template
         self.session_id = session_id or self._new_session_id()
         self.progress_callback = progress_callback or _noop
+        self.config_override = (
+            config_override
+            or ConfigOverride(
+                llm_provider=llm_provider,
+                model=model,
+                api_key=api_key,
+                max_retries=max_retries,
+            )
+        )
 
         self.messages: List[Dict[str, str]] = []
         self.last_error: Optional[str] = None
@@ -175,6 +188,7 @@ class ChatSession:
             self.llm_provider,
             model=self.model,
             max_retries=self.max_retries,
+            config_override=self.config_override,
         )
         if client is None:
             return (
@@ -289,6 +303,7 @@ class ChatSession:
             prompt_template=self.prompt_template,
             build_kwargs={"max_workers": 1, "cache_enabled": False},
             progress_callback=self._progress,
+            config_override=self.config_override,
         )
         self._update_memory(text, result)
         return result
@@ -321,6 +336,7 @@ class ChatSession:
             prompt_template=self.prompt_template,
             build_kwargs={"max_workers": 1, "cache_enabled": False},
             progress_callback=self._progress,
+            config_override=self.config_override,
         )
         self._update_memory(self.last_prompt or text, result)
         return result
@@ -350,6 +366,7 @@ class ChatSession:
             max_iterations=self.max_iterations,
             prompt_template=self.prompt_template,
             progress_callback=self._progress,
+            config_override=self.config_override,
         )
         self._progress("Optimization complete, rebuilding...")
         result = generate_and_build(
@@ -361,6 +378,7 @@ class ChatSession:
             prompt_template=self.prompt_template,
             build_kwargs={"max_workers": 1, "cache_enabled": False},
             progress_callback=self._progress,
+            config_override=self.config_override,
         )
         result["iterations"] = iterations
         self._update_memory(prompt, result)
@@ -391,6 +409,7 @@ class ChatSession:
             self.llm_provider,
             model=self.model,
             max_retries=self.max_retries,
+            config_override=self.config_override,
         )
         if client is None:
             return {
@@ -424,6 +443,7 @@ class ChatSession:
             source=source,
             llm_provider=self.llm_provider,
             model=self.model,
+            config_override=self.config_override,
         )
         return {"message": f"Here's what went wrong:\n\n{explanation}"}
 
@@ -539,6 +559,7 @@ class ChatSession:
             llm_provider=self.llm_provider,
             model=self.model,
             max_retries=self.max_retries,
+            config_override=self.config_override,
         )
 
 

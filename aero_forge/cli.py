@@ -6,7 +6,9 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
+import webbrowser
 from pathlib import Path
 from typing import Any
 
@@ -1454,6 +1456,20 @@ def examples_create(
         prompt_template=prompt_template,
     )
     click.echo(f"Created example at {project_dir}")
+
+
+@main.command("web")
+@click.option("--port", "-p", default=8080, help="Port to bind the web server.", type=int)
+@click.option(
+    "--no-browser", is_flag=True, help="Do not automatically open the browser."
+)
+@click.option("--verbose", "-v", is_flag=True, help="Show debug logs.")
+def web(port: int, no_browser: bool, verbose: bool) -> None:
+    """Run the embedded Aero-Forge web server."""
+    _setup_logging(verbose)
+    from .server import run_server
+
+    run_server(port=port, open_browser=not no_browser)
 
 
 if __name__ == "__main__":
