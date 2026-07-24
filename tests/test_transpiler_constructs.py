@@ -392,3 +392,65 @@ def test_local_function_call(tmp_path: Path) -> None:
         "    assert main(5) == 6\n"
         "    assert main(0) == 1\n",
     )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_matrix_chained_subscript(tmp_path: Path) -> None:
+    source = (
+        "def matrix_sum(m: list[list[int]]) -> int:\n"
+        "    s = 0\n"
+        "    for i in range(len(m)):\n"
+        "        for j in range(len(m[i])):\n"
+        "            s += m[i][j]\n"
+        "    return s\n"
+    )
+    _run_case(
+        tmp_path,
+        "matrix_sum",
+        source,
+        "def test_matrix_sum():\n    assert matrix_sum([[1, 2], [3, 4]]) == 10\n",
+    )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_sliced_list_subscript(tmp_path: Path) -> None:
+    source = (
+        "def sum_even(signal: list[float]) -> float:\n"
+        "    s = signal[::2]\n"
+        "    total = 0.0\n"
+        "    for i in range(len(s)):\n"
+        "        total += s[i]\n"
+        "    return total\n"
+    )
+    _run_case(
+        tmp_path,
+        "sum_even",
+        source,
+        "def test_sum_even():\n    assert sum_even([1.0, 2.0, 3.0, 4.0]) == 4.0\n",
+    )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_function_return_subscript(tmp_path: Path) -> None:
+    source = (
+        "def cooley_tukey_fft(sig: list[float]) -> list[float]:\n"
+        "    return sig\n"
+        "\n"
+        "def first_mag(sig: list[float]) -> float:\n"
+        "    return cooley_tukey_fft(sig)[0]\n"
+    )
+    _run_case(
+        tmp_path,
+        "first_mag",
+        source,
+        "def test_first_mag():\n    assert first_mag([5.0, 6.0]) == 5.0\n",
+    )
