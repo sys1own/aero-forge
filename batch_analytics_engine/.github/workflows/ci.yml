@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    paths:
+      - "batch_analytics_engine/**"
+  pull_request:
+    paths:
+      - "batch_analytics_engine/**"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: batch_analytics_engine
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python dependencies
+        run: pip install maturin pytest aiohttp
+
+      - name: Check Rust with zero warnings
+        run: RUSTFLAGS="-D warnings" cargo check --release
+
+      - name: Run Rust tests
+        run: RUSTFLAGS="-D warnings" cargo test --release
+
+      - name: Run Rust lints
+        run: RUSTFLAGS="-D warnings" cargo clippy --release -- -D warnings
+
+      - name: Build Python wheel
+        run: maturin build --release
+
+      - name: Install wheel and run Python tests
+        run: |
+          pip install target/wheels/*.whl
+          pytest -q

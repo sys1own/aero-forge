@@ -1,0 +1,208 @@
+project:
+  name: batch_analytics_engine
+  version: 0.1.0
+  description: >
+    Hybrid Python/Rust engine: Python exposes an async HTTP service and orchestrates
+    execution; Rust (PyO3) performs high-throughput streaming aggregation, mean/std
+    computation, and outlier detection on numeric record streams.
+  workspace_root: batch_analytics_engine
+  python_version: ">=3.10"
+  rust_edition: "2021"
+  build_system: maturin
+  package_manager: cargo + pip
+  target_abi: py310
+
+structure:
+  files:
+    - path: batch_analytics_engine/Cargo.toml
+      lang: toml
+      purpose: Cargo workspace root; declares the `rust_core` member crate.
+
+    - path: batch_analytics_engine/pyproject.toml
+      lang: toml
+      purpose: Python project manifest; uses Maturin build backend and declares dependencies.
+
+    - path: batch_analytics_engine/README.md
+      lang: markdown
+      purpose: Developer documentation, build/test instructions, and architecture overview.
+
+    - path: batch_analytics_engine/rust_core/Cargo.toml
+      lang: toml
+      purpose: Rust crate manifest for the native compute core; lists PyO3 and dependencies.
+
+    - path: batch_analytics_engine/rust_core/src/lib.rs
+      lang: rust
+      purpose: PyO3 module entry point; registers `#[pymodule]` and re-exports submodules.
+
+    - path: batch_analytics_engine/rust_core/src/record.rs
+      lang: rust
+      purpose: Shared domain structs (`Record`, `AggregateResult`) with PyO3 derive bindings.
+
+    - path: batch_analytics_engine/rust_core/src/aggregator.rs
+      lang: rust
+      purpose: Streaming numerical aggregation (count, sum, mean, variance/std) over sliding windows.
+
+    - path: batch_analytics_engine/rust_core/src/outlier.rs
+      lang: rust
+      purpose: Z-score and IQR based outlier detection; operates on `AggregateResult` windows.
+
+    - path: batch_analytics_engine/rust_core/src/errors.rs
+      lang: rust
+      purpose: Rust error types mapped to Python exceptions via `pyo3::exceptions`.
+
+    - path: batch_analytics_engine/python_engine/batch_analytics/__init__.py
+      lang: python
+      purpose: Public Python package entry; imports symbols from the compiled Rust extension.
+
+    - path: batch_analytics_engine/python_engine/batch_analytics/_native.pyi
+      lang: python
+      purpose: Type stubs for the Rust extension so Python consumers get static analysis support.
+
+    - path: batch_analytics_engine/python_engine/batch_analytics/service.py
+      lang: python
+      purpose: Async HTTP service (aiohttp) that accepts record batches and returns aggregates.
+
+    - path: batch_analytics_engine/python_engine/batch_analytics/client.py
+      lang: python
+      purpose: Thin Python client for submitting batches and streaming results back.
+
+    - path: batch_analytics_engine/python_engine/batch_analytics/utils.py
+      lang: python
+      purpose: Input validation, JSON parsing, and result serialization helpers.
+
+    - path: batch_analytics_engine/python_engine/tests/test_aggregator.py
+      lang: python
+      purpose: Python pytest suite covering correctness, empty input, float boundaries, and outlier logic.
+
+    - path: batch_analytics_engine/python_engine/benchmarks/bench_aggregator.py
+      lang: python
+      purpose: Comparative benchmark of the Rust extension vs a pure-Python reference implementation.
+
+    - path: batch_analytics_engine/scripts/run_service.py
+      lang: python
+      purpose: Convenience entrypoint to start the async HTTP service locally.
+
+    - path: batch_analytics_engine/.github/workflows/ci.yml
+      lang: yaml
+      purpose: CI pipeline running `cargo test`, `maturin build`, and `pytest`.
+
+contracts:
+  exported_symbols:
+    - name: aggregate_batch
+      lang: rust
+      python_name: batch_analytics.aggregate_batch
+      signature: "aggregate_batch(records: list[Record], window: int) -> list[AggregateResult]"
+      purpose: Core compute function exposed to Python; runs in Rust.
+
+    - name: detect_outliers
+      lang: rust
+      python_name: batch_analytics.detect_outliers
+      signature: "detect_outliers(results: list[AggregateResult], threshold: float) -> list[int]"
+      purpose: Returns indices of windows flagged as outliers by Z-score.
+
+    - name: Record
+      lang: rust
+      python_name: batch_analytics.Record
+      purpose: PyO3-bound dataclass carrying `id: str`, `value: float`, `timestamp: float`.
+
+    - name: AggregateResult
+      lang: rust
+      python_name: batch_analytics.AggregateResult
+      purpose: PyO3-bound dataclass carrying `window_start: int`, `mean: float`, `std: float`, `outliers: list[int]`.
+
+  shared_data_structures:
+    - name: Record
+      rust_repr: "pub struct Record { id: String, value: f64, timestamp: f64 }"
+      python_repr: "class Record: id: str; value: float; timestamp: float"
+      conversion: PyO3 `#[pyclass]` with `#[pymethods]` constructor.
+
+    - name: AggregateResult
+      rust_repr: "pub struct AggregateResult { window_start: usize, mean: f64, std: f64, outliers: Vec<usize> }"
+      python_repr: "class AggregateResult: window_start: int; mean: float; std: float; outliers: list[int]"
+      conversion: PyO3 `#[pyclass]` with getter methods and `__repr__`.
+
+  ffi_bindings:
+    - mechanism: pyo3
+      module_name: batch_analytics._native
+      init_function: "fn _native(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()>"
+      notes: >-
+        The Rust crate compiles to `batch_analytics/_native*.so` (or `batch_analytics/_native*.pyd` on Windows)
+        via Maturin. Python re-exports symbols in `__init__.py`.
+
+execution_sequence:
+  - step: 1
+    action: Define shared domain structs (`Record`, `AggregateResult`) in `batch_analytics_engine/rust_core/src/record.rs` with `#[pyclass]` and `#[pymethods]`.
+
+  - step: 2
+    action: Implement streaming window aggregation in `batch_analytics_engine/rust_core/src/aggregator.rs` using Welford or two-pass numerics.
+
+  - step: 3
+    action: Implement Z-score / IQR outlier detection in `batch_analytics_engine/rust_core/src/outlier.rs`.
+
+  - step: 4
+    action: Wire exports in `batch_analytics_engine/rust_core/src/lib.rs` via `#[pymodule]` and `m.add_class` / `m.add_function`.
+
+  - step: 5
+    action: Create root `batch_analytics_engine/Cargo.toml` workspace with a single member `rust_core` and `resolver = "2"`.
+
+  - step: 6
+    action: Configure `batch_analytics_engine/pyproject.toml` with `maturin` build backend, Python 3.11 requirement, and runtime dependencies.
+
+  - step: 7
+    action: Build the extension with `maturin develop` or `maturin build --release`.
+
+  - step: 8
+    action: Write `batch_analytics_engine/python_engine/batch_analytics/__init__.py` to import compiled symbols and `_native.pyi` stubs.
+
+  - step: 9
+    action: Implement `batch_analytics_engine/python_engine/batch_analytics/service.py` async HTTP endpoints that validate JSON, call the Rust core, and return JSON responses.
+
+  - step: 10
+    action: Add `batch_analytics_engine/python_engine/batch_analytics/client.py` and `utils.py` for orchestration and input sanitization.
+
+  - step: 11
+    action: Write `batch_analytics_engine/python_engine/tests/test_aggregator.py` covering empty batches, single windows, float edge cases, and outliers.
+
+  - step: 12
+    action: Add `batch_analytics_engine/python_engine/benchmarks/bench_aggregator.py` comparing Rust extension throughput against a pure-Python reference.
+
+  - step: 13
+    action: Add `batch_analytics_engine/scripts/run_service.py` and `batch_analytics_engine/.github/workflows/ci.yml` to run `cargo test`, `maturin build`, and `pytest`.
+
+language_boundaries:
+  rust:
+    responsibility: >-
+      High-throughput numeric aggregation, variance/std computation, outlier detection,
+      and memory-safe batch iteration. Exposes a minimal PyO3 surface.
+    files:
+      - batch_analytics_engine/rust_core/src/lib.rs
+      - batch_analytics_engine/rust_core/src/record.rs
+      - batch_analytics_engine/rust_core/src/aggregator.rs
+      - batch_analytics_engine/rust_core/src/outlier.rs
+      - batch_analytics_engine/rust_core/src/errors.rs
+
+  python:
+    responsibility: >-
+      Async HTTP service, request/response serialization, orchestration, validation,
+      tests, benchmarks, and developer tooling.
+    files:
+      - batch_analytics_engine/python_engine/batch_analytics/service.py
+      - batch_analytics_engine/python_engine/batch_analytics/client.py
+      - batch_analytics_engine/python_engine/batch_analytics/utils.py
+      - batch_analytics_engine/python_engine/batch_analytics/__init__.py
+      - batch_analytics_engine/python_engine/tests/test_aggregator.py
+      - batch_analytics_engine/python_engine/benchmarks/bench_aggregator.py
+      - batch_analytics_engine/scripts/run_service.py
+
+verification:
+  layout_checks:
+    - item: Cargo workspace root contains `rust_core` member and resolver 2.
+      passed: true
+    - item: Maturin-compatible layout with `python_engine/batch_analytics/__init__.py` and rust source crate.
+      passed: true
+    - item: PyO3 ABI targets Python 3.11 (`abi3-py311`) to match runtime requirement.
+      passed: true
+    - item: Rust files isolate numeric compute; Python files isolate service/orchestration.
+      passed: true
+    - item: Tests live outside the package directory and benchmarks are separate from source.
+      passed: true
