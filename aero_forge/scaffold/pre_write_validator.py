@@ -90,6 +90,124 @@ def _format_line(node: ast.AST) -> str:
     return f" at line {lineno}" if lineno else ""
 
 
+_PRIMITIVE_TYPES = frozenset(
+    {"int", "float", "bool", "complex", "str", "bytes", "None", "NoneType", "Any", "object"}
+)
+_TYPING_ALIASES = {"List": "list", "Tuple": "tuple", "Dict": "dict", "Set": "set", "FrozenSet": "frozenset"}
+_GENERIC_CONTAINERS = frozenset({"list", "tuple", "dict", "set", "frozenset", "Optional", "Union"})
+
+
+def _normalize_type_name(name: str) -> str:
+    """Map ``typing.List`` style names to normalized container names."""
+    if name in _TYPING_ALIASES:
+        return _TYPING_ALIASES[name]
+    if "." in name:
+        _, tail = name.rsplit(".", 1)
+        return _TYPING_ALIASES.get(tail, tail)
+    return name
+
+
+def _type_base(node: ast.AST) -> str:
+    """Return the dotted or simple name of a type node."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return f"{_type_base(node.value)}.{node.attr}"
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return ""
+
+
+def _type_args(node: ast.AST) -> List[ast.AST]:
+    """Return the argument nodes inside a generic subscript."""
+    if isinstance(node, ast.Index):  # pragma: no cover  # Python 3.8 compatibility
+        return _type_args(node.value)
+    if isinstance(node, ast.Tuple):
+        return list(node.elts)
+    return [node]
+
+
+def _annotation_str(node: ast.AST) -> str:
+    """Return a human-readable string for an annotation node."""
+    try:
+        return ast.unparse(node)
+    except Exception:  # pragma: no cover
+        return ast.dump(node)
+
+
+def _is_valid_primitive_annotation(node: ast.AST) -> bool:
+    """Return True when *node* is a primitive builtin or a generic of primitives.
+
+    Unknown user-defined types are allowed to pass so that scope shadows of
+    standard names (e.g. a local class named ``str``) are the only thing that
+    can make a standard built-in annotation fail validation.
+    """
+    if node is None:
+        return True
+    if isinstance(node, ast.Name):
+        if node.id in _PRIMITIVE_TYPES:
+            return True
+        if _normalize_type_name(node.id) in _GENERIC_CONTAINERS:
+            return False
+        return True
+    if isinstance(node, ast.Constant):
+        if node.value is None or isinstance(node.value, bool):
+            return True
+        if isinstance(node.value, str):
+            return True
+        return False
+    if isinstance(node, ast.Attribute):
+        base = _normalize_type_name(_type_base(node))
+        if base in _PRIMITIVE_TYPES:
+            return True
+        if base in _GENERIC_CONTAINERS:
+            return False
+        return True
+    if isinstance(node, ast.Subscript):
+        base = _normalize_type_name(_type_base(node.value))
+        if base in _GENERIC_CONTAINERS:
+            return all(_is_valid_primitive_annotation(a) for a in _type_args(node.slice))
+        if base in _PRIMITIVE_TYPES:
+            return False
+        return True
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        # PEP 604 union syntax: ``X | Y``.
+        return _is_valid_primitive_annotation(node.left) and _is_valid_primitive_annotation(node.right)
+    return True
+
+
+def _check_primitive_annotations(tree: ast.AST) -> None:
+    """Validate that annotations use standard primitive types or generics of primitives."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef):
+            for arg in node.args.args + node.args.posonlyargs + node.args.kwonlyargs:
+                if arg.annotation is not None and not _is_valid_primitive_annotation(arg.annotation):
+                    raise ValidationError(
+                        f"Function '{node.name}' parameter '{arg.arg}' uses non-primitive type "
+                        f"'{_annotation_str(arg.annotation)}'{_format_line(arg.annotation)}. "
+                        "Use a standard built-in type such as 'str', 'int', 'float', 'bool', 'bytes', "
+                        "'None', 'list[...]', 'dict[...]', 'Optional[...]', or 'Union[...]'.",
+                        output="",
+                    )
+            if node.returns is not None and not _is_valid_primitive_annotation(node.returns):
+                raise ValidationError(
+                    f"Function '{node.name}' return type '{_annotation_str(node.returns)}' is not primitive"
+                    f"{_format_line(node.returns)}. "
+                    "Use a standard built-in type such as 'str', 'int', 'float', 'bool', 'bytes', "
+                    "'None', 'list[...]', 'dict[...]', 'Optional[...]', or 'Union[...]'.",
+                    output="",
+                )
+        elif isinstance(node, ast.AnnAssign):
+            if node.annotation is not None and not _is_valid_primitive_annotation(node.annotation):
+                raise ValidationError(
+                    f"Annotated assignment uses non-primitive type '{_annotation_str(node.annotation)}'"
+                    f"{_format_line(node.annotation)}. "
+                    "Use a standard built-in type such as 'str', 'int', 'float', 'bool', 'bytes', "
+                    "'None', 'list[...]', 'dict[...]', 'Optional[...]', or 'Union[...]'.",
+                    output="",
+                )
+
+
 def _check_loose_annotations(tree: ast.AST) -> None:
     """Reject bare ``dict``/``list`` type annotations that lack explicit generic parameters."""
     for ann in _collect_ann_assign_targets(tree):
@@ -210,6 +328,7 @@ def _run_python_static_checks(source: str) -> None:
     except SyntaxError as exc:
         raise ValidationError(f"Python syntax error: {exc}", output=str(exc)) from exc
     _check_loose_annotations(tree)
+    _check_primitive_annotations(tree)
     _check_raw_enum_state_machines(tree)
     _check_empty_matrix_returns(tree)
     _check_dynamic_reflection(tree)

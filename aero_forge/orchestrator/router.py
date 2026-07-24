@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Set
 HIN_COMPUTE = "HIN_COMPUTE"
 GENERAL_PURPOSE = "GENERAL_PURPOSE"
 
-_SCALAR_TYPES = {"int", "float", "bool", "complex"}
+_SCALAR_TYPES = {"int", "float", "bool", "complex", "str", "bytes", "None"}
 
 _ALLOWED_BUILTINS = {
     "abs",
@@ -88,8 +88,13 @@ def _annotation_name(node: ast.AST) -> Optional[str]:
     """Return a simple name string for a Python type annotation."""
     if isinstance(node, ast.Name):
         return _TYPING_ALIASES.get(node.id, node.id)
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value
+    if isinstance(node, ast.Constant):
+        if node.value is None:
+            return "None"
+        if isinstance(node.value, bool):
+            return "bool"
+        if isinstance(node.value, str):
+            return node.value
     if isinstance(node, getattr(ast, "Str", ())):
         return node.s  # type: ignore[attr-defined]
     if isinstance(node, ast.Tuple):
