@@ -19,6 +19,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from aero_forge.builder import build_engine, spec_from_python
 from aero_forge.cache.fix_cache import FixCache
 from aero_forge.config import ConfigOverride, load_config, resolve_settings
 from aero_forge.errors import (
@@ -351,6 +352,33 @@ class Orchestrator:
             result["artifact"] = str(artifact)
         return result
 
+    def _package_general_purpose(self, source: str) -> Optional[Path]:
+        """Package general-purpose Python code using the polyglot builder.
+
+        This produces a Python source file and ``setup.py`` in a ``python_pkg/``
+        subfolder of the output directory, demonstrating the pipeline's ability to
+        emit language-specific artifacts from an abstract engine spec.
+        """
+        try:
+            spec = spec_from_python(source, name=self.source_path.stem or "generated")
+            output = build_engine(
+                spec,
+                target_language="python",
+                template_names=["setup.py"],
+            )
+            pkg_dir = self.output_dir / "python_pkg"
+            pkg_dir.mkdir(parents=True, exist_ok=True)
+            main_file = pkg_dir / f"{spec.name}.py"
+            main_file.write_text(output.source, encoding="utf-8")
+            for artifact in output.artifacts.artifacts:
+                dest = pkg_dir / artifact.path
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(artifact.content, encoding="utf-8")
+            return pkg_dir
+        except Exception as exc:
+            logger.warning("Could not package general-purpose source: %s", exc)
+            return None
+
     def _run_general_purpose(
         self, source: str, route_payload: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -396,7 +424,8 @@ class Orchestrator:
             sandbox.source_in_sandbox.write_text(source, encoding="utf-8")
             result = sandbox.run_tests()
             if result["passed"]:
-                return {
+                package_path = self._package_general_purpose(source)
+                output: Dict[str, Any] = {
                     "success": True,
                     "iterations": 0,
                     "route": route_payload["route"],
@@ -404,6 +433,9 @@ class Orchestrator:
                     "target_functions": route_payload["target_functions"],
                     "logs": result["logs"],
                 }
+                if package_path is not None:
+                    output["package"] = str(package_path)
+                return output
             return {
                 "success": False,
                 "iterations": 0,

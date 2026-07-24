@@ -1,0 +1,19 @@
+use std::collections::HashMap;
+
+pub struct $struct_name {
+    data: HashMap<$key_type, $value_type>,
+}
+
+impl $struct_name {
+    pub fn new() -> Self {
+        Self { data: HashMap::new() }
+    }
+
+    pub fn get(&self, key: &$key_type) -> Option<&$value_type> {
+        self.data.get(key)
+    }
+
+    pub fn insert(&mut self, key: $key_type, value: $value_type) {
+        self.data.insert(key, value);
+    }
+}
