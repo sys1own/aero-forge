@@ -89,14 +89,15 @@
 
     /* Sidebar */
     #sidebar {
-      width: 260px; min-width: 200px; max-width: 400px;
+      width: 260px; min-width: 180px; max-width: 50vw;
       background: var(--panel);
       border-right: 1px solid var(--border);
       display: flex; flex-direction: column;
       transition: margin-left 0.2s ease;
       min-height: 0;
+      flex-shrink: 0;
     }
-    #sidebar.collapsed { margin-left: -260px; }
+    #sidebar.collapsed { margin-left: -50vw; overflow: hidden; }
     .sidebar-header {
       height: 34px; padding: 0 0.5rem; border-bottom: 1px solid var(--border);
       display: flex; align-items: center; justify-content: space-between; background: var(--panel); gap: 0.3rem;
@@ -114,9 +115,13 @@
       user-select: none;
     }
     .tree-node:hover { background: #2a2d2e; }
+    .tree-node.drag-over { background: rgba(0,122,204,0.2); outline: 1px dashed var(--accent); }
     .tree-node.active { background: var(--panel-3); box-shadow: inset 2px 0 0 var(--accent); }
     .tree-node:hover .node-actions { opacity: 1; }
     .tree-node .icon { color: var(--muted); font-size: 0.85rem; width: 1rem; text-align: center; flex-shrink: 0; }
+    .tree-node .node-toggle { color: var(--muted); font-size: 0.6rem; width: 14px; text-align: center; flex-shrink: 0; cursor: pointer; }
+    .tree-children { overflow: hidden; transition: none; }
+    .tree-children.collapsed { display: none; }
     .node-actions { display: inline-flex; gap: 0.1rem; opacity: 0; margin-left: auto; padding-left: 0.25rem; }
     .node-actions .node-btn { width: 16px; height: 16px; display: grid; place-items: center; border-radius: 3px; color: var(--muted); font-size: 0.7rem; cursor: pointer; }
     .node-actions .node-btn:hover { color: var(--text); background: var(--panel-2); }
@@ -150,7 +155,11 @@
 
     /* Main */
     main { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; min-height: 0; }
-    #workspace { flex: 1; display: flex; flex-direction: row; overflow: hidden; min-height: 0; }
+    #workspace { flex: 1; display: flex; flex-direction: row; overflow: hidden; min-height: 0; min-width: 0; }
+    .gutter-x { width: 4px; cursor: col-resize; background: var(--border); flex-shrink: 0; position: relative; }
+    .gutter-x:hover, .gutter-x.dragging { background: var(--accent); }
+    .gutter-y { height: 4px; cursor: row-resize; background: var(--border); flex-shrink: 0; }
+    .gutter-y:hover, .gutter-y.dragging { background: var(--accent); }
     .toggle-sidebar {
       position: absolute; left: 0; top: 50%; transform: translateY(-50%);
       background: var(--panel-2); border: 1px solid var(--border); border-left: none; color: var(--text);
@@ -189,7 +198,7 @@
 
     /* Prompt deck */
     #prompt-deck {
-      width: 360px; min-width: 260px; max-width: 50vw; flex-shrink: 0;
+      width: 360px; min-width: 180px; max-width: 50vw; flex-shrink: 0;
       display: flex; flex-direction: column;
       background: var(--panel);
       border-left: 1px solid var(--border);
@@ -235,7 +244,7 @@
 
     /* Bottom panel (Terminal / Build log) */
     #bottom-panel {
-      height: 220px; min-height: 90px; flex-shrink: 0; background: var(--terminal-bg); border-top: 1px solid var(--border);
+      height: 220px; min-height: 120px; max-height: 70vh; flex-shrink: 0; background: var(--terminal-bg); border-top: 1px solid var(--border);
       display: flex; flex-direction: column; font-family: Consolas, Monaco, "Courier New", monospace;
       overflow: hidden;
     }
@@ -319,9 +328,13 @@
           <button id="new-folder-root" class="icon-btn" title="New folder" aria-label="New folder">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
           </button>
+          <button id="upload-root" class="icon-btn" title="Upload files or zip" aria-label="Upload files or zip">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          </button>
           <button id="refresh-tree" class="icon-btn" title="Refresh" aria-label="Refresh">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
           </button>
+          <input id="upload-input" type="file" multiple accept=".zip,.py,.txt,.md,.json,.toml,.yaml,.yml,.sh,.rs,.c,.cpp,.h,.hpp,.cc,.html,.css,.js,.ts" class="sr-only">
         </div>
       </div>
       <div id="file-tree" class="file-tree tree">
@@ -329,12 +342,13 @@
       </div>
       <div class="sidebar-footer">
         <div id="drop-zone" class="drop-zone">
-          Drop a .zip project bundle here or click to upload
-          <input id="zip-input" type="file" accept=".zip" class="sr-only">
+          Drop files or a .zip here, or click to upload
         </div>
         <button id="download-btn" class="secondary" style="width:100%">Download Session Zip</button>
       </div>
     </aside>
+
+    <div id="gutter-left" class="gutter-x"></div>
 
     <main>
       <button id="toggle-sidebar" class="toggle-sidebar" title="Toggle sidebar">
@@ -348,6 +362,8 @@
           </div>
           <div id="editor-container"></div>
         </section>
+
+        <div id="gutter-right" class="gutter-x"></div>
 
         <section id="prompt-deck">
           <div class="deck-tabs">
@@ -385,6 +401,8 @@
         </section>
       </div>
 
+      <div id="gutter-bottom" class="gutter-y"></div>
+
       <section id="bottom-panel">
         <div class="bottom-tabs">
           <button class="bottom-tab active" data-bottom="terminal">Terminal</button>
@@ -407,6 +425,7 @@
   <div id="context-menu" class="context-menu">
     <div class="context-menu-item" data-action="new-file">New file</div>
     <div class="context-menu-item" data-action="new-folder">New folder</div>
+    <div class="context-menu-item" data-action="upload">Upload file/zip</div>
     <div class="context-menu-sep"></div>
     <div class="context-menu-item" data-action="rename">Rename</div>
     <div class="context-menu-item" data-action="delete">Delete</div>
@@ -450,7 +469,7 @@
 
   <script>
     const LS = window.localStorage;
-    const LS_KEYS = { apiKey: 'aero_forge_api_key', provider: 'aero_forge_provider', tier: 'aero_forge_tier', session: 'aero_forge_session' };
+    const LS_KEYS = { apiKey: 'aero_forge_api_key', provider: 'aero_forge_provider', tier: 'aero_forge_tier', session: 'aero_forge_session', sidebarWidth: 'aero_forge_sidebar_width', promptWidth: 'aero_forge_prompt_width', bottomHeight: 'aero_forge_bottom_height', treeExpanded: 'aero_forge_tree_expanded' };
 
     const state = {
       sessionId: '',
@@ -468,12 +487,14 @@
       socket: null,
       contextTarget: null,
       treeRefreshInterval: null,
+      treeExpanded: new Set(),
     };
 
     let _treeSnapshot = '';
     let _treeSession = '';
     let _treeLoading = false;
     let _treeRefreshTimer = null;
+    let _dragTarget = null;
 
     const ui = {
       sidebar: document.getElementById('sidebar'),
@@ -481,8 +502,14 @@
       fileTree: document.getElementById('file-tree'),
       refreshTree: document.getElementById('refresh-tree'),
       dropZone: document.getElementById('drop-zone'),
-      zipInput: document.getElementById('zip-input'),
+      uploadInput: document.getElementById('upload-input'),
+      uploadRoot: document.getElementById('upload-root'),
       downloadBtn: document.getElementById('download-btn'),
+      gutterLeft: document.getElementById('gutter-left'),
+      gutterRight: document.getElementById('gutter-right'),
+      gutterBottom: document.getElementById('gutter-bottom'),
+      promptDeck: document.getElementById('prompt-deck'),
+      bottomPanel: document.getElementById('bottom-panel'),
       codeTabs: document.getElementById('code-tabs'),
       editorContainer: document.getElementById('editor-container'),
       promptInput: document.getElementById('prompt-input'),
@@ -523,6 +550,8 @@
         state.provider = LS.getItem(LS_KEYS.provider) || 'deepseek';
         state.tier = LS.getItem(LS_KEYS.tier) || 'free';
         state.sessionId = LS.getItem(LS_KEYS.session) || '';
+        const expanded = LS.getItem(LS_KEYS.treeExpanded);
+        if (expanded) expanded.split('\n').forEach(p => { if (p) state.treeExpanded.add(p); });
       } catch (e) {
         log('localStorage unavailable; using in-memory settings', 'info');
       }
@@ -530,6 +559,32 @@
       if (params.get('session')) state.sessionId = params.get('session');
       if (!state.sessionId) state.sessionId = generateId();
       applySettingsUI();
+    }
+
+    function saveTreeState() {
+      try {
+        const expanded = Array.from(state.treeExpanded).join('\n');
+        LS.setItem(LS_KEYS.treeExpanded, expanded);
+      } catch (e) {}
+    }
+
+    function applyLayout() {
+      try {
+        const sw = LS.getItem(LS_KEYS.sidebarWidth);
+        const pw = LS.getItem(LS_KEYS.promptWidth);
+        const bh = LS.getItem(LS_KEYS.bottomHeight);
+        if (sw) ui.sidebar.style.width = sw;
+        if (pw) ui.promptDeck.style.width = pw;
+        if (bh) ui.bottomPanel.style.height = bh;
+      } catch (e) {}
+    }
+
+    function saveLayout() {
+      try {
+        LS.setItem(LS_KEYS.sidebarWidth, ui.sidebar.style.width || getComputedStyle(ui.sidebar).width);
+        LS.setItem(LS_KEYS.promptWidth, ui.promptDeck.style.width || getComputedStyle(ui.promptDeck).width);
+        LS.setItem(LS_KEYS.bottomHeight, ui.bottomPanel.style.height || getComputedStyle(ui.bottomPanel).height);
+      } catch (e) {}
     }
 
     function saveSettings() {
@@ -647,28 +702,58 @@
       _treeRefreshTimer = setTimeout(() => loadTree(), 300);
     }
 
+    function toggleExpanded(path) {
+      if (state.treeExpanded.has(path)) state.treeExpanded.delete(path);
+      else state.treeExpanded.add(path);
+      saveTreeState();
+      loadTree(true);
+    }
+
     function renderNode(node, isRoot=false) {
       const ul = document.createElement('ul');
       const li = document.createElement('li');
       const div = document.createElement('div');
       const isDir = node.type === 'directory';
+      const expanded = isRoot || state.treeExpanded.has(node.path);
       div.className = 'tree-node' + (isDir ? ' directory' : ' file');
       div.dataset.path = node.path;
+      const toggle = (isDir && !isRoot) ? (expanded ? '&#9662;' : '&#9656;') : '';
       const icon = isDir ? '&#128449;' : (node.path.endsWith('.py') ? 'PY' : (node.path.endsWith('.aero') ? 'AB' : (node.path.endsWith('.so') ? 'SO' : '>')));
-      div.innerHTML = `<span class="icon">${icon}</span><span class="node-name">${escapeHtml(node.name)}</span><span class="node-actions"><span class="node-btn" data-action="rename" title="Rename">&#9998;</span><span class="node-btn" data-action="delete" title="Delete">&#10005;</span></span>`;
+      const actions = isDir
+        ? '<span class="node-btn" data-action="new-file" title="New file">+</span><span class="node-btn" data-action="new-folder" title="New folder">&#9633;</span><span class="node-btn" data-action="upload" title="Upload">&#8593;</span><span class="node-btn" data-action="rename" title="Rename">&#9998;</span><span class="node-btn" data-action="delete" title="Delete">&#10005;</span>'
+        : '<span class="node-btn" data-action="rename" title="Rename">&#9998;</span><span class="node-btn" data-action="delete" title="Delete">&#10005;</span>';
+      div.innerHTML = `<span class="node-toggle">${toggle}</span><span class="icon">${icon}</span><span class="node-name">${escapeHtml(node.name)}</span><span class="node-actions">${actions}</span>`;
       li.appendChild(div);
 
-      div.querySelector('[data-action="rename"]').addEventListener('click', e => { e.stopPropagation(); renameNode(node.path); });
-      div.querySelector('[data-action="delete"]').addEventListener('click', e => { e.stopPropagation(); deleteNode(node.path); });
+      div.querySelectorAll('.node-btn').forEach(btn => btn.addEventListener('click', e => {
+        e.stopPropagation();
+        const action = btn.dataset.action;
+        const targetPath = isDir ? node.path : parentDir(node.path);
+        if (action === 'new-file') createNode(targetPath, false);
+        else if (action === 'new-folder') createNode(targetPath, true);
+        else if (action === 'upload') uploadToPath(targetPath);
+        else if (action === 'rename') renameNode(node.path);
+        else if (action === 'delete') deleteNode(node.path);
+      }));
+
+      const toggleEl = div.querySelector('.node-toggle');
+      if (toggleEl) toggleEl.addEventListener('click', e => { e.stopPropagation(); toggleExpanded(node.path); });
       div.addEventListener('contextmenu', e => { e.preventDefault(); showContextMenu(e, node.path, isDir); });
 
-      if (isDir && node.children) {
-        const childUl = document.createElement('ul');
-        for (const child of node.children) childUl.appendChild(renderNode(child));
-        li.appendChild(childUl);
+      if (isDir) {
+        if (!isRoot) div.addEventListener('click', e => { if (!e.target.closest('.node-btn')) toggleExpanded(node.path); });
+        div.addEventListener('dragover', e => { e.preventDefault(); e.stopPropagation(); div.classList.add('drag-over'); });
+        div.addEventListener('dragleave', e => { div.classList.remove('drag-over'); });
+        div.addEventListener('drop', e => { e.preventDefault(); e.stopPropagation(); div.classList.remove('drag-over'); handleFiles(e.dataTransfer.files, node.path); });
+        if (node.children) {
+          const childUl = document.createElement('ul');
+          childUl.className = 'tree-children' + (expanded ? '' : ' collapsed');
+          for (const child of node.children) childUl.appendChild(renderNode(child));
+          li.appendChild(childUl);
+        }
+      } else {
+        div.addEventListener('click', e => { if (!e.target.closest('.node-btn')) openFile(node.path); });
       }
-
-      if (!isDir) div.addEventListener('click', () => openFile(node.path));
       return li;
     }
 
@@ -706,9 +791,9 @@
       ui.contextMenu.classList.add('open');
       ui.contextMenu.style.left = `${Math.min(event.clientX, window.innerWidth - 150)}px`;
       ui.contextMenu.style.top = `${Math.min(event.clientY, window.innerHeight - 120)}px`;
-      // Hide new-folder for files (still allow new file inside folder via header)
       ui.contextMenu.querySelectorAll('.context-menu-item').forEach(item => {
-        item.style.display = 'block';
+        const action = item.dataset.action;
+        item.style.display = (!isDir && (action === 'new-folder' || action === 'upload')) ? 'none' : 'block';
       });
     }
 
@@ -897,8 +982,17 @@
       state.socket.binaryType = 'arraybuffer';
       state.socket.onopen = () => { if (state.term) state.term.writeln('\r\nConnected.\r\n'); };
       state.socket.onmessage = (event) => {
-        const data = (event.data instanceof ArrayBuffer) ? new Uint8Array(event.data) : event.data;
-        if (state.term) state.term.write(data);
+        const raw = (event.data instanceof ArrayBuffer) ? new Uint8Array(event.data) : event.data;
+        if (typeof raw === 'string' && raw.trim().startsWith('{')) {
+          try {
+            const msg = JSON.parse(raw);
+            if (msg.type === 'tree_updated' || msg.status === 'building') {
+              if (msg.type === 'tree_updated') refreshTree();
+              return;
+            }
+          } catch (e) {}
+        }
+        if (state.term) state.term.write(raw);
       };
       state.socket.onclose = (e) => {
         if (state.term) state.term.writeln(`\r\nTerminal disconnected (code ${e.code}).\r\n`);
@@ -972,20 +1066,40 @@
       }
     }
 
-    async function uploadZip(file) {
-      if (!file) return;
+    function uploadToPath(targetPath) {
+      _dragTarget = targetPath || '.';
+      ui.uploadInput.click();
+    }
+
+    async function handleFiles(files, targetPath) {
+      if (!files || !files.length) return;
       setBusy(true);
-      log(`Uploading ${file.name}...`);
-      try {
-        const data = await api('POST', `/api/upload-zip?session_id=${encodeURIComponent(state.sessionId)}`, await file.arrayBuffer(), 'application/zip');
-        state.sessionId = data.session_id;
-        try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
-        ui.settingSession.value = state.sessionId;
-        log('Upload complete', 'success');
-        reconnectTerminal();
-        await loadTree();
-      } catch (e) { log(`Upload failed: ${e.message}`, 'error'); }
-      finally { setBusy(false); }
+      const dest = targetPath === '.' ? 'root' : targetPath;
+      log(`Uploading ${files.length} item(s) to ${dest}...`);
+      let sessionId = state.sessionId;
+      for (const file of files) {
+        if (file.name.toLowerCase().endsWith('.zip')) {
+          try {
+            const data = await api('POST', `/api/upload-zip?session_id=${encodeURIComponent(sessionId)}&target_path=${encodeURIComponent(targetPath)}`, await file.arrayBuffer(), 'application/zip');
+            sessionId = data.session_id;
+          } catch (e) { log(`Upload failed for ${file.name}: ${e.message}`, 'error'); continue; }
+        } else {
+          let text;
+          try { text = await file.text(); }
+          catch (e) { log(`Could not read ${file.name} as text`, 'error'); continue; }
+          const path = targetPath === '.' ? file.name : `${targetPath}/${file.name}`;
+          try {
+            await api('POST', '/api/save-file', buildBody({ path, content: text }));
+          } catch (e) { log(`Upload failed for ${file.name}: ${e.message}`, 'error'); continue; }
+        }
+      }
+      state.sessionId = sessionId;
+      try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
+      ui.settingSession.value = state.sessionId;
+      log('Upload complete', 'success');
+      reconnectTerminal();
+      await loadTree();
+      setBusy(false);
     }
 
     async function downloadZip() {
@@ -1065,6 +1179,46 @@
       return safe.replace(/\n/g, '<br>');
     }
 
+    function initResizers() {
+      const client = (ev, axis) => (ev.touches && ev.touches.length ? ev.touches[0][axis === 'x' ? 'clientX' : 'clientY'] : ev[axis === 'x' ? 'clientX' : 'clientY']);
+      const startResize = (gutter, axis, target, min, max, prop, invert) => (e) => {
+        e.preventDefault();
+        const startPos = client(e, axis);
+        const rect = target.getBoundingClientRect();
+        const startSize = axis === 'x' ? rect.width : rect.height;
+        const onMove = (ev) => {
+          const delta = client(ev, axis) - startPos;
+          const newSize = invert ? startSize - delta : startSize + delta;
+          const clamped = Math.max(min, Math.min(max, newSize));
+          target.style[prop] = `${clamped}px`;
+          if (state.editor) state.editor.layout();
+          if (state.fitAddon) state.fitAddon.fit();
+        };
+        const onUp = () => {
+          document.removeEventListener('mousemove', onMove);
+          document.removeEventListener('mouseup', onUp);
+          document.removeEventListener('touchmove', onMove);
+          document.removeEventListener('touchend', onUp);
+          gutter.classList.remove('dragging');
+          saveLayout();
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        document.addEventListener('touchmove', onMove, { passive: false });
+        document.addEventListener('touchend', onUp);
+        gutter.classList.add('dragging');
+      };
+      const app = () => document.querySelector('.app');
+      const appW = () => (app() ? app().clientWidth : window.innerWidth);
+      const appH = () => (app() ? app().clientHeight : window.innerHeight);
+      ui.gutterLeft.addEventListener('mousedown', startResize(ui.gutterLeft, 'x', ui.sidebar, 180, appW() * 0.45, 'width', false));
+      ui.gutterLeft.addEventListener('touchstart', startResize(ui.gutterLeft, 'x', ui.sidebar, 180, appW() * 0.45, 'width', false), { passive: false });
+      ui.gutterRight.addEventListener('mousedown', startResize(ui.gutterRight, 'x', ui.promptDeck, 180, appW() * 0.45, 'width', true));
+      ui.gutterRight.addEventListener('touchstart', startResize(ui.gutterRight, 'x', ui.promptDeck, 180, appW() * 0.45, 'width', true), { passive: false });
+      ui.gutterBottom.addEventListener('mousedown', startResize(ui.gutterBottom, 'y', ui.bottomPanel, 120, appH() * 0.6, 'height', false));
+      ui.gutterBottom.addEventListener('touchstart', startResize(ui.gutterBottom, 'y', ui.bottomPanel, 120, appH() * 0.6, 'height', false), { passive: false });
+    }
+
     // Sidebar toggle
     ui.toggleSidebar.addEventListener('click', () => ui.sidebar.classList.toggle('collapsed'));
 
@@ -1074,6 +1228,8 @@
       ui.deckPanels.forEach(p => p.classList.remove('active'));
       tab.classList.add('active');
       document.getElementById(`${tab.dataset.tab}-panel`).classList.add('active');
+      if (state.editor) state.editor.layout();
+      if (state.fitAddon) state.fitAddon.fit();
     }));
 
     // Bottom tabs
@@ -1088,11 +1244,24 @@
       else ui.keyGroup.classList.remove('hidden');
     });
 
-    // Drag and drop
-    ui.dropZone.addEventListener('click', () => ui.zipInput.click());
-    ui.zipInput.addEventListener('change', e => uploadZip(e.target.files[0]));
-    ['dragenter','dragover'].forEach(ev => ui.dropZone.addEventListener(ev, e => { e.preventDefault(); ui.dropZone.classList.add('drag-over'); }));
-    ['dragleave','drop'].forEach(ev => ui.dropZone.addEventListener(ev, e => { e.preventDefault(); ui.dropZone.classList.remove('drag-over'); if (ev === 'drop') uploadZip(e.dataTransfer.files[0]); }));
+    // Upload / drag and drop
+    ui.uploadInput.addEventListener('change', e => { handleFiles(e.target.files, _dragTarget || '.'); _dragTarget = null; e.target.value = ''; });
+    ui.uploadRoot.addEventListener('click', () => { _dragTarget = '.'; ui.uploadInput.click(); });
+    ui.dropZone.addEventListener('click', () => { _dragTarget = '.'; ui.uploadInput.click(); });
+    ['dragenter','dragover'].forEach(ev => {
+      ui.dropZone.addEventListener(ev, e => { e.preventDefault(); ui.dropZone.classList.add('drag-over'); });
+      ui.fileTree.addEventListener(ev, e => { e.preventDefault(); });
+    });
+    ['dragleave','drop'].forEach(ev => ui.dropZone.addEventListener(ev, e => {
+      e.preventDefault();
+      ui.dropZone.classList.remove('drag-over');
+      if (ev === 'drop') handleFiles(e.dataTransfer.files, '.');
+    }));
+    ui.fileTree.addEventListener('drop', e => {
+      if (e.target.closest('.tree-node')) return;
+      e.preventDefault();
+      handleFiles(e.dataTransfer.files, '.');
+    });
     ui.downloadBtn.addEventListener('click', downloadZip);
     ui.refreshTree.addEventListener('click', loadTree);
     ui.newFileRoot.addEventListener('click', () => createNode('.', false));
@@ -1106,6 +1275,7 @@
         if (!target) return;
         if (action === 'new-file') createNode(target.isDir ? target.path : parentDir(target.path), false);
         else if (action === 'new-folder') createNode(target.isDir ? target.path : parentDir(target.path), true);
+        else if (action === 'upload') uploadToPath(target.isDir ? target.path : parentDir(target.path));
         else if (action === 'rename') renameNode(target.path);
         else if (action === 'delete') deleteNode(target.path);
       });
@@ -1127,6 +1297,8 @@
 
     // Init
     loadSettings();
+    applyLayout();
+    initResizers();
     initMonaco();
     initTerminal();
     startTreeRefresh();
