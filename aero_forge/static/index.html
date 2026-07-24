@@ -847,11 +847,19 @@
       });
     }
 
-    function connectTerminal() {
+    async function connectTerminal() {
       if (state.socket) { try { state.socket.close(); } catch (e) {} state.socket = null; }
+
+      let wsPort;
+      try {
+        const info = await api('GET', `/api/ws-port?session_id=${encodeURIComponent(state.sessionId)}`);
+        wsPort = info.ws_port;
+      } catch (e) {
+        state.term.writeln(`\r\nCould not discover terminal port: ${e.message}. Using default.\r\n`);
+        wsPort = parseInt(window.location.port || (window.location.protocol === 'https:' ? '443' : '80')) + 1;
+      }
+
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const httpPort = parseInt(window.location.port || (window.location.protocol === 'https:' ? '443' : '80'));
-      const wsPort = httpPort + 1;
       const wsUrl = `${protocol}//${window.location.hostname}:${wsPort}/ws/terminal?session_id=${encodeURIComponent(state.sessionId)}`;
       try {
         state.socket = new WebSocket(wsUrl);
@@ -865,8 +873,10 @@
         const data = (event.data instanceof ArrayBuffer) ? new Uint8Array(event.data) : event.data;
         if (state.term) state.term.write(data);
       };
-      state.socket.onclose = () => { if (state.term) state.term.writeln('\r\nTerminal disconnected.\r\n'); };
-      state.socket.onerror = (e) => { if (state.term) state.term.writeln('\r\nTerminal connection error.\r\n'); };
+      state.socket.onclose = (e) => {
+        if (state.term) state.term.writeln(`\r\nTerminal disconnected (code ${e.code}).\r\n`);
+      };
+      state.socket.onerror = () => { if (state.term) state.term.writeln(`\r\nTerminal connection error. Check that the WebSocket server (port ${wsPort}) is reachable.\r\n`); };
       state.term.onData(data => { if (state.socket && state.socket.readyState === WebSocket.OPEN) state.socket.send(data); });
       state.term.onResize(({ cols, rows }) => { if (state.socket && state.socket.readyState === WebSocket.OPEN) state.socket.send(JSON.stringify({cols, rows})); });
       window.addEventListener('resize', () => { if (state.fitAddon) state.fitAddon.fit(); });

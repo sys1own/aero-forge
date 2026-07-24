@@ -38,6 +38,7 @@ DEFAULT_PORT = 8080
 
 _manager = SandboxManager()
 _static_dir = Path(__file__).parent / "static"
+_ws_port: Optional[int] = None
 
 
 def _session_dir(session_id: str) -> Path:
@@ -170,6 +171,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_file_content(query)
             if path == "/api/download-zip":
                 return self._handle_download_zip(query)
+            if path == "/api/ws-port":
+                return self._handle_ws_port(query)
 
             return self._serve_static(path)
         except Exception as exc:
@@ -353,9 +356,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
         if not session_id:
             return _send_json(self, 400, {"error": "Missing 'session_id'"})
 
-        session_dir = _manager._session_dir(session_id)
-        if not session_dir.is_dir():
-            return _send_json(self, 404, {"error": f"Session {session_id} not found"})
+        session_dir = _session_dir(session_id)
 
         return _send_json(
             self,
@@ -366,6 +367,21 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def _handle_ws_port(self, query: Dict[str, List[str]]) -> None:
+        """Return the actual WebSocket server port, falling back to HTTP port + 1."""
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        session_id = _first(query, "session_id")
+        if session_id:
+            _session_dir(session_id)  # ensure sandbox exists
+        fallback = DEFAULT_PORT + 1
+        try:
+            server_port = int(self.server.server_address[1])
+            fallback = server_port + 1
+        except Exception:
+            pass
+        return _send_json(self, 200, {"ws_port": _ws_port or fallback})
+
     def _handle_file_content(self, query: Dict[str, List[str]]) -> None:
         session_id = _first(query, "session_id")
         file_path = _first(query, "path")
@@ -374,7 +390,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 self, 400, {"error": "Missing 'session_id' and/or 'path'"}
             )
 
-        session_dir = _manager._session_dir(session_id)
+        session_dir = _session_dir(session_id)
         try:
             target = _resolve_file(session_dir, file_path)
         except ValueError:
@@ -659,6 +675,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
         if not session_id:
             return _send_json(self, 400, {"error": "Missing 'session_id'"})
 
+        session_dir = _session_dir(session_id)
         try:
             archive_bytes = _manager.archive_session_sandbox(session_id)
         except ValueError as exc:
@@ -847,14 +864,24 @@ async def _handle_terminal(websocket: Any) -> None:
 
 async def _run_websocket_server(ws_port: int) -> None:
     """Run the terminal WebSocket server on the given port."""
+    global _ws_port
     async with websockets.serve(_handle_terminal, "", ws_port, ping_interval=20, ping_timeout=10):
+        _ws_port = ws_port
         logger.info("Terminal WebSocket server listening on ws://localhost:%s/ws/terminal", ws_port)
         await asyncio.Future()  # run forever
 
 
 def _start_websocket_server(ws_port: int) -> None:
-    """Start the asyncio WebSocket server in a dedicated daemon thread."""
-    asyncio.run(_run_websocket_server(ws_port))
+    """Start the asyncio WebSocket server, scanning for an available port if needed."""
+    global _ws_port
+    for offset in range(20):
+        candidate = ws_port + offset
+        try:
+            asyncio.run(_run_websocket_server(candidate))
+            return
+        except OSError as exc:
+            logger.warning("Could not bind WebSocket server to port %s: %s", candidate, exc)
+    logger.error("WebSocket server could not bind to any port in %s-%s", ws_port, ws_port + 19)
 
 
 def run_server(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
