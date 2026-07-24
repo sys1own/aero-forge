@@ -96,6 +96,13 @@ def test_static_404(server):
     assert b"Not found" in body
 
 
+def test_favicon_and_logo(server):
+    for path in ("/favicon.ico", "/static/logo.png"):
+        status, body = _get(server + path)
+        assert status == 200
+        assert body[:4] == b"\x89PNG"
+
+
 def test_api_upload_zip_and_files(server):
     session_id = "test-session-files"
     zip_bytes = _make_zip({"src/main.py": "def add(a, b):\n    return a + b\n"})
