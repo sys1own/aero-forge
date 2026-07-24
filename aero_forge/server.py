@@ -39,6 +39,7 @@ def _send_json(handler: BaseHTTPRequestHandler, status: int, data: Any) -> None:
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(body)))
     handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header("Access-Control-Allow-Headers", "Content-Type, X-Api-Key, X-API-Key, Authorization")
     handler.end_headers()
     handler.wfile.write(body)
 
@@ -54,6 +55,7 @@ def _send_bytes(
     handler.send_header("Content-Type", content_type)
     handler.send_header("Content-Length", str(len(data)))
     handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.send_header("Access-Control-Allow-Headers", "Content-Type, X-Api-Key, X-API-Key, Authorization")
     if headers:
         for key, value in headers.items():
             handler.send_header(key, value)
@@ -146,38 +148,59 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
         logger.info(format, *args)
 
     def do_GET(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        path = parsed.path
-        query = parse_qs(parsed.query)
+        try:
+            parsed = urlparse(self.path)
+            path = parsed.path
+            query = parse_qs(parsed.query)
 
-        if path == "/api/files":
-            return self._handle_files(query)
-        if path == "/api/file-content":
-            return self._handle_file_content(query)
-        if path == "/api/download-zip":
-            return self._handle_download_zip(query)
+            if path == "/api/files":
+                return self._handle_files(query)
+            if path == "/api/file-content":
+                return self._handle_file_content(query)
+            if path == "/api/download-zip":
+                return self._handle_download_zip(query)
 
-        return self._serve_static(path)
+            return self._serve_static(path)
+        except Exception as exc:
+            logger.exception("GET %s failed", self.path)
+            return _send_json(self, 500, {"error": str(exc)})
 
     def do_POST(self) -> None:  # noqa: N802
-        parsed = urlparse(self.path)
-        path = parsed.path
+        try:
+            parsed = urlparse(self.path)
+            path = parsed.path
 
-        if path == "/api/build":
-            return self._handle_build()
-        if path == "/api/chat":
-            return self._handle_chat()
-        if path == "/api/upload-zip":
-            return self._handle_upload_zip()
+            if path == "/api/build":
+                return self._handle_build()
+            if path == "/api/chat":
+                return self._handle_chat()
+            if path == "/api/upload-zip":
+                return self._handle_upload_zip()
 
-        return _send_json(self, 404, {"error": "Not found"})
+            return _send_json(self, 404, {"error": "Not found"})
+        except Exception as exc:
+            logger.exception("POST %s failed", self.path)
+            return _send_json(self, 500, {"error": str(exc)})
 
     def do_OPTIONS(self) -> None:  # noqa: N802
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Api-Key, X-API-Key, Authorization")
         self.end_headers()
+
+    def _api_key(self, body: Dict[str, Any]) -> Optional[str]:
+        """Resolve API key from JSON body, X-Api-Key header, or Authorization header."""
+        key = body.get("api_key")
+        if key:
+            return key
+        key = self.headers.get("X-Api-Key") or self.headers.get("X-API-Key")
+        if key:
+            return key
+        auth = self.headers.get("Authorization", "")
+        if auth.lower().startswith("bearer "):
+            return auth.split(" ", 1)[1]
+        return None
 
     def _handle_build(self) -> None:
         try:
@@ -192,7 +215,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             variants = 3 if body.get("variants") else 1
             config = ConfigOverride(
                 llm_provider=body.get("provider"),
-                api_key=body.get("api_key"),
+                api_key=self._api_key(body),
                 model=body.get("model"),
                 max_retries=3,
             )
@@ -236,7 +259,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
 
             config = ConfigOverride(
                 llm_provider=body.get("provider"),
-                api_key=body.get("api_key"),
+                api_key=self._api_key(body),
                 model=body.get("model"),
                 max_retries=3,
             )
@@ -399,9 +422,15 @@ def _first(query: Dict[str, List[str]], key: str) -> Optional[str]:
     return values[0] if values else None
 
 
+class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    """Threaded HTTP server that allows immediate rebinding to the same port."""
+
+    allow_reuse_address = True
+
+
 def make_server(port: int = DEFAULT_PORT) -> ThreadingHTTPServer:
     """Return a threaded HTTP server bound to the given port."""
-    return ThreadingHTTPServer(("", port), AeroForgeHandler)
+    return ReusableThreadingHTTPServer(("", port), AeroForgeHandler)
 
 
 def run_server(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:

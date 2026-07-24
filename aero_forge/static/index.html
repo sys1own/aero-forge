@@ -444,15 +444,26 @@
     }
 
     async function api(method, path, body, contentType='application/json') {
-      const opts = { method };
+      const opts = { method, mode: 'cors' };
+      const headers = {};
+      if (state.apiKey) {
+        headers['X-API-Key'] = state.apiKey;
+      }
       if (body) {
         if (contentType === 'application/json') opts.body = JSON.stringify(body);
         else opts.body = body;
-        opts.headers = { 'Content-Type': contentType };
+        headers['Content-Type'] = contentType;
       }
-      const res = await fetch(path, opts);
+      if (Object.keys(headers).length) opts.headers = headers;
+      let res;
+      try {
+        res = await fetch(path, opts);
+      } catch (netErr) {
+        throw new Error(netErr.message || 'Network request failed; is the server running?');
+      }
       const text = await res.text();
-      const data = text ? JSON.parse(text) : {};
+      let data = {};
+      try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { error: text || `HTTP ${res.status}` }; }
       if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       return data;
     }
