@@ -15,8 +15,11 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from aero_forge.blueprint import Blueprint, ContractEntry, ManifestEntry, write_blueprint
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
+from aero_forge.orchestrator.orchestrator import plan_workspace
+from aero_forge.scaffold.pre_write_validator import validate_blueprint_manifest
 from aero_forge.translator.translator import TargetMode
 
 logger = logging.getLogger("aero_forge.monorepo")
@@ -29,6 +32,30 @@ def _sanitize_name(name: str) -> str:
     if not name or name[0].isdigit():
         name = "engine"
     return name
+
+
+def _extract_signature(source: str, name: str) -> str:
+    """Return a string representation of ``name``'s signature from *source*."""
+    import ast
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return f"def {name}(...)"
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            try:
+                args = ast.unparse(node.args)
+            except Exception:
+                args = "..."
+            returns = ""
+            if node.returns is not None:
+                try:
+                    returns = f" -> {ast.unparse(node.returns)}"
+                except Exception:
+                    returns = ""
+            return f"def {name}({args}){returns}"
+    return f"def {name}(...)"
 
 
 def _function_names_from_source(source: str) -> List[str]:
@@ -285,6 +312,19 @@ def generate_monorepo(
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Pass 1: plan the workspace and emit blueprint.aero at the project root.
+    plan_workspace(
+        prompt,
+        output_dir,
+        project_name=project_name,
+        constraints=constraints,
+        llm_provider=llm_provider,
+        model=model,
+        max_retries=max_retries,
+        max_tokens=max_tokens,
+        config_override=config_override,
+    )
+
     core_dir = output_dir / ".aero_core"
     if core_dir.exists():
         shutil.rmtree(core_dir)
@@ -451,12 +491,65 @@ def generate_monorepo(
         if p.is_file() and ".aero_core" not in p.parts
     )
 
+    # Finalize the authoritative blueprint with the concrete manifest.
+    signature = _extract_signature(implementation, primary)
+    manifest = [
+        ManifestEntry(path="Cargo.toml", lang="toml", purpose="Cargo workspace manifest"),
+        ManifestEntry(path="README.md", lang="markdown", purpose="Project README"),
+        ManifestEntry(path="rust_core/Cargo.toml", lang="toml", purpose="PyO3 crate manifest"),
+        ManifestEntry(path="rust_core/src/lib.rs", lang="rust", purpose="PyO3 native extension"),
+        ManifestEntry(path="python_engine/pyproject.toml", lang="toml", purpose="Python package manifest"),
+        ManifestEntry(path=f"python_engine/src/{package_name}/__init__.py", lang="python", purpose="Package exports"),
+        ManifestEntry(path=f"python_engine/src/{package_name}/{primary}.py", lang="python", purpose="Native loader"),
+        ManifestEntry(path=f"python_engine/src/{package_name}/_pure.py", lang="python", purpose="Pure-Python fallback"),
+        ManifestEntry(path=f"python_engine/tests/test_{primary}.py", lang="python", purpose="Pytest tests"),
+        ManifestEntry(path="python_engine/service.py", lang="python", purpose="Async HTTP service"),
+        ManifestEntry(path="python_engine/bench.py", lang="python", purpose="Benchmark script"),
+    ]
+    contracts = [
+        ContractEntry(
+            name=primary,
+            signature=signature,
+            language="python/rust",
+            python_name=f"{package_name}.{primary}",
+            purpose="Native/PyO3 exported core function",
+        )
+    ]
+    final_blueprint = Blueprint(
+        project=safe_project,
+        architecture="hybrid_polyglot",
+        toolchains=["python", "rust", "pyo3", "maturin", "cargo"],
+        manifest=manifest,
+        contracts=contracts,
+        output_dir=output_dir / "dist",
+        llm={"provider": llm_provider or "none", "model": model},
+        prompt=prompt,
+        constraints=constraints,
+    )
+    write_blueprint(final_blueprint, output_dir / "blueprint.aero")
+
+    # Pass 2 enforcement: every declared file must exist.
+    try:
+        validate_blueprint_manifest(output_dir, output_dir / "blueprint.aero")
+    except Exception as exc:
+        return {
+            "success": False,
+            "error": str(exc),
+            "files": files,
+            "core_build": build,
+            "cargo_output": cargo.stdout,
+            "cargo_error": cargo.stderr,
+            "pytest_output": pytest.stdout,
+            "pytest_error": pytest.stderr,
+        }
+
     return {
         "success": success,
         "project_name": safe_project,
         "package_name": package_name,
         "primary_function": primary,
         "files": files,
+        "blueprint_path": str(output_dir / "blueprint.aero"),
         "core_build": build,
         "cargo_output": cargo.stdout,
         "cargo_error": cargo.stderr,

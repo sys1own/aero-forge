@@ -45,10 +45,32 @@ class LLMConfig(BaseModel):
     model: Optional[str] = None
 
 
+class ManifestEntry(BaseModel):
+    """A file emitted by the generator as part of a workspace."""
+
+    path: str
+    lang: str
+    purpose: str = ""
+
+
+class ContractEntry(BaseModel):
+    """An exported symbol contract between Rust and Python."""
+
+    name: str
+    signature: str = ""
+    language: str = "python"
+    python_name: str = ""
+    purpose: str = ""
+
+
 class Blueprint(BaseModel):
-    """Normalized build blueprint."""
+    """Normalized build blueprint with optional workspace planning metadata."""
 
     project: str = "aero_forge_project"
+    architecture: str = "pure_python"
+    toolchains: List[str] = Field(default_factory=list)
+    manifest: List[ManifestEntry] = Field(default_factory=list)
+    contracts: List[ContractEntry] = Field(default_factory=list)
     functions: List[FunctionSpec] = Field(default_factory=list)
     compiler_flags: List[str] = Field(default_factory=list)
     output_dir: Path = Path("./dist")

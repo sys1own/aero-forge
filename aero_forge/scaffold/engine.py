@@ -23,6 +23,10 @@ from aero_forge._constants import (
 )
 from aero_forge.errors import UnsupportedError
 from aero_forge.precision_shield.shield import Shield, _FLOAT_MATH_FUNCS
+from aero_forge.scaffold.pre_write_validator import (
+    BlueprintValidationError,
+    validate_blueprint_manifest,
+)
 from aero_forge.translator import TargetMode
 
 logger = logging.getLogger("aero_forge.scaffold.engine")
@@ -63,12 +67,18 @@ class Engine:
         annotated_graph: Any,
         output_dir: Path,
         *,
+        workspace_root: Optional[Path] = None,
         module_name: str,
         function_names: List[str],
         source: str,
         target_mode: str = TargetMode.PYO3,
     ) -> Path:
-        """Create a temporary crate, write Cargo.toml and src/lib.rs, and return its path."""
+        """Create a temporary crate, write Cargo.toml and src/lib.rs, and return its path.
+
+        If a ``blueprint.aero`` exists in ``workspace_root`` and declares a
+        ``Cargo.toml``/``src/lib.rs`` manifest, the generated crate files are
+        also copied to the declared project-tree paths and validated.
+        """
         traits_by_name = dict(self._traits(annotated_graph))
         crate_root = Path(tempfile.mkdtemp(prefix="accelerator-crate-"))
         src_dir = crate_root / "src"
@@ -220,7 +230,70 @@ class Engine:
         (crate_root / "Cargo.toml").write_text(cargo, encoding="utf-8")
         (src_dir / "lib.rs").write_text(lib, encoding="utf-8")
 
+        if workspace_root is not None:
+            self._emit_from_blueprint(crate_root, Path(workspace_root))
+
         return crate_root
+
+    def _emit_from_blueprint(
+        self, crate_root: Path, workspace_root: Path
+    ) -> None:
+        """Copy generated crate files to the paths declared in ``workspace_root/blueprint.aero``.
+
+        Raises ``BlueprintValidationError`` if a declared Rust/TOML file cannot
+        be emitted at the expected location.
+        """
+        blueprint_path = workspace_root / "blueprint.aero"
+        if not blueprint_path.is_file():
+            return
+
+        from aero_forge.blueprint import parse_blueprint
+
+        try:
+            blueprint = parse_blueprint(blueprint_path)
+        except Exception as exc:
+            raise BlueprintValidationError(
+                f"Invalid blueprint.aero: {exc}", output=str(exc)
+            ) from exc
+
+        if not blueprint.manifest:
+            return
+
+        # Map manifest paths to the generated crate artifacts.
+        manifest_paths = {entry.path: entry for entry in blueprint.manifest}
+        cargo_entry = next(
+            (p for p in manifest_paths if Path(p).name == "Cargo.toml"), None
+        )
+        if cargo_entry is None:
+            return
+
+        crate_dir_rel = Path(cargo_entry).parent
+        dest_root = workspace_root / crate_dir_rel
+        dest_root.mkdir(parents=True, exist_ok=True)
+
+        # Copy the Cargo.toml and src/lib.rs to the declared crate root.
+        cargo_dest = dest_root / "Cargo.toml"
+        cargo_dest.write_text((crate_root / "Cargo.toml").read_text(encoding="utf-8"), encoding="utf-8")
+
+        lib_entry = next(
+            (p for p in manifest_paths if Path(p).name == "lib.rs"), None
+        )
+        if lib_entry is not None:
+            lib_dir_rel = Path(lib_entry).parent
+            lib_dest_dir = workspace_root / lib_dir_rel
+            lib_dest_dir.mkdir(parents=True, exist_ok=True)
+            lib_dest = lib_dest_dir / "lib.rs"
+            lib_dest.write_text((crate_root / "src" / "lib.rs").read_text(encoding="utf-8"), encoding="utf-8")
+
+        # Validate that every manifest file now exists in the workspace.
+        try:
+            validate_blueprint_manifest(workspace_root, blueprint_path)
+        except BlueprintValidationError:
+            raise
+        except Exception as exc:
+            raise BlueprintValidationError(
+                f"Blueprint manifest validation failed: {exc}", output=str(exc)
+            ) from exc
 
     @staticmethod
     def _traits(annotated_graph: Any) -> Dict[str, Any]:
