@@ -423,3 +423,79 @@ def test_port_fallback_on_collision(tmp_path, monkeypatch):
         server.server_close()
         occupant.close()
         http_thread.join(timeout=2)
+
+
+def test_api_files_create(server):
+    session_id = "test-files-create"
+    status, body = _post_json(
+        server + "/api/files/create",
+        {"session_id": session_id, "path": "src/new_file.py", "is_dir": False},
+    )
+    assert status == 200
+    assert body["status"] == "created"
+    assert body["path"] == "src/new_file.py"
+
+    status, body = _get(server + f"/api/files?session_id={session_id}")
+    assert status == 200
+    tree = json.loads(body.decode("utf-8"))
+    assert "src/new_file.py" in _collect_paths(tree["tree"])
+
+
+def test_api_files_download(server):
+    session_id = "test-files-download"
+    content = "hello download"
+    _post_json(
+        server + "/api/save-file",
+        {"session_id": session_id, "path": "note.txt", "content": content},
+    )
+
+    req = Request(
+        server + f"/api/files/download?session_id={session_id}&path=note.txt",
+        method="GET",
+    )
+    with urlopen(req, timeout=5) as resp:
+        assert resp.status == 200
+        assert resp.read().decode("utf-8") == content
+        assert 'attachment' in resp.headers.get("Content-Disposition", "")
+
+
+def test_api_files_upload(server):
+    session_id = "test-files-upload"
+    data = b"uploaded binary data"
+    req = Request(
+        server + f"/api/files/upload?session_id={session_id}&target_path=.&filename=data.bin",
+        data=data,
+        headers={"Content-Type": "application/octet-stream"},
+        method="POST",
+    )
+    with urlopen(req, timeout=5) as resp:
+        assert resp.status == 200
+
+    status, body = _get(server + f"/api/file-content?session_id={session_id}&path=data.bin")
+    assert status == 200
+    file_data = json.loads(body.decode("utf-8"))
+    assert file_data["content"] == data.decode("utf-8")
+
+
+def test_api_workspace_clean(server):
+    session_id = "test-workspace-clean"
+    _post_json(
+        server + "/api/save-file",
+        {"session_id": session_id, "path": "old.py", "content": "x = 1"},
+    )
+    status, body = _get(server + f"/api/files?session_id={session_id}")
+    assert status == 200
+    tree = json.loads(body.decode("utf-8"))
+    assert "old.py" in _collect_paths(tree["tree"])
+
+    status, body = _post_json(
+        server + "/api/workspace/clean",
+        {"session_id": session_id},
+    )
+    assert status == 200
+    assert body["status"] == "cleaned"
+
+    status, body = _get(server + f"/api/files?session_id={session_id}")
+    assert status == 200
+    tree = json.loads(body.decode("utf-8"))
+    assert "old.py" not in _collect_paths(tree["tree"])

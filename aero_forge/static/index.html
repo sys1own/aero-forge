@@ -334,6 +334,9 @@
           <button id="refresh-tree" class="icon-btn" title="Refresh" aria-label="Refresh">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
           </button>
+          <button id="clean-workspace" class="icon-btn" title="Clean workspace" aria-label="Clean workspace">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+          </button>
           <input id="upload-input" type="file" multiple accept=".zip,.py,.txt,.md,.json,.toml,.yaml,.yml,.sh,.rs,.c,.cpp,.h,.hpp,.cc,.html,.css,.js,.ts" class="sr-only">
         </div>
       </div>
@@ -426,6 +429,7 @@
     <div class="context-menu-item" data-action="new-file">New file</div>
     <div class="context-menu-item" data-action="new-folder">New folder</div>
     <div class="context-menu-item" data-action="upload">Upload file/zip</div>
+    <div class="context-menu-item" data-action="download">Download</div>
     <div class="context-menu-sep"></div>
     <div class="context-menu-item" data-action="rename">Rename</div>
     <div class="context-menu-item" data-action="delete">Delete</div>
@@ -463,6 +467,17 @@
       <div class="modal-actions">
         <button id="cancel-settings" class="secondary">Cancel</button>
         <button id="save-settings" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="clean-modal" class="modal-overlay">
+    <div class="modal">
+      <h2>Clean Workspace</h2>
+      <p style="margin:0.5rem 0 1rem;font-size:0.85rem;color:var(--text)">Are you sure you want to delete all generated files in the workspace? This action cannot be undone.</p>
+      <div class="modal-actions">
+        <button id="cancel-clean" class="secondary">Cancel</button>
+        <button id="confirm-clean" class="primary" style="background:var(--danger)">Clean Workspace</button>
       </div>
     </div>
   </div>
@@ -541,6 +556,10 @@
       runPanel: document.getElementById('run-panel'),
       newFileRoot: document.getElementById('new-file-root'),
       newFolderRoot: document.getElementById('new-folder-root'),
+      cleanWorkspace: document.getElementById('clean-workspace'),
+      cleanModal: document.getElementById('clean-modal'),
+      cancelClean: document.getElementById('cancel-clean'),
+      confirmClean: document.getElementById('confirm-clean'),
       contextMenu: document.getElementById('context-menu'),
     };
 
@@ -721,7 +740,7 @@
       const icon = isDir ? '&#128449;' : (node.path.endsWith('.py') ? 'PY' : (node.path.endsWith('.aero') ? 'AB' : (node.path.endsWith('.so') ? 'SO' : '>')));
       const actions = isDir
         ? '<span class="node-btn" data-action="new-file" title="New file">+</span><span class="node-btn" data-action="new-folder" title="New folder">&#9633;</span><span class="node-btn" data-action="upload" title="Upload">&#8593;</span><span class="node-btn" data-action="rename" title="Rename">&#9998;</span><span class="node-btn" data-action="delete" title="Delete">&#10005;</span>'
-        : '<span class="node-btn" data-action="rename" title="Rename">&#9998;</span><span class="node-btn" data-action="delete" title="Delete">&#10005;</span>';
+        : '<span class="node-btn" data-action="download" title="Download">&#8595;</span><span class="node-btn" data-action="rename" title="Rename">&#9998;</span><span class="node-btn" data-action="delete" title="Delete">&#10005;</span>';
       div.innerHTML = `<span class="node-toggle">${toggle}</span><span class="icon">${icon}</span><span class="node-name">${escapeHtml(node.name)}</span><span class="node-actions">${actions}</span>`;
       li.appendChild(div);
 
@@ -732,6 +751,7 @@
         if (action === 'new-file') createNode(targetPath, false);
         else if (action === 'new-folder') createNode(targetPath, true);
         else if (action === 'upload') uploadToPath(targetPath);
+        else if (action === 'download') downloadFile(node.path);
         else if (action === 'rename') renameNode(node.path);
         else if (action === 'delete') deleteNode(node.path);
       }));
@@ -793,7 +813,7 @@
       ui.contextMenu.style.top = `${Math.min(event.clientY, window.innerHeight - 120)}px`;
       ui.contextMenu.querySelectorAll('.context-menu-item').forEach(item => {
         const action = item.dataset.action;
-        item.style.display = (!isDir && (action === 'new-folder' || action === 'upload')) ? 'none' : 'block';
+        item.style.display = ((!isDir && (action === 'new-folder' || action === 'upload')) || (isDir && action === 'download')) ? 'none' : 'block';
       });
     }
 
@@ -1115,9 +1135,42 @@
       log('Download started', 'success');
     }
 
+    async function downloadFile(path) {
+      if (!state.sessionId || !path) return;
+      const res = await fetch(`/api/files/download?session_id=${encodeURIComponent(state.sessionId)}&path=${encodeURIComponent(path)}`);
+      if (!res.ok) { log(`Download failed for ${path}`, 'error'); return; }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = fileName(path);
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      log(`Downloaded ${fileName(path)}`, 'success');
+    }
+
+    async function cleanWorkspace() {
+      if (!state.sessionId) return;
+      try {
+        setBusy(true);
+        const data = await api('POST', '/api/workspace/clean', buildBody({}));
+        state.sessionId = data.session_id;
+        state.tabs.forEach(tab => { tab.model.dispose(); });
+        state.tabs = [];
+        state.activeTab = null;
+        renderTabs();
+        try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
+        ui.settingSession.value = state.sessionId;
+        reconnectTerminal();
+        await loadTree(true);
+        log('Workspace cleaned', 'success');
+      } catch (e) { log(`Clean workspace failed: ${e.message}`, 'error'); }
+      finally { setBusy(false); }
+    }
+
     async function runBuild() {
       const prompt = ui.promptInput.value.trim();
       if (!prompt) return;
+      ui.promptInput.value = '';
       setBusy(true);
       log(`Building: ${prompt}`);
       addChat('system', `Building: ${prompt}`);
@@ -1239,6 +1292,9 @@
     ui.settingsBtn.addEventListener('click', () => { applySettingsUI(); ui.settingsModal.classList.add('open'); });
     ui.cancelSettings.addEventListener('click', () => ui.settingsModal.classList.remove('open'));
     ui.saveSettings.addEventListener('click', () => { saveSettings(); ui.settingsModal.classList.remove('open'); loadTree(); });
+    ui.cleanWorkspace.addEventListener('click', () => ui.cleanModal.classList.add('open'));
+    ui.cancelClean.addEventListener('click', () => ui.cleanModal.classList.remove('open'));
+    ui.confirmClean.addEventListener('click', () => { ui.cleanModal.classList.remove('open'); cleanWorkspace(); });
     ui.settingTier.addEventListener('change', () => {
       if (ui.settingTier.value === 'lifetime') { ui.keyGroup.classList.add('hidden'); ui.settingProvider.value = 'deepseek'; }
       else ui.keyGroup.classList.remove('hidden');
@@ -1276,6 +1332,7 @@
         if (action === 'new-file') createNode(target.isDir ? target.path : parentDir(target.path), false);
         else if (action === 'new-folder') createNode(target.isDir ? target.path : parentDir(target.path), true);
         else if (action === 'upload') uploadToPath(target.isDir ? target.path : parentDir(target.path));
+        else if (action === 'download') downloadFile(target.path);
         else if (action === 'rename') renameNode(target.path);
         else if (action === 'delete') deleteNode(target.path);
       });
