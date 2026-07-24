@@ -23,6 +23,8 @@ class BuildCache:
         self.root.mkdir(parents=True, exist_ok=True)
         self._index_path = self.root / "index.json"
         self._index: Dict[str, str] = self._load_index()
+        self._task_index_path = self.root / "task_index.json"
+        self._task_index: Dict[str, Any] = self._load_task_index()
         self._rustc_version = _rustc_version()
 
     def _load_index(self) -> Dict[str, str]:
@@ -110,6 +112,59 @@ class BuildCache:
                 child.unlink()
         self._index = {}
         self._save_index()
+        self._task_index = {}
+        self._save_task_index()
+
+    def _load_task_index(self) -> Dict[str, Any]:
+        if self._task_index_path.is_file():
+            try:
+                data = json.loads(self._task_index_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return data
+            except (json.JSONDecodeError, OSError):
+                pass
+        return {}
+
+    def _save_task_index(self) -> None:
+        self._task_index_path.write_text(
+            json.dumps(self._task_index, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
+    def get_task(
+        self, task_name: str, inputs: List[Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Return a cached task result if inputs and recorded outputs are unchanged."""
+        if not self.enabled:
+            return None
+        input_hash = _hash_inputs(inputs)
+        entry = self._task_index.get(task_name)
+        if not entry or entry.get("input_hash") != input_hash:
+            return None
+        for path_str, file_hash in entry.get("outputs", {}).items():
+            path = Path(path_str)
+            if not path.is_file() or _hash_file(path) != file_hash:
+                return None
+        return entry.get("result")
+
+    def put_task(
+        self,
+        task_name: str,
+        inputs: List[Any],
+        outputs: List[Path],
+        result: Dict[str, Any],
+    ) -> None:
+        """Store a task result keyed by the SHA-256 hash of its inputs."""
+        if not self.enabled:
+            return
+        input_hash = _hash_inputs(inputs)
+        output_hashes = {str(p): _hash_file(p) for p in outputs if p.is_file()}
+        self._task_index[task_name] = {
+            "input_hash": input_hash,
+            "outputs": output_hashes,
+            "result": result,
+        }
+        self._save_task_index()
 
 
 def _default_cache_root() -> Path:
@@ -117,6 +172,28 @@ def _default_cache_root() -> Path:
     if env_dir:
         return Path(env_dir)
     return Path.home() / ".cache" / "aero-forge" / "build_cache"
+
+
+def _hash_file(path: Path) -> str:
+    hasher = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(8192), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def _hash_inputs(inputs: List[Any]) -> str:
+    hasher = hashlib.sha256()
+    for item in sorted(inputs, key=lambda x: x if isinstance(x, str) else str(x)):
+        if isinstance(item, str):
+            hasher.update(item.encode("utf-8"))
+        else:
+            path = Path(item)
+            if path.is_file():
+                hasher.update(path.read_bytes())
+            else:
+                hasher.update(str(path).encode("utf-8"))
+    return hasher.hexdigest()
 
 
 def _rustc_version() -> str:
