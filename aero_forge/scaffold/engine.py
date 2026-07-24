@@ -503,6 +503,11 @@ class RustGenerator:
                 return self.return_type or self.function_type
             if name in self.class_names:
                 return name
+            if name in getattr(self, "local_function_nodes", {}):
+                other = self.local_function_nodes[name]
+                ret = _annotation_to_rust_type(other.returns, self.class_names)
+                if ret:
+                    return ret
         return None
 
     def _propagate_subscript_types(
@@ -765,6 +770,11 @@ class RustGenerator:
                 return "Self"
             if name in self.class_names:
                 return name
+            if name in getattr(self, "local_function_nodes", {}):
+                other = self.local_function_nodes[name]
+                ret = _annotation_to_rust_type(other.returns, self.class_names)
+                if ret:
+                    return ret
             if base is None and name in {"int", "float"}:
                 return "i64" if name == "int" else "f64"
             if base is None and name == "sorted":
@@ -1860,18 +1870,60 @@ class RustGenerator:
                     "Subscript/indexing is only supported on Vec/list types", node=expr
                 )
             value_expr = self._emit_expr(expr.value, base_type)
+            element_type = _element_type(base_type)
+            if element_type == "?" and ctx and ctx.startswith("Vec<"):
+                element_type = _element_type(ctx)
+            if element_type == "?":
+                element_type = self.function_type
+
             lower = (
                 self._emit_expr(expr.slice.lower, "i64")
                 if expr.slice.lower is not None
                 else "0"
             )
-            if expr.slice.upper is None and expr.slice.lower is None:
+            upper = (
+                self._emit_expr(expr.slice.upper, "i64")
+                if expr.slice.upper is not None
+                else None
+            )
+
+            step = expr.slice.step
+            if step is not None and not (
+                isinstance(step, ast.Constant) and step.value == 1
+            ):
+                step_val = _const_int_index(step)
+                step_expr = self._emit_expr(step, "i64")
+                if step_val is not None and step_val < 0:
+                    if upper is not None or lower != "0":
+                        raise UnsupportedError(
+                            "negative step slices with bounds are not supported",
+                            node=expr,
+                        )
+                    access = (
+                        f"({value_expr}).iter().rev().step_by({-step_val})"
+                        f".cloned().collect::<Vec<{element_type}>>"
+                    ) + "()"
+                else:
+                    iter_expr = f"({value_expr}).iter()"
+                    if lower != "0":
+                        iter_expr += f".skip(({lower}) as usize)"
+                    if upper is not None:
+                        if lower == "0":
+                            iter_expr += f".take(({upper}) as usize)"
+                        else:
+                            iter_expr += f".take((({upper}) - ({lower})).max(0) as usize)"
+                    access = (
+                        f"{iter_expr}.step_by(({step_expr}) as usize)"
+                        f".cloned().collect::<Vec<{element_type}>>"
+                    ) + "()"
+                return self._coerce(access, f"Vec<{element_type}>", ctx)
+
+            if upper is None and lower == "0":
                 return self._coerce(f"{value_expr}.clone()", base_type, ctx)
-            if expr.slice.upper is None:
+            if upper is None:
                 return self._coerce(
                     f"{value_expr}[({lower}) as usize..].to_vec()", base_type, ctx
                 )
-            upper = self._emit_expr(expr.slice.upper, "i64")
             if expr.slice.lower is None:
                 return self._coerce(
                     f"{value_expr}[0..({upper}) as usize].to_vec()", base_type, ctx
@@ -1884,6 +1936,13 @@ class RustGenerator:
 
         base, indices = _flatten(expr, [])
         base_type = self._type_of(base)
+        if not (base_type.startswith("Vec<") or _is_tuple_type(base_type)):
+            if indices:
+                element_type = ctx if ctx and ctx != "?" else self.function_type
+                inferred = element_type
+                for _ in indices:
+                    inferred = f"Vec<{inferred}>"
+                base_type = inferred
         if not (base_type.startswith("Vec<") or _is_tuple_type(base_type)):
             raise UnsupportedError(
                 "Subscript/indexing is only supported on Vec/list or tuple types",
