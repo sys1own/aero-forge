@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import ast
 import os
-import shutil
 from pathlib import Path
 from typing import Optional
+
+from aero_forge.environment import ContractViolationError, VerifyDependencies
 
 IO_ERROR = "Unsupported I/O operation detected. Aborting."
 
@@ -21,15 +22,16 @@ class UnsupportedError(ValueError):
 
 
 def check_toolchain() -> None:
-    """Verify that cargo and rustc are installed."""
-    missing = [tool for tool in ("cargo", "rustc") if not shutil.which(tool)]
-    if missing:
+    """Verify that the Rust toolchain is available before building."""
+    try:
+        VerifyDependencies.verify_language("rust")
+    except ContractViolationError as exc:
         path_dirs = os.environ.get("PATH", "").split(os.pathsep)
         raise UserError(
-            f"Missing Rust toolchain: {', '.join(missing)}. "
+            f"{exc} "
             "Install Rust from https://rustup.rs/ and ensure cargo/rustc are on your PATH. "
             f"Searched PATH directories: {', '.join(d for d in path_dirs if d)}"
-        )
+        ) from exc
 
 
 def locate_unsupported_node(source: str, message: str) -> Optional[ast.AST]:
