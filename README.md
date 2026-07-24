@@ -146,6 +146,13 @@ You can resume a previous session with `--session-id`:
 aero-forge chat --session-id abc123
 ```
 
+For machine integration, use `--json` to emit NDJSON events:
+
+```bash
+aero-forge chat --json
+aero-forge generate --prompt "..." --build --json --stream
+```
+
 Useful chat phrases:
 
 - `Build a <function>` - generate and compile code
@@ -186,6 +193,8 @@ After every successful `aero-forge generate --build` or `aero-forge build`, Aero
 | `--optimize` | Run an iterative LLM optimization loop. |
 | `--prompt-template <name>` | Choose one of `v1_minimal`, `v2_structured`, `v3_algorithm`, `v4_performance`, `v5_balanced` (default), `v6_creative`, `v7_conservative`, `v8_iterative`, `v9_transpiler_friendly`, `v10_correctness_focused`. |
 | `--build` | Run `aero-forge build` immediately after generation. |
+| `--json` | Output the final result as structured JSON for frontend integration. |
+| `--stream` | Emit NDJSON progress events during generation/build. |
 
 ## Blueprint Reference
 
