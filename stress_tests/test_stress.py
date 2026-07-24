@@ -518,3 +518,12 @@ class TestLevel31MatrixBorrow:
         result = _run_build(blueprint)
         assert result.returncode == 0, result.stderr + result.stdout
         assert "Build summary: 1 succeeded, 0 failed" in result.stderr
+
+
+class TestLevel32RealWorldCampaign:
+    def test_real_world_campaign(self):
+        """All eight DeepSeek validation prompts compile and pass their tests."""
+        blueprint = STRESS_DIR / "level32_real_world_campaign" / "blueprint.aero"
+        result = _run_build(blueprint)
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert "Build summary: 8 succeeded, 0 failed" in result.stderr

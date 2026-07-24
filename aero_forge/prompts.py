@@ -47,11 +47,11 @@ Keep the code transpiler-friendly:
 - Do NOT use list comprehensions. Use explicit for loops instead.
 - Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 - Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
-For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
-Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
-Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
+For the Mandelbrot escape-time algorithm, use real and imaginary parts separately. If `cr*cr + ci*ci >= 4` return 0 immediately. Start with `zr = 0.0` and `zi = 0.0`. For `i` from `0` to `max_iter - 1`, compute `new_zr = zr*zr - zi*zi + cr` and `new_zi = 2*zr*zi + ci`. If `new_zr*new_zr + new_zi*new_zi > 4` return `i + 1` (the number of iterations performed). Otherwise set `zr = new_zr` and `zi = new_zi`. Return `max_iter` if it never escapes. Test guidance: `(0.0, 0.0, 100) -> 100`, `(-0.9, 0.0, 100) -> 100`, `(-1.5, 0.0, 100) -> 100`, `(0.25, 0.5, 100) -> 100`, `(-1.3, 0.0, 100) -> 100`; escape cases: `(2.0, 0.0, 100) -> 0`, `(1.0, 0.0, 100) -> 3`. Avoid ambiguous boundary points in tests.
+Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
+Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
-If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b: return []` before accessing `a[0]` or `b[0]`; do not alias `result[i]` to a temporary list, set `result[i][j] = total` directly after the inner loop.
 """,
     "Minimal baseline prompt.",
 )
@@ -82,11 +82,11 @@ def function_name(param1: type, param2: type) -> return_type:
     \"\"\"Algorithm description\"\"\"
     # Implementation
     return result
-For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
-Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
-Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
+For the Mandelbrot escape-time algorithm, use real and imaginary parts separately. If `cr*cr + ci*ci >= 4` return 0 immediately. Start with `zr = 0.0` and `zi = 0.0`. For `i` from `0` to `max_iter - 1`, compute `new_zr = zr*zr - zi*zi + cr` and `new_zi = 2*zr*zi + ci`. If `new_zr*new_zr + new_zi*new_zi > 4` return `i + 1` (the number of iterations performed). Otherwise set `zr = new_zr` and `zi = new_zi`. Return `max_iter` if it never escapes. Test guidance: `(0.0, 0.0, 100) -> 100`, `(-0.9, 0.0, 100) -> 100`, `(-1.5, 0.0, 100) -> 100`, `(0.25, 0.5, 100) -> 100`, `(-1.3, 0.0, 100) -> 100`; escape cases: `(2.0, 0.0, 100) -> 0`, `(1.0, 0.0, 100) -> 3`. Avoid ambiguous boundary points in tests.
+Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
+Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
-If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b: return []` before accessing `a[0]` or `b[0]`; do not alias `result[i]` to a temporary list, set `result[i][j] = total` directly after the inner loop.
 """,
     "Structured rules + output format.",
 )
@@ -108,11 +108,11 @@ RULES:
 9. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 10. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 11. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
-For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
-Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
-Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
+For the Mandelbrot escape-time algorithm, use real and imaginary parts separately. If `cr*cr + ci*ci >= 4` return 0 immediately. Start with `zr = 0.0` and `zi = 0.0`. For `i` from `0` to `max_iter - 1`, compute `new_zr = zr*zr - zi*zi + cr` and `new_zi = 2*zr*zi + ci`. If `new_zr*new_zr + new_zi*new_zi > 4` return `i + 1` (the number of iterations performed). Otherwise set `zr = new_zr` and `zi = new_zi`. Return `max_iter` if it never escapes. Test guidance: `(0.0, 0.0, 100) -> 100`, `(-0.9, 0.0, 100) -> 100`, `(-1.5, 0.0, 100) -> 100`, `(0.25, 0.5, 100) -> 100`, `(-1.3, 0.0, 100) -> 100`; escape cases: `(2.0, 0.0, 100) -> 0`, `(1.0, 0.0, 100) -> 3`. Avoid ambiguous boundary points in tests.
+Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
+Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
-If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b: return []` before accessing `a[0]` or `b[0]`; do not alias `result[i]` to a temporary list, set `result[i][j] = total` directly after the inner loop.
 """,
     "Focus on algorithmic efficiency.",
 )
@@ -133,11 +133,11 @@ RULES:
 9. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 10. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 11. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
-For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
-Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
-Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
+For the Mandelbrot escape-time algorithm, use real and imaginary parts separately. If `cr*cr + ci*ci >= 4` return 0 immediately. Start with `zr = 0.0` and `zi = 0.0`. For `i` from `0` to `max_iter - 1`, compute `new_zr = zr*zr - zi*zi + cr` and `new_zi = 2*zr*zi + ci`. If `new_zr*new_zr + new_zi*new_zi > 4` return `i + 1` (the number of iterations performed). Otherwise set `zr = new_zr` and `zi = new_zi`. Return `max_iter` if it never escapes. Test guidance: `(0.0, 0.0, 100) -> 100`, `(-0.9, 0.0, 100) -> 100`, `(-1.5, 0.0, 100) -> 100`, `(0.25, 0.5, 100) -> 100`, `(-1.3, 0.0, 100) -> 100`; escape cases: `(2.0, 0.0, 100) -> 0`, `(1.0, 0.0, 100) -> 3`. Avoid ambiguous boundary points in tests.
+Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
+Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
-If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b: return []` before accessing `a[0]` or `b[0]`; do not alias `result[i]` to a temporary list, set `result[i][j] = total` directly after the inner loop.
 """,
     "Focus on low-level performance and SIMD-friendly code.",
 )
@@ -164,11 +164,11 @@ def function_name(param1: type, param2: type) -> return_type:
     \"\"\"Short description of the algorithm.\"\"\"
     # efficient implementation
     return result
-For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
-Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
-Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
+For the Mandelbrot escape-time algorithm, use real and imaginary parts separately. If `cr*cr + ci*ci >= 4` return 0 immediately. Start with `zr = 0.0` and `zi = 0.0`. For `i` from `0` to `max_iter - 1`, compute `new_zr = zr*zr - zi*zi + cr` and `new_zi = 2*zr*zi + ci`. If `new_zr*new_zr + new_zi*new_zi > 4` return `i + 1` (the number of iterations performed). Otherwise set `zr = new_zr` and `zi = new_zi`. Return `max_iter` if it never escapes. Test guidance: `(0.0, 0.0, 100) -> 100`, `(-0.9, 0.0, 100) -> 100`, `(-1.5, 0.0, 100) -> 100`, `(0.25, 0.5, 100) -> 100`, `(-1.3, 0.0, 100) -> 100`; escape cases: `(2.0, 0.0, 100) -> 0`, `(1.0, 0.0, 100) -> 3`. Avoid ambiguous boundary points in tests.
+Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
+Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
-If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b: return []` before accessing `a[0]` or `b[0]`; do not alias `result[i]` to a temporary list, set `result[i][j] = total` directly after the inner loop.
 """,
     "Balanced combination of V2, V3, and V4.",
 )
@@ -187,11 +187,11 @@ RULES:
 7. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 8. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 9. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
-For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
-Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
-Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
+For the Mandelbrot escape-time algorithm, use real and imaginary parts separately. If `cr*cr + ci*ci >= 4` return 0 immediately. Start with `zr = 0.0` and `zi = 0.0`. For `i` from `0` to `max_iter - 1`, compute `new_zr = zr*zr - zi*zi + cr` and `new_zi = 2*zr*zi + ci`. If `new_zr*new_zr + new_zi*new_zi > 4` return `i + 1` (the number of iterations performed). Otherwise set `zr = new_zr` and `zi = new_zi`. Return `max_iter` if it never escapes. Test guidance: `(0.0, 0.0, 100) -> 100`, `(-0.9, 0.0, 100) -> 100`, `(-1.5, 0.0, 100) -> 100`, `(0.25, 0.5, 100) -> 100`, `(-1.3, 0.0, 100) -> 100`; escape cases: `(2.0, 0.0, 100) -> 0`, `(1.0, 0.0, 100) -> 3`. Avoid ambiguous boundary points in tests.
+Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
+Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
-If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b: return []` before accessing `a[0]` or `b[0]`; do not alias `result[i]` to a temporary list, set `result[i][j] = total` directly after the inner loop.
 """,
     "Encourage novel algorithm choices.",
 )
@@ -210,11 +210,11 @@ RULES:
 7. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 8. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 9. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
-For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
-Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
-Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
+For the Mandelbrot escape-time algorithm, use real and imaginary parts separately. If `cr*cr + ci*ci >= 4` return 0 immediately. Start with `zr = 0.0` and `zi = 0.0`. For `i` from `0` to `max_iter - 1`, compute `new_zr = zr*zr - zi*zi + cr` and `new_zi = 2*zr*zi + ci`. If `new_zr*new_zr + new_zi*new_zi > 4` return `i + 1` (the number of iterations performed). Otherwise set `zr = new_zr` and `zi = new_zi`. Return `max_iter` if it never escapes. Test guidance: `(0.0, 0.0, 100) -> 100`, `(-0.9, 0.0, 100) -> 100`, `(-1.5, 0.0, 100) -> 100`, `(0.25, 0.5, 100) -> 100`, `(-1.3, 0.0, 100) -> 100`; escape cases: `(2.0, 0.0, 100) -> 0`, `(1.0, 0.0, 100) -> 3`. Avoid ambiguous boundary points in tests.
+Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
+Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
-If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b: return []` before accessing `a[0]` or `b[0]`; do not alias `result[i]` to a temporary list, set `result[i][j] = total` directly after the inner loop.
 """,
     "Use only well-known algorithms.",
 )
@@ -234,11 +234,11 @@ RULES:
 8. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 9. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
 10. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
-For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
-Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
-Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
+For the Mandelbrot escape-time algorithm, use real and imaginary parts separately. If `cr*cr + ci*ci >= 4` return 0 immediately. Start with `zr = 0.0` and `zi = 0.0`. For `i` from `0` to `max_iter - 1`, compute `new_zr = zr*zr - zi*zi + cr` and `new_zi = 2*zr*zi + ci`. If `new_zr*new_zr + new_zi*new_zi > 4` return `i + 1` (the number of iterations performed). Otherwise set `zr = new_zr` and `zi = new_zi`. Return `max_iter` if it never escapes. Test guidance: `(0.0, 0.0, 100) -> 100`, `(-0.9, 0.0, 100) -> 100`, `(-1.5, 0.0, 100) -> 100`, `(0.25, 0.5, 100) -> 100`, `(-1.3, 0.0, 100) -> 100`; escape cases: `(2.0, 0.0, 100) -> 0`, `(1.0, 0.0, 100) -> 3`. Avoid ambiguous boundary points in tests.
+Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
+Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
-If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b: return []` before accessing `a[0]` or `b[0]`; do not alias `result[i]` to a temporary list, set `result[i][j] = total` directly after the inner loop.
 """,
     "Optimizes with iterative feedback.",
 )
@@ -258,11 +258,11 @@ RULES:
 8. Keep code simple and explicit; avoid Python idioms that do not map directly to Rust.
 9. All return statements must return the same number of values.
 10. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
-For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
-Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
-Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
+For the Mandelbrot escape-time algorithm, use real and imaginary parts separately. If `cr*cr + ci*ci >= 4` return 0 immediately. Start with `zr = 0.0` and `zi = 0.0`. For `i` from `0` to `max_iter - 1`, compute `new_zr = zr*zr - zi*zi + cr` and `new_zi = 2*zr*zi + ci`. If `new_zr*new_zr + new_zi*new_zi > 4` return `i + 1` (the number of iterations performed). Otherwise set `zr = new_zr` and `zi = new_zi`. Return `max_iter` if it never escapes. Test guidance: `(0.0, 0.0, 100) -> 100`, `(-0.9, 0.0, 100) -> 100`, `(-1.5, 0.0, 100) -> 100`, `(0.25, 0.5, 100) -> 100`, `(-1.3, 0.0, 100) -> 100`; escape cases: `(2.0, 0.0, 100) -> 0`, `(1.0, 0.0, 100) -> 3`. Avoid ambiguous boundary points in tests.
+Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
+Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
-If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b: return []` before accessing `a[0]` or `b[0]`; do not alias `result[i]` to a temporary list, set `result[i][j] = total` directly after the inner loop.
 """,
     "Explicitly forbids constructs that are hard for the transpiler to handle.",
 )
@@ -277,14 +277,14 @@ RULES:
 2. Prioritize correctness over cleverness. Use well-known, proven algorithms.
 3. Use explicit `for i in range(n):` loops and index-based list access.
 4. Avoid complex list slicing, tuple unpacking, and multi-target assignments when possible.
-5. For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the iteration count as soon as `abs(z) > 2`; return max_iter if the point does not escape.
+5. For the Mandelbrot escape-time algorithm, use real and imaginary parts separately. If `cr*cr + ci*ci >= 4` return 0 immediately. Start with `zr = 0.0` and `zi = 0.0`. For `i` from `0` to `max_iter - 1`, compute `new_zr = zr*zr - zi*zi + cr` and `new_zi = 2*zr*zi + ci`. If `new_zr*new_zr + new_zi*new_zi > 4` return `i + 1` (the number of iterations performed). Otherwise set `zr = new_zr` and `zi = new_zi`. Return `max_iter` if it never escapes. Test guidance: `(0.0, 0.0, 100) -> 100`, `(-0.9, 0.0, 100) -> 100`, `(-1.5, 0.0, 100) -> 100`, `(0.25, 0.5, 100) -> 100`, `(-1.3, 0.0, 100) -> 100`; escape cases: `(2.0, 0.0, 100) -> 0`, `(1.0, 0.0, 100) -> 3`. Avoid ambiguous boundary points in tests.
 6. Do NOT use list comprehensions. Use explicit for loops and `append()` instead.
 7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, `sum()`, `map()`, `filter()`, `eval()`, `exec()`, generators, `async`/`await`, `match`/`case`, or walrus operators.
 8. Do NOT define nested functions, classes, or lambdas inside the function.
 9. All return statements must return the same number of values.
 10. Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays.
 11. You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
-If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b: return []` before accessing `a[0]` or `b[0]`; do not alias `result[i]` to a temporary list, set `result[i][j] = total` directly after the inner loop.
 12. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 """,
     "Emphasizes algorithmic correctness and transpiler-friendly explicit loops.",

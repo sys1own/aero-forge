@@ -282,11 +282,14 @@ def _detect_function_names(source: str) -> List[str]:
         tree = ast.parse(source)
     except SyntaxError:
         return _token_function_names(source)
-    return [
-        node.name
-        for node in tree.body
-        if isinstance(node, ast.FunctionDef) and not node.name.startswith("_")
-    ]
+    seen: set[str] = set()
+    names: list[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and not node.name.startswith("_"):
+            if node.name not in seen:
+                seen.add(node.name)
+                names.append(node.name)
+    return names
 
 
 def _token_function_names(source: str) -> List[str]:
