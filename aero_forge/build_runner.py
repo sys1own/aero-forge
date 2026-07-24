@@ -436,6 +436,15 @@ class BuildRunner:
                 total_functions,
             )
 
+        # Surface the first concrete failure for the web UI.
+        first_error = ""
+        first_logs = ""
+        for r in results:
+            if not r.success:
+                first_logs = r.logs
+                first_error = first_logs.splitlines()[0] if first_logs else "Build failed"
+                break
+
         return {
             "success": failed_functions == 0 and not dry_run,
             "dry_run": dry_run,
@@ -444,6 +453,8 @@ class BuildRunner:
             "total": total_functions,
             "passed": passed_functions,
             "failed": failed_functions,
+            "error": first_error,
+            "logs": first_logs,
             "results": [
                 {
                     "source": str(r.source),
@@ -451,6 +462,8 @@ class BuildRunner:
                     "success": r.success,
                     "artifact": str(r.artifact) if r.artifact else None,
                     "iterations": r.iterations,
+                    "logs": r.logs,
+                    "explanation": r.explanation,
                 }
                 for r in results
             ],

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import ast
 import re
+import traceback
 from enum import Enum
-from typing import Optional
+from pathlib import Path
+from typing import Any, Optional
 
 
 class ErrorClass(Enum):
@@ -71,4 +74,58 @@ def is_transient(text: Optional[str]) -> bool:
     return classify(text) == ErrorClass.TRANSIENT
 
 
-__all__ = ["ErrorClass", "classify", "classify_exception", "is_fatal", "is_transient"]
+def format_transpiler_error(
+    exc: BaseException,
+    source_path: Optional[Path] = None,
+    source: Optional[str] = None,
+) -> str:
+    """Format a transpiler or unexpected exception into a concise, location-aware message.
+
+    Output format: ``[Transpiler Error] <ExceptionType>: <Details> [File: ... Line: ...]``.
+    """
+    name = type(exc).__name__
+    message = str(exc) or "<no details>"
+    node = getattr(exc, "node", None)
+    line: Optional[int] = None
+
+    if node is None and source is not None:
+        from aero_forge.errors import UnsupportedError, locate_unsupported_node
+
+        if isinstance(exc, UnsupportedError):
+            node = exc.node
+        else:
+            node = locate_unsupported_node(source, message)
+
+    if node is not None:
+        line = getattr(node, "lineno", None)
+
+    location_parts = []
+    if source_path:
+        location_parts.append(f"File: {source_path}")
+    if line:
+        location_parts.append(f"Line: {line}")
+    location = f" [{'; '.join(location_parts)}]" if location_parts else ""
+
+    return f"[Transpiler Error] {name}: {message}{location}"
+
+
+def format_transpiler_error_with_traceback(
+    exc: BaseException,
+    source_path: Optional[Path] = None,
+    source: Optional[str] = None,
+) -> str:
+    """Return a formatted transpiler error appended with the full traceback."""
+    formatted = format_transpiler_error(exc, source_path=source_path, source=source)
+    tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    return f"{formatted}\n\nTraceback:\n{tb}"
+
+
+__all__ = [
+    "ErrorClass",
+    "classify",
+    "classify_exception",
+    "format_transpiler_error",
+    "format_transpiler_error_with_traceback",
+    "is_fatal",
+    "is_transient",
+]

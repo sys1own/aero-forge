@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import textwrap
 import tokenize
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -27,6 +28,7 @@ from aero_forge.healing.router import try_auto_fix
 from aero_forge.orchestrator.error_classifier import (
     ErrorClass,
     classify_exception,
+    format_transpiler_error_with_traceback,
     is_fatal,
 )
 from aero_forge.llm import get_llm_client
@@ -198,7 +200,10 @@ class Orchestrator:
                         raise
                     logger.exception("Unexpected error during build")
                     return self._partial_result(
-                        iteration, last_working_artifact, str(exc), ""
+                        iteration,
+                        last_working_artifact,
+                        str(exc),
+                        traceback.format_exc(),
                     )
 
                 last_working_source = source
@@ -389,28 +394,35 @@ class Orchestrator:
         module_name = f"aero_forge_{self.source_path.stem}"
         crate_name = _rust_identifier(module_name)
 
-        uast = python_source_to_uast(source)
-        graph = UASTToHINTranslator().translate(uast)
+        try:
+            uast = python_source_to_uast(source)
+            graph = UASTToHINTranslator().translate(uast)
 
-        shield_config: Dict[str, Any] = {}
-        traits_by_name: Dict[str, Any] = {}
-        for name in self.function_names:
-            traits = Shield(config=shield_config).analyze(
-                graph, func_name=name, source=source
+            shield_config: Dict[str, Any] = {}
+            traits_by_name: Dict[str, Any] = {}
+            for name in self.function_names:
+                traits = Shield(config=shield_config).analyze(
+                    graph, func_name=name, source=source
+                )
+                traits["function_name"] = name
+                traits_by_name[name] = traits
+            graph.traits_by_name = traits_by_name
+            graph.traits = graph.traits_by_name
+
+            engine = Engine()
+            crate_root = engine.generate(
+                graph,
+                sandbox_root,
+                module_name=module_name,
+                function_names=self.function_names,
+                source=source,
             )
-            traits["function_name"] = name
-            traits_by_name[name] = traits
-        graph.traits_by_name = traits_by_name
-        graph.traits = graph.traits_by_name
-
-        engine = Engine()
-        crate_root = engine.generate(
-            graph,
-            sandbox_root,
-            module_name=module_name,
-            function_names=self.function_names,
-            source=source,
-        )
+        except Exception as exc:
+            raise _BuildFailure(
+                format_transpiler_error_with_traceback(
+                    exc, source_path=self.source_path, source=source
+                )
+            ) from exc
 
         try:
             fmt = subprocess.run(
