@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -18,6 +19,7 @@ from .blueprint import (
     write_blueprint,
 )
 from .build_runner import BuildRunner
+from .build_summary import format_build_summary
 from .error_explainer import explain_error
 from .errors import UserError
 from .examples import create_example, list_examples, run_example
@@ -314,6 +316,8 @@ def fix(
             "v6_creative",
             "v7_conservative",
             "v8_iterative",
+            "v9_transpiler_friendly",
+            "v10_correctness_focused",
         ],
         case_sensitive=False,
     ),
@@ -454,11 +458,19 @@ def build(
         )
         return
 
-    click.echo(
-        f"Build complete: {result['passed']}/{result['total']} succeeded. "
-        f"Output directory: {result['output_dir']}"
-    )
-    if not result["success"]:
+    if result.get("success"):
+        summary = format_build_summary(
+            result,
+            output_dir=Path(result.get("output_dir", ".")),
+            llm_provider=llm_provider,
+            model=model,
+        )
+        click.echo(f"\n{summary}")
+    else:
+        click.echo(
+            f"Build complete: {result['passed']}/{result['total']} succeeded. "
+            f"Output directory: {result['output_dir']}"
+        )
         sys.exit(1)
 
 
@@ -538,6 +550,8 @@ def build(
             "v6_creative",
             "v7_conservative",
             "v8_iterative",
+            "v9_transpiler_friendly",
+            "v10_correctness_focused",
         ],
         case_sensitive=False,
     ),
@@ -660,11 +674,21 @@ def generate(
 
     if result.get("build"):
         build_result = result["build"]
-        click.echo(
-            f"Build: {build_result.get('passed', 0)}/{build_result.get('total', 0)} "
-            f"succeeded ({build_result.get('output_dir', '')})"
-        )
-        if not build_result.get("success"):
+        if build_result.get("success"):
+            summary = format_build_summary(
+                build_result,
+                output_dir=Path(result.get("blueprint_path", output_dir)).parent
+                / "dist",
+                prompt=prompt,
+                llm_provider=llm_provider,
+                model=model,
+            )
+            click.echo(f"\n{summary}")
+        else:
+            click.echo(
+                f"Build: {build_result.get('passed', 0)}/{build_result.get('total', 0)} "
+                f"failed ({build_result.get('output_dir', '')})"
+            )
             sys.exit(1)
 
 
@@ -819,11 +843,18 @@ def init(project: str, path: str, fmt: str) -> None:
             "v6_creative",
             "v7_conservative",
             "v8_iterative",
+            "v9_transpiler_friendly",
+            "v10_correctness_focused",
         ],
         case_sensitive=False,
     ),
     default="v5_balanced",
     help="System prompt template for generation (default: v5_balanced).",
+)
+@click.option(
+    "--session-id",
+    default=None,
+    help="Resume a previous chat session (default: start a new one).",
 )
 @click.option(
     "--verbose",
@@ -837,10 +868,14 @@ def chat(
     max_iterations: int,
     verbose: bool,
     prompt_template: str,
+    session_id: str | None,
 ) -> None:
     """Interactive chat session for prompt-driven generation and optimization."""
     _setup_logging(verbose)
     from .chat import ChatSession
+
+    def _progress(message: str) -> None:
+        click.echo(f"[{message}]")
 
     session = ChatSession(
         Path(output_dir),
@@ -848,9 +883,15 @@ def chat(
         model=model,
         max_iterations=max_iterations,
         prompt_template=prompt_template,
+        session_id=session_id,
+        progress_callback=_progress,
     )
 
-    click.echo("Aero-Forge chat mode. Type 'help' for commands, 'exit' to leave.")
+    click.echo("Aero-Forge chat is ready. What would you like to build?")
+    if session_id:
+        click.echo(f"(Resuming session {session.session_id})")
+    click.echo("Type 'help' for ideas or 'exit' to leave.")
+
     while True:
         try:
             user_input = click.prompt("> ", prompt_suffix="")
@@ -860,27 +901,26 @@ def chat(
         if not text:
             continue
         if text.lower() in {"exit", "quit"}:
-            click.echo("Goodbye!")
+            click.secho("Goodbye!", fg="green")
             break
 
-        action_result = session.handle_command(text)
-        if action_result:
-            message = action_result.get("message")
-            if message:
-                click.echo(message)
-            else:
-                build = action_result.get("build")
-                if build:
-                    click.echo(
-                        f"Build: {build.get('passed', 0)}/{build.get('total', 0)} succeeded"
-                    )
-                else:
-                    click.echo("Action completed.")
-            # After explicit commands like 'help' or 'show', do not also call the LLM.
-            if text.lower() in ("help", "?", "show"):
-                continue
+        response = session.process(text)
+        _print_chat_response(session, response)
 
-        response = session.reply(text)
+
+def _print_chat_response(session: Any, response: str) -> None:
+    """Print a chat response with color based on the last build state."""
+    build = (session.last_build_result or {}).get("build") or {}
+    lowered = response.lower()
+    if not build.get("success") and (
+        "oops" in lowered or "snag" in lowered or "error" in lowered
+    ):
+        click.secho(response, fg="red")
+    elif build.get("success") and ("done!" in lowered or "passed" in lowered):
+        click.secho(response, fg="green")
+    elif "not sure" in lowered or "did you mean" in lowered:
+        click.secho(response, fg="yellow")
+    else:
         click.echo(response)
 
 

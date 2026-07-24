@@ -195,7 +195,7 @@ def test_cli_generate_command(tmp_path):
     assert result.exit_code == 0
     assert (tmp_path / "src" / "generated.py").is_file()
     assert (tmp_path / "tests" / "test_generated.py").is_file()
-    assert "Build: 1/1 succeeded" in result.output
+    assert "Done!" in result.output or "passed" in result.output.lower()
 
 
 def test_blueprint_prompt_generates_and_builds(tmp_path):

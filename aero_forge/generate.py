@@ -6,7 +6,7 @@ import ast
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from aero_forge.blueprint import Blueprint, FunctionSpec, discover_functions
 from aero_forge.build_runner import BuildRunner
@@ -459,11 +459,14 @@ def generate_project(
     discover: bool = False,
     explain: bool = False,
     review: bool = False,
+    progress_callback: Optional[Callable[[str], None]] = None,
 ) -> GeneratedProject:
     """Generate code from a prompt and write the project files.
 
     Returns ``(source_path, test_path, blueprint, implementation, tests, explanation)``.
     """
+    if progress_callback:
+        progress_callback("Generating code from your prompt...")
     response = generate_from_prompt(
         prompt,
         constraints=constraints,
@@ -495,6 +498,8 @@ def generate_project(
     source_path, test_path, blueprint = write_generated_project(
         output_dir, implementation, tests, project_name=project_name
     )
+    if progress_callback:
+        progress_callback("Code written; ready to compile.")
     return source_path, test_path, blueprint, implementation, tests, explanation
 
 
@@ -517,6 +522,7 @@ def generate_and_build(
     discover: bool = False,
     explain: bool = False,
     review: bool = False,
+    progress_callback: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """Generate code from a prompt and optionally build/optimize it.
 
@@ -579,6 +585,9 @@ def generate_and_build(
         "iterations": [],
     }
 
+    if progress_callback:
+        progress_callback("Compiling to Rust...")
+
     if optimize:
         result["iterations"] = optimize_generated_code(
             output_dir=output_dir,
@@ -589,6 +598,7 @@ def generate_and_build(
             max_retries=max_retries,
             max_iterations=max_iterations,
             prompt_template=prompt_template,
+            progress_callback=progress_callback,
         )
         result["build"] = (
             result["iterations"][-1].get("build") if result["iterations"] else None
@@ -608,8 +618,14 @@ def generate_and_build(
                 "output_dir": str(output_dir / "dist"),
             }
         )
+        if progress_callback:
+            progress_callback("Running tests...")
         runner = BuildRunner(bp, **build_kwargs)
         result["build"] = runner.build()
+        if progress_callback:
+            build = result["build"] or {}
+            status = "passed" if build.get("success") else "failed"
+            progress_callback(f"Build {status}.")
 
     return result
 
@@ -624,6 +640,7 @@ def optimize_generated_code(
     max_retries: int = 3,
     max_iterations: int = 5,
     prompt_template: Optional[str] = None,
+    progress_callback: Optional[Callable[[str], None]] = None,
 ) -> List[Dict[str, Any]]:
     """Iteratively compile, benchmark, and optimize generated code.
 
@@ -639,6 +656,8 @@ def optimize_generated_code(
     previous_time: Optional[float] = None
 
     for iteration in range(1, max_iterations + 1):
+        if progress_callback:
+            progress_callback(f"Optimization iteration {iteration}/{max_iterations}...")
         implementation = source_path.read_text(encoding="utf-8")
         bp = Blueprint.model_validate(
             {
@@ -656,6 +675,8 @@ def optimize_generated_code(
         )
 
         start = time.perf_counter()
+        if progress_callback:
+            progress_callback("Compiling optimized version...")
         runner = BuildRunner(bp, max_workers=1, cache_enabled=False)
         build_result = runner.build()
         elapsed = time.perf_counter() - start
