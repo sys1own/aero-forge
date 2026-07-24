@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import logging
 import math
 import re
@@ -439,6 +440,8 @@ class RustGenerator:
                 return "i64"
             if isinstance(expr.value, float):
                 return "f64"
+            if isinstance(expr.value, str):
+                return "String"
             if expr.value is None:
                 return "()"
             return None
@@ -470,6 +473,12 @@ class RustGenerator:
         if isinstance(expr, ast.ListComp):
             inner = self._infer_expr_type(expr.elt, types) or self.function_type
             return f"Vec<{inner}>"
+        if isinstance(expr, ast.Dict):
+            if not expr.keys:
+                return "HashMap<String, String>"
+            key_type = self._infer_expr_type(expr.keys[0], types) or "String"
+            val_type = self._infer_expr_type(expr.values[0], types) or "String"
+            return f"HashMap<{key_type}, {val_type}>"
         if isinstance(expr, ast.Tuple):
             elts = [self._infer_expr_type(e, types) for e in expr.elts]
             if all(elts):
@@ -641,6 +650,13 @@ class RustGenerator:
                 unified = [self._unify(a, b) for a, b in zip(parts1, parts2)]
                 if all(unified):
                     return f"({', '.join(unified)})"
+        if t1.startswith("HashMap<") and t2.startswith("HashMap<"):
+            k1, v1 = _kv_types(t1)
+            k2, v2 = _kv_types(t2)
+            k = self._unify(k1, k2)
+            v = self._unify(v1, v2)
+            if k and v:
+                return f"HashMap<{k}, {v}>"
         if "f64" in (t1, t2):
             return "f64"
         if "i64" in (t1, t2):
@@ -680,6 +696,8 @@ class RustGenerator:
                 return "i64"
             if isinstance(expr.value, float):
                 return "f64"
+            if isinstance(expr.value, str):
+                return "String"
             if expr.value is None:
                 return "()"
         if isinstance(expr, ast.Name):
@@ -708,7 +726,16 @@ class RustGenerator:
                     element_type = self._tuple_element_at(base_type, idx)
                     if element_type is not None:
                         return element_type
+            if base_type.startswith("HashMap<"):
+                _, val_type = _kv_types(base_type)
+                return val_type
             return self.function_type
+        if isinstance(expr, ast.Dict):
+            if not expr.keys:
+                return "HashMap<String, String>"
+            key_type = self._type_of(expr.keys[0])
+            val_type = self._type_of(expr.values[0])
+            return f"HashMap<{key_type}, {val_type}>"
         if isinstance(expr, ast.List):
             if not expr.elts:
                 return "Vec<?>"
@@ -857,6 +884,12 @@ class RustGenerator:
             return f"({expr} != 0)"
         if from_type == "f64" and to_type == "bool":
             return f"({expr} != 0.0)"
+        if from_type == "&str" and to_type == "String":
+            return f"({expr}).to_string()"
+        if from_type == "String" and to_type == "&str":
+            return f"({expr}).as_str()"
+        if from_type.startswith("HashMap<") and to_type.startswith("HashMap<"):
+            return expr
         return expr
 
     # ------------------------------------------------------------------
@@ -1079,6 +1112,8 @@ class RustGenerator:
             return "0.0_f64"
         if typ == "bool":
             return "false"
+        if typ == "String":
+            return 'String::new()'
         if typ.startswith("Vec<"):
             inner = _element_type(typ)
             return f"Vec::<{inner}>::new()"
@@ -1632,6 +1667,8 @@ class RustGenerator:
             return f"({', '.join(self._emit_expr(e, ctx) for e in expr.elts)})"
         if isinstance(expr, ast.ListComp):
             return self._emit_listcomp(expr, ctx)
+        if isinstance(expr, ast.Dict):
+            return self._emit_dict_literal(expr, ctx)
         if isinstance(expr, ast.Tuple):
             tuple_parts: List[str] = []
             if ctx and ctx.startswith("(") and ctx.endswith(")"):
@@ -1720,6 +1757,10 @@ class RustGenerator:
                 if ctx == "i64":
                     return f"({rust_inf} as i64)"
                 return f"({rust_inf} as {ctx})"
+            rust_str = json.dumps(value, ensure_ascii=False)
+            if ctx == "&str":
+                return rust_str
+            return f"{rust_str}.to_string()"
         if value is None:
             raise UnsupportedError("None is not a numeric value", node=expr)
         raise UnsupportedError(f"Unsupported literal: {value!r}", node=expr)
@@ -1733,6 +1774,30 @@ class RustGenerator:
             return f"Vec::<{element_type}>::new()"
         elements = [self._emit_expr(e, element_type) for e in expr.elts]
         return f"vec![{', '.join(elements)}]"
+
+    def _emit_dict_literal(self, expr: ast.Dict, ctx: str) -> str:
+        """Emit a Python dict literal as a Rust HashMap construction block."""
+        key_type, val_type = _kv_types(ctx) if ctx.startswith("HashMap<") else ("String", "String")
+        if not expr.keys:
+            return f"HashMap::<{key_type}, {val_type}>::new()"
+        # Infer concrete types from the first key/value if no annotation was given.
+        if not ctx.startswith("HashMap<"):
+            key_type = self._type_of(expr.keys[0]) or key_type
+            val_type = self._type_of(expr.values[0]) or val_type
+            # Re-emit the first pair with the inferred types.
+            first_key = self._emit_expr(expr.keys[0], key_type)
+            first_val = self._emit_expr(expr.values[0], val_type)
+        else:
+            first_key = None
+            first_val = None
+        tmp = self._next_tmp()
+        lines = [f"let mut {tmp} = HashMap::new();"]
+        for k, v in zip(expr.keys, expr.values):
+            k_rust = self._emit_expr(k, key_type)
+            v_rust = self._emit_expr(v, val_type)
+            lines.append(f"{tmp}.insert({k_rust}, {v_rust});")
+        lines.append(tmp)
+        return f"({{\n" + "\n".join("    " + line for line in lines) + "\n})"
 
     def _emit_listcomp(self, expr: ast.ListComp, ctx: str) -> str:
         """Emit a list comprehension as a Rust ``for`` loop block."""
@@ -1970,16 +2035,24 @@ class RustGenerator:
 
         base, indices = _flatten(expr, [])
         base_type = self._type_of(base)
-        if not (base_type.startswith("Vec<") or _is_tuple_type(base_type)):
+        if not (
+            base_type.startswith("Vec<")
+            or _is_tuple_type(base_type)
+            or base_type.startswith("HashMap<")
+        ):
             if indices:
                 element_type = ctx if ctx and ctx != "?" else self.function_type
                 inferred = element_type
                 for _ in indices:
                     inferred = f"Vec<{inferred}>"
                 base_type = inferred
-        if not (base_type.startswith("Vec<") or _is_tuple_type(base_type)):
+        if not (
+            base_type.startswith("Vec<")
+            or _is_tuple_type(base_type)
+            or base_type.startswith("HashMap<")
+        ):
             raise UnsupportedError(
-                "Subscript/indexing is only supported on Vec/list or tuple types",
+                "Subscript/indexing is only supported on Vec/list, tuple, or dict types",
                 node=expr,
             )
 
@@ -2016,6 +2089,12 @@ class RustGenerator:
                     index_expr = self._emit_expr(idx, "i64")
                 access = f"{access}[({index_expr}) as usize]"
                 final_type = element_type
+            elif final_type.startswith("HashMap<"):
+                key_type, val_type = _kv_types(final_type)
+                key_expr = self._emit_expr(idx, key_type)
+                default = self._zero_for_type(val_type)
+                access = f"{access}.get(&{key_expr}).cloned().unwrap_or({default})"
+                final_type = val_type
             else:
                 raise UnsupportedError(
                     f"Cannot index into type {final_type}", node=idx
@@ -2245,6 +2324,37 @@ class RustGenerator:
         left = self._emit_expr(expr.left, numeric_ctx)
         right = self._emit_expr(expr.comparators[0], numeric_ctx)
         op = expr.ops[0]
+        op_type = type(op)
+        right_type = self._type_of(expr.comparators[0])
+        if op_type is ast.In:
+            if right_type.startswith("HashMap<"):
+                key_type, _ = _kv_types(right_type)
+                left = self._emit_expr(expr.left, key_type)
+                right = self._emit_expr(expr.comparators[0], right_type)
+                return f"({right}).contains_key(&{left})"
+            if right_type.startswith("Vec<"):
+                element_type = _element_type(right_type)
+                left = self._emit_expr(expr.left, element_type)
+                right = self._emit_expr(expr.comparators[0], right_type)
+                return f"({right}).contains(&{left})"
+            raise UnsupportedError(
+                "'in' membership is only supported for Vec and dict types", node=expr
+            )
+        if op_type is ast.NotIn:
+            if right_type.startswith("HashMap<"):
+                key_type, _ = _kv_types(right_type)
+                left = self._emit_expr(expr.left, key_type)
+                right = self._emit_expr(expr.comparators[0], right_type)
+                return f"!({right}).contains_key(&{left})"
+            if right_type.startswith("Vec<"):
+                element_type = _element_type(right_type)
+                left = self._emit_expr(expr.left, element_type)
+                right = self._emit_expr(expr.comparators[0], right_type)
+                return f"!({right}).contains(&{left})"
+            raise UnsupportedError(
+                "'not in' membership is only supported for Vec and dict types",
+                node=expr,
+            )
         op_str = {
             ast.Eq: "==",
             ast.NotEq: "!=",
@@ -2252,7 +2362,7 @@ class RustGenerator:
             ast.LtE: "<=",
             ast.Gt: ">",
             ast.GtE: ">=",
-        }.get(type(op))
+        }.get(op_type)
         if op_str is None:
             raise UnsupportedError(
                 f"Unsupported comparison: {type(op).__name__}", node=expr
@@ -3002,6 +3112,11 @@ def _augassign_op(op: ast.operator) -> str:
         ast.FloorDiv: "/=",
         ast.Mod: "%=",
         ast.Pow: "=",
+        ast.BitXor: "^=",
+        ast.BitAnd: "&=",
+        ast.BitOr: "|=",
+        ast.LShift: "<<=",
+        ast.RShift: ">>=",
     }
     if type(op) not in mapping:
         raise UnsupportedError(
@@ -3120,6 +3235,8 @@ def _annotation_to_rust_type(
             return "Vec<?>"
         if name in ("tuple", "Tuple"):
             return "(?,)"
+        if name in ("dict", "Dict"):
+            return "HashMap<String, String>"
         return _SCALAR_TYPE_MAP.get(name)
 
     if isinstance(annotation, ast.Subscript):
@@ -3143,6 +3260,18 @@ def _annotation_to_rust_type(
                 ]
                 if all(parts):
                     return f"({', '.join(parts)})"
+            return None
+        if base_name in ("dict", "Dict"):
+            if isinstance(annotation.slice, ast.Tuple):
+                parts = [
+                    _annotation_to_rust_type(elt, class_names)
+                    for elt in annotation.slice.elts
+                ]
+                if all(parts):
+                    return f"HashMap<{parts[0]}, {parts[1]}>"
+            key = _annotation_to_rust_type(annotation.slice, class_names)
+            if key:
+                return f"HashMap<{key}, {key}>"
             return None
         if base_name == "ndarray":
             inner = _annotation_to_rust_type(annotation.slice, class_names)
@@ -3168,6 +3297,7 @@ _SCALAR_TYPE_MAP = {
     "int": "i64",
     "float": "f64",
     "bool": "bool",
+    "str": "String",
     "None": "()",
 }
 
@@ -3184,6 +3314,8 @@ def _infer_expr_type(
             return "i64"
         if isinstance(expr.value, float):
             return "f64"
+        if isinstance(expr.value, str):
+            return "String"
     if isinstance(expr, ast.List):
         if not expr.elts:
             return f"Vec<{function_type}>"
@@ -3192,6 +3324,12 @@ def _infer_expr_type(
     if isinstance(expr, ast.ListComp):
         inner = _infer_expr_type(expr.elt, function_type, class_names)
         return f"Vec<{inner or function_type}>"
+    if isinstance(expr, ast.Dict):
+        if not expr.keys:
+            return "HashMap<String, String>"
+        k = _infer_expr_type(expr.keys[0], function_type, class_names)
+        v = _infer_expr_type(expr.values[0], function_type, class_names)
+        return f"HashMap<{k or 'String'}, {v or 'String'}>"
     if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Mult):
         if isinstance(expr.left, ast.List):
             return _infer_expr_type(expr.left, function_type, class_names)
@@ -3217,6 +3355,23 @@ def _element_type(rust_type: str) -> str:
                 return rust_type[4:i].strip()
         return rust_type[4:-1]
     return rust_type
+
+
+def _kv_types(rust_type: str) -> Tuple[str, str]:
+    """Return the (key, value) types of a HashMap, or (String, String) if unknown."""
+    prefix = "HashMap<"
+    if not (rust_type.startswith(prefix) and rust_type.endswith(">")):
+        return "String", "String"
+    inner = rust_type[len(prefix):-1]
+    depth = 0
+    for i, ch in enumerate(inner):
+        if ch in "(<[{":
+            depth += 1
+        elif ch in ")>]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            return inner[:i].strip(), inner[i + 1:].strip()
+    return "String", "String"
 
 
 def _vec_depth(rust_type: str) -> int:
