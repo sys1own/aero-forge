@@ -34,6 +34,9 @@ def server(tmp_path, monkeypatch):
     http_thread.start()
     ws_thread = threading.Thread(target=_start_websocket_server, args=(port + 1,), daemon=True)
     ws_thread.start()
+    # Give the WebSocket server a moment to bind before tests connect.
+    import time
+    time.sleep(0.5)
     yield f"http://localhost:{port}"
     server.shutdown()
     server.server_close()

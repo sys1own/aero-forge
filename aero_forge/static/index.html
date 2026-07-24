@@ -61,6 +61,9 @@
       width: 22px; height: 22px; color: var(--accent);
       flex-shrink: 0;
     }
+    .brand .logo-img {
+      height: 28px; width: auto; display: block; flex-shrink: 0;
+    }
     .brand h1 { font-size: 0.95rem; margin: 0; font-weight: 500; letter-spacing: 0.01em; color: var(--text); }
     .brand small { color: var(--muted); font-size: 0.65rem; display: block; margin-top: -2px; }
     .header-actions { display: flex; align-items: center; gap: 0.6rem; }
@@ -281,11 +284,7 @@
 <body>
   <header>
     <div class="brand">
-      <svg class="logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <path d="M12 2L2 7l10 5 10-5-10-5z"/>
-        <path d="M2 12l10 5 10-5"/>
-        <path d="M2 17l10 5 10-5"/>
-      </svg>
+      <img src="/logo.png" alt="Aero Forge" class="logo-img" aria-hidden="true" />
       <div>
         <h1>Aero Forge</h1>
         <small>Prompt &rarr; Python &rarr; Rust</small>
