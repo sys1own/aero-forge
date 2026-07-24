@@ -84,13 +84,15 @@ def test_pre_write_validation_catches_invalid_syntax(tmp_path: Path) -> None:
 def test_web_response_payload_has_files_and_tree(tmp_path: Path) -> None:
     """The web response must expose structured file updates, not raw source blocks."""
     impl = "def add(a: int, b: int) -> int:\n    return a + b\n"
-    tests = "from generated import add\n"
-    source_path = tmp_path / "src" / "generated.py"
+    tests = "from add import add\n"
+    source_path = tmp_path / "src" / "add.py"
     source_path.parent.mkdir(parents=True, exist_ok=True)
     source_path.write_text(impl, encoding="utf-8")
+    init_path = tmp_path / "src" / "__init__.py"
+    init_path.write_text("from .add import add\n", encoding="utf-8")
     build_result: dict[str, Any] = {
         "source_path": str(source_path),
-        "test_path": str(tmp_path / "tests" / "test_generated.py"),
+        "test_path": str(tmp_path / "tests" / "test_add.py"),
         "blueprint_path": str(tmp_path / "blueprint.aero"),
         "implementation": impl,
         "tests": tests,
@@ -98,8 +100,8 @@ def test_web_response_payload_has_files_and_tree(tmp_path: Path) -> None:
         "build": {"success": True, "passed": 1, "total": 1},
         "iterations": [],
     }
-    (tmp_path / "tests" / "test_generated.py").parent.mkdir(parents=True, exist_ok=True)
-    (tmp_path / "tests" / "test_generated.py").write_text(tests, encoding="utf-8")
+    (tmp_path / "tests" / "test_add.py").parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tests" / "test_add.py").write_text(tests, encoding="utf-8")
     (tmp_path / "blueprint.aero").write_text("project: test\n", encoding="utf-8")
 
     payload = _build_web_response("session-123", tmp_path, build_result)
@@ -110,5 +112,6 @@ def test_web_response_payload_has_files_and_tree(tmp_path: Path) -> None:
     assert "tree" in payload
     assert "result" in payload
     paths = [f["path"] for f in payload["files"]]
-    assert any("src/generated.py" in p for p in paths)
+    assert any("src/add.py" in p for p in paths)
+    assert any("src/__init__.py" in p for p in paths)
     assert payload["tree"]["type"] == "directory"

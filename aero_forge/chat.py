@@ -13,7 +13,11 @@ from typing import Any, Callable, Dict, List, Optional
 from aero_forge.build_summary import format_build_summary
 from aero_forge.config import ConfigOverride
 from aero_forge.error_explainer import explain_error
-from aero_forge.generate import generate_and_build, optimize_generated_code
+from aero_forge.generate import (
+    _find_generated_python_paths,
+    generate_and_build,
+    optimize_generated_code,
+)
 from aero_forge.llm.clients import get_llm_client
 
 logger = logging.getLogger("aero_forge.chat")
@@ -281,12 +285,14 @@ class ChatSession:
         return "Done!"
 
     def _has_source(self) -> bool:
-        return (self.output_dir / "src" / "generated.py").is_file() or bool(
-            self.last_source
-        )
+        try:
+            source_path, _ = _find_generated_python_paths(self.output_dir)
+        except FileNotFoundError:
+            return bool(self.last_source)
+        return source_path.is_file() or bool(self.last_source)
 
     def _read_source(self) -> Optional[str]:
-        source_path = self.output_dir / "src" / "generated.py"
+        source_path, _ = _find_generated_python_paths(self.output_dir)
         if source_path.is_file():
             return source_path.read_text(encoding="utf-8")
         return self.last_source
@@ -312,7 +318,7 @@ class ChatSession:
 
     def _ensure_source_file(self) -> bool:
         """Write ``last_source`` to disk if the generated source file is missing."""
-        source_path = self.output_dir / "src" / "generated.py"
+        source_path, _ = _find_generated_python_paths(self.output_dir)
         if not source_path.is_file() and self.last_source:
             source_path.parent.mkdir(parents=True, exist_ok=True)
             source_path.write_text(self.last_source, encoding="utf-8")

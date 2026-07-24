@@ -106,10 +106,11 @@ def test_generate_and_build_writes_files(tmp_path):
             build_kwargs={"max_workers": 1, "cache_enabled": False},
         )
 
-    assert result["source_path"] == str(tmp_path / "src" / "generated.py")
-    assert result["test_path"] == str(tmp_path / "tests" / "test_generated.py")
-    assert (tmp_path / "src" / "generated.py").is_file()
-    assert (tmp_path / "tests" / "test_generated.py").is_file()
+    assert result["source_path"] == str(tmp_path / "src" / "square.py")
+    assert result["test_path"] == str(tmp_path / "tests" / "test_square.py")
+    assert (tmp_path / "src" / "square.py").is_file()
+    assert (tmp_path / "src" / "__init__.py").is_file()
+    assert (tmp_path / "tests" / "test_square.py").is_file()
     assert (tmp_path / "blueprint.aero").is_file()
     assert result["build"]["success"] is True
     assert result["build"]["passed"] == 1
@@ -193,8 +194,8 @@ def test_cli_generate_command(tmp_path):
         )
 
     assert result.exit_code == 0
-    assert (tmp_path / "src" / "generated.py").is_file()
-    assert (tmp_path / "tests" / "test_generated.py").is_file()
+    assert (tmp_path / "src" / "double.py").is_file()
+    assert (tmp_path / "tests" / "test_double.py").is_file()
     assert "Done!" in result.output or "passed" in result.output.lower()
 
 
@@ -233,7 +234,42 @@ def test_blueprint_prompt_generates_and_builds(tmp_path):
         )
 
     assert result.exit_code == 0
-    assert (tmp_path / "dist" / "src" / "generated.py").is_file()
+    assert (tmp_path / "dist" / "src" / "cube.py").is_file()
+
+
+def test_generate_uses_domain_specific_module_name(tmp_path):
+    """The workspace uses a descriptive filename derived from the generated code."""
+    response = (
+        "```python\n"
+        "class CacheEngine:\n"
+        "    def get(self, key: str) -> str:\n"
+        "        return key\n"
+        "```\n\n"
+        "```python\n"
+        "from generated import CacheEngine\n\n"
+        "def test_cache_engine_gets_value():\n"
+        "    engine = CacheEngine()\n"
+        "    assert engine.get('x') == 'x'\n"
+        "```"
+    )
+    with patch(
+        "aero_forge.generate.get_llm_client", return_value=_make_mock_client(response)
+    ):
+        result = generate_and_build(
+            "build a cache engine",
+            output_dir=tmp_path,
+            llm_provider="openai",
+            build_kwargs={"max_workers": 1, "cache_enabled": False},
+        )
+
+    assert result["source_path"] == str(tmp_path / "src" / "cache_engine.py")
+    assert result["test_path"] == str(tmp_path / "tests" / "test_cache_engine.py")
+    assert (tmp_path / "src" / "cache_engine.py").is_file()
+    assert (tmp_path / "src" / "__init__.py").is_file()
+    assert (tmp_path / "tests" / "test_cache_engine.py").is_file()
+    init = (tmp_path / "src" / "__init__.py").read_text(encoding="utf-8")
+    assert "from .cache_engine import CacheEngine" in init
+    assert '"CacheEngine"' in init
 
 
 def test_cli_generate_command_json_output(tmp_path):
