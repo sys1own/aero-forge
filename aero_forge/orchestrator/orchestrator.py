@@ -979,11 +979,7 @@ def _llm_plan_blueprint(
         config_override=config_override,
     )
     try:
-        raw = client.generate(
-            plan_prompt,
-            system_prompt=None,
-            max_tokens=max_tokens,
-        )
+        raw = client.generate(plan_prompt, max_tokens=max_tokens)
     except Exception as exc:
         logger.warning("LLM planning call failed: %s", exc)
         return None

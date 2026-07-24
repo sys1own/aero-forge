@@ -246,3 +246,52 @@ def test_primitive_subscript_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValidationError) as exc_info:
         validator.validate(tmp_path, language="python")
     assert "non-primitive" in str(exc_info.value).lower()
+
+
+def test_mat_mul_empty_return_rewritten_and_validated(tmp_path: Path) -> None:
+    """A generated ``mat_mul`` with a bare ``return []`` is auto-rewritten and passes validation."""
+    from aero_forge.scaffold.pre_write_validator import rewrite_empty_matrix_returns
+
+    source = (
+        "def mat_mul(a: list[list[float]], b: list[list[float]]) -> list[list[float]]:\n"
+        "    if not a or not b:\n"
+        "        return []\n"
+        "    rows = len(a)\n"
+        "    cols = len(b[0]) if b and b[0] else 0\n"
+        "    result = []\n"
+        "    for i in range(rows):\n"
+        "        row = []\n"
+        "        for j in range(cols):\n"
+        "            total = 0.0\n"
+        "            for k in range(len(b)):\n"
+        "                total += a[i][k] * b[k][j]\n"
+        "            row.append(total)\n"
+        "        result.append(row)\n"
+        "    return result\n"
+    )
+
+    rewritten = rewrite_empty_matrix_returns(source)
+    assert "return []" not in rewritten
+    assert "[[0.0] * " in rewritten
+
+    (tmp_path / "mat_mul.py").write_text(rewritten)
+    validator = PreWriteValidator()
+    result = validator.validate(tmp_path, language="python")
+    assert result.succeeded
+
+
+def test_int_matrix_zero_value(tmp_path: Path) -> None:
+    """Rewrites for integer matrices use ``0`` instead of ``0.0``."""
+    from aero_forge.scaffold.pre_write_validator import rewrite_empty_matrix_returns
+
+    source = (
+        "def zero_int(rows: int, cols: int) -> list[list[int]]:\n"
+        "    if rows == 0 or cols == 0:\n"
+        "        return []\n"
+        "    return [[0] * cols for _ in range(rows)]\n"
+    )
+    rewritten = rewrite_empty_matrix_returns(source)
+    assert "[[0] * " in rewritten
+    (tmp_path / "zero_int.py").write_text(rewritten)
+    result = PreWriteValidator().validate(tmp_path, language="python")
+    assert result.succeeded

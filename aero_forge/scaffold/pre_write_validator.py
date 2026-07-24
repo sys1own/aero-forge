@@ -325,23 +325,127 @@ def _suggests_matrix_or_array(name: str) -> bool:
     )
 
 
-def _check_empty_matrix_returns(tree: ast.AST) -> None:
-    """Reject ``return []`` in matrix/array functions that would discard target dimensions."""
+def _is_matrix_like_function(node: ast.FunctionDef) -> bool:
+    """True when a function looks like it should return a structured matrix/array."""
+    return (
+        node.returns is not None
+        and _annotation_is_nested_list(node.returns)
+    ) or _suggests_matrix_or_array(node.name)
+
+
+def _matrix_element_zero(returns: Optional[ast.AST]) -> Any:
+    """Choose ``0`` or ``0.0`` based on the innermost element type annotation."""
+    inner: Optional[ast.AST] = returns
+    while isinstance(inner, ast.Subscript):
+        if isinstance(inner.value, ast.Name) and inner.value.id in {"list", "List"}:
+            inner = inner.slice
+        else:
+            break
+    if isinstance(inner, ast.Name):
+        if inner.id in {"int", "bool", "i32", "i64"}:
+            return 0
+        if inner.id in {"float", "f32", "f64", "double"}:
+            return 0.0
+    return 0.0
+
+
+def _len_expr(name: str) -> ast.Call:
+    return ast.Call(
+        func=ast.Name(id="len", ctx=ast.Load()),
+        args=[ast.Name(id=name, ctx=ast.Load())],
+        keywords=[],
+    )
+
+
+def _cols_expr(name: Optional[str]) -> ast.expr:
+    """Return a safe column-count expression: ``len(b[0]) if b and b[0] else 0``."""
+    if not name:
+        return ast.Constant(value=0)
+    name_node = ast.Name(id=name, ctx=ast.Load())
+    sub_zero = ast.Subscript(value=name_node, slice=ast.Constant(value=0), ctx=ast.Load())
+    test = ast.BoolOp(
+        op=ast.And(),
+        values=[name_node, sub_zero],
+    )
+    body = ast.Call(
+        func=ast.Name(id="len", ctx=ast.Load()),
+        args=[sub_zero],
+        keywords=[],
+    )
+    return ast.IfExp(test=test, body=body, orelse=ast.Constant(value=0))
+
+
+def _zero_matrix_expr(rows_expr: ast.expr, cols_expr: ast.expr, zero: Any) -> ast.ListComp:
+    """Build ``[[zero] * cols for _ in range(rows)]`` as an AST expression."""
+    elt = ast.BinOp(
+        left=ast.List(elts=[ast.Constant(value=zero)], ctx=ast.Load()),
+        op=ast.Mult(),
+        right=cols_expr,
+    )
+    target = ast.Name(id="_", ctx=ast.Store())
+    iter_call = ast.Call(
+        func=ast.Name(id="range", ctx=ast.Load()),
+        args=[rows_expr],
+        keywords=[],
+    )
+    generator = ast.comprehension(target=target, iter=iter_call, ifs=[], is_async=0)
+    return ast.ListComp(elt=elt, generators=[generator])
+
+
+def rewrite_empty_matrix_returns(source: str) -> str:
+    """Rewrite bare ``return []`` in matrix/array functions to a zero-filled shape.
+
+    Uses the function's argument names and return type to produce a safe
+    ``[[0.0] * cols for _ in range(rows)]`` list-comprehension. If no rewrite is
+    needed, the original source text is returned unchanged.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+
+    changed = False
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef):
             continue
-        matrix_like = (
-            node.returns is not None
-            and _annotation_is_nested_list(node.returns)
-        ) or _suggests_matrix_or_array(node.name)
-        if not matrix_like:
+        if not _is_matrix_like_function(node):
+            continue
+
+        args = [a.arg for a in node.args.args + node.args.posonlyargs + node.args.kwonlyargs]
+        zero = _matrix_element_zero(node.returns)
+
+        for stmt in list(ast.walk(node)):
+            if _is_empty_list_return(stmt) and isinstance(stmt, ast.Return):
+                rows_expr = _len_expr(args[0]) if args else ast.Constant(value=0)
+                cols_expr = _cols_expr(args[1]) if len(args) > 1 else ast.Constant(value=0)
+                stmt.value = _zero_matrix_expr(rows_expr, cols_expr, zero)
+                changed = True
+
+    if not changed:
+        return source
+
+    ast.fix_missing_locations(tree)
+    return ast.unparse(tree)
+
+
+def _check_empty_matrix_returns(tree: ast.AST) -> None:
+    """Reject ``return []`` in matrix/array functions that would discard target dimensions.
+
+    The error message advertises ``rewrite_empty_matrix_returns()`` so callers can
+    auto-correct the source before writing it to the workspace.
+    """
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        if not _is_matrix_like_function(node):
             continue
         for stmt in ast.walk(node):
             if _is_empty_list_return(stmt):
                 raise ValidationError(
                     f"Function '{node.name}' returns an empty list{_format_line(stmt)}, which discards "
-                    "the expected matrix/array dimensions. Return a zero-filled structure "
-                    "with the correct target shape instead (e.g. [[0] * cols for _ in range(rows)]).",
+                    "the expected matrix/array dimensions. Apply rewrite_empty_matrix_returns() "
+                    "or return a zero-filled structure with the correct target shape "
+                    "(e.g. [[0.0] * cols for _ in range(rows)]).",
                     output="",
                 )
 
