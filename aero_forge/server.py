@@ -174,8 +174,6 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_file_content(query)
             if path == "/api/download-zip":
                 return self._handle_download_zip(query)
-            if path == "/api/ws-port":
-                return self._handle_ws_port(query)
 
             return self._serve_static(path)
         except Exception as exc:
@@ -369,21 +367,6 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 "tree": _build_tree(session_dir),
             },
         )
-
-    def _handle_ws_port(self, query: Dict[str, List[str]]) -> None:
-        """Return the actual WebSocket server port, falling back to HTTP port + 1."""
-        parsed = urlparse(self.path)
-        query = parse_qs(parsed.query)
-        session_id = _first(query, "session_id")
-        if session_id:
-            _session_dir(session_id)  # ensure sandbox exists
-        fallback = DEFAULT_PORT + 1
-        try:
-            server_port = int(self.server.server_address[1])
-            fallback = server_port + 1
-        except Exception:
-            pass
-        return _send_json(self, 200, {"ws_port": _ws_port or fallback})
 
     def _handle_file_content(self, query: Dict[str, List[str]]) -> None:
         session_id = _first(query, "session_id")
