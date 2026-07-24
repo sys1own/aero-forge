@@ -282,7 +282,7 @@ def test_list_comprehension_filter_and_step(tmp_path: Path) -> None:
     not shutil.which("cargo") or not shutil.which("rustc"),
     reason="Rust toolchain not installed",
 )
-def test_nested_function_rejected(tmp_path: Path) -> None:
+def test_nested_function_routes_to_general(tmp_path: Path) -> None:
     source = (
         "def outer(x: int) -> int:\n"
         "    def inner(y: int) -> int:\n"
@@ -303,8 +303,9 @@ def test_nested_function_rejected(tmp_path: Path) -> None:
         use_llm=False,
     )
     result = orchestrator.run()
-    assert not result["success"]
-    assert "Nested functions" in result.get("error", "")
+    assert result["success"]
+    assert result["route"] == "GENERAL_PURPOSE"
+    assert "nested function" in " ".join(result.get("reasons", [])).lower()
 
 
 @pytest.mark.skipif(

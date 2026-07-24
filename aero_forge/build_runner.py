@@ -357,12 +357,18 @@ class BuildRunner:
                 )
                 artifact_path = source_output / artifact.name
 
+        logs = result.get("logs", "")
+        if not success:
+            error = result.get("error")
+            if error:
+                logs = f"{error}\n{logs}".strip()
+
         return BuildResult(
             source=source,
             function_names=function_names,
             success=success,
             artifact=artifact_path,
-            logs=result.get("logs", ""),
+            logs=logs,
             iterations=result.get("iterations", 0),
             explanation=explanation,
         )
