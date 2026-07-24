@@ -147,3 +147,59 @@ def test_zero_matrix_filled_accepted(tmp_path: Path) -> None:
     )
     result = validator.validate(tmp_path, language="python")
     assert result.succeeded
+
+
+def test_dynamic_reflection_builtin_rejected(tmp_path: Path) -> None:
+    validator = PreWriteValidator()
+    (tmp_path / "main.py").write_text(
+        "def blocked_multiply(a: int, b: int) -> int:\n"
+        "    if hasattr(a, 'real'):\n"
+        "        return a * b\n"
+        "    return a * b\n"
+    )
+    with pytest.raises(ValidationError) as exc_info:
+        validator.validate(tmp_path, language="python")
+    assert "hasattr" in str(exc_info.value).lower()
+    assert "isinstance" in str(exc_info.value).lower()
+
+
+def test_eval_exec_rejected(tmp_path: Path) -> None:
+    validator = PreWriteValidator()
+    (tmp_path / "main.py").write_text("x = eval('1 + 1')\n")
+    with pytest.raises(ValidationError) as exc_info:
+        validator.validate(tmp_path, language="python")
+    assert "eval" in str(exc_info.value).lower()
+
+
+def test_intenum_allowed_and_plain_class_allowed(tmp_path: Path) -> None:
+    validator = PreWriteValidator()
+    (tmp_path / "main.py").write_text(
+        "from enum import IntEnum\n"
+        "from dataclasses import dataclass\n"
+        "class State(IntEnum):\n    ON = 1\n"
+        "@dataclass\n"
+        "class Config:\n    value: int = 0\n"
+    )
+    result = validator.validate(tmp_path, language="python")
+    assert result.succeeded
+
+
+def test_multi_base_class_rejected(tmp_path: Path) -> None:
+    validator = PreWriteValidator()
+    (tmp_path / "main.py").write_text(
+        "from enum import Enum\n"
+        "class Serializable:\n    pass\n"
+        "class State(Serializable, Enum):\n    ON = 1\n"
+    )
+    with pytest.raises(ValidationError) as exc_info:
+        validator.validate(tmp_path, language="python")
+    assert "multiple base classes" in str(exc_info.value).lower()
+
+
+def test_validator_output_includes_message_and_path(tmp_path: Path) -> None:
+    validator = PreWriteValidator()
+    (tmp_path / "main.py").write_text("def evaluate_rule_tree(event: dict):\n    pass\n")
+    with pytest.raises(ValidationError) as exc_info:
+        validator.validate(tmp_path, language="python")
+    assert "main.py" in exc_info.value.output
+    assert "dict" in exc_info.value.output

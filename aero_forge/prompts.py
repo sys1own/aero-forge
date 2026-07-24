@@ -55,7 +55,8 @@ If a function indexes into a list, guard against empty input with `if len(<name>
 
 STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
 - Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
-- Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
+- Do NOT use dynamic reflection builtins (`hasattr`, `getattr`, `setattr`, `eval()`, `exec()`). Use `isinstance()` for type checks or `try...except AttributeError:` for safe attribute access.
+- State machine enums must inherit from `IntEnum` only (e.g. `from enum import IntEnum`) or be a plain `@dataclass`; no raw `Enum`, `Flag`, or multi-base class hierarchies.
 - Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
 """,
     "Minimal baseline prompt.",
@@ -76,7 +77,7 @@ RULES:
 7. Support Python 3.10+ and Rust 1.70+.
 8. If the user asks for "fast" or "optimized", use SIMD-friendly data layouts.
 9. If the user mentions "GPU", include a comment `# @accelerate gpu`.
-10. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`.
+10. Do NOT use `hasattr`, `getattr`, `setattr`, `eval()`, `exec()`, `raise`, `assert`, or `with`. Use `isinstance()` for explicit type checks and `try...except AttributeError:` for safe attribute access.
 11. Do NOT use list comprehensions. Use explicit for loops instead.
 12. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 13. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
@@ -95,7 +96,8 @@ If a function indexes into a list, guard against empty input with `if len(<name>
 
 STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
 - Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
-- Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
+- Do NOT use dynamic reflection builtins (`hasattr`, `getattr`, `setattr`, `eval()`, `exec()`). Use `isinstance()` for type checks or `try...except AttributeError:` for safe attribute access.
+- State machine enums must inherit from `IntEnum` only (e.g. `from enum import IntEnum`) or be a plain `@dataclass`; no raw `Enum`, `Flag`, or multi-base class hierarchies.
 - Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
 """,
     "Structured rules + output format.",
@@ -113,7 +115,7 @@ RULES:
 4. Avoid dynamic types, dictionaries, sets, and nested data structures unless necessary.
 5. Optimize for asymptotic complexity first; prefer O(n log n) or better.
 6. Return no markdown, no commentary, no docstring unless it helps readability.
-7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`.
+7. Do NOT use `hasattr`, `getattr`, `setattr`, `eval()`, `exec()`, `raise`, `assert`, or `with`. Use `isinstance()` for explicit type checks and `try...except AttributeError:` for safe attribute access.
 8. Do NOT use list comprehensions. Use explicit for loops instead.
 9. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 10. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
@@ -126,7 +128,8 @@ If a function indexes into a list, guard against empty input with `if len(<name>
 
 STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
 - Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
-- Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
+- Do NOT use dynamic reflection builtins (`hasattr`, `getattr`, `setattr`, `eval()`, `exec()`). Use `isinstance()` for type checks or `try...except AttributeError:` for safe attribute access.
+- State machine enums must inherit from `IntEnum` only (e.g. `from enum import IntEnum`) or be a plain `@dataclass`; no raw `Enum`, `Flag`, or multi-base class hierarchies.
 - Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
 """,
     "Focus on algorithmic efficiency.",
@@ -143,7 +146,7 @@ RULES:
 4. Prefer iterative numeric kernels over recursion and dynamic containers.
 5. For "fast"/"optimized" requests, add `# @accelerate gpu` and use cache-friendly blocking where applicable.
 6. No markdown, no explanations, no extra output.
-7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`.
+7. Do NOT use `hasattr`, `getattr`, `setattr`, `eval()`, `exec()`, `raise`, `assert`, or `with`. Use `isinstance()` for explicit type checks and `try...except AttributeError:` for safe attribute access.
 8. Do NOT use list comprehensions. Use explicit for loops instead.
 9. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 10. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
@@ -156,7 +159,8 @@ If a function indexes into a list, guard against empty input with `if len(<name>
 
 STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
 - Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
-- Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
+- Do NOT use dynamic reflection builtins (`hasattr`, `getattr`, `setattr`, `eval()`, `exec()`). Use `isinstance()` for type checks or `try...except AttributeError:` for safe attribute access.
+- State machine enums must inherit from `IntEnum` only (e.g. `from enum import IntEnum`) or be a plain `@dataclass`; no raw `Enum`, `Flag`, or multi-base class hierarchies.
 - Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
 """,
     "Focus on low-level performance and SIMD-friendly code.",
@@ -173,7 +177,7 @@ RULES:
 4. Use local variables and flat numeric data structures for speed.
 5. Add `# @accelerate gpu` when the user asks for GPU acceleration.
 6. No markdown fences, no explanations, and no code outside the function.
-7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`.
+7. Do NOT use `hasattr`, `getattr`, `setattr`, `eval()`, `exec()`, `raise`, `assert`, or `with`. Use `isinstance()` for explicit type checks and `try...except AttributeError:` for safe attribute access.
 8. Do NOT use list comprehensions. Use explicit for loops instead.
 9. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 10. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
@@ -192,7 +196,8 @@ If a function indexes into a list, guard against empty input with `if len(<name>
 
 STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
 - Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
-- Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
+- Do NOT use dynamic reflection builtins (`hasattr`, `getattr`, `setattr`, `eval()`, `exec()`). Use `isinstance()` for type checks or `try...except AttributeError:` for safe attribute access.
+- State machine enums must inherit from `IntEnum` only (e.g. `from enum import IntEnum`) or be a plain `@dataclass`; no raw `Enum`, `Flag`, or multi-base class hierarchies.
 - Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
 """,
     "Balanced combination of V2, V3, and V4.",
@@ -207,7 +212,7 @@ RULES:
 2. Surprise the user with an elegant, high-performance algorithm when appropriate.
 3. Avoid standard-library heavy solutions; aim for numeric/scalar kernels that compile cleanly to Rust.
 4. No markdown, no explanations, no extra output.
-5. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`.
+5. Do NOT use `hasattr`, `getattr`, `setattr`, `eval()`, `exec()`, `raise`, `assert`, or `with`. Use `isinstance()` for explicit type checks and `try...except AttributeError:` for safe attribute access.
 6. Do NOT use list comprehensions. Use explicit for loops instead.
 7. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 8. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
@@ -220,7 +225,8 @@ If a function indexes into a list, guard against empty input with `if len(<name>
 
 STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
 - Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
-- Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
+- Do NOT use dynamic reflection builtins (`hasattr`, `getattr`, `setattr`, `eval()`, `exec()`). Use `isinstance()` for type checks or `try...except AttributeError:` for safe attribute access.
+- State machine enums must inherit from `IntEnum` only (e.g. `from enum import IntEnum`) or be a plain `@dataclass`; no raw `Enum`, `Flag`, or multi-base class hierarchies.
 - Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
 """,
     "Encourage novel algorithm choices.",
@@ -235,7 +241,7 @@ RULES:
 2. Use classic algorithms (e.g., Euclidean GCD, Sieve of Eratosthenes, matrix multiplication triple loop).
 3. Avoid recursion, dynamic typing, dictionaries, sets.
 4. No markdown, no explanations, no extra output.
-5. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`.
+5. Do NOT use `hasattr`, `getattr`, `setattr`, `eval()`, `exec()`, `raise`, `assert`, or `with`. Use `isinstance()` for explicit type checks and `try...except AttributeError:` for safe attribute access.
 6. Do NOT use list comprehensions. Use explicit for loops instead.
 7. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 8. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
@@ -248,7 +254,8 @@ If a function indexes into a list, guard against empty input with `if len(<name>
 
 STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
 - Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
-- Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
+- Do NOT use dynamic reflection builtins (`hasattr`, `getattr`, `setattr`, `eval()`, `exec()`). Use `isinstance()` for type checks or `try...except AttributeError:` for safe attribute access.
+- State machine enums must inherit from `IntEnum` only (e.g. `from enum import IntEnum`) or be a plain `@dataclass`; no raw `Enum`, `Flag`, or multi-base class hierarchies.
 - Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
 """,
     "Use only well-known algorithms.",
@@ -264,7 +271,7 @@ RULES:
 3. If the user provides benchmark or error feedback, optimize accordingly.
 4. Avoid recursion, dynamic typing, dictionaries, sets.
 5. No markdown, no explanations, no extra output.
-6. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`.
+6. Do NOT use `hasattr`, `getattr`, `setattr`, `eval()`, `exec()`, `raise`, `assert`, or `with`. Use `isinstance()` for explicit type checks and `try...except AttributeError:` for safe attribute access.
 7. Do NOT use list comprehensions. Use explicit for loops instead.
 8. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 9. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
@@ -277,7 +284,8 @@ If a function indexes into a list, guard against empty input with `if len(<name>
 
 STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
 - Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
-- Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
+- Do NOT use dynamic reflection builtins (`hasattr`, `getattr`, `setattr`, `eval()`, `exec()`). Use `isinstance()` for type checks or `try...except AttributeError:` for safe attribute access.
+- State machine enums must inherit from `IntEnum` only (e.g. `from enum import IntEnum`) or be a plain `@dataclass`; no raw `Enum`, `Flag`, or multi-base class hierarchies.
 - Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
 """,
     "Optimizes with iterative feedback.",
@@ -294,7 +302,7 @@ RULES:
 4. Use index-based access for lists (e.g., `arr[i]`) instead of `for x in arr`, `enumerate()`, or `zip()`.
 5. Do NOT use list comprehensions. Use explicit for loops and `append()` instead.
 6. Do NOT use tuple unpacking or multi-target assignments (e.g., `a, b = b, a + b`). Use temporary variables and simple assignments.
-7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, `sum()`, `map()`, `filter()`, `eval()`, `exec()`, generators, `async`/`await`, `match`/`case`, or walrus operators.
+7. Do NOT use `hasattr`, `getattr`, `setattr`, `eval()`, `exec()`, `raise`, `assert`, `with`, `sum()`, `map()`, `filter()`, generators, `async`/`await`, `match`/`case`, or walrus operators. Use `isinstance()` for explicit type checks and `try...except AttributeError:` for safe attribute access.
 8. Keep code simple and explicit; avoid Python idioms that do not map directly to Rust.
 9. All return statements must return the same number of values.
 10. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
@@ -306,7 +314,8 @@ If a function indexes into a list, guard against empty input with `if len(<name>
 
 STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
 - Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
-- Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
+- Do NOT use dynamic reflection builtins (`hasattr`, `getattr`, `setattr`, `eval()`, `exec()`). Use `isinstance()` for type checks or `try...except AttributeError:` for safe attribute access.
+- State machine enums must inherit from `IntEnum` only (e.g. `from enum import IntEnum`) or be a plain `@dataclass`; no raw `Enum`, `Flag`, or multi-base class hierarchies.
 - Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
 """,
     "Explicitly forbids constructs that are hard for the transpiler to handle.",
@@ -324,7 +333,7 @@ RULES:
 4. Avoid complex list slicing, tuple unpacking, and multi-target assignments when possible.
 5. For the Mandelbrot escape-time algorithm, use real and imaginary parts separately. If `cr*cr + ci*ci >= 4` return 0 immediately. Start with `zr = 0.0` and `zi = 0.0`. For `i` from `0` to `max_iter - 1`, compute `new_zr = zr*zr - zi*zi + cr` and `new_zi = 2*zr*zi + ci`. If `new_zr*new_zr + new_zi*new_zi > 4` return `i + 1` (the number of iterations performed). Otherwise set `zr = new_zr` and `zi = new_zi`. Return `max_iter` if it never escapes. Test guidance: `(0.0, 0.0, 100) -> 100`, `(-0.9, 0.0, 100) -> 100`, `(-1.5, 0.0, 100) -> 100`, `(0.25, 0.5, 100) -> 100`, `(-1.3, 0.0, 100) -> 100`; escape cases: `(2.0, 0.0, 100) -> 0`, `(1.0, 0.0, 100) -> 3`. Avoid ambiguous boundary points in tests.
 6. Do NOT use list comprehensions. Use explicit for loops and `append()` instead.
-7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, `sum()`, `map()`, `filter()`, `eval()`, `exec()`, generators, `async`/`await`, `match`/`case`, or walrus operators.
+7. Do NOT use `hasattr`, `getattr`, `setattr`, `eval()`, `exec()`, `raise`, `assert`, `with`, `sum()`, `map()`, `filter()`, generators, `async`/`await`, `match`/`case`, or walrus operators. Use `isinstance()` for explicit type checks and `try...except AttributeError:` for safe attribute access.
 8. Do NOT define nested functions, classes, or lambdas inside the function.
 9. All return statements must return the same number of values.
 10. Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays.
@@ -333,7 +342,8 @@ If a function indexes into a list, guard against empty input with `if len(<name>
 
 STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
 - Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
-- Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
+- Do NOT use dynamic reflection builtins (`hasattr`, `getattr`, `setattr`, `eval()`, `exec()`). Use `isinstance()` for type checks or `try...except AttributeError:` for safe attribute access.
+- State machine enums must inherit from `IntEnum` only (e.g. `from enum import IntEnum`) or be a plain `@dataclass`; no raw `Enum`, `Flag`, or multi-base class hierarchies.
 - Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
 12. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 """,

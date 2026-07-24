@@ -85,44 +85,65 @@ def _collect_ann_assign_targets(tree: ast.AST) -> List[ast.AST]:
     return annotations
 
 
+def _format_line(node: ast.AST) -> str:
+    lineno = getattr(node, "lineno", None)
+    return f" at line {lineno}" if lineno else ""
+
+
 def _check_loose_annotations(tree: ast.AST) -> None:
     """Reject bare ``dict``/``list`` type annotations that lack explicit generic parameters."""
     for ann in _collect_ann_assign_targets(tree):
         if _is_bare_dict_or_list_annotation(ann):
             name = ann.id  # type: ignore[union-attr]
             raise ValidationError(
-                f"Bare '{name}' type annotation is not allowed. "
+                f"Bare '{name}' type annotation is not allowed{_format_line(ann)}. "
                 f"Use explicit generic forms such as '{name.lower()}[str, Any]' "
                 "(with 'from typing import Any') or omit the annotation.",
                 output="",
             )
 
 
+def _is_allowed_enum_base(base: ast.AST) -> bool:
+    """Only ``IntEnum`` / ``enum.IntEnum`` are accepted as enum bases."""
+    if isinstance(base, ast.Name) and base.id == "IntEnum":
+        return True
+    if (
+        isinstance(base, ast.Attribute)
+        and isinstance(base.value, ast.Name)
+        and base.value.id == "enum"
+        and base.attr == "IntEnum"
+    ):
+        return True
+    return False
+
+
 def _check_raw_enum_state_machines(tree: ast.AST) -> None:
-    """Reject classes that inherit from raw ``Enum``; prefer ``IntEnum`` or dataclasses."""
+    """Reject non-IntEnum / multi-base class hierarchies for state machines."""
     for node in ast.walk(tree):
         if not isinstance(node, ast.ClassDef):
             continue
+        if len(node.bases) > 1:
+            raise ValidationError(
+                f"Class '{node.name}' has multiple base classes{_format_line(node)}. "
+                "State machine enums must inherit from 'IntEnum' only, "
+                "or be a plain class without complex base class trees.",
+                output="",
+            )
         for base in node.bases:
-            if isinstance(base, ast.Name) and base.id == "Enum":
-                raise ValidationError(
-                    f"Class '{node.name}' inherits from raw 'Enum'. "
-                    "Use 'IntEnum' from 'enum' for serialisable state machines, "
-                    "or use '@dataclass' for structured state data.",
-                    output="",
-                )
-            if (
-                isinstance(base, ast.Attribute)
-                and isinstance(base.value, ast.Name)
-                and base.value.id == "enum"
-                and base.attr == "Enum"
-            ):
-                raise ValidationError(
-                    f"Class '{node.name}' inherits from raw 'enum.Enum'. "
-                    "Use 'enum.IntEnum' for serialisable state machines, "
-                    "or use '@dataclass' for structured state data.",
-                    output="",
-                )
+            if _is_allowed_enum_base(base):
+                continue
+            if isinstance(base, ast.Name):
+                base_name = base.id
+            elif isinstance(base, ast.Attribute):
+                base_name = f"{base.value.id}.{base.attr}"  # type: ignore[union-attr]
+            else:
+                base_name = ast.unparse(base)
+            raise ValidationError(
+                f"Class '{node.name}' inherits from '{base_name}'{_format_line(node)}. "
+                "State machine enums must use 'IntEnum' (e.g. 'from enum import IntEnum') "
+                "or a plain '@dataclass' without complex base class trees.",
+                output="",
+            )
 
 
 def _is_empty_list_return(node: ast.AST) -> bool:
@@ -157,11 +178,29 @@ def _check_empty_matrix_returns(tree: ast.AST) -> None:
         for stmt in ast.walk(node):
             if _is_empty_list_return(stmt):
                 raise ValidationError(
-                    f"Function '{node.name}' returns an empty list, which discards "
+                    f"Function '{node.name}' returns an empty list{_format_line(stmt)}, which discards "
                     "the expected matrix/array dimensions. Return a zero-filled structure "
                     "with the correct target shape instead (e.g. [[0] * cols for _ in range(rows)]).",
                     output="",
                 )
+
+
+_DYNAMIC_REFLECTION_BUILTINS = {"hasattr", "getattr", "setattr", "eval", "exec"}
+
+
+def _check_dynamic_reflection(tree: ast.AST) -> None:
+    """Reject dynamic reflection builtins that break static analysis and sandboxing."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in _DYNAMIC_REFLECTION_BUILTINS:
+            raise ValidationError(
+                f"Function calls dynamic reflection builtin '{func.id}'{_format_line(node)}. "
+                "Use explicit type checks with 'isinstance()' or 'try...except AttributeError:' "
+                "instead of 'hasattr'/'getattr'/'setattr'/'eval'/'exec'.",
+                output="",
+            )
 
 
 def _run_python_static_checks(source: str) -> None:
@@ -173,6 +212,7 @@ def _run_python_static_checks(source: str) -> None:
     _check_loose_annotations(tree)
     _check_raw_enum_state_machines(tree)
     _check_empty_matrix_returns(tree)
+    _check_dynamic_reflection(tree)
 
 
 class PreWriteValidator:
@@ -253,7 +293,7 @@ class PreWriteValidator:
                 try:
                     _run_python_static_checks(path.read_text(encoding="utf-8"))
                 except ValidationError as exc:
-                    exc.output = f"{path}: {exc.output}"
+                    exc.output = f"{path}: {exc}"
                     raise
                 except (OSError, UnicodeDecodeError) as exc:
                     raise ValidationError(f"Could not read {path}: {exc}", output=str(exc)) from exc
