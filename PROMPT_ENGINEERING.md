@@ -5,6 +5,11 @@ four reference test cases using the DeepSeek API.  The goal was to find a
 system prompt that produces **first-attempt compiles ≥ 80 %** and **< 3 average
 iterations**.
 
+> **Architecture note:** Prompt engineering is part of the *upstream intent*
+> layer. LLMs are used to interpret the user's natural language request and
+> emit Python source/tests. Once generated, the transpile → compile → test →
+> heal pipeline is fully deterministic and never calls an LLM.
+
 ## Campaign Setup
 
 - Provider: `deepseek` (`https://api.deepseek.com/v1`)
@@ -65,8 +70,8 @@ The script writes `prompt_engineering_report.json` with per-case metrics.
   `v10_correctness_focused`.
 - Added **smoke-test generation** as a fallback when the LLM does not produce
   tests.
-- Added **router-level sanitization** that strips unsupported `raise` and
-  `assert` statements before transpilation.
+- Added **deterministic router-level sanitization** that strips unsupported `raise` and
+  `assert` statements before transpilation. This is a static AST transform, not an LLM call.
 - Added `aero_forge/prompt_engineering.py` campaign harness and
   `tests/test_prompt_engineering.py`.
 

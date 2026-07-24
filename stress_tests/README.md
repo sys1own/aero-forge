@@ -24,7 +24,7 @@ fail with a clear `UnsupportedError` message rather than crashing.
 | 4 | Control flow | **Pass** | `break`/`continue` in `for`/`while` loops, recursion, nested `if`/`elif`/`else` work. |
 | 5 | Standard library | **Partial** | `math` module functions and constants work. `random`, `datetime`, `re`, `json` are unsupported. |
 | 6 | Cross-file & multi-module | **Pass** | Multiple source files build in parallel with per-source tests. |
-| 7 | LLM healing | **Partial / API-dependent** | `test_no_llm_graceful_failure` passes. Real healing verified with `openrouter/free` for syntax, type, and multi-function broken files when a valid key is available. Rate-limit/backoff and API-fallback behavior is covered by mocked unit tests in `stress_tests/test_llm_rate_limits.py`. Gemini free-tier keys are often quota-exhausted and will xfail/skip. |
+| 7 | Deterministic failure diagnostics | **Pass** | Broken files fail cleanly with `[Transpiler Error]` or `Syntax error` diagnostics. The build loop no longer calls an LLM for repair; LLMs are confined to upstream intent and human-facing diagnostics. |
 | 8 | Performance & scale | **Pass** | 50 functions from one file compile in ~1 second. |
 | 9 | Blueprint edge cases | **Pass** | Missing files, missing function names, and name/compile_all combinations produce clear messages. |
 | 10 | Classes & methods | **Pass** | `Counter` and `Calculator` classes compile, including instance methods, read-only methods, `@staticmethod`, and `@classmethod`. |
