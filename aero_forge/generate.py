@@ -5,14 +5,19 @@ from __future__ import annotations
 import ast
 import logging
 import re
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from aero_forge.blueprint import Blueprint, FunctionSpec, discover_functions
 from aero_forge.build_runner import BuildRunner
 from aero_forge.config import ConfigOverride
+from aero_forge.errors import UserError
 from aero_forge.llm.clients import get_llm_client
+from aero_forge.overlay import OverlayManager
+from aero_forge.overlay.store import OverlayStore
 from aero_forge.prompts import get_default_template, get_template
+from aero_forge.scaffold.pre_write_validator import PreWriteValidator, ValidationError
 from aero_forge.algorithms import (
     Algorithm,
     algorithm_prompt_context,
@@ -247,11 +252,28 @@ def write_generated_project(
     implementation: str,
     tests: str,
     project_name: str = "generated_project",
+    validate: bool = True,
 ) -> Tuple[Path, Path, Blueprint]:
     """Write implementation, tests, and a blueprint to ``output_dir``.
 
+    Runs pre-write validation and performs an active structural merge when a
+    previous generated baseline exists, preserving user edits from the workspace.
     Returns ``(source_path, test_path, blueprint)``.
     """
+    # Normalise generated text to end with a single newline so structural merges
+    # and downstream line-oriented tools behave consistently.
+    if not implementation.endswith("\n"):
+        implementation += "\n"
+    if tests and not tests.endswith("\n"):
+        tests += "\n"
+
+    if validate:
+        validator = PreWriteValidator(context={}, language="python")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "generated.py").write_text(implementation, encoding="utf-8")
+            validator.validate(tmp_path, language="python")
+
     src_dir = output_dir / "src"
     tests_dir = output_dir / "tests"
     src_dir.mkdir(parents=True, exist_ok=True)
@@ -259,8 +281,28 @@ def write_generated_project(
 
     source_path = src_dir / "generated.py"
     test_path = tests_dir / "test_generated.py"
-    source_path.write_text(implementation, encoding="utf-8")
+
+    # Active structural merge: preserve committed user overlays on re-generation.
+    overlay_store = OverlayStore(
+        output_dir,
+        build_cache_dir=".aero/build_cache",
+        overlays_dir=".aero/overlays",
+    )
+    overlay_manager = OverlayManager(output_dir, store=overlay_store)
+    if source_path.is_file():
+        reapply_status = overlay_manager.structural_reapply(
+            source_path, implementation, language="python"
+        )
+        if reapply_status.name == "APPLIED":
+            implementation = source_path.read_text(encoding="utf-8")
+        else:
+            source_path.write_text(implementation, encoding="utf-8")
+    else:
+        source_path.write_text(implementation, encoding="utf-8")
+    overlay_manager.record_generated(source_path)
+
     test_path.write_text(tests, encoding="utf-8")
+    overlay_manager.record_generated(test_path)
 
     blueprint = Blueprint(
         project=project_name,
@@ -574,29 +616,45 @@ def generate_and_build(
         best["variants"] = variant_results
         return best
 
-    (
-        source_path,
-        test_path,
-        blueprint,
-        implementation,
-        tests,
-        explanation,
-    ) = generate_project(
-        prompt,
-        constraints=constraints,
-        output_dir=output_dir,
-        project_name=project_name,
-        llm_provider=llm_provider,
-        model=model,
-        max_retries=max_retries,
-        prompt_template=prompt_template,
-        algorithm_library=algorithm_library,
-        selected_algorithm=selected_algorithm,
-        discover=discover,
-        explain=explain,
-        review=review,
-        config_override=config_override,
-    )
+    try:
+        (
+            source_path,
+            test_path,
+            blueprint,
+            implementation,
+            tests,
+            explanation,
+        ) = generate_project(
+            prompt,
+            constraints=constraints,
+            output_dir=output_dir,
+            project_name=project_name,
+            llm_provider=llm_provider,
+            model=model,
+            max_retries=max_retries,
+            prompt_template=prompt_template,
+            algorithm_library=algorithm_library,
+            selected_algorithm=selected_algorithm,
+            discover=discover,
+            explain=explain,
+            review=review,
+            config_override=config_override,
+        )
+    except ValidationError as exc:
+        return {
+            "source_path": "",
+            "test_path": "",
+            "blueprint_path": str(output_dir / "blueprint.aero"),
+            "implementation": "",
+            "tests": "",
+            "explanation": "",
+            "build": {
+                "success": False,
+                "error": "pre-write validation failed",
+                "logs": exc.output,
+            },
+            "iterations": [],
+        }
 
     result: Dict[str, Any] = {
         "source_path": str(source_path),
