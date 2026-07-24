@@ -81,7 +81,7 @@ def _make_zip(file_map: dict) -> bytes:
 def test_index_html(server):
     status, body = _get(server + "/")
     assert status == 200
-    assert b"Aero-Forge" in body
+    assert (b"Aero Forge" in body or b"Aero-Forge" in body)
     assert b"</html>" in body
 
 

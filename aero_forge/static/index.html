@@ -3,22 +3,28 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Aero-Forge Devin Core</title>
+  <title>Aero Forge</title>
   <style>
     :root {
-      --bg: #0a0d12;
-      --panel: #111620;
-      --panel-2: #181d29;
-      --panel-3: #202634;
-      --text: #e8ecf1;
-      --muted: #94a2b8;
-      --accent: #22d3ee;
-      --accent-2: #0ea5e9;
-      --accent-glow: rgba(34, 211, 238, 0.25);
-      --border: #2a3142;
-      --success: #34d399;
-      --warning: #fbbf24;
-      --danger: #f87171;
+      --bg: #1e1e1e;
+      --panel: #252526;
+      --panel-2: #333333;
+      --panel-3: #3c3c3c;
+      --editor: #1e1e1e;
+      --text: #d4d4d4;
+      --muted: #858585;
+      --accent: #007acc;
+      --accent-2: #3794ff;
+      --accent-glow: rgba(0, 122, 204, 0.25);
+      --border: #3c3c3c;
+      --success: #7ee787;
+      --warning: #f5d188;
+      --danger: #f48771;
+      --terminal-bg: #181818;
+      --terminal-text: #cccccc;
+      --terminal-info: #4fc1ff;
+      --terminal-success: #7ee787;
+      --terminal-error: #f48771;
     }
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; }
@@ -29,178 +35,212 @@
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      font-size: 13px;
     }
-    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
     ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
     ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
     /* Header */
     header {
-      height: 56px;
-      background: var(--panel);
+      height: 38px;
+      background: #181818;
       border-bottom: 1px solid var(--border);
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 0 1rem;
+      padding: 0 0.75rem;
       flex-shrink: 0;
       gap: 1rem;
     }
-    .brand { display: flex; align-items: center; gap: 0.75rem; }
-    .logo {
-      width: 32px; height: 32px; border-radius: 6px;
-      background: linear-gradient(135deg, var(--accent), var(--accent-2));
-      display: grid; place-items: center; font-weight: 800; color: #000; font-size: 0.9rem;
+    .brand { display: flex; align-items: center; gap: 0.6rem; }
+    .brand .logo {
+      width: 22px; height: 22px; color: var(--accent);
+      flex-shrink: 0;
     }
-    .brand h1 { font-size: 1.1rem; margin: 0; letter-spacing: 0.02em; }
-    .brand small { color: var(--muted); font-size: 0.7rem; display: block; margin-top: -2px; }
-    .header-actions { display: flex; align-items: center; gap: 0.75rem; }
+    .brand h1 { font-size: 0.95rem; margin: 0; font-weight: 500; letter-spacing: 0.01em; color: var(--text); }
+    .brand small { color: var(--muted); font-size: 0.65rem; display: block; margin-top: -2px; }
+    .header-actions { display: flex; align-items: center; gap: 0.6rem; }
     .tier-badge {
-      font-size: 0.7rem; font-weight: 700; text-transform: uppercase; padding: 0.25rem 0.5rem;
+      font-size: 0.65rem; font-weight: 600; text-transform: uppercase; padding: 0.15rem 0.45rem;
       border-radius: 999px; border: 1px solid var(--border); color: var(--muted);
     }
-    .tier-badge.lifetime { color: var(--accent); border-color: var(--accent); background: rgba(34,211,238,0.08); }
+    .tier-badge.lifetime { color: var(--accent); border-color: var(--accent); background: rgba(0,122,204,0.1); }
     button.icon-btn {
-      background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 6px;
-      width: 34px; height: 34px; display: grid; place-items: center; cursor: pointer;
+      background: transparent; border: 1px solid transparent; color: var(--text); border-radius: 4px;
+      width: 28px; height: 28px; display: grid; place-items: center; cursor: pointer; font-size: 0.9rem;
     }
-    button.icon-btn:hover { background: var(--panel-2); border-color: var(--accent); }
-    /* Layout */
+    button.icon-btn:hover { background: var(--panel-2); color: var(--accent); }
+
+    /* App layout */
     .app { display: flex; flex: 1; overflow: hidden; }
+
     /* Sidebar */
     #sidebar {
-      width: 280px; min-width: 220px; max-width: 420px;
+      width: 260px; min-width: 200px; max-width: 400px;
       background: var(--panel);
       border-right: 1px solid var(--border);
       display: flex; flex-direction: column;
       transition: margin-left 0.2s ease;
     }
-    #sidebar.collapsed { margin-left: -280px; }
+    #sidebar.collapsed { margin-left: -260px; }
     .sidebar-header {
-      padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between;
+      height: 34px; padding: 0 0.75rem; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between; background: var(--panel);
     }
-    .sidebar-title { font-size: 0.85rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
-    .file-tree { flex: 1; overflow: auto; padding: 0.5rem; }
+    .sidebar-title { font-size: 0.7rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+    .file-tree { flex: 1; overflow: auto; padding: 0.35rem 0; font-size: 0.82rem; }
     .tree ul { list-style: none; padding-left: 1.1rem; margin: 0; }
     .tree li { position: relative; }
     .tree-node {
-      display: flex; align-items: center; gap: 0.5rem;
-      padding: 0.35rem 0.5rem; border-radius: 5px; cursor: pointer; font-size: 0.85rem; color: var(--text);
+      display: flex; align-items: center; gap: 0.4rem;
+      padding: 0.25rem 0.6rem; border-radius: 0; cursor: pointer; color: var(--text);
       user-select: none;
     }
-    .tree-node:hover { background: var(--panel-2); }
+    .tree-node:hover { background: #2a2d2e; }
     .tree-node.active { background: var(--panel-3); box-shadow: inset 2px 0 0 var(--accent); }
-    .tree-node .icon { color: var(--muted); font-size: 0.9rem; width: 1rem; text-align: center; }
-    .tree-node.file .icon { color: var(--accent); }
-    .sidebar-footer { padding: 0.75rem; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 0.5rem; }
+    .tree-node .icon { color: var(--muted); font-size: 0.85rem; width: 1rem; text-align: center; flex-shrink: 0; }
+    .tree-node.file .icon { color: #dcb67a; }
+    .tree-node.directory .icon { color: #75beff; }
+    .sidebar-footer { padding: 0.6rem; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 0.5rem; background: var(--panel); }
     .drop-zone {
-      border: 2px dashed var(--border); border-radius: 8px; padding: 0.75rem; text-align: center; color: var(--muted); font-size: 0.8rem;
-      transition: all 0.15s ease;
+      border: 1px dashed var(--border); border-radius: 4px; padding: 0.6rem; text-align: center; color: var(--muted); font-size: 0.75rem;
+      transition: all 0.15s ease; background: var(--panel-2);
     }
-    .drop-zone.drag-over { border-color: var(--accent); background: var(--panel-2); color: var(--text); }
+    .drop-zone.drag-over { border-color: var(--accent); background: rgba(0,122,204,0.1); color: var(--text); }
     button.primary {
-      background: linear-gradient(135deg, var(--accent), var(--accent-2)); border: none; color: #000; font-weight: 700;
-      padding: 0.55rem 0.9rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;
+      background: var(--accent); border: none; color: #fff; font-weight: 600;
+      padding: 0.45rem 0.75rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem;
     }
-    button.primary:hover { filter: brightness(1.08); }
+    button.primary:hover { background: var(--accent-2); }
     button.secondary {
       background: var(--panel-2); border: 1px solid var(--border); color: var(--text); font-weight: 600;
-      padding: 0.55rem 0.9rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;
+      padding: 0.45rem 0.75rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem;
     }
-    button.secondary:hover { border-color: var(--accent); }
+    button.secondary:hover { background: var(--panel-3); }
+
     /* Main */
     main { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
     .toggle-sidebar {
       position: absolute; left: 0; top: 50%; transform: translateY(-50%);
       background: var(--panel-2); border: 1px solid var(--border); border-left: none; color: var(--text);
-      padding: 0.4rem 0.3rem; border-radius: 0 6px 6px 0; cursor: pointer; z-index: 10;
+      padding: 0.3rem 0.2rem; border-radius: 0 4px 4px 0; cursor: pointer; z-index: 10;
     }
+    .toggle-sidebar:hover { background: var(--panel-3); color: var(--accent); }
+
     /* Code panel */
     #code-panel {
       flex: 1; display: flex; flex-direction: column; min-height: 0;
-      background: var(--bg);
+      background: var(--editor);
       border-bottom: 1px solid var(--border);
     }
     .code-header {
-      height: 38px; background: var(--panel); border-bottom: 1px solid var(--border);
-      display: flex; align-items: center; justify-content: space-between; padding: 0 1rem; font-size: 0.85rem; color: var(--muted);
+      height: 34px; background: var(--panel); border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; padding: 0 0.75rem; font-size: 0.8rem; color: var(--muted);
+    }
+    .code-tab {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      height: 34px; padding: 0 0.75rem; background: var(--editor);
+      border-top: 1px solid var(--border); border-right: 1px solid var(--border);
+      border-left: 1px solid var(--border); border-bottom: 1px solid var(--editor);
+      margin-top: -1px; color: var(--text); font-size: 0.8rem;
+    }
+    .code-tab::before {
+      content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      background: var(--accent);
     }
     #code-display {
-      flex: 1; overflow: auto; padding: 1rem; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-      font-size: 0.85rem; line-height: 1.5; white-space: pre; color: var(--text);
+      flex: 1; overflow: auto; padding: 0;
+      font-family: Consolas, Monaco, "Courier New", monospace;
+      font-size: 0.82rem; line-height: 1.55; color: var(--text); background: var(--editor);
+      tab-size: 2;
     }
-    .placeholder { color: var(--muted); font-style: italic; }
+    #code-display .placeholder { padding: 1rem; color: var(--muted); font-style: italic; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .code-line { display: flex; }
+    .line-number {
+      width: 3.5rem; min-width: 3.5rem; text-align: right; padding: 0 0.85rem 0 0;
+      color: var(--muted); background: var(--editor);
+      user-select: none; border-right: 1px solid var(--border); margin-right: 0.85rem;
+    }
+    .line-code { white-space: pre; padding-right: 1rem; }
+    .line-code:empty::after { content: '\00a0'; }
+
     /* Prompt deck */
     #prompt-deck {
-      height: 320px; min-height: 180px; max-height: 50vh;
+      height: 300px; min-height: 160px; max-height: 50vh;
       display: flex; flex-direction: column;
       background: var(--panel);
       border-top: 1px solid var(--border);
     }
     .deck-tabs {
-      display: flex; border-bottom: 1px solid var(--border); background: var(--panel-2);
+      display: flex; border-bottom: 1px solid var(--border); background: var(--panel);
     }
     .deck-tab {
-      padding: 0.6rem 1rem; font-size: 0.8rem; font-weight: 600; color: var(--muted); cursor: pointer;
+      padding: 0.5rem 0.9rem; font-size: 0.75rem; font-weight: 600; color: var(--muted); cursor: pointer;
       border-bottom: 2px solid transparent; background: transparent; border-top: none; border-left: none; border-right: none;
     }
-    .deck-tab.active { color: var(--text); border-bottom-color: var(--accent); background: var(--panel-3); }
+    .deck-tab.active { color: var(--text); border-bottom-color: var(--accent); background: var(--panel-2); }
     .deck-body { flex: 1; display: flex; min-height: 0; }
-    .deck-panel { flex: 1; display: none; flex-direction: column; padding: 1rem; gap: 0.75rem; overflow: auto; }
+    .deck-panel { flex: 1; display: none; flex-direction: column; padding: 0.85rem; gap: 0.65rem; overflow: auto; }
     .deck-panel.active { display: flex; }
-    .chat-feed { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 0.75rem; }
-    .msg { padding: 0.65rem 0.85rem; border-radius: 8px; max-width: 90%; font-size: 0.9rem; line-height: 1.45; }
+    .chat-feed { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 0.6rem; }
+    .msg { padding: 0.55rem 0.75rem; border-radius: 4px; max-width: 90%; font-size: 0.85rem; line-height: 1.45; }
     .msg.user { align-self: flex-end; background: var(--panel-3); border: 1px solid var(--border); }
     .msg.assistant { align-self: flex-start; background: var(--panel-2); border: 1px solid var(--border); }
-    .msg.system { align-self: center; background: transparent; color: var(--muted); font-size: 0.8rem; font-style: italic; border: none; }
+    .msg.system { align-self: center; background: transparent; color: var(--muted); font-size: 0.75rem; font-style: italic; border: none; }
     .msg.error { color: var(--danger); border-color: var(--danger); }
     .msg code {
-      background: rgba(255,255,255,0.06); padding: 0.1rem 0.3rem; border-radius: 4px; font-family: monospace;
+      background: rgba(255,255,255,0.06); padding: 0.1rem 0.3rem; border-radius: 3px; font-family: Consolas, Monaco, "Courier New", monospace;
     }
-    .msg pre { background: rgba(0,0,0,0.3); padding: 0.6rem; border-radius: 6px; overflow: auto; margin: 0.5rem 0; }
+    .msg pre { background: rgba(0,0,0,0.3); padding: 0.5rem; border-radius: 4px; overflow: auto; margin: 0.5rem 0; }
     .prompt-row { display: flex; gap: 0.5rem; }
     textarea#prompt-input, textarea#chat-input {
-      flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text);
-      padding: 0.75rem; font-size: 0.9rem; resize: none; min-height: 48px; max-height: 120px;
+      flex: 1; background: var(--editor); border: 1px solid var(--border); border-radius: 4px; color: var(--text);
+      padding: 0.6rem; font-size: 0.85rem; resize: none; min-height: 44px; max-height: 110px;
+      font-family: inherit;
     }
     textarea#prompt-input:focus, textarea#chat-input:focus { outline: none; border-color: var(--accent); }
     .deck-controls { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
-    .toggle { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: var(--muted); cursor: pointer; }
+    .toggle { display: flex; align-items: center; gap: 0.4rem; font-size: 0.8rem; color: var(--muted); cursor: pointer; }
     .toggle input { accent-color: var(--accent); }
     .status-bar {
-      display: flex; align-items: center; gap: 0.75rem; font-size: 0.8rem; color: var(--muted);
+      display: flex; align-items: center; gap: 0.5rem; font-size: 0.8rem; color: var(--muted);
     }
     .status-bar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
     .status-bar .dot.busy { background: var(--warning); animation: pulse 1s infinite; }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
-    /* Log stream */
+
+    /* Terminal / Build log */
     #log-stream {
-      height: 160px; min-height: 100px; background: #080a0e; border-top: 1px solid var(--border);
-      display: flex; flex-direction: column;
+      height: 170px; min-height: 90px; background: var(--terminal-bg); border-top: 1px solid var(--border);
+      display: flex; flex-direction: column; font-family: Consolas, Monaco, "Courier New", monospace;
     }
-    .log-header { padding: 0.45rem 1rem; font-size: 0.75rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); }
-    #log-lines { flex: 1; overflow: auto; padding: 0.5rem 1rem; font-family: monospace; font-size: 0.8rem; color: var(--muted); }
-    .log-line { border-bottom: 1px solid rgba(255,255,255,0.03); padding: 0.25rem 0; }
-    .log-line.info { color: var(--accent); }
-    .log-line.success { color: var(--success); }
-    .log-line.error { color: var(--danger); }
+    .log-header { height: 26px; padding: 0 0.75rem; display: flex; align-items: center; font-size: 0.65rem; font-weight: 700; color: var(--text); text-transform: uppercase; letter-spacing: 0.06em; background: var(--panel); border-bottom: 1px solid var(--border); }
+    #log-lines { flex: 1; overflow: auto; padding: 0.5rem 0.75rem; font-size: 0.8rem; color: var(--terminal-text); }
+    .log-line { border-bottom: 1px solid rgba(255,255,255,0.03); padding: 0.15rem 0; }
+    .log-line.info { color: var(--terminal-info); }
+    .log-line.success { color: var(--terminal-success); }
+    .log-line.error { color: var(--terminal-error); }
+
     /* Modal */
-    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center; z-index: 100; }
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 100; }
     .modal-overlay.open { display: flex; }
-    .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; width: 420px; max-width: 92vw; padding: 1.25rem; box-shadow: 0 20px 50px rgba(0,0,0,0.4); }
-    .modal h2 { margin: 0 0 1rem; font-size: 1.1rem; }
-    .form-group { margin-bottom: 1rem; }
-    .form-group label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.35rem; font-weight: 600; }
+    .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; width: 420px; max-width: 92vw; padding: 1rem; box-shadow: 0 20px 50px rgba(0,0,0,0.5); }
+    .modal h2 { margin: 0 0 0.8rem; font-size: 1rem; font-weight: 600; }
+    .form-group { margin-bottom: 0.8rem; }
+    .form-group label { display: block; font-size: 0.75rem; color: var(--muted); margin-bottom: 0.25rem; font-weight: 600; }
     .form-group input, .form-group select {
-      width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text);
-      padding: 0.6rem 0.75rem; font-size: 0.9rem;
+      width: 100%; background: var(--editor); border: 1px solid var(--border); border-radius: 4px; color: var(--text);
+      padding: 0.5rem 0.65rem; font-size: 0.85rem;
     }
     .form-group input:focus, .form-group select:focus { outline: none; border-color: var(--accent); }
-    .hint { font-size: 0.75rem; color: var(--muted); margin-top: 0.3rem; }
-    .modal-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1rem; }
+    .hint { font-size: 0.7rem; color: var(--muted); margin-top: 0.25rem; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.8rem; }
+
     /* Misc */
     .hidden { display: none !important; }
-    .spinner { width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.2); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; vertical-align: middle; }
+    .spinner { width: 12px; height: 12px; border: 2px solid rgba(255,255,255,0.2); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; vertical-align: middle; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
   </style>
@@ -208,16 +248,20 @@
 <body>
   <header>
     <div class="brand">
-      <div class="logo">AF</div>
+      <svg class="logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+        <path d="M2 12l10 5 10-5"/>
+        <path d="M2 17l10 5 10-5"/>
+      </svg>
       <div>
-        <h1>Aero-Forge <span style="color:var(--accent)">Devin Core</span></h1>
+        <h1>Aero Forge</h1>
         <small>Prompt &rarr; Python &rarr; Rust</small>
       </div>
     </div>
     <div class="header-actions">
       <span id="tier-badge" class="tier-badge">Free</span>
       <button id="settings-btn" class="icon-btn" title="Settings" aria-label="Settings">
-        &#9881;
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       </button>
     </div>
   </header>
@@ -225,8 +269,10 @@
   <div class="app">
     <aside id="sidebar">
       <div class="sidebar-header">
-        <span class="sidebar-title">Project Explorer</span>
-        <button id="refresh-tree" class="icon-btn" style="width:auto;height:auto;padding:0.2rem 0.4rem;" title="Refresh">&#8635;</button>
+        <span class="sidebar-title">Explorer</span>
+        <button id="refresh-tree" class="icon-btn" style="width:auto;height:auto;padding:0.15rem 0.35rem;" title="Refresh">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        </button>
       </div>
       <div id="file-tree" class="file-tree tree">
         <div class="placeholder" style="padding:1rem;color:var(--muted)">Create or select a session to explore files.</div>
@@ -236,19 +282,22 @@
           Drop a .zip project bundle here or click to upload
           <input id="zip-input" type="file" accept=".zip" class="sr-only">
         </div>
-        <button id="download-btn" class="secondary" style="width:100%">&#8686; Download Session Zip</button>
+        <button id="download-btn" class="secondary" style="width:100%">Download Session Zip</button>
       </div>
     </aside>
 
     <main>
-      <button id="toggle-sidebar" class="toggle-sidebar" title="Toggle sidebar">&#9776;</button>
+      <button id="toggle-sidebar" class="toggle-sidebar" title="Toggle sidebar">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
 
       <section id="code-panel">
         <div class="code-header">
-          <span id="code-path">No file selected</span>
-          <span id="code-meta"></span>
+          <span id="code-path-tab" class="code-tab">No file selected</span>
         </div>
-        <div id="code-display" class="placeholder">Select a file from the project explorer to view source, tests, or compiled artifacts.</div>
+        <div id="code-display">
+          <div class="placeholder">Select a file from the Explorer to view source, tests, or compiled artifacts.</div>
+        </div>
       </section>
 
       <section id="prompt-deck">
@@ -260,7 +309,7 @@
           <div id="build-panel" class="deck-panel active">
             <div class="prompt-row">
               <textarea id="prompt-input" placeholder="Build a fast iterative Fibonacci function..."></textarea>
-              <button id="build-btn" class="primary" style="min-width:96px">Build</button>
+              <button id="build-btn" class="primary" style="min-width:84px">Build</button>
             </div>
             <div class="deck-controls">
               <label class="toggle">
@@ -276,18 +325,18 @@
 
           <div id="chat-panel" class="deck-panel">
             <div id="chat-feed" class="chat-feed">
-              <div class="msg system">Welcome to the Aero-Forge co-pilot. Ask for builds, optimizations, or explanations.</div>
+              <div class="msg system">Welcome to the Aero Forge co-pilot. Ask for builds, optimizations, or explanations.</div>
             </div>
             <div class="prompt-row">
               <textarea id="chat-input" placeholder="Ask the co-pilot..."></textarea>
-              <button id="chat-send" class="primary" style="min-width:80px">Send</button>
+              <button id="chat-send" class="primary" style="min-width:72px">Send</button>
             </div>
           </div>
         </div>
       </section>
 
       <section id="log-stream">
-        <div class="log-header">Live Build Log</div>
+        <div class="log-header">Terminal / Build Log</div>
         <div id="log-lines"></div>
       </section>
     </main>
@@ -351,7 +400,7 @@
       zipInput: document.getElementById('zip-input'),
       downloadBtn: document.getElementById('download-btn'),
       codeDisplay: document.getElementById('code-display'),
-      codePath: document.getElementById('code-path'),
+      codePath: document.getElementById('code-path-tab'),
       codeMeta: document.getElementById('code-meta'),
       promptInput: document.getElementById('prompt-input'),
       buildBtn: document.getElementById('build-btn'),
@@ -490,19 +539,20 @@
       const ul = document.createElement('ul');
       const li = document.createElement('li');
       const div = document.createElement('div');
-      div.className = 'tree-node' + (node.type === 'file' ? ' file' : '');
+      const isDir = node.type === 'directory';
+      div.className = 'tree-node' + (isDir ? ' directory' : ' file');
       div.dataset.path = node.path;
-      const icon = node.type === 'file' ? (node.path.endsWith('.py') ? 'PY' : (node.path.endsWith('.aero') ? 'AB' : (node.path.endsWith('.so') ? 'SO' : '>'))) : '&#128449;';
+      const icon = isDir ? '&#128449;' : (node.path.endsWith('.py') ? 'PY' : (node.path.endsWith('.aero') ? 'AB' : (node.path.endsWith('.so') ? 'SO' : '>')));
       div.innerHTML = `<span class="icon">${icon}</span><span>${escapeHtml(node.name)}</span>`;
       li.appendChild(div);
 
-      if (node.type === 'directory' && node.children) {
+      if (isDir && node.children) {
         const childUl = document.createElement('ul');
         for (const child of node.children) childUl.appendChild(renderNode(child));
         li.appendChild(childUl);
       }
 
-      if (node.type === 'file') {
+      if (!isDir) {
         div.addEventListener('click', () => openFile(node.path, div));
       }
       return li;
@@ -513,18 +563,37 @@
       return s.replace(/[&<>"]/g, c => map[c]);
     }
 
+    function renderCode(content) {
+      ui.codeDisplay.innerHTML = '';
+      const lines = content.split('\n');
+      const maxDigits = String(lines.length).length;
+      const fragment = document.createDocumentFragment();
+      lines.forEach((line, i) => {
+        const row = document.createElement('div');
+        row.className = 'code-line';
+        const num = document.createElement('span');
+        num.className = 'line-number';
+        num.textContent = String(i + 1).padStart(maxDigits, ' ');
+        const code = document.createElement('span');
+        code.className = 'line-code';
+        code.textContent = line;
+        row.appendChild(num);
+        row.appendChild(code);
+        fragment.appendChild(row);
+      });
+      ui.codeDisplay.appendChild(fragment);
+    }
+
     async function openFile(path, el) {
       document.querySelectorAll('.tree-node.active').forEach(n => n.classList.remove('active'));
       if (el) el.classList.add('active');
       ui.codePath.textContent = path;
-      ui.codeDisplay.classList.remove('placeholder');
-      ui.codeDisplay.textContent = 'Loading...';
+      ui.codeDisplay.innerHTML = '<div class="placeholder">Loading...</div>';
       try {
         const data = await api('GET', `/api/file-content?session_id=${encodeURIComponent(state.sessionId)}&path=${encodeURIComponent(path)}`);
-        ui.codeDisplay.textContent = data.content;
-        ui.codeMeta.textContent = `${data.content.length} chars`;
+        renderCode(data.content);
       } catch (e) {
-        ui.codeDisplay.textContent = `Error: ${e.message}`;
+        ui.codeDisplay.innerHTML = `<div class="placeholder">Error: ${escapeHtml(e.message)}</div>`;
       }
     }
 
@@ -627,7 +696,6 @@
 
     function renderMarkdown(text) {
       if (!text) return '';
-      // Escape then render fenced code blocks and inline code
       let safe = escapeHtml(text);
       safe = safe.replace(/```([\s\S]*?)```/g, (m, c) => `<pre>${c}</pre>`);
       safe = safe.replace(/`([^`]+)`/g, (m, c) => `<code>${c}</code>`);
@@ -675,7 +743,7 @@
     // Init
     loadSettings();
     loadTree();
-    log('Devin Core UI loaded');
+    log('Aero Forge UI loaded');
   </script>
 </body>
 </html>
