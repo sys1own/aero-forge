@@ -22,6 +22,10 @@ from aero_forge.error_explainer import explain_error
 from aero_forge.gpu import compile_gpu_kernel, find_gpu_functions
 from aero_forge.orchestrator.orchestrator import Orchestrator
 from aero_forge.scaffold.engine import _generate_pyi
+from aero_forge.scaffold.pre_write_validator import (
+    ValidationError,
+    validate_build_outputs,
+)
 from aero_forge.translator import TargetMode
 from aero_forge.wasm import build_wasm_module
 
@@ -276,6 +280,23 @@ class BuildRunner:
 
         dag_results = dag.run()
         results: List[BuildResult] = list(dag_results.values())
+        try:
+            validate_build_outputs(output_dir, self.blueprint)
+        except ValidationError as exc:
+            logger.error("Build output validation failed: %s", exc)
+            failed_results = [
+                BuildResult(
+                    source=r.source,
+                    function_names=r.function_names,
+                    success=False,
+                    artifact=r.artifact,
+                    logs=f"{r.logs}\n{exc}".strip() if r.logs else str(exc),
+                    iterations=r.iterations,
+                    explanation=r.explanation,
+                )
+                for r in results
+            ]
+            return self._summarize(failed_results)
         return self._summarize(results)
 
     def _safe_build_source(

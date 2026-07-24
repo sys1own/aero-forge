@@ -481,6 +481,46 @@ def _run_python_static_checks(source: str) -> None:
     _check_dynamic_reflection(tree)
 
 
+class BuildOutputError(ValidationError):
+    """Raised when a build output directory is missing expected artifacts."""
+
+    pass
+
+
+def validate_build_outputs(
+    output_dir: Path,
+    blueprint: Optional[Any] = None,
+) -> None:
+    """Fail the build pass if the output workspace contains zero artifacts.
+
+    When a ``blueprint`` is supplied, also verify that every file declared in
+    ``blueprint.manifest`` exists under ``output_dir``.
+    """
+    output = Path(output_dir)
+    files = [p for p in output.rglob("*") if p.is_file()]
+    if not files:
+        raise BuildOutputError(
+            f"Build output directory {output} contains zero artifacts",
+            output="",
+        )
+
+    if blueprint is not None:
+        manifest = getattr(blueprint, "manifest", None) or []
+        missing: List[str] = []
+        for entry in manifest:
+            path = getattr(entry, "path", None)
+            if not path:
+                continue
+            candidate = output / path
+            if not candidate.is_file():
+                missing.append(str(path))
+        if missing:
+            raise BuildOutputError(
+                f"Missing declared build artifact {missing[0]} from blueprint.aero",
+                output=f"Missing build artifacts: {', '.join(missing)}",
+            )
+
+
 class PreWriteValidator:
     """Run validation in an isolated workspace before promoting files."""
 
