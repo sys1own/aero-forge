@@ -50,6 +50,7 @@ _manager = SandboxManager()
 _static_dir = Path(__file__).parent / "static"
 _active_websockets: Dict[str, Any] = {}
 _active_ws_lock = threading.Lock()
+_event_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 def _register_websocket(session_id: str, ws: Any) -> None:
@@ -72,6 +73,31 @@ def _send_ws_heartbeat(session_id: str, phase: str, loop: asyncio.AbstractEventL
         asyncio.run_coroutine_threadsafe(ws.send_str(payload), loop)
     except Exception as exc:
         logger.debug("Could not send build heartbeat: %s", exc)
+
+
+def _set_event_loop() -> None:
+    global _event_loop
+    _event_loop = asyncio.get_running_loop()
+
+
+async def _broadcast_tree(session_id: str) -> None:
+    with _active_ws_lock:
+        ws = _active_websockets.get(session_id)
+    if ws is None or getattr(ws, "closed", False):
+        return
+    try:
+        await ws.send_str(json.dumps({"type": "tree_updated"}))
+    except Exception:
+        pass
+
+
+def _notify_tree_changed(session_id: str) -> None:
+    if not session_id or _event_loop is None:
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(_broadcast_tree(session_id), _event_loop)
+    except Exception:
+        pass
 
 
 def _session_dir(session_id: str) -> Path:
@@ -237,16 +263,48 @@ def _parse_multipart(body: bytes, boundary: bytes) -> Optional[bytes]:
     return None
 
 
-def _extract_zip_safely(zip_bytes: bytes, dest: Path) -> None:
-    """Extract a zip archive to ``dest`` while guarding against path traversal."""
+def _extract_zip_safely(zip_bytes: bytes, dest: Path, archive_name: Optional[str] = None) -> None:
+    """Extract a zip archive to ``dest`` while guarding against path traversal.
+
+    If every member is inside a single top-level wrapper directory (and no files
+    live at the archive root), that wrapper is stripped so files land directly
+    under ``dest``. Common source directories such as ``src`` or ``tests`` are
+    not stripped unless they match the archive filename.
+    """
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(BytesIO(zip_bytes), "r") as zf:
-        for member in zf.namelist():
-            target = (dest / member).resolve()
+        namelist = [m for m in zf.namelist() if not m.startswith("__MACOSX/")]
+        files = [m for m in namelist if not m.endswith("/")]
+        if not files:
+            return
+
+        strip_prefix = ""
+        top_dirs = {m.split("/")[0] for m in files if "/" in m}
+        root_files = [m for m in files if "/" not in m]
+        if len(top_dirs) == 1 and not root_files:
+            prefix = next(iter(top_dirs))
+            common_folders = {
+                "src", "lib", "libs", "tests", "test", "app", "bin", "docs",
+                "examples", "scripts", "pkg", "package", "include", "includes",
+            }
+            archive_stem = Path(archive_name).stem if archive_name else ""
+            if prefix == archive_stem or prefix.lower() not in common_folders:
+                strip_prefix = prefix + "/"
+
+        for member in files:
+            rel = member[len(strip_prefix):] if strip_prefix and member.startswith(strip_prefix) else member
+            if not rel:
+                continue
+            target = dest / rel
             try:
-                target.relative_to(dest.resolve())
+                resolved = target.resolve()
+                resolved.relative_to(dest.resolve())
             except ValueError as exc:
                 raise ValueError(f"Zip member escapes extraction directory: {member}") from exc
-        zf.extractall(dest)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(member) as src, open(target, "wb") as dst:
+                dst.write(src.read())
 
 
 def _build_tree(directory: Path, rel: Optional[Path] = None) -> Dict[str, Any]:
@@ -439,6 +497,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
 
+            _notify_tree_changed(session_id)
+
             return _send_json(
                 self,
                 200,
@@ -566,13 +626,21 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             else:
                 zip_bytes = body
 
-            # Read session id from a query parameter if present, otherwise generate one.
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
             session_id = _first(query, "session_id") or str(uuid.uuid4())
+            target_path = (_first(query, "target_path") or "").strip()
             session_dir = _session_dir(session_id)
 
-            _extract_zip_safely(zip_bytes, session_dir)
+            if target_path:
+                if any(part == ".." for part in Path(target_path).parts):
+                    return _send_json(self, 400, {"error": "Invalid target_path"})
+                dest = session_dir / target_path
+            else:
+                dest = session_dir
+
+            _extract_zip_safely(zip_bytes, dest)
+            _notify_tree_changed(session_id)
 
             return _send_json(
                 self,
@@ -612,6 +680,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             else:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text("", encoding="utf-8")
+
+            _notify_tree_changed(session_id)
 
             return _send_json(
                 self,
@@ -653,6 +723,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             target.parent.mkdir(parents=True, exist_ok=True)
             source.rename(target)
 
+            _notify_tree_changed(session_id)
+
             return _send_json(
                 self,
                 200,
@@ -690,6 +762,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 shutil.rmtree(target)
             else:
                 target.unlink()
+
+            _notify_tree_changed(session_id)
 
             return _send_json(
                 self,
@@ -1081,6 +1155,7 @@ def _run_http_handler(raw_request: bytes, port: int) -> bytes:
 
 async def _aiohttp_http_handler(request: web.Request, port: int) -> web.Response:
     """Route any non-WebSocket HTTP request through the existing handler stack."""
+    _set_event_loop()
     if request.method == "OPTIONS":
         return web.Response(status=204, headers=_CORS_HEADERS)
     if request.path == "/api/build":
@@ -1122,6 +1197,7 @@ class _AioWSAdapter:
 
 async def _aiohttp_ws_handler(request: web.Request) -> web.WebSocketResponse:
     """Accept WebSocket upgrades on the same HTTP port and attach the terminal PTY."""
+    _set_event_loop()
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     query = parse_qs(request.query_string)
@@ -1155,6 +1231,7 @@ class AioForgeServer:
         await self.runner.setup()
         site = web.TCPSite(self.runner, host="", port=self.port)
         await site.start()
+        _set_event_loop()
         self._stop_event = asyncio.Event()
         await self._stop_event.wait()
         await self.runner.cleanup()
