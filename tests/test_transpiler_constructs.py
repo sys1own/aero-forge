@@ -554,3 +554,83 @@ def test_string_constants_and_dict(tmp_path: Path) -> None:
         "    assert string_dict_lookup(85) == 'B'\n"
         "    assert string_dict_lookup(50) == 'F'\n",
     )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_tuple_unpack_from_call(tmp_path: Path) -> None:
+    source = (
+        "def get_coords(x: int) -> tuple[int, float, int]:\n"
+        "    return (x, float(x), x * 2)\n"
+        "\n"
+        "def use_coords(n: int) -> float:\n"
+        "    a, b, c = get_coords(n)\n"
+        "    return a + b + c\n"
+    )
+    _run_case(
+        tmp_path,
+        "use_coords",
+        source,
+        "def test_use_coords():\n"
+        "    assert use_coords(3) == 12.0\n",
+    )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_return_none_as_empty_list(tmp_path: Path) -> None:
+    source = (
+        "def collect(n: int) -> list[int]:\n"
+        "    if n <= 0:\n"
+        "        return None\n"
+        "    return [n] + collect(n - 1)\n"
+    )
+    _run_case(
+        tmp_path,
+        "collect",
+        source,
+        "def test_collect():\n"
+        "    assert collect(3) == [3, 2, 1]\n"
+        "    assert collect(0) == []\n",
+    )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_safe_list_indexing(tmp_path: Path) -> None:
+    source = (
+        "def first_sum(nums: list[int]) -> int:\n"
+        "    return nums[0] + nums[1]\n"
+    )
+    _run_case(
+        tmp_path,
+        "first_sum",
+        source,
+        "def test_first_sum():\n"
+        "    assert first_sum([3, 4, 5]) == 7\n",
+    )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_list_index_assignment(tmp_path: Path) -> None:
+    source = (
+        "def bump_first(nums: list[int]) -> list[int]:\n"
+        "    nums[0] += 1\n"
+        "    return nums\n"
+    )
+    _run_case(
+        tmp_path,
+        "bump_first",
+        source,
+        "def test_bump_first():\n"
+        "    assert bump_first([10, 20]) == [11, 20]\n",
+    )

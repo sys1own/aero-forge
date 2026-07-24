@@ -334,6 +334,19 @@ class RustGenerator:
                                 stmt.value, target_type, types
                             )
                     self._propagate_subscript_types(stmt.value, rhs_type, types)
+                elif isinstance(target, (ast.Tuple, ast.List)) and isinstance(
+                    stmt.value, ast.Call
+                ):
+                    rhs_type = self._infer_expr_type(stmt.value, types)
+                    if rhs_type and rhs_type.startswith("(") and rhs_type.endswith(")"):
+                        parts = self._tuple_element_types(rhs_type)
+                        elts = _elements(target)
+                        if len(parts) == len(elts):
+                            for typ, elt in zip(parts, elts):
+                                if isinstance(elt, ast.Name):
+                                    types[elt.id] = self._unify(
+                                        types.get(elt.id), typ
+                                    )
         elif isinstance(stmt, ast.AugAssign):
             target_type = None
             if isinstance(stmt.target, ast.Name):
@@ -1114,6 +1127,9 @@ class RustGenerator:
             return "false"
         if typ == "String":
             return 'String::new()'
+        if typ.startswith("HashMap<"):
+            k, v = _kv_types(typ)
+            return f"HashMap::<{k}, {v}>::new()"
         if typ.startswith("Vec<"):
             inner = _element_type(typ)
             return f"Vec::<{inner}>::new()"
@@ -1237,8 +1253,12 @@ class RustGenerator:
 
     def _emit_stmt(self, stmt: ast.stmt) -> str:
         if isinstance(stmt, ast.Return):
-            if stmt.value is None:
-                # Bare ``return`` compiles to the zero value for the declared return type.
+            if stmt.value is None or (
+                isinstance(stmt.value, ast.Constant) and stmt.value.value is None
+            ):
+                # Bare ``return`` or ``return None`` compiles to the zero value
+                # for the declared return type, producing an empty Vec/HashMap
+                # when the function is annotated to return a collection.
                 if self.return_type == "()":
                     return "return;"
                 return f"return {self._zero()};"
@@ -1405,24 +1425,42 @@ class RustGenerator:
 
     def _emit_tuple_unpack(self, target: ast.AST, value: ast.expr) -> str:
         target_elts = _elements(target)
-        if not isinstance(value, (ast.Tuple, ast.List)):
-            raise UnsupportedError(
-                "Tuple unpack requires a tuple/list on the right", node=value
-            )
-
-        value_elts = _elements(value)
-        if len(target_elts) != len(value_elts):
-            raise UnsupportedError(
-                "Tuple unpack target and value length mismatch", node=target
-            )
-
-        elements = []
-        for t, e in zip(target_elts, value_elts):
-            target_type = self._type_of(t)
-            elements.append(self._strip_outer_parens(self._emit_expr(e, target_type)))
         tmp = self._next_tmp()
-        # The parentheses here form a Rust tuple literal, so we keep them.
-        lines = [f"let {tmp} = ({', '.join(elements)});"]
+
+        if isinstance(value, (ast.Tuple, ast.List)):
+            value_elts = _elements(value)
+            if len(target_elts) != len(value_elts):
+                raise UnsupportedError(
+                    "Tuple unpack target and value length mismatch", node=target
+                )
+            elements = []
+            for t, e in zip(target_elts, value_elts):
+                target_type = self._type_of(t)
+                elements.append(
+                    self._strip_outer_parens(self._emit_expr(e, target_type))
+                )
+            # The parentheses here form a Rust tuple literal, so we keep them.
+            lines = [f"let {tmp} = ({', '.join(elements)});"]
+        elif isinstance(value, ast.Call):
+            value_type = self._type_of(value)
+            if not (value_type.startswith("(") and value_type.endswith(")")):
+                raise UnsupportedError(
+                    "Tuple unpack requires a function that returns a tuple", node=value
+                )
+            parts = self._tuple_element_types(value_type)
+            if len(target_elts) != len(parts):
+                raise UnsupportedError(
+                    "Tuple unpack target and function return arity mismatch",
+                    node=target,
+                )
+            value_expr = self._strip_outer_parens(self._emit_expr(value, value_type))
+            lines = [f"let {tmp} = {value_expr};"]
+        else:
+            raise UnsupportedError(
+                "Tuple unpack requires a tuple, list, or tuple-returning call on the right",
+                node=value,
+            )
+
         for i, t in enumerate(target_elts):
             if isinstance(t, ast.Name):
                 lines.append(f"{t.id} = {tmp}.{i};")
@@ -1450,6 +1488,8 @@ class RustGenerator:
 
     def _emit_lvalue(self, target: ast.expr, ctx: str) -> str:
         """Emit a place expression, stripping outer parentheses when possible."""
+        if isinstance(target, ast.Subscript):
+            return self._emit_subscript(target, ctx, place=True)
         expr = self._emit_expr(target, ctx)
         while True:
             stripped = self._strip_outer_parens(expr)
@@ -1951,8 +1991,13 @@ class RustGenerator:
             "Unsupported list comprehension iterator or target", node=expr
         )
 
-    def _emit_subscript(self, expr: ast.Subscript, ctx: str) -> str:
-        """Emit a subscript (possibly a chain) and borrow/clone as needed."""
+    def _emit_subscript(self, expr: ast.Subscript, ctx: str, *, place: bool = False) -> str:
+        """Emit a subscript (possibly a chain) and borrow/clone as needed.
+
+        When ``place`` is True, emit a place expression suitable for assignment
+        (e.g. ``x[i]``). Otherwise, emit a safe value expression using ``.get()``
+        for dynamic containers.
+        """
 
         def _flatten(e: ast.expr, indices: List[ast.expr]) -> ast.expr:
             """Collect consecutive non-slice subscripts into a single base+indices."""
@@ -2087,7 +2132,11 @@ class RustGenerator:
                     index_expr = f"(({access}).len() as i64 - {n}_i64)"
                 else:
                     index_expr = self._emit_expr(idx, "i64")
-                access = f"{access}[({index_expr}) as usize]"
+                if place:
+                    access = f"{access}[({index_expr}) as usize]"
+                else:
+                    default = self._zero_for_type(element_type)
+                    access = f"{access}.get(({index_expr}) as usize).cloned().unwrap_or({default})"
                 final_type = element_type
             elif final_type.startswith("HashMap<"):
                 key_type, val_type = _kv_types(final_type)
