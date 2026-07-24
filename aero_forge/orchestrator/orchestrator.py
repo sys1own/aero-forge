@@ -1,18 +1,20 @@
-"""Orchestrate the LLM → transpile → compile → test → heal loop."""
+"""Orchestrate the deterministic transpile → compile → test → heal loop.
+
+The execution path is strictly deterministic: AST/UAST lowering, HIN graph
+transformation, type inference, symbolic constraint verification, and code
+healing are performed by static analysis, AST rewrites, and pattern matching.
+LLMs are never invoked inside the build loop; they are confined to the
+upstream intent-parsing and human-facing diagnostic layers.
+"""
 
 from __future__ import annotations
 
 import ast
 import importlib.machinery
-import importlib.util
-import io
 import logging
 import os
-import re
 import shutil
 import subprocess
-import textwrap
-import tokenize
 import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -25,13 +27,13 @@ from aero_forge.errors import (
     classify_cargo_error,
 )
 from aero_forge.healing.router import try_auto_fix
+from aero_forge.llm import get_llm_client
 from aero_forge.orchestrator.error_classifier import (
     ErrorClass,
     classify_exception,
     format_transpiler_error_with_traceback,
     is_fatal,
 )
-from aero_forge.llm import get_llm_client
 from aero_forge.orchestrator.prompt_builder import PromptBuilder
 from aero_forge.precision_shield.shield import Shield
 from aero_forge.sandbox.manager import Sandbox
@@ -54,7 +56,12 @@ class ForgeError(Exception):
 
 
 class Orchestrator:
-    """Drive the generate/transpile/build/test loop."""
+    """Drive the deterministic transpile/build/test/heal loop.
+
+    Healing is performed by the static ``try_auto_fix`` router and the
+    deterministic fix cache. No LLM calls occur during compilation or test
+    execution.
+    """
 
     def __init__(
         self,
@@ -122,6 +129,8 @@ class Orchestrator:
         self.target = target
 
         self.cache = FixCache(enabled=self.settings["CACHE_ENABLED"])
+        # prompt_builder and llm_client are retained for API compatibility but
+        # are no longer used by the deterministic build loop.
         self.prompt_builder = PromptBuilder()
         self.llm_client: Optional[Any] = None
         if self.use_llm:
@@ -140,7 +149,11 @@ class Orchestrator:
         self._cargo_target = Path.home() / ".cache" / "aero-forge" / "target"
 
     def run(self) -> Dict[str, Any]:
-        """Run the build/heal loop and return the final result."""
+        """Run the deterministic transpile/compile/test/heal loop.
+
+        All repair attempts are static AST/pattern-based. No LLM calls are made
+        during execution.
+        """
         logger.info(
             "Starting forge for %s::%s",
             self.source_path,
@@ -157,7 +170,6 @@ class Orchestrator:
 
         last_working_source: Optional[str] = None
         last_working_artifact: Optional[Path] = None
-        self.prompt_builder.clear()
 
         for iteration in range(1, self.max_iterations + 1):
             logger.info("Forge iteration %d/%d", iteration, self.max_iterations)
@@ -264,64 +276,23 @@ class Orchestrator:
         return result
 
     def _attempt_fix(self, source: str, error_log: str) -> Optional[str]:
-        """Try router, cache, then LLM."""
-        # 1. Router-first healing.
+        """Try deterministic router and cached fixes.
+
+        The orchestrator never invokes an LLM during the build loop. All
+        repairs are static AST rewrites or pattern-based patches produced by
+        ``aero_forge.healing.router``.
+        """
         fixed = try_auto_fix(error_log, source)
         if fixed is not None and fixed != source:
             logger.info("Self-healing router produced a fix")
             return fixed
 
-        # 2. Cached fix.
         cached = self.cache.get(error_log, source)
         if cached is not None and cached != source:
             logger.info("Fix cache hit")
             return cached
 
-        # 3. LLM fallback.
-        if not self.use_llm or self.llm_client is None:
-            logger.info("LLM disabled; no fix available")
-            return None
-
-        target = self._function_name_for_error(source, error_log)
-        func_source = self._extract_function_source(source, target)
-        messages = self.prompt_builder.build(target, func_source)
-
-        logger.info(
-            "Requesting LLM fix for %s from %s",
-            target,
-            self.settings.get("LLM_PROVIDER"),
-        )
-        answer = self.llm_client.generate(messages)
-        if answer is None:
-            logger.error("LLM failed to produce a fix")
-            return None
-
-        new_func = _extract_function_body(answer, target)
-        fixed = _replace_function(source, target, new_func)
-        if fixed == source:
-            logger.warning("LLM returned a fix identical to current source; ignoring")
-            return None
-
-        self.cache.set(error_log, source, fixed)
-        logger.info("LLM produced a fix")
-        return fixed
-
-    def _function_name_for_error(self, source: str, error_log: str) -> str:
-        """Return the function most likely responsible for ``error_log``."""
-        # Syntax errors include a line number; map it back to a function.
-        m = re.search(r"\(line (\d+)\)", error_log)
-        if m:
-            line = int(m.group(1))
-            name = _function_at_line(source, line)
-            if name:
-                return name
-
-        # Failing test/assert output usually names the function.
-        for name in self.function_names:
-            if name in error_log:
-                return name
-
-        return self.function_name
+        return None
 
     def _validate_return_tuple_sizes(self, tree: ast.AST) -> None:
         """Reject functions whose return statements return different tuple sizes.
@@ -518,200 +489,6 @@ class Orchestrator:
         else:
             # Build outputs are isolated; do not turn them into packages.
             pass
-
-    def _extract_function_source(
-        self, source: str, function_name: Optional[str] = None
-    ) -> str:
-        function_name = function_name or self.function_name
-        try:
-            tree = ast.parse(source)
-        except SyntaxError:
-            return source
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == function_name:
-                return ast.unparse(node)
-        return source
-
-
-def _function_at_line(source: str, line: int) -> Optional[str]:
-    """Return the function whose source region contains ``line``.
-
-    Falls back to token-based discovery when the source has syntax errors.
-    """
-    try:
-        tree = ast.parse(source)
-        for node in tree.body:
-            if isinstance(node, ast.FunctionDef):
-                start = node.lineno
-                end = node.end_lineno or start
-                if start <= line <= end:
-                    return node.name
-    except SyntaxError:
-        pass
-
-    try:
-        import io
-        import tokenize
-
-        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
-    except (SyntaxError, tokenize.TokenError):
-        tokens = []
-
-    functions: List[tuple] = []
-    i = 0
-    while i < len(tokens):
-        tok = tokens[i]
-        if tok.type == tokenize.NAME and tok.string == "def":
-            j = i + 1
-            while j < len(tokens) and tokens[j].type in (
-                tokenize.NL,
-                tokenize.NEWLINE,
-                tokenize.INDENT,
-                tokenize.DEDENT,
-                tokenize.COMMENT,
-            ):
-                j += 1
-            if j < len(tokens) and tokens[j].type == tokenize.NAME:
-                name = tokens[j].string
-                start_line = tok.start[0]
-                end_line = len(source.splitlines()) + 1
-                for k in range(j + 1, len(tokens)):
-                    if (
-                        tokens[k].type == tokenize.NAME
-                        and tokens[k].string in {"def", "class"}
-                        and tokens[k].start[1] == tok.start[1]
-                    ):
-                        end_line = tokens[k].start[0] - 1
-                        break
-                functions.append((name, start_line, end_line))
-                i = j
-        i += 1
-
-    for name, start_line, end_line in functions:
-        if start_line <= line <= end_line:
-            return name
-    return None
-
-
-def _extract_function_body(text: str, name: str) -> str:
-    """Strip markdown fences and return a function definition or body block."""
-    text = text.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-
-    try:
-        tree = ast.parse(text)
-        if len(tree.body) == 1 and isinstance(tree.body[0], ast.FunctionDef):
-            return ast.unparse(tree.body[0])
-    except SyntaxError:
-        pass
-
-    return textwrap.dedent(text)
-
-
-def _replace_function(source: str, name: str, new_body: str) -> str:
-    """Replace the function ``name`` in ``source`` with ``new_body``.
-
-    Falls back to text-region replacement when the original source is not valid
-    Python, so that a syntax error in one function of a multi-function file does
-    not erase the other functions.
-    """
-    try:
-        body_tree = ast.parse(new_body)
-    except SyntaxError:
-        return source
-
-    is_full_func = len(body_tree.body) == 1 and isinstance(
-        body_tree.body[0], ast.FunctionDef
-    )
-
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        if is_full_func:
-            return _replace_function_text(source, name, ast.unparse(body_tree.body[0]))
-        return source
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == name:
-            if is_full_func:
-                new_func = body_tree.body[0]
-                node.args = new_func.args
-                node.body = new_func.body
-                node.decorator_list = new_func.decorator_list
-                node.returns = new_func.returns
-            else:
-                node.body = body_tree.body
-            return ast.unparse(tree)
-
-    return source
-
-
-def _replace_function_text(source: str, name: str, replacement: str) -> str:
-    """Replace the source text region of ``def name(...)`` with ``replacement``.
-
-    Uses tokenization so it works even when the file as a whole does not parse.
-    """
-    try:
-        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
-    except (SyntaxError, tokenize.TokenError):
-        tokens = []
-
-    all_defs: List[Tuple[int, int]] = []
-    for i, tok in enumerate(tokens):
-        if tok.type == tokenize.NAME and tok.string in {"def", "class"}:
-            j = i + 1
-            while j < len(tokens) and tokens[j].type in (
-                tokenize.NL,
-                tokenize.NEWLINE,
-                tokenize.INDENT,
-                tokenize.DEDENT,
-                tokenize.COMMENT,
-            ):
-                j += 1
-            if j < len(tokens) and tokens[j].type == tokenize.NAME:
-                all_defs.append((i, j))
-
-    target_index = -1
-    for idx, (i, j) in enumerate(all_defs):
-        if tokens[j].string == name:
-            target_index = idx
-            break
-
-    if target_index == -1:
-        # Fall back to a simple regex for the function header.
-        pattern = re.compile(
-            rf"^(\s*def\s+{re.escape(name)}\b.*?)(?=^\s*def\s+\w+\b|\Z)",
-            re.MULTILINE | re.DOTALL,
-        )
-        return pattern.sub(replacement, source)
-
-    start_tok = tokens[all_defs[target_index][0]]
-    start_line = start_tok.start[0]
-
-    # Find the next top-level definition or the end of the file.
-    end_line = len(source.splitlines()) + 1
-    for i, j in all_defs[target_index + 1 :]:
-        tok = tokens[i]
-        if tok.start[1] == start_tok.start[1]:
-            end_line = tok.start[0]
-            break
-
-    lines = source.splitlines(keepends=True)
-    replacement_with_nl = (
-        replacement if replacement.endswith("\n") else replacement + "\n"
-    )
-    return (
-        "".join(lines[: start_line - 1])
-        + replacement_with_nl
-        + "".join(lines[end_line - 1 :])
-    )
-
 
 class _BuildFailure(UserError):
     """Internal exception used to signal a compilation failure with logs."""

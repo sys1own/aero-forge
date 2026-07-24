@@ -51,10 +51,12 @@ def _resolve_llm_provider(
         return "none"
     if not llm_provider:
         llm_provider = os.getenv("AERO_FORGE_LLM_PROVIDER")
-    if llm_fix and not llm_provider:
-        raise UserError(
-            "--llm-fix requires an LLM provider. "
-            "Set AERO_FORGE_LLM_PROVIDER or use --llm-provider."
+    if llm_fix:
+        click.echo(
+            "--llm-fix is deprecated; the build loop is deterministic and no longer "
+            "calls an LLM for auto-fixing. LLM support is confined to upstream "
+            "intent parsing and human-facing diagnostics.",
+            err=True,
         )
     if not llm_provider:
         click.echo(
@@ -152,12 +154,12 @@ def main() -> None:
 @click.option(
     "--no-llm",
     is_flag=True,
-    help="Run the accelerator without LLM-based healing.",
+    help="Run without LLM-driven code generation (the build loop is always deterministic).",
 )
 @click.option(
     "--llm-fix",
     is_flag=True,
-    help="Use an LLM to explain and auto-fix failures.",
+    help="Deprecated. The build loop is deterministic and never calls an LLM for repair.",
 )
 @click.option(
     "--no-cache",
@@ -203,7 +205,7 @@ def fix(
                 "type": error_type,
                 "message": error,
                 "details": "",
-                "suggestion": "Add type hints, simplify the construct, or run with --llm-fix.",
+                "suggestion": "Add type hints, simplify the construct, or correct the unsupported Python construct.",
             },
             "files_generated": [],
             "rust_extensions": [],
@@ -286,7 +288,7 @@ def fix(
                 "type": "build_error",
                 "message": error_text,
                 "details": result.get("logs", ""),
-                "suggestion": "Run with --llm-fix to let the LLM repair the code.",
+                "suggestion": "Add type hints, simplify the construct, or correct the unsupported Python construct.",
             },
         }
         if json_output:
@@ -365,12 +367,12 @@ def fix(
 @click.option(
     "--no-llm",
     is_flag=True,
-    help="Run without LLM-based healing.",
+    help="Run without LLM-driven code generation (the build loop is always deterministic).",
 )
 @click.option(
     "--llm-fix",
     is_flag=True,
-    help="Use an LLM to explain and auto-fix failures.",
+    help="Deprecated. The build loop is deterministic and never calls an LLM for repair.",
 )
 @click.option(
     "--no-cache",

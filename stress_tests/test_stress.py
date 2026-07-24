@@ -129,58 +129,38 @@ class TestLevel6CrossFile:
         assert "Build summary: 3 succeeded, 0 failed" in result.stderr
 
 
-class TestLevel7LLMHealing:
-    @staticmethod
-    def _is_api_limit_error(output: str) -> bool:
-        lowered = output.lower()
-        return any(
-            marker in lowered
-            for marker in (
-                "rate limit",
-                "quota",
-                "key limit",
-                "401",
-                "403",
-                "429",
-                "identical to current source",
-            )
-        )
+class TestLevel7DeterministicFailure:
+    """Broken files cannot be healed by an LLM during the build loop.
+
+    The deterministic core produces clear diagnostics and stops cleanly.
+    """
 
     @pytest.mark.parametrize(
-        "blueprint,summary",
+        "blueprint,expect_success",
         [
-            ("blueprint_syntax.aero", "1 succeeded, 0 failed"),
-            ("blueprint_type.aero", "1 succeeded, 0 failed"),
-            ("blueprint_multi.aero", "3 succeeded, 0 failed"),
+            ("blueprint_syntax.aero", False),
+            ("blueprint_type.aero", True),  # deterministic router heals a/b -> a//b
+            ("blueprint_multi.aero", False),
         ],
     )
-    def test_openrouter_heals_broken_functions(self, blueprint, summary):
-        if not os.getenv("OPENROUTER_API_KEY"):
-            pytest.skip("OPENROUTER_API_KEY not set")
+    def test_broken_functions_fail_with_diagnostics(self, blueprint, expect_success):
         bp = STRESS_DIR / "level7_llm_healing" / blueprint
         out_dir = bp.parent / "dist"
         if out_dir.exists():
             shutil.rmtree(out_dir)
-        result = _run_build(bp, env={"AERO_FORGE_LLM_PROVIDER": "openrouter"})
+        result = _run_build(bp, env={"AERO_FORGE_LLM_PROVIDER": "none"})
         output = result.stderr + result.stdout
-        if result.returncode != 0 and self._is_api_limit_error(output):
-            pytest.xfail(f"OpenRouter API limit hit: {output[:200]}")
-        assert result.returncode == 0, output
-        assert summary in result.stderr, output
-
-    def test_gemini_heals_syntax_error(self):
-        if not os.getenv("GEMINI_API_KEY"):
-            pytest.skip("GEMINI_API_KEY not set")
-        bp = STRESS_DIR / "level7_llm_healing" / "blueprint_gemini_syntax.aero"
-        out_dir = bp.parent / "dist"
-        if out_dir.exists():
-            shutil.rmtree(out_dir)
-        result = _run_build(bp, env={"AERO_FORGE_LLM_PROVIDER": "gemini"})
-        output = result.stderr + result.stdout
-        if result.returncode != 0 and self._is_api_limit_error(output):
-            pytest.xfail(f"Gemini API limit hit: {output[:200]}")
-        assert result.returncode == 0, output
-        assert "1 succeeded, 0 failed" in result.stderr, output
+        if expect_success:
+            assert result.returncode == 0, output
+            assert "succeeded" in output, output
+        else:
+            assert result.returncode != 0, output
+            assert (
+                "[Transpiler Error]" in output
+                or "Syntax error" in output
+                or "could not be fixed" in output
+                or "Unsupported" in output
+            ), output
 
     def test_no_llm_graceful_failure(self):
         """A broken function with provider: none should fail gracefully without crashing."""
@@ -189,9 +169,9 @@ class TestLevel7LLMHealing:
         assert result.returncode != 0
         output = result.stderr + result.stdout
         assert (
-            "LLM disabled" in output
-            or "could not be fixed" in output
+            "could not be fixed" in output
             or "Syntax error" in output
+            or "[Transpiler Error]" in output
         )
 
 
