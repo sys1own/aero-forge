@@ -51,6 +51,7 @@ For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the i
 Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing.
 """,
     "Minimal baseline prompt.",
 )
@@ -85,6 +86,7 @@ For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the i
 Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing.
 """,
     "Structured rules + output format.",
 )
@@ -110,6 +112,7 @@ For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the i
 Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing.
 """,
     "Focus on algorithmic efficiency.",
 )
@@ -134,6 +137,7 @@ For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the i
 Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing.
 """,
     "Focus on low-level performance and SIMD-friendly code.",
 )
@@ -164,6 +168,7 @@ For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the i
 Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing.
 """,
     "Balanced combination of V2, V3, and V4.",
 )
@@ -186,6 +191,7 @@ For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the i
 Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing.
 """,
     "Encourage novel algorithm choices.",
 )
@@ -208,6 +214,7 @@ For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the i
 Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing.
 """,
     "Use only well-known algorithms.",
 )
@@ -231,6 +238,7 @@ For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the i
 Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing.
 """,
     "Optimizes with iterative feedback.",
 )
@@ -254,6 +262,7 @@ For the Mandelbrot escape-time algorithm, iterate `z = z*z + c` and return the i
 Do not define nested functions, classes, or lambdas inside the function; use top-level helpers only.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed.
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing.
 """,
     "Explicitly forbids constructs that are hard for the transpiler to handle.",
 )
@@ -275,6 +284,7 @@ RULES:
 9. All return statements must return the same number of values.
 10. Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays.
 11. You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing.
 12. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 """,
     "Emphasizes algorithmic correctness and transpiler-friendly explicit loops.",

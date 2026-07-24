@@ -164,6 +164,10 @@ Aero-Forge's transpiler targets numerical and algorithmic Python. The following 
 - `append()` and `extend()` on list variables.
 - Nested `list[list[T]]` matrices with row/column indexing (`m[i][j]`), including caching a row (`row = m[i]`) via `.clone()`.
 - `min()` and `max()` on two scalar values.
+- `sorted(values)` with no key.
+- `int()` and `float()` casts.
+- Mixed `int`/`float` arithmetic and `math` functions such as `math.cos`, `math.sin`, and `math.sqrt`.
+- Automatic empty-list guard for scalar-returning functions that index into a list.
 
 The following are intentionally not supported and produce clear errors:
 

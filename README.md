@@ -348,6 +348,10 @@ The transpiler handles common numerical and algorithmic Python patterns:
 - `append()` and `extend()` on lists.
 - Basic `list[list[T]]` matrices and indexing (`m[i][j]`), including row caching (`row = m[i]`).
 - `min()` and `max()` on two scalar values.
+- `sorted(values)` with no key.
+- `int()` and `float()` casts.
+- Mixed `int`/`float` arithmetic and `math` functions (`math.cos`, `math.sin`, `math.sqrt`, etc.).
+- Automatic empty-list guard for scalar-returning functions that index into a list.
 
 ## Known Limitations
 
