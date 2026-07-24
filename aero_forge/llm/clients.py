@@ -60,12 +60,16 @@ class BaseLLMClient(ABC):
         api_key: Optional[str] = None,
         backoff_initial: float = 1.0,
         backoff_max: float = 30.0,
+        timeout: Optional[float] = None,
     ):
         self.model = model
         self.max_retries = max(1, max_retries)
         self.api_key = api_key
         self.backoff_initial = backoff_initial
         self.backoff_max = backoff_max
+        self.timeout = timeout or float(
+            os.getenv("AERO_FORGE_LLM_TIMEOUT", "120.0")
+        )
 
     def generate(
         self,
@@ -230,7 +234,7 @@ class OpenAIClient(BaseLLMClient):
             or self.base_url
             or "https://api.openai.com/v1"
         )
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=self.timeout)
         messages = _normalize_messages(prompt)
         response = client.chat.completions.create(
             model=self.model,
@@ -272,7 +276,7 @@ class OpenRouterClient(OpenAIClient):
         from openai import OpenAI
 
         base_url = os.getenv("AERO_FORGE_BASE_URL") or self.base_url
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=60.0)
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=self.timeout)
         messages = _normalize_messages(prompt)
         response = client.chat.completions.create(
             model=self.model,
