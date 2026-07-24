@@ -105,5 +105,10 @@ def test_orchestrator_routes_non_numeric_function_to_standard_runtime(tmp_path):
     assert result["success"] is True
     assert "[HIN Bypass]" in result["logs"]
     assert "decision_matrix_pro" in result["logs"]
-    assert "non-numerical" in result["logs"].lower() or "dynamic dictionary" in result["logs"].lower()
+    assert (
+        "non-numerical" in result["logs"].lower()
+        or "dynamic dictionary" in result["logs"].lower()
+        or "f-string" in result["logs"].lower()
+        or "string formatting" in result["logs"].lower()
+    )
     assert (tmp_path / "python_pkg").is_dir()

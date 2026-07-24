@@ -183,7 +183,7 @@ class Engine:
             lib = (
                 "#![allow(unused_imports)]\n"
                 f"{_shield_imports(all_traits)}\n"
-                "use std::collections::HashMap;\n"
+                "use std::collections::BTreeMap;\n"
                 "\n"
                 f"{functions_section}"
                 "\n\n"
@@ -440,8 +440,24 @@ class RustGenerator:
         iter_expr = stmt.iter
         if isinstance(iter_expr, ast.Call):
             name = _call_name(iter_expr)
+            base = _call_base(iter_expr)
             if name == "range" and isinstance(target, ast.Name) and target.id != "_":
                 types[target.id] = "i64"
+            elif name in ("keys", "values", "items") and base is not None:
+                base_node = iter_expr.func.value if isinstance(iter_expr.func, ast.Attribute) else None
+                dict_type = self._infer_expr_type(base_node, types) if base_node else None
+                if dict_type and dict_type.startswith("BTreeMap<"):
+                    key_type, val_type = _kv_types(dict_type)
+                    if name in ("keys", "values") and isinstance(target, ast.Name):
+                        types[target.id] = self._unify(
+                            types.get(target.id), key_type if name == "keys" else val_type
+                        )
+                    elif name == "items" and isinstance(target, ast.Tuple) and len(target.elts) == 2:
+                        k_elt, v_elt = target.elts
+                        if isinstance(k_elt, ast.Name):
+                            types[k_elt.id] = self._unify(types.get(k_elt.id), key_type)
+                        if isinstance(v_elt, ast.Name):
+                            types[v_elt.id] = self._unify(types.get(v_elt.id), val_type)
             elif name == "enumerate" and isinstance(target, ast.Tuple):
                 if len(target.elts) >= 1 and isinstance(target.elts[0], ast.Name):
                     types[target.elts[0].id] = "i64"
@@ -458,6 +474,8 @@ class RustGenerator:
                             known_elt = self._infer_element_or_ref(
                                 self._infer_expr_type(iterable, types)
                             )
+                        if known_elt and known_elt.startswith("&"):
+                            known_elt = known_elt[1:]
                         types[val.id] = self._unify(types.get(val.id), known_elt)
                         if isinstance(iterable, ast.Name) and known_elt:
                             types[iterable.id] = self._unify(
@@ -473,23 +491,50 @@ class RustGenerator:
                             known_elt = self._infer_element_or_ref(
                                 self._infer_expr_type(arg, types)
                             )
+                        if known_elt and known_elt.startswith("&"):
+                            known_elt = known_elt[1:]
                         types[elt.id] = self._unify(types.get(elt.id), known_elt)
                         if isinstance(arg, ast.Name) and known_elt:
                             types[arg.id] = self._unify(
                                 types.get(arg.id), f"Vec<{known_elt}>"
                             )
-            elif name not in ("range", "enumerate", "zip"):
+            elif name not in ("range", "enumerate", "zip", "keys", "values", "items"):
                 pass
-        elif isinstance(iter_expr, ast.Name) and isinstance(target, ast.Name):
-            known_elt = types.get(target.id)
-            if known_elt is None:
-                known_elt = self._infer_element_or_ref(
-                    types.get(iter_expr.id, self.function_type)
-                )
+        elif isinstance(iter_expr, ast.Name):
+            iter_type = types.get(iter_expr.id)
+            if iter_type and iter_type.startswith("BTreeMap<"):
+                if isinstance(target, ast.Name):
+                    key_type, _ = _kv_types(iter_type)
+                    types[target.id] = self._unify(types.get(target.id), key_type)
+            else:
+                known_elt: Optional[str] = None
+                if isinstance(target, ast.Tuple) and _is_tuple_type(iter_type or ""):
+                    known_elt = _element_type(iter_type)
+                elif isinstance(target, ast.Name):
+                    known_elt = types.get(target.id)
+                if known_elt is None:
+                    known_elt = self._infer_element_or_ref(
+                        types.get(iter_expr.id, self.function_type)
+                    )
+                if known_elt and known_elt.startswith("&"):
+                    known_elt = known_elt[1:]
+                if isinstance(target, ast.Name):
+                    types[target.id] = self._unify(types.get(target.id), known_elt)
+                elif isinstance(target, ast.Tuple) and _is_tuple_type(known_elt):
+                    parts = self._tuple_element_types(known_elt)
+                    for elt, part in zip(target.elts, parts):
+                        if isinstance(elt, ast.Name):
+                            types[elt.id] = self._unify(types.get(elt.id), part)
+                if known_elt:
+                    types[iter_expr.id] = self._unify(
+                        types.get(iter_expr.id), f"Vec<{known_elt}>"
+                    )
+        elif isinstance(iter_expr, ast.Subscript) and isinstance(target, ast.Name):
+            iter_type = self._infer_expr_type(iter_expr, types)
+            known_elt = self._infer_element_or_ref(iter_type)
+            if known_elt and known_elt.startswith("&"):
+                known_elt = known_elt[1:]
             types[target.id] = self._unify(types.get(target.id), known_elt)
-            types[iter_expr.id] = self._unify(
-                types.get(iter_expr.id), f"Vec<{known_elt}>"
-            )
 
     def _infer_element_or_ref(self, container_type: Optional[str]) -> str:
         if not container_type or not container_type.startswith("Vec<"):
@@ -531,6 +576,11 @@ class RustGenerator:
                 if isinstance(expr.slice, ast.Slice):
                     return f"Vec<{element_type}>"
                 return element_type
+            if base_type and base_type.startswith("BTreeMap<"):
+                _, val_type = _kv_types(base_type)
+                if isinstance(expr.slice, ast.Slice):
+                    return f"BTreeMap<{_kv_types(base_type)[0]}, {val_type}>"
+                return val_type
             return None
         if isinstance(expr, ast.List):
             if not expr.elts:
@@ -542,10 +592,10 @@ class RustGenerator:
             return f"Vec<{inner}>"
         if isinstance(expr, ast.Dict):
             if not expr.keys:
-                return "HashMap<String, String>"
+                return "BTreeMap<String, String>"
             key_type = self._infer_expr_type(expr.keys[0], types) or "String"
             val_type = self._infer_expr_type(expr.values[0], types) or "String"
-            return f"HashMap<{key_type}, {val_type}>"
+            return f"BTreeMap<{key_type}, {val_type}>"
         if isinstance(expr, ast.Tuple):
             elts = [self._infer_expr_type(e, types) for e in expr.elts]
             if all(elts):
@@ -592,6 +642,17 @@ class RustGenerator:
                 ret = _annotation_to_rust_type(other.returns, self.class_names)
                 if ret:
                     return ret
+            if base is not None and name == "pop":
+                base_type = self._infer_expr_type(expr.func.value, types)
+                if base_type and base_type.startswith("Vec<"):
+                    return _element_type(base_type)
+            if base is not None and name == "get":
+                base_type = self._infer_expr_type(expr.func.value, types)
+                if base_type and base_type.startswith("BTreeMap<"):
+                    _, val_type = _kv_types(base_type)
+                    return val_type
+                if base_type and base_type.startswith("Vec<"):
+                    return _element_type(base_type)
         return None
 
     def _propagate_subscript_types(
@@ -722,13 +783,13 @@ class RustGenerator:
                 unified = [self._unify(a, b) for a, b in zip(parts1, parts2)]
                 if all(unified):
                     return f"({', '.join(unified)})"
-        if t1.startswith("HashMap<") and t2.startswith("HashMap<"):
+        if t1.startswith("BTreeMap<") and t2.startswith("BTreeMap<"):
             k1, v1 = _kv_types(t1)
             k2, v2 = _kv_types(t2)
             k = self._unify(k1, k2)
             v = self._unify(v1, v2)
             if k and v:
-                return f"HashMap<{k}, {v}>"
+                return f"BTreeMap<{k}, {v}>"
         if "f64" in (t1, t2):
             return "f64"
         if "i64" in (t1, t2):
@@ -798,16 +859,16 @@ class RustGenerator:
                     element_type = self._tuple_element_at(base_type, idx)
                     if element_type is not None:
                         return element_type
-            if base_type.startswith("HashMap<"):
+            if base_type.startswith("BTreeMap<"):
                 _, val_type = _kv_types(base_type)
                 return val_type
             return self.function_type
         if isinstance(expr, ast.Dict):
             if not expr.keys:
-                return "HashMap<String, String>"
+                return "BTreeMap<String, String>"
             key_type = self._type_of(expr.keys[0])
             val_type = self._type_of(expr.values[0])
-            return f"HashMap<{key_type}, {val_type}>"
+            return f"BTreeMap<{key_type}, {val_type}>"
         if isinstance(expr, ast.List):
             if not expr.elts:
                 return "Vec<?>"
@@ -960,8 +1021,12 @@ class RustGenerator:
             return f"({expr}).to_string()"
         if from_type == "String" and to_type == "&str":
             return f"({expr}).as_str()"
-        if from_type.startswith("HashMap<") and to_type.startswith("HashMap<"):
+        if from_type.startswith("BTreeMap<") and to_type.startswith("BTreeMap<"):
             return expr
+        if from_type.startswith("Vec<") and to_type == "bool":
+            return f"!({expr}).is_empty()"
+        if from_type.startswith("BTreeMap<") and to_type == "bool":
+            return f"!({expr}).is_empty()"
         return expr
 
     # ------------------------------------------------------------------
@@ -1186,9 +1251,9 @@ class RustGenerator:
             return "false"
         if typ == "String":
             return 'String::new()'
-        if typ.startswith("HashMap<"):
+        if typ.startswith("BTreeMap<"):
             k, v = _kv_types(typ)
-            return f"HashMap::<{k}, {v}>::new()"
+            return f"BTreeMap::<{k}, {v}>::new()"
         if typ.startswith("Vec<"):
             inner = _element_type(typ)
             return f"Vec::<{inner}>::new()"
@@ -1387,7 +1452,7 @@ class RustGenerator:
                 isinstance(stmt.value, ast.Constant) and stmt.value.value is None
             ):
                 # Bare ``return`` or ``return None`` compiles to the zero value
-                # for the declared return type, producing an empty Vec/HashMap
+                # for the declared return type, producing an empty Vec/BTreeMap
                 # when the function is annotated to return a collection.
                 if self.return_type == "()":
                     return "return;"
@@ -1471,11 +1536,11 @@ class RustGenerator:
             target = stmt.targets[0]
             if isinstance(target, ast.Name):
                 name = target.id
-                if (
-                    isinstance(stmt.value, ast.List)
-                    and not stmt.value.elts
-                    and name in self.type_env
-                ):
+                is_empty_collection = (
+                    (isinstance(stmt.value, ast.List) and not stmt.value.elts)
+                    or (isinstance(stmt.value, ast.Dict) and not stmt.value.keys)
+                )
+                if is_empty_collection and name in self.type_env:
                     rhs_type = self.type_env[name]
                 else:
                     rhs_type = self._type_of(stmt.value)
@@ -1511,9 +1576,12 @@ class RustGenerator:
             first_name = (
                 stmt.targets[0].id if isinstance(stmt.targets[0], ast.Name) else None
             )
+            is_empty_collection = (
+                (isinstance(stmt.value, ast.List) and not stmt.value.elts)
+                or (isinstance(stmt.value, ast.Dict) and not stmt.value.keys)
+            )
             if (
-                isinstance(stmt.value, ast.List)
-                and not stmt.value.elts
+                is_empty_collection
                 and first_name
                 and first_name in self.type_env
             ):
@@ -1549,8 +1617,29 @@ class RustGenerator:
                 "append() is only supported on list/Vec types", node=expr
             )
         element_type = _element_type(container_type)
+        arg = expr.args[0]
+        arg_str = self._emit_expr(arg, element_type)
+        if element_type not in ("i64", "f64", "bool"):
+            arg_str = f"({arg_str}).clone()"
+        if isinstance(target, ast.Subscript):
+            base_type = self._type_of(target.value)
+            if base_type.startswith("BTreeMap<"):
+                key_type, val_type = _kv_types(base_type)
+                key_expr = self._emit_expr(target.slice, key_type)
+                base_expr = self._emit_expr(target.value, base_type)
+                return (
+                    f"({base_expr}).entry(({key_expr}).clone())"
+                    f".or_insert({self._zero_for_type(val_type)})"
+                    f".push({arg_str});"
+                )
+            if base_type.startswith("Vec<"):
+                idx_expr = self._emit_expr(target.slice, "i64")
+                base_expr = self._emit_expr(target.value, base_type)
+                return (
+                    f"({base_expr}).get_mut(({idx_expr}) as usize)"
+                    f".unwrap().push({arg_str});"
+                )
         target_str = self._emit_expr(target, container_type)
-        arg_str = self._emit_expr(expr.args[0], element_type)
         return f"{target_str}.push({arg_str});"
 
     def _emit_tuple_unpack(self, target: ast.AST, value: ast.expr) -> str:
@@ -1672,13 +1761,34 @@ class RustGenerator:
                 return self._emit_for_enumerate(stmt)
             if name == "zip":
                 return self._emit_for_zip(stmt)
+            if name in ("keys", "values", "items"):
+                base = _call_base(iter_expr)
+                if base is not None and isinstance(iter_expr.func, ast.Attribute):
+                    base_node = iter_expr.func.value
+                    if self._type_of(base_node).startswith("BTreeMap<"):
+                        return self._emit_for_dict_methods(stmt, name)
+            if name == "get" and isinstance(iter_expr.func, ast.Attribute):
+                base_node = iter_expr.func.value
+                base_type = self._type_of(base_node)
+                if base_type.startswith("BTreeMap<"):
+                    _, val_type = _kv_types(base_type)
+                    if val_type.startswith("Vec<"):
+                        return self._emit_for_get_iter(stmt, base_node, val_type)
             raise UnsupportedError(
                 f"Unsupported for-loop iterator: {name}", node=iter_expr
             )
-        if isinstance(iter_expr, ast.Name) and isinstance(target, ast.Name):
-            return self._emit_for_list_variable(target.id, iter_expr, stmt)
+        if isinstance(iter_expr, ast.Name):
+            typ = self._type_of(iter_expr)
+            if typ.startswith("Vec<"):
+                return self._emit_for_list_variable(target, iter_expr, stmt)
+            if typ.startswith("BTreeMap<") and isinstance(target, ast.Name):
+                return self._emit_for_dict_keys(stmt, target.id, iter_expr.id)
+        if isinstance(iter_expr, ast.Subscript) and isinstance(target, ast.Name):
+            typ = self._type_of(iter_expr)
+            if typ.startswith("Vec<"):
+                return self._emit_for_subscript_vec(stmt, target.id, iter_expr)
         raise UnsupportedError(
-            "Only range, enumerate, zip, and list variable loops are supported",
+            "Only range, enumerate, zip, list variable, dict, and dict method loops are supported",
             node=stmt,
         )
 
@@ -1737,11 +1847,11 @@ class RustGenerator:
             )
         element_type = _element_type(iterable_type)
         iter_rust = self._emit_expr(iterable, iterable_type)
-        if element_type in ("i64", "f64", "bool"):
-            iterator = f"{iter_rust}.iter().copied().enumerate()"
-        else:
-            iterator = f"{iter_rust}.iter().enumerate()"
+        iterator = f"{iter_rust}.iter().cloned().enumerate()"
+        old = self.type_env.get(val_name)
+        self.type_env[val_name] = element_type
         body = self._emit_body(stmt.body)
+        self._restore_type(val_name, old)
         return (
             f"for ({idx_name}, {val_name}) in {iterator} {{\n"
             f"    let {idx_name} = {idx_name} as i64;\n"
@@ -1763,7 +1873,8 @@ class RustGenerator:
                 "Only plain names are supported in a zip() target", node=target
             )
         iterators: List[str] = []
-        for arg in call.args:
+        old_types: Dict[str, Optional[str]] = {}
+        for arg, name in zip(call.args, names):
             arg_type = self._type_of(arg)
             if not arg_type.startswith("Vec<"):
                 raise UnsupportedError(
@@ -1771,10 +1882,9 @@ class RustGenerator:
                 )
             element_type = _element_type(arg_type)
             arg_rust = self._emit_expr(arg, arg_type)
-            if element_type in ("i64", "f64", "bool"):
-                iterators.append(f"{arg_rust}.iter().copied()")
-            else:
-                iterators.append(f"{arg_rust}.iter()")
+            iterators.append(f"{arg_rust}.iter().cloned()")
+            old_types[name] = self.type_env.get(name)
+            self.type_env[name] = element_type
         if len(iterators) > 2:
             raise UnsupportedError(
                 "zip() with more than two iterables is not supported", node=stmt
@@ -1783,10 +1893,12 @@ class RustGenerator:
         for it in iterators[1:]:
             zip_expr = f"{zip_expr}.zip({it})"
         body = self._emit_body(stmt.body)
+        for name, old in old_types.items():
+            self._restore_type(name, old)
         return f"for ({', '.join(names)}) in {zip_expr} {{\n{body}\n}}"
 
     def _emit_for_list_variable(
-        self, target_name: str, iter_expr: ast.Name, stmt: ast.For
+        self, target: ast.AST, iter_expr: ast.Name, stmt: ast.For
     ) -> str:
         iter_type = self._type_of(iter_expr)
         if not iter_type.startswith("Vec<"):
@@ -1795,12 +1907,168 @@ class RustGenerator:
             )
         element_type = _element_type(iter_type)
         iter_rust = self._emit_expr(iter_expr, iter_type)
-        if element_type in ("i64", "f64", "bool"):
-            iterator = f"{iter_rust}.iter().copied()"
+        iterator = f"{iter_rust}.iter().cloned()"
+        old_types: Dict[str, Optional[str]] = {}
+        if isinstance(target, ast.Name):
+            names = [target.id]
+            target_type = element_type
+        elif isinstance(target, ast.Tuple):
+            names = [elt.id for elt in target.elts if isinstance(elt, ast.Name)]
+            if len(names) != len(target.elts):
+                raise UnsupportedError(
+                    "Only plain names are supported in a for-loop target", node=stmt
+                )
+            if _is_tuple_type(element_type):
+                target_type = element_type
+            else:
+                raise UnsupportedError(
+                    "Tuple target requires a tuple element type", node=stmt
+                )
         else:
-            iterator = f"{iter_rust}.iter()"
+            raise UnsupportedError(
+                "Only a single name or tuple target is supported for list iteration",
+                node=stmt,
+            )
+        parts = self._tuple_element_types(target_type) if _is_tuple_type(target_type) else [target_type] * len(names)
+        if len(parts) != len(names):
+            raise UnsupportedError(
+                "Tuple target element count does not match iterator type", node=stmt
+            )
+        for name, typ in zip(names, parts):
+            old_types[name] = self.type_env.get(name)
+            self.type_env[name] = typ
         body = self._emit_body(stmt.body)
-        return f"for {target_name} in {iterator} {{\n{body}\n}}"
+        for name, old in old_types.items():
+            self._restore_type(name, old)
+        target_str = f"({', '.join(names)})" if len(names) > 1 else names[0]
+        return f"for {target_str} in {iterator} {{\n{body}\n}}"
+
+    def _emit_for_dict_keys(
+        self, stmt: ast.For, target_name: str, dict_name: str
+    ) -> str:
+        dict_type = self._type_of(ast.Name(id=dict_name, ctx=ast.Load()))
+        if not dict_type.startswith("BTreeMap<"):
+            raise UnsupportedError(
+                "for ... in dict variable only supports dict/BTreeMap types", node=stmt
+            )
+        key_type, _ = _kv_types(dict_type)
+        dict_expr = self._emit_expr(
+            ast.Name(id=dict_name, ctx=ast.Load()), dict_type
+        )
+        old = self.type_env.get(target_name)
+        self.type_env[target_name] = key_type
+        body = self._emit_body(stmt.body)
+        self._restore_type(target_name, old)
+        return f"for {target_name} in {dict_expr}.keys().cloned() {{\n{body}\n}}"
+
+    def _emit_for_subscript_vec(
+        self, stmt: ast.For, target_name: str, iter_expr: ast.Subscript
+    ) -> str:
+        iter_type = self._type_of(iter_expr)
+        if not iter_type.startswith("Vec<"):
+            raise UnsupportedError(
+                "for ... in subscript only supports list/Vec values", node=stmt
+            )
+        element_type = _element_type(iter_type)
+        iter_rust = self._emit_expr(iter_expr, iter_type)
+        old = self.type_env.get(target_name)
+        self.type_env[target_name] = element_type
+        body = self._emit_body(stmt.body)
+        self._restore_type(target_name, old)
+        return f"for {target_name} in ({iter_rust}).iter().cloned() {{\n{body}\n}}"
+
+    def _emit_for_dict_methods(self, stmt: ast.For, method: str) -> str:
+        call = stmt.iter
+        assert isinstance(call, ast.Call)
+        base_node = call.func.value
+        dict_type = self._type_of(base_node)
+        if not dict_type.startswith("BTreeMap<"):
+            raise UnsupportedError(
+                f"dict.{method}() loop requires a dict/BTreeMap", node=stmt
+            )
+        key_type, val_type = _kv_types(dict_type)
+        dict_expr = self._emit_expr(base_node, dict_type)
+        if method in ("keys", "values"):
+            if not isinstance(stmt.target, ast.Name):
+                raise UnsupportedError(
+                    f"dict.{method}() requires a single loop variable", node=stmt
+                )
+            target_name = stmt.target.id
+            element_type = key_type if method == "keys" else val_type
+            old = self.type_env.get(target_name)
+            self.type_env[target_name] = element_type
+            body = self._emit_body(stmt.body)
+            self._restore_type(target_name, old)
+            if method == "keys":
+                iterator = f"{dict_expr}.keys().cloned()"
+            else:
+                iterator = f"{dict_expr}.values().cloned()"
+            return f"for {target_name} in {iterator} {{\n{body}\n}}"
+        # method == "items"
+        if not isinstance(stmt.target, ast.Tuple) or len(stmt.target.elts) != 2:
+            raise UnsupportedError(
+                "dict.items() requires a two-element tuple target", node=stmt
+            )
+        k_elt, v_elt = stmt.target.elts
+        if not (isinstance(k_elt, ast.Name) and isinstance(v_elt, ast.Name)):
+            raise UnsupportedError(
+                "dict.items() target elements must be plain names", node=stmt
+            )
+        k_name, v_name = k_elt.id, v_elt.id
+        k_ref = self._next_tmp()
+        v_ref = self._next_tmp()
+        old_k = self.type_env.get(k_name)
+        old_v = self.type_env.get(v_name)
+        self.type_env[k_name] = key_type
+        self.type_env[v_name] = val_type
+        body = self._emit_body(stmt.body)
+        self._restore_type(k_name, old_k)
+        self._restore_type(v_name, old_v)
+        return (
+            f"for ({k_ref}, {v_ref}) in {dict_expr}.iter() {{\n"
+            f"    let {k_name} = {k_ref}.clone();\n"
+            f"    let {v_name} = {v_ref}.clone();\n"
+            f"{body}\n"
+            f"}}"
+        )
+
+    def _emit_for_get_iter(
+        self, stmt: ast.For, base_node: ast.expr, val_type: str
+    ) -> str:
+        """Emit a ``for x in dict.get(key, [])`` style loop."""
+        assert isinstance(stmt.iter, ast.Call)
+        call = stmt.iter
+        element_type = _element_type(val_type)
+        target = stmt.target
+        if isinstance(target, ast.Name):
+            names = [target.id]
+        elif isinstance(target, ast.Tuple):
+            names = [e.id for e in target.elts if isinstance(e, ast.Name)]
+            if len(names) != len(target.elts):
+                raise UnsupportedError(
+                    "dict.get() iteration target must contain only names", node=stmt
+                )
+        else:
+            raise UnsupportedError(
+                "dict.get() iteration requires a name or tuple target", node=stmt
+            )
+        if len(names) != 1:
+            raise UnsupportedError(
+                "dict.get() iteration supports exactly one loop variable", node=stmt
+            )
+        name = names[0]
+        old = self.type_env.get(name)
+        self.type_env[name] = element_type
+        body = self._emit_body(stmt.body)
+        self._restore_type(name, old)
+        call_expr = self._emit_expr(call, val_type)
+        return f"for {name} in ({call_expr}).iter().cloned() {{\n{body}\n}}"
+
+    def _restore_type(self, name: str, old: Optional[str]) -> None:
+        if old is None:
+            self.type_env.pop(name, None)
+        else:
+            self.type_env[name] = old
 
     def _emit_body(self, stmts: List[ast.stmt]) -> str:
         lines = [self._emit_stmt(s) for s in stmts]
@@ -1946,12 +2214,12 @@ class RustGenerator:
         return f"vec![{', '.join(elements)}]"
 
     def _emit_dict_literal(self, expr: ast.Dict, ctx: str) -> str:
-        """Emit a Python dict literal as a Rust HashMap construction block."""
-        key_type, val_type = _kv_types(ctx) if ctx.startswith("HashMap<") else ("String", "String")
+        """Emit a Python dict literal as a Rust BTreeMap construction block."""
+        key_type, val_type = _kv_types(ctx) if ctx.startswith("BTreeMap<") else ("String", "String")
         if not expr.keys:
-            return f"HashMap::<{key_type}, {val_type}>::new()"
+            return f"BTreeMap::<{key_type}, {val_type}>::new()"
         # Infer concrete types from the first key/value if no annotation was given.
-        if not ctx.startswith("HashMap<"):
+        if not ctx.startswith("BTreeMap<"):
             key_type = self._type_of(expr.keys[0]) or key_type
             val_type = self._type_of(expr.values[0]) or val_type
             # Re-emit the first pair with the inferred types.
@@ -1961,7 +2229,7 @@ class RustGenerator:
             first_key = None
             first_val = None
         tmp = self._next_tmp()
-        lines = [f"let mut {tmp} = HashMap::new();"]
+        lines = [f"let mut {tmp} = BTreeMap::new();"]
         for k, v in zip(expr.keys, expr.values):
             k_rust = self._emit_expr(k, key_type)
             v_rust = self._emit_expr(v, val_type)
@@ -2047,28 +2315,20 @@ class RustGenerator:
                 iter_type = self._type_of(gen.iter)
                 element_type = _element_type(iter_type)
                 iter_rust = self._emit_expr(gen.iter, iter_type)
-                if element_type in ("i64", "f64", "bool"):
-                    return (
-                        [name],
-                        f"{iter_rust}.iter().copied()",
-                        [(name, element_type)],
-                    )
-                return [name], f"{iter_rust}.iter()", [(name, f"&{element_type}")]
+                return (
+                    [name],
+                    f"{iter_rust}.iter().cloned()",
+                    [(name, element_type)],
+                )
             # General expression iterator (e.g. a slice like ``arr[1:]``).
             iter_type = self._type_of(gen.iter)
             if iter_type.startswith("Vec<"):
                 element_type = _element_type(iter_type)
                 iter_rust = self._emit_expr(gen.iter, iter_type)
-                if element_type in ("i64", "f64", "bool"):
-                    return (
-                        [name],
-                        f"({iter_rust}).iter().copied()",
-                        [(name, element_type)],
-                    )
                 return (
                     [name],
-                    f"({iter_rust}).iter()",
-                    [(name, f"&{element_type}")],
+                    f"({iter_rust}).iter().cloned()",
+                    [(name, element_type)],
                 )
         if isinstance(gen.target, ast.Tuple):
             names = [elt.id for elt in gen.target.elts if isinstance(elt, ast.Name)]
@@ -2085,10 +2345,7 @@ class RustGenerator:
                     iterable_type = self._type_of(iterable)
                     element_type = _element_type(iterable_type)
                     iter_rust = self._emit_expr(iterable, iterable_type)
-                    if element_type in ("i64", "f64", "bool"):
-                        iterator = f"{iter_rust}.iter().copied().enumerate()"
-                    else:
-                        iterator = f"{iter_rust}.iter().enumerate()"
+                    iterator = f"{iter_rust}.iter().cloned().enumerate()"
                     return (
                         names,
                         iterator,
@@ -2108,10 +2365,7 @@ class RustGenerator:
                         arg_type = self._type_of(arg)
                         element_type = _element_type(arg_type)
                         arg_rust = self._emit_expr(arg, arg_type)
-                        if element_type in ("i64", "f64", "bool"):
-                            iterators.append(f"{arg_rust}.iter().copied()")
-                        else:
-                            iterators.append(f"{arg_rust}.iter()")
+                        iterators.append(f"{arg_rust}.iter().cloned()")
                         var_types.append((elt.id, element_type))
                     zip_expr = iterators[0]
                     for it in iterators[1:]:
@@ -2213,7 +2467,7 @@ class RustGenerator:
         if not (
             base_type.startswith("Vec<")
             or _is_tuple_type(base_type)
-            or base_type.startswith("HashMap<")
+            or base_type.startswith("BTreeMap<")
         ):
             if indices:
                 element_type = ctx if ctx and ctx != "?" else self.function_type
@@ -2224,7 +2478,7 @@ class RustGenerator:
         if not (
             base_type.startswith("Vec<")
             or _is_tuple_type(base_type)
-            or base_type.startswith("HashMap<")
+            or base_type.startswith("BTreeMap<")
         ):
             raise UnsupportedError(
                 "Subscript/indexing is only supported on Vec/list, tuple, or dict types",
@@ -2268,11 +2522,17 @@ class RustGenerator:
                     default = self._zero_for_type(element_type)
                     access = f"{access}.get(({index_expr}) as usize).cloned().unwrap_or({default})"
                 final_type = element_type
-            elif final_type.startswith("HashMap<"):
+            elif final_type.startswith("BTreeMap<"):
                 key_type, val_type = _kv_types(final_type)
                 key_expr = self._emit_expr(idx, key_type)
-                default = self._zero_for_type(val_type)
-                access = f"{access}.get(&{key_expr}).cloned().unwrap_or({default})"
+                if place:
+                    access = (
+                        f"*({access}).entry(({key_expr}).clone())"
+                        f".or_insert({self._zero_for_type(val_type)})"
+                    )
+                else:
+                    default = self._zero_for_type(val_type)
+                    access = f"({access}).get(&{key_expr}).cloned().unwrap_or({default})"
                 final_type = val_type
             else:
                 raise UnsupportedError(
@@ -2281,8 +2541,9 @@ class RustGenerator:
 
         # When the final value is a non-Copy container and the context expects an
         # owned value, clone it.  Scalar/copy types (i64, f64, bool) dereference
-        # automatically through the reference returned by indexing.
-        if final_type.startswith("Vec<") and ctx == final_type:
+        # automatically through the reference returned by indexing.  Do not add
+        # `.clone()` to a place expression used on the left-hand side.
+        if not place and final_type.startswith("Vec<") and ctx == final_type:
             access = f"{access}.clone()"
         access = self._coerce(access, final_type, ctx)
         # Guard indexing on empty containers. If the container is empty and the
@@ -2506,7 +2767,7 @@ class RustGenerator:
         op_type = type(op)
         right_type = self._type_of(expr.comparators[0])
         if op_type is ast.In:
-            if right_type.startswith("HashMap<"):
+            if right_type.startswith("BTreeMap<"):
                 key_type, _ = _kv_types(right_type)
                 left = self._emit_expr(expr.left, key_type)
                 right = self._emit_expr(expr.comparators[0], right_type)
@@ -2520,7 +2781,7 @@ class RustGenerator:
                 "'in' membership is only supported for Vec and dict types", node=expr
             )
         if op_type is ast.NotIn:
-            if right_type.startswith("HashMap<"):
+            if right_type.startswith("BTreeMap<"):
                 key_type, _ = _kv_types(right_type)
                 left = self._emit_expr(expr.left, key_type)
                 right = self._emit_expr(expr.comparators[0], right_type)
@@ -2723,18 +2984,37 @@ class RustGenerator:
             return self._coerce(call_expr, callee_return, ctx)
 
         if base is not None and name == "pop":
-            if expr.args:
-                raise UnsupportedError(
-                    "pop() with arguments is not supported", node=expr
-                )
-            target = expr.func.value
-            target_type = self._type_of(target)
+            target_node = expr.func.value
+            target_type = self._type_of(target_node)
             if not target_type.startswith("Vec<"):
                 raise UnsupportedError(
                     "pop() is only supported on list/Vec types", node=expr
                 )
-            target_str = self._emit_expr(target, target_type)
-            return f"{target_str}.pop().unwrap()"
+            target_str = self._emit_expr(target_node, target_type)
+            if not expr.args:
+                return f"{target_str}.pop().unwrap()"
+            if len(expr.args) == 1:
+                idx = self._strip_outer_parens(self._emit_expr(expr.args[0], "i64"))
+                return f"{target_str}.remove(({idx}) as usize)"
+            raise UnsupportedError("pop() supports at most one index argument", node=expr)
+
+        if base is not None and name == "get":
+            target_node = expr.func.value
+            target_type = self._type_of(target_node)
+            if not target_type.startswith("BTreeMap<"):
+                raise UnsupportedError(
+                    "dict.get() is only supported on dict/BTreeMap types", node=expr
+                )
+            if not expr.args:
+                raise UnsupportedError("dict.get() requires at least one argument", node=expr)
+            key_type, val_type = _kv_types(target_type)
+            target_str = self._emit_expr(target_node, target_type)
+            key_expr = self._strip_outer_parens(self._emit_expr(expr.args[0], key_type))
+            if len(expr.args) >= 2:
+                default_expr = self._strip_outer_parens(self._emit_expr(expr.args[1], val_type))
+            else:
+                default_expr = self._zero_for_type(val_type)
+            return f"({target_str}).get(&{key_expr}).cloned().unwrap_or({default_expr})"
 
         # Generic unsupported attribute/method fallback: emit a zero value so the
         # generated Rust still compiles, and warn so the user can inspect.
@@ -3415,7 +3695,7 @@ def _annotation_to_rust_type(
         if name in ("tuple", "Tuple"):
             return "(?,)"
         if name in ("dict", "Dict"):
-            return "HashMap<String, String>"
+            return "BTreeMap<String, String>"
         return _SCALAR_TYPE_MAP.get(name)
 
     if isinstance(annotation, ast.Subscript):
@@ -3447,10 +3727,10 @@ def _annotation_to_rust_type(
                     for elt in annotation.slice.elts
                 ]
                 if all(parts):
-                    return f"HashMap<{parts[0]}, {parts[1]}>"
+                    return f"BTreeMap<{parts[0]}, {parts[1]}>"
             key = _annotation_to_rust_type(annotation.slice, class_names)
             if key:
-                return f"HashMap<{key}, {key}>"
+                return f"BTreeMap<{key}, {key}>"
             return None
         if base_name == "ndarray":
             inner = _annotation_to_rust_type(annotation.slice, class_names)
@@ -3505,10 +3785,10 @@ def _infer_expr_type(
         return f"Vec<{inner or function_type}>"
     if isinstance(expr, ast.Dict):
         if not expr.keys:
-            return "HashMap<String, String>"
+            return "BTreeMap<String, String>"
         k = _infer_expr_type(expr.keys[0], function_type, class_names)
         v = _infer_expr_type(expr.values[0], function_type, class_names)
-        return f"HashMap<{k or 'String'}, {v or 'String'}>"
+        return f"BTreeMap<{k or 'String'}, {v or 'String'}>"
     if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Mult):
         if isinstance(expr.left, ast.List):
             return _infer_expr_type(expr.left, function_type, class_names)
@@ -3525,9 +3805,9 @@ def _element_type(rust_type: str) -> str:
         depth = 0
         for i in range(4, len(rust_type) - 1):
             ch = rust_type[i]
-            if ch == "<":
+            if ch in "(<{":
                 depth += 1
-            elif ch == ">":
+            elif ch in ")>}":
                 depth -= 1
             elif ch == "," and depth == 0:
                 # Not expected for Vec<T>, but keep parser robust.
@@ -3537,8 +3817,8 @@ def _element_type(rust_type: str) -> str:
 
 
 def _kv_types(rust_type: str) -> Tuple[str, str]:
-    """Return the (key, value) types of a HashMap, or (String, String) if unknown."""
-    prefix = "HashMap<"
+    """Return the (key, value) types of a BTreeMap, or (String, String) if unknown."""
+    prefix = "BTreeMap<"
     if not (rust_type.startswith(prefix) and rust_type.endswith(">")):
         return "String", "String"
     inner = rust_type[len(prefix):-1]

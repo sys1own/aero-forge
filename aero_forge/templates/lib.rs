@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 #[allow(unused_imports)]
 use pyo3::types::PyType;
 #[allow(unused_imports)]
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 {shield_imports}
 
 {functions}
