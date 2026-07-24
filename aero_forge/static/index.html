@@ -3,173 +3,668 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Aero-Forge Web</title>
+  <title>Aero-Forge Devin Core</title>
   <style>
-    :root { --bg: #0b0f17; --panel: #111827; --text: #e5e7eb; --accent: #22d3ee; --border: #374151; }
+    :root {
+      --bg: #0a0d12;
+      --panel: #111620;
+      --panel-2: #181d29;
+      --panel-3: #202634;
+      --text: #e8ecf1;
+      --muted: #94a2b8;
+      --accent: #22d3ee;
+      --accent-2: #0ea5e9;
+      --accent-glow: rgba(34, 211, 238, 0.25);
+      --border: #2a3142;
+      --success: #34d399;
+      --warning: #fbbf24;
+      --danger: #f87171;
+    }
     * { box-sizing: border-box; }
-    body { margin: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
-    header { padding: 1.5rem 2rem; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
-    h1 { margin: 0; font-size: 1.5rem; color: var(--accent); }
-    main { padding: 2rem; max-width: 1200px; margin: 0 auto; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
-    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
-    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 0.75rem; padding: 1.25rem; }
-    label { display: block; margin: 0.75rem 0 0.25rem; font-size: 0.875rem; color: #9ca3af; }
-    input, textarea, select, button { font: inherit; border: 1px solid var(--border); border-radius: 0.375rem; padding: 0.5rem 0.75rem; background: var(--bg); color: var(--text); width: 100%; }
-    button { cursor: pointer; background: var(--accent); color: #000; font-weight: 600; border: none; margin-top: 1rem; }
-    button:hover { opacity: 0.9; }
-    textarea { min-height: 6rem; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
-    pre { background: var(--bg); border: 1px solid var(--border); border-radius: 0.375rem; padding: 1rem; overflow: auto; min-height: 8rem; }
-    .row { display: flex; gap: 1rem; }
-    .row > * { flex: 1; }
-    #file-tree ul { list-style: none; padding-left: 1.25rem; margin: 0; }
-    #file-tree li { cursor: pointer; padding: 0.25rem 0; }
-    #file-tree li:hover { color: var(--accent); }
-    .small { font-size: 0.8rem; color: #9ca3af; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+    /* Header */
+    header {
+      height: 56px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 1rem;
+      flex-shrink: 0;
+      gap: 1rem;
+    }
+    .brand { display: flex; align-items: center; gap: 0.75rem; }
+    .logo {
+      width: 32px; height: 32px; border-radius: 6px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      display: grid; place-items: center; font-weight: 800; color: #000; font-size: 0.9rem;
+    }
+    .brand h1 { font-size: 1.1rem; margin: 0; letter-spacing: 0.02em; }
+    .brand small { color: var(--muted); font-size: 0.7rem; display: block; margin-top: -2px; }
+    .header-actions { display: flex; align-items: center; gap: 0.75rem; }
+    .tier-badge {
+      font-size: 0.7rem; font-weight: 700; text-transform: uppercase; padding: 0.25rem 0.5rem;
+      border-radius: 999px; border: 1px solid var(--border); color: var(--muted);
+    }
+    .tier-badge.lifetime { color: var(--accent); border-color: var(--accent); background: rgba(34,211,238,0.08); }
+    button.icon-btn {
+      background: transparent; border: 1px solid var(--border); color: var(--text); border-radius: 6px;
+      width: 34px; height: 34px; display: grid; place-items: center; cursor: pointer;
+    }
+    button.icon-btn:hover { background: var(--panel-2); border-color: var(--accent); }
+    /* Layout */
+    .app { display: flex; flex: 1; overflow: hidden; }
+    /* Sidebar */
+    #sidebar {
+      width: 280px; min-width: 220px; max-width: 420px;
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+      display: flex; flex-direction: column;
+      transition: margin-left 0.2s ease;
+    }
+    #sidebar.collapsed { margin-left: -280px; }
+    .sidebar-header {
+      padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between;
+    }
+    .sidebar-title { font-size: 0.85rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    .file-tree { flex: 1; overflow: auto; padding: 0.5rem; }
+    .tree ul { list-style: none; padding-left: 1.1rem; margin: 0; }
+    .tree li { position: relative; }
+    .tree-node {
+      display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.35rem 0.5rem; border-radius: 5px; cursor: pointer; font-size: 0.85rem; color: var(--text);
+      user-select: none;
+    }
+    .tree-node:hover { background: var(--panel-2); }
+    .tree-node.active { background: var(--panel-3); box-shadow: inset 2px 0 0 var(--accent); }
+    .tree-node .icon { color: var(--muted); font-size: 0.9rem; width: 1rem; text-align: center; }
+    .tree-node.file .icon { color: var(--accent); }
+    .sidebar-footer { padding: 0.75rem; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 0.5rem; }
+    .drop-zone {
+      border: 2px dashed var(--border); border-radius: 8px; padding: 0.75rem; text-align: center; color: var(--muted); font-size: 0.8rem;
+      transition: all 0.15s ease;
+    }
+    .drop-zone.drag-over { border-color: var(--accent); background: var(--panel-2); color: var(--text); }
+    button.primary {
+      background: linear-gradient(135deg, var(--accent), var(--accent-2)); border: none; color: #000; font-weight: 700;
+      padding: 0.55rem 0.9rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;
+    }
+    button.primary:hover { filter: brightness(1.08); }
+    button.secondary {
+      background: var(--panel-2); border: 1px solid var(--border); color: var(--text); font-weight: 600;
+      padding: 0.55rem 0.9rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem;
+    }
+    button.secondary:hover { border-color: var(--accent); }
+    /* Main */
+    main { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+    .toggle-sidebar {
+      position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+      background: var(--panel-2); border: 1px solid var(--border); border-left: none; color: var(--text);
+      padding: 0.4rem 0.3rem; border-radius: 0 6px 6px 0; cursor: pointer; z-index: 10;
+    }
+    /* Code panel */
+    #code-panel {
+      flex: 1; display: flex; flex-direction: column; min-height: 0;
+      background: var(--bg);
+      border-bottom: 1px solid var(--border);
+    }
+    .code-header {
+      height: 38px; background: var(--panel); border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between; padding: 0 1rem; font-size: 0.85rem; color: var(--muted);
+    }
+    #code-display {
+      flex: 1; overflow: auto; padding: 1rem; font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      font-size: 0.85rem; line-height: 1.5; white-space: pre; color: var(--text);
+    }
+    .placeholder { color: var(--muted); font-style: italic; }
+    /* Prompt deck */
+    #prompt-deck {
+      height: 320px; min-height: 180px; max-height: 50vh;
+      display: flex; flex-direction: column;
+      background: var(--panel);
+      border-top: 1px solid var(--border);
+    }
+    .deck-tabs {
+      display: flex; border-bottom: 1px solid var(--border); background: var(--panel-2);
+    }
+    .deck-tab {
+      padding: 0.6rem 1rem; font-size: 0.8rem; font-weight: 600; color: var(--muted); cursor: pointer;
+      border-bottom: 2px solid transparent; background: transparent; border-top: none; border-left: none; border-right: none;
+    }
+    .deck-tab.active { color: var(--text); border-bottom-color: var(--accent); background: var(--panel-3); }
+    .deck-body { flex: 1; display: flex; min-height: 0; }
+    .deck-panel { flex: 1; display: none; flex-direction: column; padding: 1rem; gap: 0.75rem; overflow: auto; }
+    .deck-panel.active { display: flex; }
+    .chat-feed { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 0.75rem; }
+    .msg { padding: 0.65rem 0.85rem; border-radius: 8px; max-width: 90%; font-size: 0.9rem; line-height: 1.45; }
+    .msg.user { align-self: flex-end; background: var(--panel-3); border: 1px solid var(--border); }
+    .msg.assistant { align-self: flex-start; background: var(--panel-2); border: 1px solid var(--border); }
+    .msg.system { align-self: center; background: transparent; color: var(--muted); font-size: 0.8rem; font-style: italic; border: none; }
+    .msg.error { color: var(--danger); border-color: var(--danger); }
+    .msg code {
+      background: rgba(255,255,255,0.06); padding: 0.1rem 0.3rem; border-radius: 4px; font-family: monospace;
+    }
+    .msg pre { background: rgba(0,0,0,0.3); padding: 0.6rem; border-radius: 6px; overflow: auto; margin: 0.5rem 0; }
+    .prompt-row { display: flex; gap: 0.5rem; }
+    textarea#prompt-input, textarea#chat-input {
+      flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text);
+      padding: 0.75rem; font-size: 0.9rem; resize: none; min-height: 48px; max-height: 120px;
+    }
+    textarea#prompt-input:focus, textarea#chat-input:focus { outline: none; border-color: var(--accent); }
+    .deck-controls { display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+    .toggle { display: flex; align-items: center; gap: 0.5rem; font-size: 0.85rem; color: var(--muted); cursor: pointer; }
+    .toggle input { accent-color: var(--accent); }
+    .status-bar {
+      display: flex; align-items: center; gap: 0.75rem; font-size: 0.8rem; color: var(--muted);
+    }
+    .status-bar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); }
+    .status-bar .dot.busy { background: var(--warning); animation: pulse 1s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+    /* Log stream */
+    #log-stream {
+      height: 160px; min-height: 100px; background: #080a0e; border-top: 1px solid var(--border);
+      display: flex; flex-direction: column;
+    }
+    .log-header { padding: 0.45rem 1rem; font-size: 0.75rem; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; border-bottom: 1px solid var(--border); }
+    #log-lines { flex: 1; overflow: auto; padding: 0.5rem 1rem; font-family: monospace; font-size: 0.8rem; color: var(--muted); }
+    .log-line { border-bottom: 1px solid rgba(255,255,255,0.03); padding: 0.25rem 0; }
+    .log-line.info { color: var(--accent); }
+    .log-line.success { color: var(--success); }
+    .log-line.error { color: var(--danger); }
+    /* Modal */
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: none; align-items: center; justify-content: center; z-index: 100; }
+    .modal-overlay.open { display: flex; }
+    .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; width: 420px; max-width: 92vw; padding: 1.25rem; box-shadow: 0 20px 50px rgba(0,0,0,0.4); }
+    .modal h2 { margin: 0 0 1rem; font-size: 1.1rem; }
+    .form-group { margin-bottom: 1rem; }
+    .form-group label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.35rem; font-weight: 600; }
+    .form-group input, .form-group select {
+      width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text);
+      padding: 0.6rem 0.75rem; font-size: 0.9rem;
+    }
+    .form-group input:focus, .form-group select:focus { outline: none; border-color: var(--accent); }
+    .hint { font-size: 0.75rem; color: var(--muted); margin-top: 0.3rem; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 1rem; }
+    /* Misc */
+    .hidden { display: none !important; }
+    .spinner { width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.2); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; vertical-align: middle; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
   </style>
 </head>
 <body>
   <header>
-    <h1>Aero-Forge</h1>
-    <span class="small">Prompt-driven Python to Rust extensions</span>
-  </header>
-  <main>
-    <div class="grid">
-      <div class="panel">
-        <h2>Build</h2>
-        <label for="session">Session ID</label>
-        <input id="session" placeholder="leave blank to create one">
-
-        <label for="provider">Provider</label>
-        <select id="provider">
-          <option value="deepseek">deepseek</option>
-          <option value="openai">openai</option>
-          <option value="openrouter">openrouter</option>
-          <option value="gemini">gemini</option>
-          <option value="none">none</option>
-        </select>
-
-        <label for="api-key">API Key</label>
-        <input id="api-key" type="password" placeholder="optional">
-
-        <label for="prompt">Prompt</label>
-        <textarea id="prompt" placeholder="Build a fast iterative Fibonacci function"></textarea>
-
-        <label><input type="checkbox" id="variants" style="width:auto"> Generate 3 variants</label>
-        <button id="build-btn">Build</button>
-      </div>
-
-      <div class="panel">
-        <h2>Chat</h2>
-        <label for="chat-session">Session ID</label>
-        <input id="chat-session" placeholder="leave blank to create one">
-        <label for="message">Message</label>
-        <textarea id="message" placeholder="Make it faster"></textarea>
-        <button id="chat-btn">Send</button>
-      </div>
-
-      <div class="panel">
-        <h2>Files</h2>
-        <button id="refresh-files">Refresh</button>
-        <div id="file-tree">No session selected</div>
-        <label for="file-content">File content</label>
-        <textarea id="file-content" readonly></textarea>
-      </div>
-
-      <div class="panel">
-        <h2>Upload / Download</h2>
-        <label for="upload">Upload project zip</label>
-        <input id="upload" type="file" accept=".zip">
-        <button id="upload-btn">Upload</button>
-        <button id="download-btn">Download Session Zip</button>
-        <pre id="status">Ready</pre>
+    <div class="brand">
+      <div class="logo">AF</div>
+      <div>
+        <h1>Aero-Forge <span style="color:var(--accent)">Devin Core</span></h1>
+        <small>Prompt &rarr; Python &rarr; Rust</small>
       </div>
     </div>
-  </main>
+    <div class="header-actions">
+      <span id="tier-badge" class="tier-badge">Free</span>
+      <button id="settings-btn" class="icon-btn" title="Settings" aria-label="Settings">
+        &#9881;
+      </button>
+    </div>
+  </header>
+
+  <div class="app">
+    <aside id="sidebar">
+      <div class="sidebar-header">
+        <span class="sidebar-title">Project Explorer</span>
+        <button id="refresh-tree" class="icon-btn" style="width:auto;height:auto;padding:0.2rem 0.4rem;" title="Refresh">&#8635;</button>
+      </div>
+      <div id="file-tree" class="file-tree tree">
+        <div class="placeholder" style="padding:1rem;color:var(--muted)">Create or select a session to explore files.</div>
+      </div>
+      <div class="sidebar-footer">
+        <div id="drop-zone" class="drop-zone">
+          Drop a .zip project bundle here or click to upload
+          <input id="zip-input" type="file" accept=".zip" class="sr-only">
+        </div>
+        <button id="download-btn" class="secondary" style="width:100%">&#8686; Download Session Zip</button>
+      </div>
+    </aside>
+
+    <main>
+      <button id="toggle-sidebar" class="toggle-sidebar" title="Toggle sidebar">&#9776;</button>
+
+      <section id="code-panel">
+        <div class="code-header">
+          <span id="code-path">No file selected</span>
+          <span id="code-meta"></span>
+        </div>
+        <div id="code-display" class="placeholder">Select a file from the project explorer to view source, tests, or compiled artifacts.</div>
+      </section>
+
+      <section id="prompt-deck">
+        <div class="deck-tabs">
+          <button class="deck-tab active" data-tab="build">Build</button>
+          <button class="deck-tab" data-tab="chat">Co-pilot Chat</button>
+        </div>
+        <div class="deck-body">
+          <div id="build-panel" class="deck-panel active">
+            <div class="prompt-row">
+              <textarea id="prompt-input" placeholder="Build a fast iterative Fibonacci function..."></textarea>
+              <button id="build-btn" class="primary" style="min-width:96px">Build</button>
+            </div>
+            <div class="deck-controls">
+              <label class="toggle">
+                <input id="variant-toggle" type="checkbox">
+                <span>Generate 3 variants &amp; benchmark</span>
+              </label>
+              <div class="status-bar">
+                <span id="status-dot" class="dot"></span>
+                <span id="status-text">Ready</span>
+              </div>
+            </div>
+          </div>
+
+          <div id="chat-panel" class="deck-panel">
+            <div id="chat-feed" class="chat-feed">
+              <div class="msg system">Welcome to the Aero-Forge co-pilot. Ask for builds, optimizations, or explanations.</div>
+            </div>
+            <div class="prompt-row">
+              <textarea id="chat-input" placeholder="Ask the co-pilot..."></textarea>
+              <button id="chat-send" class="primary" style="min-width:80px">Send</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="log-stream">
+        <div class="log-header">Live Build Log</div>
+        <div id="log-lines"></div>
+      </section>
+    </main>
+  </div>
+
+  <div id="settings-modal" class="modal-overlay">
+    <div class="modal">
+      <h2>Settings</h2>
+      <div class="form-group">
+        <label for="setting-tier">Membership Tier</label>
+        <select id="setting-tier">
+          <option value="free">Free (bring your own key)</option>
+          <option value="lifetime">Lifetime (managed DeepSeek)</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="setting-provider">Provider</label>
+        <select id="setting-provider">
+          <option value="deepseek">DeepSeek</option>
+          <option value="openai">OpenAI</option>
+          <option value="openrouter">OpenRouter</option>
+          <option value="gemini">Gemini</option>
+        </select>
+      </div>
+      <div class="form-group" id="key-group">
+        <label for="setting-api-key">API Key</label>
+        <input id="setting-api-key" type="password" placeholder="sk-..." autocomplete="off">
+        <div class="hint">Stored only in your browser's localStorage. Never sent to our servers unless used in API calls.</div>
+      </div>
+      <div class="form-group">
+        <label for="setting-session">Session ID</label>
+        <input id="setting-session" type="text" placeholder="leave blank for a new session">
+        <div class="hint">Reuse a session ID to continue working on the same project.</div>
+      </div>
+      <div class="modal-actions">
+        <button id="cancel-settings" class="secondary">Cancel</button>
+        <button id="save-settings" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
 
   <script>
-    const $ = id => document.getElementById(id);
-    const status = msg => { $("status").textContent = msg; };
-    const sessionId = () => $("session").value || $("chat-session").value || "";
+    const LS = window.localStorage;
+    const LS_KEYS = { apiKey: 'aero_forge_api_key', provider: 'aero_forge_provider', tier: 'aero_forge_tier', session: 'aero_forge_session' };
 
-    async function postJSON(url, body) {
-      const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      const data = await res.json();
+    const state = {
+      sessionId: '',
+      provider: 'deepseek',
+      apiKey: '',
+      tier: 'free',
+      messages: [],
+      busy: false,
+    };
+
+    const ui = {
+      sidebar: document.getElementById('sidebar'),
+      toggleSidebar: document.getElementById('toggle-sidebar'),
+      fileTree: document.getElementById('file-tree'),
+      refreshTree: document.getElementById('refresh-tree'),
+      dropZone: document.getElementById('drop-zone'),
+      zipInput: document.getElementById('zip-input'),
+      downloadBtn: document.getElementById('download-btn'),
+      codeDisplay: document.getElementById('code-display'),
+      codePath: document.getElementById('code-path'),
+      codeMeta: document.getElementById('code-meta'),
+      promptInput: document.getElementById('prompt-input'),
+      buildBtn: document.getElementById('build-btn'),
+      variantToggle: document.getElementById('variant-toggle'),
+      chatInput: document.getElementById('chat-input'),
+      chatSend: document.getElementById('chat-send'),
+      chatFeed: document.getElementById('chat-feed'),
+      logLines: document.getElementById('log-lines'),
+      statusDot: document.getElementById('status-dot'),
+      statusText: document.getElementById('status-text'),
+      tierBadge: document.getElementById('tier-badge'),
+      settingsBtn: document.getElementById('settings-btn'),
+      settingsModal: document.getElementById('settings-modal'),
+      saveSettings: document.getElementById('save-settings'),
+      cancelSettings: document.getElementById('cancel-settings'),
+      settingProvider: document.getElementById('setting-provider'),
+      settingApiKey: document.getElementById('setting-api-key'),
+      settingTier: document.getElementById('setting-tier'),
+      settingSession: document.getElementById('setting-session'),
+      keyGroup: document.getElementById('key-group'),
+      deckTabs: document.querySelectorAll('.deck-tab'),
+      deckPanels: document.querySelectorAll('.deck-panel'),
+    };
+
+    function loadSettings() {
+      try {
+        state.apiKey = LS.getItem(LS_KEYS.apiKey) || '';
+        state.provider = LS.getItem(LS_KEYS.provider) || 'deepseek';
+        state.tier = LS.getItem(LS_KEYS.tier) || 'free';
+        state.sessionId = LS.getItem(LS_KEYS.session) || '';
+      } catch (e) {
+        log('localStorage unavailable; using in-memory settings', 'info');
+      }
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('session')) state.sessionId = params.get('session');
+      if (!state.sessionId) state.sessionId = generateId();
+      applySettingsUI();
+    }
+
+    function saveSettings() {
+      state.tier = ui.settingTier.value;
+      state.provider = ui.settingProvider.value;
+      state.apiKey = ui.settingApiKey.value.trim();
+      state.sessionId = ui.settingSession.value.trim() || generateId();
+      try {
+        LS.setItem(LS_KEYS.tier, state.tier);
+        LS.setItem(LS_KEYS.provider, state.provider);
+        if (state.tier === 'free') LS.setItem(LS_KEYS.apiKey, state.apiKey); else LS.removeItem(LS_KEYS.apiKey);
+        LS.setItem(LS_KEYS.session, state.sessionId);
+      } catch (e) {
+        log('localStorage unavailable; settings not persisted', 'info');
+      }
+      applySettingsUI();
+    }
+
+    function applySettingsUI() {
+      ui.settingTier.value = state.tier;
+      ui.settingProvider.value = state.provider;
+      ui.settingApiKey.value = state.apiKey;
+      ui.settingSession.value = state.sessionId;
+      ui.tierBadge.textContent = state.tier === 'lifetime' ? 'Lifetime' : 'Free';
+      ui.tierBadge.classList.toggle('lifetime', state.tier === 'lifetime');
+      if (state.tier === 'lifetime') {
+        ui.keyGroup.classList.add('hidden');
+        ui.settingProvider.value = 'deepseek';
+        state.provider = 'deepseek';
+      } else {
+        ui.keyGroup.classList.remove('hidden');
+      }
+    }
+
+    function generateId() {
+      return 'session-' + Math.random().toString(36).slice(2) + Date.now().toString(36);
+    }
+
+    function log(message, type='info') {
+      const line = document.createElement('div');
+      line.className = `log-line ${type}`;
+      line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+      ui.logLines.appendChild(line);
+      ui.logLines.scrollTop = ui.logLines.scrollHeight;
+    }
+
+    function setBusy(busy) {
+      state.busy = busy;
+      ui.statusDot.classList.toggle('busy', busy);
+      ui.statusText.textContent = busy ? 'Working...' : 'Ready';
+      ui.buildBtn.disabled = busy;
+      ui.chatSend.disabled = busy;
+    }
+
+    async function api(method, path, body, contentType='application/json') {
+      const opts = { method };
+      if (body) {
+        if (contentType === 'application/json') opts.body = JSON.stringify(body);
+        else opts.body = body;
+        opts.headers = { 'Content-Type': contentType };
+      }
+      const res = await fetch(path, opts);
+      const text = await res.text();
+      const data = text ? JSON.parse(text) : {};
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
       return data;
     }
 
-    $("build-btn").onclick = async () => {
-      status("Building...");
-      const payload = {
-        prompt: $("prompt").value,
-        session_id: $("session").value || undefined,
-        provider: $("provider").value,
-        api_key: $("api-key").value || undefined,
-        variants: $("variants").checked,
-      };
-      const data = await postJSON("/api/build", payload);
-      if (data.session_id) $("session").value = data.session_id;
-      $("chat-session").value = $("session").value;
-      status(JSON.stringify(data, null, 2));
-      refreshFiles();
-    };
-
-    $("chat-btn").onclick = async () => {
-      status("Chatting...");
-      const data = await postJSON("/api/chat", {
-        message: $("message").value,
-        session_id: $("chat-session").value || undefined,
-        provider: $("provider").value,
-        api_key: $("api-key").value || undefined,
-      });
-      if (data.session_id) $("chat-session").value = data.session_id;
-      $("session").value = data.session_id;
-      status(JSON.stringify(data, null, 2));
-      refreshFiles();
-    };
-
-    async function refreshFiles() {
-      const sid = sessionId();
-      if (!sid) return;
-      const res = await fetch(`/api/files?session_id=${sid}`);
-      const data = await res.json();
-      $("file-tree").innerHTML = renderTree(data.tree);
-      $("file-tree").querySelectorAll("li").forEach(li => {
-        li.onclick = async () => {
-          const path = li.dataset.path;
-          const r = await fetch(`/api/file-content?session_id=${sid}&path=${encodeURIComponent(path)}`);
-          const d = await r.json();
-          $("file-content").value = d.content || d.error || "";
-        };
-      });
+    function buildBody(extra={}) {
+      const body = { session_id: state.sessionId, provider: state.provider, ...extra };
+      if (state.tier === 'free' && state.apiKey) body.api_key = state.apiKey;
+      return body;
     }
 
-    function renderTree(node) {
-      if (node.type === "file") return `<li data-path="${node.path}">${node.name}</li>`;
-      const children = node.children.map(renderTree).join("");
-      return `<li>${node.name}<ul>${children}</ul></li>`;
+    async function loadTree() {
+      if (!state.sessionId) return;
+      ui.fileTree.innerHTML = '<div class="placeholder" style="padding:1rem">Loading...</div>';
+      try {
+        const data = await api('GET', `/api/files?session_id=${encodeURIComponent(state.sessionId)}`);
+        ui.fileTree.innerHTML = '';
+        ui.fileTree.appendChild(renderNode(data.tree, true));
+      } catch (e) {
+        ui.fileTree.innerHTML = `<div class="placeholder" style="padding:1rem;color:var(--danger)">${e.message}</div>`;
+      }
     }
 
-    $("refresh-files").onclick = refreshFiles;
+    function renderNode(node, isRoot=false) {
+      const ul = document.createElement('ul');
+      const li = document.createElement('li');
+      const div = document.createElement('div');
+      div.className = 'tree-node' + (node.type === 'file' ? ' file' : '');
+      div.dataset.path = node.path;
+      const icon = node.type === 'file' ? (node.path.endsWith('.py') ? 'PY' : (node.path.endsWith('.aero') ? 'AB' : (node.path.endsWith('.so') ? 'SO' : '>'))) : '&#128449;';
+      div.innerHTML = `<span class="icon">${icon}</span><span>${escapeHtml(node.name)}</span>`;
+      li.appendChild(div);
 
-    $("upload-btn").onclick = async () => {
-      const file = $("upload").files[0];
-      if (!file) return status("Select a zip file first");
-      status("Uploading...");
-      const sid = $("session").value || "";
-      const url = sid ? `/api/upload-zip?session_id=${sid}` : "/api/upload-zip";
-      const res = await fetch(url, { method: "POST", body: file, headers: { "Content-Type": "application/zip" } });
-      const data = await res.json();
-      if (data.session_id) { $("session").value = data.session_id; $("chat-session").value = data.session_id; }
-      status(JSON.stringify(data, null, 2));
-      refreshFiles();
-    };
+      if (node.type === 'directory' && node.children) {
+        const childUl = document.createElement('ul');
+        for (const child of node.children) childUl.appendChild(renderNode(child));
+        li.appendChild(childUl);
+      }
 
-    $("download-btn").onclick = async () => {
-      const sid = sessionId();
-      if (!sid) return status("No session selected");
-      window.open(`/api/download-zip?session_id=${sid}`);
-    };
+      if (node.type === 'file') {
+        div.addEventListener('click', () => openFile(node.path, div));
+      }
+      return li;
+    }
+
+    function escapeHtml(s) {
+      const map = {'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;'};
+      return s.replace(/[&<>"]/g, c => map[c]);
+    }
+
+    async function openFile(path, el) {
+      document.querySelectorAll('.tree-node.active').forEach(n => n.classList.remove('active'));
+      if (el) el.classList.add('active');
+      ui.codePath.textContent = path;
+      ui.codeDisplay.classList.remove('placeholder');
+      ui.codeDisplay.textContent = 'Loading...';
+      try {
+        const data = await api('GET', `/api/file-content?session_id=${encodeURIComponent(state.sessionId)}&path=${encodeURIComponent(path)}`);
+        ui.codeDisplay.textContent = data.content;
+        ui.codeMeta.textContent = `${data.content.length} chars`;
+      } catch (e) {
+        ui.codeDisplay.textContent = `Error: ${e.message}`;
+      }
+    }
+
+    async function uploadZip(file) {
+      if (!file) return;
+      setBusy(true);
+      log(`Uploading ${file.name}...`);
+      try {
+        const data = await api('POST', `/api/upload-zip?session_id=${encodeURIComponent(state.sessionId)}`, await file.arrayBuffer(), 'application/zip');
+        state.sessionId = data.session_id;
+        try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
+        ui.settingSession.value = state.sessionId;
+        log('Upload complete', 'success');
+        await loadTree();
+      } catch (e) {
+        log(`Upload failed: ${e.message}`, 'error');
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function downloadZip() {
+      if (!state.sessionId) return;
+      const res = await fetch(`/api/download-zip?session_id=${encodeURIComponent(state.sessionId)}`);
+      if (!res.ok) { log('Download failed', 'error'); return; }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = `${state.sessionId}.zip`;
+      document.body.appendChild(a); a.click(); a.remove();
+      URL.revokeObjectURL(url);
+      log('Download started', 'success');
+    }
+
+    async function runBuild() {
+      const prompt = ui.promptInput.value.trim();
+      if (!prompt) return;
+      setBusy(true);
+      log(`Building: ${prompt}`);
+      addChat('system', `Building: ${prompt}`);
+      try {
+        const data = await api('POST', '/api/build', buildBody({ prompt, variants: ui.variantToggle.checked, model: state.provider === 'deepseek' ? 'deepseek-v4-flash' : undefined }));
+        state.sessionId = data.session_id;
+        try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
+        ui.settingSession.value = state.sessionId;
+        if (data.result && data.result.build) {
+          const b = data.result.build;
+          if (b.success) {
+            log(`Build succeeded: ${b.passed || 0}/${b.total || 0} tests`, 'success');
+            addChat('assistant', data.result.build.summary || 'Build complete!');
+          } else {
+            log(`Build failed: ${b.error || 'unknown'}`, 'error');
+            addChat('assistant', `Build failed: ${b.error || 'unknown'}`);
+          }
+        } else {
+          log('Build response received', 'success');
+          addChat('assistant', 'Build response received.');
+        }
+        await loadTree();
+      } catch (e) {
+        log(`Build error: ${e.message}`, 'error');
+        addChat('assistant', `Build error: ${e.message}`);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function sendChat() {
+      const text = ui.chatInput.value.trim();
+      if (!text) return;
+      addChat('user', text);
+      ui.chatInput.value = '';
+      setBusy(true);
+      try {
+        const data = await api('POST', '/api/chat', buildBody({ message: text, history: state.messages }));
+        state.sessionId = data.session_id;
+        try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
+        ui.settingSession.value = state.sessionId;
+        state.messages = data.messages || [];
+        addChat('assistant', data.response);
+      } catch (e) {
+        addChat('assistant', `Chat error: ${e.message}`, true);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function addChat(role, text, isError=false) {
+      const msg = document.createElement('div');
+      msg.className = `msg ${role}${isError ? ' error' : ''}`;
+      msg.innerHTML = renderMarkdown(text);
+      ui.chatFeed.appendChild(msg);
+      ui.chatFeed.scrollTop = ui.chatFeed.scrollHeight;
+      if (role === 'assistant' && !isError) {
+        state.messages.push({ role: 'assistant', content: text });
+      } else if (role === 'user') {
+        state.messages.push({ role: 'user', content: text });
+      }
+    }
+
+    function renderMarkdown(text) {
+      if (!text) return '';
+      // Escape then render fenced code blocks and inline code
+      let safe = escapeHtml(text);
+      safe = safe.replace(/```([\s\S]*?)```/g, (m, c) => `<pre>${c}</pre>`);
+      safe = safe.replace(/`([^`]+)`/g, (m, c) => `<code>${c}</code>`);
+      return safe.replace(/\n/g, '<br>');
+    }
+
+    // Sidebar toggle
+    ui.toggleSidebar.addEventListener('click', () => ui.sidebar.classList.toggle('collapsed'));
+
+    // Tabs
+    ui.deckTabs.forEach(tab => tab.addEventListener('click', () => {
+      ui.deckTabs.forEach(t => t.classList.remove('active'));
+      ui.deckPanels.forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById(`${tab.dataset.tab}-panel`).classList.add('active');
+    }));
+
+    // Settings modal
+    ui.settingsBtn.addEventListener('click', () => { applySettingsUI(); ui.settingsModal.classList.add('open'); });
+    ui.cancelSettings.addEventListener('click', () => ui.settingsModal.classList.remove('open'));
+    ui.saveSettings.addEventListener('click', () => { saveSettings(); ui.settingsModal.classList.remove('open'); loadTree(); });
+    ui.settingTier.addEventListener('change', () => {
+      if (ui.settingTier.value === 'lifetime') {
+        ui.keyGroup.classList.add('hidden');
+        ui.settingProvider.value = 'deepseek';
+      } else {
+        ui.keyGroup.classList.remove('hidden');
+      }
+    });
+
+    // Drag and drop
+    ui.dropZone.addEventListener('click', () => ui.zipInput.click());
+    ui.zipInput.addEventListener('change', e => uploadZip(e.target.files[0]));
+    ['dragenter','dragover'].forEach(ev => ui.dropZone.addEventListener(ev, e => { e.preventDefault(); ui.dropZone.classList.add('drag-over'); }));
+    ['dragleave','drop'].forEach(ev => ui.dropZone.addEventListener(ev, e => { e.preventDefault(); ui.dropZone.classList.remove('drag-over'); if (ev === 'drop') uploadZip(e.dataTransfer.files[0]); }));
+    ui.downloadBtn.addEventListener('click', downloadZip);
+    ui.refreshTree.addEventListener('click', loadTree);
+
+    // Prompts
+    ui.buildBtn.addEventListener('click', runBuild);
+    ui.promptInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runBuild(); } });
+    ui.chatSend.addEventListener('click', sendChat);
+    ui.chatInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } });
+
+    // Init
+    loadSettings();
+    loadTree();
+    log('Devin Core UI loaded');
   </script>
 </body>
 </html>
