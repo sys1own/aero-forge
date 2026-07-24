@@ -118,6 +118,37 @@ def test_api_upload_zip_and_files(server):
     assert "def add" in file_data["content"]
 
 
+def test_api_save_file(server):
+    session_id = "test-session-save"
+    zip_bytes = _make_zip({"src/main.py": "def add(a, b):\n    return a + b\n"})
+    status, _ = _post_bytes(
+        server + f"/api/upload-zip?session_id={session_id}", zip_bytes
+    )
+    assert status == 200
+
+    status, body = _post_json(
+        server + "/api/save-file",
+        {"session_id": session_id, "path": "src/main.py", "content": "def add(a, b):\n    return a + b + 1\n"},
+    )
+    assert status == 200
+    assert body["status"] == "saved"
+    assert body["path"] == "src/main.py"
+
+    status, body = _get(server + f"/api/file-content?session_id={session_id}&path=src/main.py")
+    assert status == 200
+    file_data = json.loads(body.decode("utf-8"))
+    assert "return a + b + 1" in file_data["content"]
+
+    try:
+        status, body = _post_json(
+            server + "/api/save-file",
+            {"session_id": session_id, "path": "../etc/passwd", "content": "hacked"},
+        )
+    except HTTPError as exc:
+        status, body = exc.code, exc.read()
+    assert status == 400
+
+
 def test_api_download_zip(server):
     session_id = "test-session-download"
     zip_bytes = _make_zip({"data.txt": "hello"})

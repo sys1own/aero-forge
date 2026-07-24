@@ -176,6 +176,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_chat()
             if path == "/api/upload-zip":
                 return self._handle_upload_zip()
+            if path == "/api/save-file":
+                return self._handle_save_file()
 
             return _send_json(self, 404, {"error": "Not found"})
         except Exception as exc:
@@ -244,6 +246,42 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             )
         except Exception as exc:  # pragma: no cover
             logger.exception("Build endpoint failed")
+            return _send_json(self, 500, {"error": str(exc)})
+
+    def _handle_save_file(self) -> None:
+        try:
+            body = _parse_json_body(self)
+            session_id = body.get("session_id", "").strip()
+            file_path = body.get("path", "").strip()
+            content = body.get("content")
+            if not session_id or not file_path:
+                return _send_json(self, 400, {"error": "Missing 'session_id' and/or 'path'"})
+            if content is None:
+                return _send_json(self, 400, {"error": "Missing 'content'"})
+
+            session_dir = _manager.create_session_sandbox(session_id)
+            try:
+                target = _resolve_file(session_dir, file_path)
+            except ValueError:
+                return _send_json(self, 400, {"error": "Invalid path"})
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+
+            return _send_json(
+                self,
+                200,
+                {
+                    "session_id": session_id,
+                    "path": file_path,
+                    "status": "saved",
+                    "size": target.stat().st_size,
+                },
+            )
+        except ValueError as exc:
+            return _send_json(self, 400, {"error": str(exc)})
+        except Exception as exc:
+            logger.exception("Save-file endpoint failed")
             return _send_json(self, 500, {"error": str(exc)})
 
     def _handle_chat(self) -> None:
