@@ -106,6 +106,60 @@ aero-forge fix src/my_function.py --function my_function --no-llm
 aero-forge build blueprint.aero --no-llm
 ```
 
+### 5. Interactive Chat Mode
+
+Start a conversational session. Aero-Forge remembers your previous prompts, generated code, and build results, so you can iterate naturally:
+
+```bash
+aero-forge chat
+```
+
+Example session:
+
+```text
+$ aero-forge chat
+Aero-Forge chat is ready. What would you like to build?
+> Build a fast Fibonacci function.
+[Generating code from your prompt...]
+[Compiling to Rust...]
+[Running tests...]
+[Build passed.]
+Done! I generated `fibonacci`, compiled it to a Rust extension, and it passed all tests. The compiled library is in `dist/`.
+
+> Make it faster.
+[Alright, optimizing...]
+Done! The optimized version is even faster. The build completed in 0.8s.
+
+> Show me the code.
+Here's the code:
+
+def fibonacci(n: int) -> int:
+    ...
+
+> exit
+Goodbye!
+```
+
+You can resume a previous session with `--session-id`:
+
+```bash
+aero-forge chat --session-id abc123
+```
+
+Useful chat phrases:
+
+- `Build a <function>` - generate and compile code
+- `Make it faster` / `Use less memory` - optimize the current code
+- `Benchmark it` - build and time the project
+- `Show me the code` - display the generated source
+- `Explain the algorithm` - get a plain-English explanation
+- `Explain` - explain the last build error
+- `help` - list available commands
+
+### 6. Post-Build Summaries
+
+After every successful `aero-forge generate --build` or `aero-forge build`, Aero-Forge prints a short, friendly summary of what was built, whether tests passed, and where the compiled library is. In chat mode the summary is part of the assistant's reply.
+
 ## Commands Reference
 
 | Command | Description |
@@ -113,7 +167,7 @@ aero-forge build blueprint.aero --no-llm
 | `aero-forge fix <file> --function <name>` | Transpile and compile a single function. |
 | `aero-forge build [blueprint]` | Build all functions in a blueprint. |
 | `aero-forge generate --prompt "..."` | Generate code from a natural language prompt. |
-| `aero-forge chat` | Start an interactive chat session. |
+| `aero-forge chat` | Start an interactive chat session (`--session-id` to resume). |
 | `aero-forge examples list` | List available example projects. |
 | `aero-forge examples run <name>` | Build an example. |
 | `aero-forge examples create <name> --prompt "..."` | Create a new example from a prompt. |
@@ -130,7 +184,7 @@ aero-forge build blueprint.aero --no-llm
 | `--discover` | Allow the LLM to design a new algorithm when no library entry matches. |
 | `--review` | Run an LLM self-review step before compilation. |
 | `--optimize` | Run an iterative LLM optimization loop. |
-| `--prompt-template <name>` | Choose one of `v1_minimal`, `v2_structured`, `v3_algorithm`, `v4_performance`, `v5_balanced` (default), `v6_creative`, `v7_conservative`, `v8_iterative`. |
+| `--prompt-template <name>` | Choose one of `v1_minimal`, `v2_structured`, `v3_algorithm`, `v4_performance`, `v5_balanced` (default), `v6_creative`, `v7_conservative`, `v8_iterative`, `v9_transpiler_friendly`, `v10_correctness_focused`. |
 | `--build` | Run `aero-forge build` immediately after generation. |
 
 ## Blueprint Reference
