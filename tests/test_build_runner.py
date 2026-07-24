@@ -4,11 +4,12 @@ import importlib
 import shutil
 import sys
 from pathlib import Path
+from typing import List
 
 import pytest
 
 from aero_forge.blueprint import parse_blueprint
-from aero_forge.build_runner import BuildRunner
+from aero_forge.build_runner import BuildRunner, BuildTaskDAG
 from aero_forge.cache.build_cache import BuildCache
 
 
@@ -406,3 +407,69 @@ def test_build_runner_reports_transpiler_error_details(tmp_path):
     assert "general-purpose" in result["error"]
     assert result["logs"]
     assert "FileNotFoundError" in result["logs"]
+
+
+def test_build_task_dag_topological_order(tmp_path: Path):
+    """BuildTaskDAG should execute tasks in dependency order."""
+    cache = BuildCache(root=tmp_path / "cache", enabled=False)
+    dag = BuildTaskDAG(cache)
+    order: List[str] = []
+
+    def make_task(name: str):
+        def task():
+            order.append(name)
+            return {"result": name}
+        return task
+
+    dag.add_task("a", make_task("a"), inputs=[tmp_path / "a.in"], deps=[])
+    dag.add_task("b", make_task("b"), inputs=[tmp_path / "b.in"], deps=["a"])
+    dag.add_task("c", make_task("c"), inputs=[tmp_path / "c.in"], deps=["a"])
+    dag.add_task("d", make_task("d"), inputs=[tmp_path / "d.in"], deps=["b", "c"])
+
+    results = dag.run()
+    assert results == {"a": "a", "b": "b", "c": "c", "d": "d"}
+    # Verify d comes after b and c, and b/c after a.
+    assert order.index("a") < order.index("b")
+    assert order.index("a") < order.index("c")
+    assert order.index("b") < order.index("d")
+    assert order.index("c") < order.index("d")
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_build_runner_dag_skips_unchanged_files(tmp_path: Path):
+    """The DAG runner should bypass recompilation when source inputs are unchanged."""
+    source = tmp_path / "calc.py"
+    test = tmp_path / "test_calc.py"
+    source.write_text("def square(n: int) -> int:\n    return n * n\n")
+    test.write_text(
+        "from calc import square\n"
+        "def test_square():\n"
+        "    assert square(4) == 16\n"
+    )
+    blueprint_path = tmp_path / "blueprint.aero"
+    blueprint_path.write_text(
+        "project: dag_cache_test\n"
+        "functions:\n"
+        "  - file: calc.py\n"
+        "    name: square\n"
+        "    tests: [test_calc.py]\n"
+        "llm:\n"
+        "  provider: none\n"
+        "output_dir: ./dist\n"
+    )
+
+    cache_dir = tmp_path / "cache"
+    bp = parse_blueprint(blueprint_path)
+    runner1 = BuildRunner(bp, max_workers=1, cache_dir=cache_dir)
+    result1 = runner1.build()
+    assert result1["success"] is True
+    assert result1["results"][0]["iterations"] > 0
+
+    runner2 = BuildRunner(bp, max_workers=1, cache_dir=cache_dir)
+    result2 = runner2.build()
+    assert result2["success"] is True
+    assert result2["results"][0]["iterations"] == 0
+    assert result2["results"][0]["logs"] == "DAG cache hit"

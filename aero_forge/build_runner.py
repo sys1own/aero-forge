@@ -50,6 +50,127 @@ class BuildResult:
         self.explanation = explanation
 
 
+class BuildTaskDAG:
+    """Directed acyclic graph of build tasks with SHA-256 input hashing.
+
+    Tasks are run in topological order. A task is skipped when its input file
+    hashes match a cached entry and all recorded output files still exist and
+    are unchanged.
+    """
+
+    def __init__(self, cache: BuildCache, max_workers: int = 1):
+        self.cache = cache
+        self.max_workers = max(1, max_workers)
+        self._tasks: Dict[str, Dict[str, Any]] = {}
+
+    def add_task(
+        self,
+        name: str,
+        func: Any,
+        inputs: List[Any],
+        outputs: Optional[List[Path]] = None,
+        deps: Optional[List[str]] = None,
+    ) -> None:
+        """Register a task that produces ``outputs`` from ``inputs``.
+
+        ``func`` must return either a ``BuildResult`` or a dict with keys
+        ``result`` and optionally ``outputs``.
+        """
+        self._tasks[name] = {
+            "func": func,
+            "inputs": list(inputs),
+            "outputs": [Path(p) for p in (outputs or [])],
+            "deps": list(deps or []),
+        }
+
+    def run(self) -> Dict[str, Any]:
+        """Execute tasks in dependency order and return their results."""
+        order = self._topological_order()
+        results: Dict[str, Any] = {}
+
+        if self.max_workers == 1 or len(order) == 1:
+            for name in order:
+                results[name] = self._run_task(name)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=self.max_workers
+            ) as executor:
+                futures = {
+                    executor.submit(self._run_task, name): name for name in order
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    name = futures[future]
+                    results[name] = future.result()
+
+        return results
+
+    def _topological_order(self) -> List[str]:
+        """Return a valid execution order using Kahn's algorithm."""
+        in_degree: Dict[str, int] = {name: 0 for name in self._tasks}
+        dependents: Dict[str, List[str]] = defaultdict(list)
+        for name, task in self._tasks.items():
+            for dep in task["deps"]:
+                if dep in self._tasks:
+                    in_degree[name] += 1
+                    dependents[dep].append(name)
+
+        queue = [name for name, deg in in_degree.items() if deg == 0]
+        order: List[str] = []
+        while queue:
+            name = queue.pop(0)
+            order.append(name)
+            for dependent in dependents[name]:
+                in_degree[dependent] -= 1
+                if in_degree[dependent] == 0:
+                    queue.append(dependent)
+
+        if len(order) != len(self._tasks):
+            raise RuntimeError("Build task graph contains a cycle")
+        return order
+
+    def _run_task(self, name: str) -> Any:
+        task = self._tasks[name]
+        inputs = task["inputs"]
+        cached = self.cache.get_task(name, inputs)
+        if cached is not None:
+            logger.info("DAG cache hit for task %s", name)
+            return self._build_result_from_cache(cached)
+
+        result = task["func"]()
+        outputs = list(task["outputs"])
+        if isinstance(result, dict) and "result" in result:
+            outputs.extend(Path(p) for p in result.get("outputs", []))
+            result = result["result"]
+
+        if isinstance(result, BuildResult):
+            self.cache.put_task(name, inputs, outputs, self._result_to_dict(result))
+        return result
+
+    @staticmethod
+    def _result_to_dict(result: BuildResult) -> Dict[str, Any]:
+        return {
+            "source": str(result.source),
+            "function_names": result.function_names,
+            "success": result.success,
+            "artifact": str(result.artifact) if result.artifact else None,
+            "logs": result.logs,
+            "iterations": result.iterations,
+            "explanation": result.explanation,
+        }
+
+    @staticmethod
+    def _build_result_from_cache(cached: Dict[str, Any]) -> BuildResult:
+        return BuildResult(
+            source=Path(cached["source"]),
+            function_names=list(cached.get("function_names", [])),
+            success=cached.get("success", False),
+            artifact=Path(cached["artifact"]) if cached.get("artifact") else None,
+            logs="DAG cache hit",
+            iterations=0,
+            explanation=cached.get("explanation", ""),
+        )
+
+
 class BuildRunner:
     """Compile and test all functions described by a Blueprint."""
 
@@ -123,63 +244,38 @@ class BuildRunner:
                 dry_run=True,
             )
 
-        results: List[BuildResult] = []
-        bar_label = "Building"
-
-        def _run_single() -> None:
-            for source, specs in source_specs:
-                results.append(self._safe_build_source(output_dir, source, specs))
-
-        def _run_parallel() -> None:
-            executor_class = (
-                concurrent.futures.ProcessPoolExecutor
-                if self.distributed
-                else concurrent.futures.ThreadPoolExecutor
+        dag = BuildTaskDAG(self.cache, max_workers=self.max_workers)
+        for source, specs in source_specs:
+            inputs = [source]
+            for spec in specs:
+                for test in spec.tests:
+                    if test.is_file():
+                        inputs.append(test)
+            inputs = sorted({p.resolve() for p in inputs})
+            function_names = [spec.name for spec in specs]
+            flags = self._combined_flags(specs)
+            metadata = (
+                f"functions:{','.join(sorted(function_names))};"
+                f"flags:{','.join(sorted(flags))};"
+                f"target:{self.target};"
+                f"target_mode:{self.target_mode}"
             )
-            with executor_class(max_workers=self.max_workers) as executor:
-                futures = {
-                    executor.submit(
-                        self._safe_build_source, output_dir, source, specs
-                    ): source
-                    for source, specs in source_specs
-                }
-                for future in concurrent.futures.as_completed(futures):
-                    results.append(future.result())
+            # Include the source path so identical files in different projects do
+            # not share a task cache entry.
+            inputs.append(str(source.resolve()))
+            inputs.append(metadata)
+            task_outputs = [output_dir / source.name]
+            dag.add_task(
+                name=f"compile:{source.name}",
+                func=lambda s=source, sp=specs: self._safe_build_source(
+                    output_dir, s, sp
+                ),
+                inputs=inputs,
+                outputs=task_outputs,
+            )
 
-        if self.progress:
-            with click.progressbar(
-                length=len(source_specs),
-                label=bar_label,
-                show_pos=True,
-            ) as bar:
-                if self.max_workers == 1 or len(source_specs) == 1:
-                    for source, specs in source_specs:
-                        results.append(
-                            self._safe_build_source(output_dir, source, specs)
-                        )
-                        bar.update(1)
-                else:
-                    executor_class = (
-                        concurrent.futures.ProcessPoolExecutor
-                        if self.distributed
-                        else concurrent.futures.ThreadPoolExecutor
-                    )
-                    with executor_class(max_workers=self.max_workers) as executor:
-                        futures = {
-                            executor.submit(
-                                self._safe_build_source, output_dir, source, specs
-                            ): source
-                            for source, specs in source_specs
-                        }
-                        for future in concurrent.futures.as_completed(futures):
-                            results.append(future.result())
-                            bar.update(1)
-        else:
-            if self.max_workers == 1 or len(source_specs) == 1:
-                _run_single()
-            else:
-                _run_parallel()
-
+        dag_results = dag.run()
+        results: List[BuildResult] = list(dag_results.values())
         return self._summarize(results)
 
     def _safe_build_source(

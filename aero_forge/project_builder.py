@@ -22,6 +22,7 @@ from aero_forge.build_runner import BuildRunner
 from aero_forge.build_summary import format_build_summary
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_project
+from aero_forge.scaffold.engine import ProjectScaffolder
 
 logger = logging.getLogger("aero_forge.project_builder")
 
@@ -65,6 +66,7 @@ class ProjectBuilder:
         max_workers: int = 4,
         cache_enabled: bool = True,
         target: str = "native",
+        template: Optional[str] = None,
         config_override: Optional[ConfigOverride] = None,
     ):
         self.project_root = Path(project_root).resolve()
@@ -80,11 +82,40 @@ class ProjectBuilder:
         self.max_workers = max_workers
         self.cache_enabled = cache_enabled
         self.target = target
+        self.template = template
         self.config_override = config_override
 
     def _discover(self) -> List[Any]:
         """Return discovered ``FunctionSpec`` objects for the project."""
         return discover_project(self.project_root)
+
+    def scaffold(self, template: Optional[str] = None) -> Dict[str, Any]:
+        """Generate a project shell (axum, clap, or python_hybrid) for the project."""
+        chosen = template or self.template
+        if not chosen:
+            raise ValueError("No template specified for scaffold()")
+        functions = [f.name for f in self._discover()] or None
+        project_name = self.project_root.name
+        if chosen == "axum":
+            root = ProjectScaffolder.scaffold_axum(
+                self.project_root, project_name, functions
+            )
+        elif chosen == "clap":
+            root = ProjectScaffolder.scaffold_clap(
+                self.project_root, project_name, functions
+            )
+        elif chosen == "python_hybrid":
+            root = ProjectScaffolder.scaffold_python_hybrid(
+                self.project_root, project_name, functions
+            )
+        else:
+            raise ValueError(f"Unknown template: {chosen}")
+        return {
+            "status": "scaffolded",
+            "template": chosen,
+            "project_root": str(root),
+            "files": sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()),
+        }
 
     def _context_summary(self, functions: List[Any]) -> str:
         """Build a short text summary of existing project functions for the LLM."""

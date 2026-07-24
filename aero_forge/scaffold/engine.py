@@ -3639,6 +3639,237 @@ def _generate_pyi(
 
 
 # ---------------------------------------------------------------------------
+# Project scaffolding templates
+# ---------------------------------------------------------------------------
+class ProjectScaffolder:
+    """Generate production-grade project shells that embed HIN compute modules."""
+
+    @staticmethod
+    def _rust_identifier(name: str) -> str:
+        sanitized = re.sub(r"[^0-9a-zA-Z_]", "_", name)
+        if not sanitized:
+            sanitized = "module"
+        if sanitized[0].isdigit():
+            sanitized = "a_" + sanitized
+        return sanitized
+
+    @staticmethod
+    def scaffold_axum(
+        output_dir: Path,
+        project_name: str = "axum_api",
+        function_names: Optional[List[str]] = None,
+    ) -> Path:
+        """Scaffold an Axum REST API project with an embedded HIN compute module."""
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        safe = ProjectScaffolder._rust_identifier(project_name)
+
+        (out / "Cargo.toml").write_text(
+            f"""[package]
+name = "{safe}"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7"
+tokio = {{ version = "1", features = ["full"] }}
+serde = {{ version = "1", features = ["derive"] }}
+serde_json = "1"
+""",
+            encoding="utf-8",
+        )
+
+        src = out / "src"
+        src.mkdir(parents=True, exist_ok=True)
+
+        functions = function_names or ["add"]
+        routes = []
+        for name in functions:
+            route = f'        .route("/{name}", post({name}_handler))'
+            routes.append(route)
+        route_lines = "\n".join(routes)
+
+        handlers = []
+        for name in functions:
+            handlers.append(
+                f"""async fn {name}_handler(body: String) -> String {{
+    let values: Vec<f64> = serde_json::from_str(&body).unwrap_or_default();
+    let result = compute::{name}(
+        values.get(0).copied().unwrap_or(0.0),
+        values.get(1).copied().unwrap_or(0.0),
+    );
+    serde_json::to_string(&result).unwrap()
+}}"""
+            )
+        handler_lines = "\n\n".join(handlers)
+
+        compute_functions = []
+        for name in functions:
+            compute_functions.append(
+                f"""pub fn {name}(a: f64, b: f64) -> f64 {{
+    a {('+' if name == 'add' else '*')} b
+}}"""
+            )
+        compute_lines = "\n\n".join(compute_functions)
+
+        (src / "main.rs").write_text(
+            f"""mod compute;
+
+use axum::{{routing::post, Router}};
+use serde_json::Value;
+
+#[tokio::main]
+async fn main() {{
+    let app = Router::new()
+{route_lines};
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}}
+
+{handler_lines}
+""",
+            encoding="utf-8",
+        )
+
+        (src / "compute.rs").write_text(compute_lines, encoding="utf-8")
+        return out
+
+    @staticmethod
+    def scaffold_clap(
+        output_dir: Path,
+        project_name: str = "clap_cli",
+        function_names: Optional[List[str]] = None,
+    ) -> Path:
+        """Scaffold a Clap command-line interface with embedded HIN compute."""
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        safe = ProjectScaffolder._rust_identifier(project_name)
+
+        (out / "Cargo.toml").write_text(
+            f"""[package]
+name = "{safe}"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = {{ version = "=4.5.30", features = ["derive"] }}
+""",
+            encoding="utf-8",
+        )
+
+        src = out / "src"
+        src.mkdir(parents=True, exist_ok=True)
+
+        functions = function_names or ["add"]
+        match_arms = []
+        for name in functions:
+            op = "+" if name == "add" else "*"
+            match_arms.append(
+                f"""        Commands::{name.capitalize()} {{ a, b }} => {{
+            println!(\"{{}}\", compute::{name}(a, b));
+        }}"""
+            )
+        arm_lines = "\n".join(match_arms)
+
+        commands = []
+        for name in functions:
+            commands.append(
+                f"""    {name.capitalize()} {{
+        a: f64,
+        b: f64,
+    }},"""
+            )
+        command_lines = "\n".join(commands)
+
+        compute_functions = []
+        for name in functions:
+            op = "+" if name == "add" else "*"
+            compute_functions.append(
+                f"""pub fn {name}(a: f64, b: f64) -> f64 {{
+    a {op} b
+}}"""
+            )
+        compute_lines = "\n\n".join(compute_functions)
+
+        (src / "main.rs").write_text(
+            f"""mod compute;
+
+use clap::{{Parser, Subcommand}};
+
+#[derive(Parser)]
+#[command(name = "{safe}")]
+struct Cli {{
+    #[command(subcommand)]
+    command: Commands,
+}}
+
+#[derive(Subcommand)]
+enum Commands {{
+{command_lines}
+}}
+
+fn main() {{
+    let cli = Cli::parse();
+    match cli.command {{
+{arm_lines}
+    }}
+}}
+""",
+            encoding="utf-8",
+        )
+
+        (src / "compute.rs").write_text(compute_lines, encoding="utf-8")
+        return out
+
+    @staticmethod
+    def scaffold_python_hybrid(
+        output_dir: Path,
+        project_name: str = "python_hybrid",
+        function_names: Optional[List[str]] = None,
+    ) -> Path:
+        """Scaffold a standard Python package that embeds compiled native modules."""
+        out = Path(output_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        safe = ProjectScaffolder._rust_identifier(project_name)
+
+        (out / "pyproject.toml").write_text(
+            f"""[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "{safe}"
+version = "0.1.0"
+description = "Aero-Forge generated Python hybrid package"
+""",
+            encoding="utf-8",
+        )
+
+        pkg_dir = out / "src" / safe
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+        (pkg_dir / "__init__.py").write_text(
+            f"""# {safe} generated by aero-forge
+""",
+            encoding="utf-8",
+        )
+
+        functions = function_names or ["add"]
+        stubs = [f"def {name}(a: float, b: float) -> float: ..." for name in functions]
+        (pkg_dir / "_native.pyi").write_text(
+            "\n".join(stubs) + "\n", encoding="utf-8"
+        )
+
+        tests_dir = out / "tests"
+        tests_dir.mkdir(parents=True, exist_ok=True)
+        (tests_dir / "test_placeholder.py").write_text(
+            "def test_import():\n    from {} import {}\n".format(safe, safe),
+            encoding="utf-8",
+        )
+
+        return out
+
+
+# ---------------------------------------------------------------------------
 # Package scaffolding helpers
 # ---------------------------------------------------------------------------
 def find_project_root(start: Path) -> Path:
