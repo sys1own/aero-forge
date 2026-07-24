@@ -1,0 +1,29 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "batch-analytics-engine"
+version = "0.1.0"
+description = "Hybrid Python/Rust batch analytics engine: Rust numeric aggregation via PyO3, Python async HTTP service."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "aiohttp>=3.9",
+]
+
+[project.optional-dependencies]
+dev = [
+    "maturin>=1.0,<2.0",
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[tool.maturin]
+manifest-path = "rust_core/Cargo.toml"
+module-name = "batch_analytics._native"
+python-source = "python_engine"
+
+[tool.pytest.ini_options]
+testpaths = ["python_engine/tests"]
+asyncio_mode = "auto"
