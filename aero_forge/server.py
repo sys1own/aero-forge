@@ -40,12 +40,140 @@ logger = logging.getLogger("aero_forge.server")
 
 DEFAULT_PORT = 8080
 
+_CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type, X-Api-Key, X-API-Key, Authorization",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+}
+
 _manager = SandboxManager()
 _static_dir = Path(__file__).parent / "static"
+_active_websockets: Dict[str, Any] = {}
+_active_ws_lock = threading.Lock()
+
+
+def _register_websocket(session_id: str, ws: Any) -> None:
+    with _active_ws_lock:
+        _active_websockets[session_id] = ws
+
+
+def _unregister_websocket(session_id: str) -> None:
+    with _active_ws_lock:
+        _active_websockets.pop(session_id, None)
+
+
+def _send_ws_heartbeat(session_id: str, phase: str, loop: asyncio.AbstractEventLoop) -> None:
+    with _active_ws_lock:
+        ws = _active_websockets.get(session_id)
+    if ws is None or getattr(ws, "closed", False):
+        return
+    try:
+        payload = json.dumps({"status": "building", "phase": phase})
+        asyncio.run_coroutine_threadsafe(ws.send_str(payload), loop)
+    except Exception as exc:
+        logger.debug("Could not send build heartbeat: %s", exc)
 
 
 def _session_dir(session_id: str) -> Path:
     return _manager.create_session_sandbox(session_id)
+
+
+def _api_key_from_request(request: web.Request, body: Dict[str, Any]) -> Optional[str]:
+    key = body.get("api_key") or body.get("apiKey")
+    if key:
+        return key
+    key = request.headers.get("X-Api-Key") or request.headers.get("X-API-Key")
+    if key:
+        return key
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1]
+    return None
+
+
+def _phase_from_message(message: str) -> str:
+    m = message.lower()
+    if "compil" in m:
+        return "cargo_compilation"
+    if "test" in m:
+        return "test_execution"
+    if "generat" in m:
+        return "code_generation"
+    if m.startswith("build "):
+        return "build_complete"
+    return "in_progress"
+
+
+async def _handle_build_async(request: web.Request) -> web.Response:
+    """Run a build off the event loop and send progress heartbeats over the terminal WS."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400)
+
+    prompt = body.get("prompt", "").strip()
+    if not prompt:
+        return web.json_response({"error": "Missing 'prompt'"}, status=400)
+
+    session_id = body.get("session_id") or str(uuid.uuid4())
+    session_dir = _session_dir(session_id)
+    variants = 3 if body.get("variants") else 1
+    config = ConfigOverride(
+        llm_provider=body.get("provider"),
+        api_key=_api_key_from_request(request, body),
+        model=body.get("model"),
+        max_retries=3,
+    )
+
+    loop = asyncio.get_running_loop()
+    last_phase = {"phase": "code_generation"}
+
+    def progress_callback(message: str) -> None:
+        phase = _phase_from_message(message)
+        last_phase["phase"] = phase
+        _send_ws_heartbeat(session_id, phase, loop)
+
+    async def heartbeat() -> None:
+        while True:
+            try:
+                await asyncio.sleep(4)
+            except asyncio.CancelledError:
+                break
+            _send_ws_heartbeat(session_id, last_phase["phase"], loop)
+
+    heartbeat_task: asyncio.Task = asyncio.create_task(heartbeat())
+    try:
+        result = await asyncio.to_thread(
+            generate_and_build,
+            prompt,
+            output_dir=session_dir,
+            project_name="generated",
+            max_retries=3,
+            max_iterations=5,
+            variants=variants,
+            build_kwargs={"max_workers": 1, "cache_enabled": False},
+            config_override=config,
+            progress_callback=progress_callback,
+        )
+        return web.json_response(
+            {
+                "session_id": session_id,
+                "status": "success" if result.get("build", {}).get("success") else "failure",
+                "result": result,
+            },
+            headers=_CORS_HEADERS,
+        )
+    except Exception as exc:
+        logger.exception("Build endpoint failed")
+        return web.json_response(
+            {"status": "error", "message": str(exc)}, status=500, headers=_CORS_HEADERS
+        )
+    finally:
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
 
 
 def _send_json(handler: BaseHTTPRequestHandler, status: int, data: Any) -> None:
@@ -162,6 +290,24 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         logger.info(format, *args)
 
+    def handle(self) -> None:
+        """Handle a single HTTP request and close the connection."""
+        try:
+            self.handle_one_request()
+        except Exception as exc:
+            logger.exception("Request handler failed: %s", exc)
+            try:
+                self.send_error(500, message="Internal Server Error")
+            except Exception:
+                pass
+
+    def finish(self) -> None:
+        """Flush the in-memory response writer without closing shared buffers."""
+        try:
+            self.wfile.flush()
+        except Exception:
+            pass
+
     def do_GET(self) -> None:  # noqa: N802
         try:
             parsed = urlparse(self.path)
@@ -174,6 +320,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_file_content(query)
             if path == "/api/download-zip":
                 return self._handle_download_zip(query)
+            if path in ("/favicon.ico", "/static/logo.png"):
+                return self._serve_static("/logo.png")
 
             return self._serve_static(path)
         except Exception as exc:
@@ -846,9 +994,9 @@ class _FakeSocket:
 
     def makefile(self, mode: str, *args: Any, **kwargs: Any) -> Any:
         if "r" in mode:
-            return io.BufferedReader(self.r)
+            return self.r
         if "w" in mode:
-            return io.BufferedWriter(self.w)
+            return self.w
         raise ValueError(mode)
 
     def settimeout(self, *args: Any) -> None:
@@ -907,9 +1055,10 @@ async def _build_raw_request(request: web.Request) -> bytes:
     raw = f"{request.method} {request.raw_path} HTTP/1.1\r\n".encode()
     raw += f"Host: {request.host}\r\n".encode()
     for name, value in request.headers.items():
-        if name.lower() == "host":
+        if name.lower() in {"host", "connection"}:
             continue
         raw += f"{name}: {value}\r\n".encode()
+    raw += b"Connection: close\r\n"
     if body:
         raw += f"Content-Length: {len(body)}\r\n".encode()
     raw += b"\r\n"
@@ -932,6 +1081,10 @@ def _run_http_handler(raw_request: bytes, port: int) -> bytes:
 
 async def _aiohttp_http_handler(request: web.Request, port: int) -> web.Response:
     """Route any non-WebSocket HTTP request through the existing handler stack."""
+    if request.method == "OPTIONS":
+        return web.Response(status=204, headers=_CORS_HEADERS)
+    if request.path == "/api/build":
+        return await _handle_build_async(request)
     raw = await _build_raw_request(request)
     loop = asyncio.get_event_loop()
     response_bytes = await loop.run_in_executor(None, _run_http_handler, raw, port)
@@ -971,11 +1124,16 @@ async def _aiohttp_ws_handler(request: web.Request) -> web.WebSocketResponse:
     """Accept WebSocket upgrades on the same HTTP port and attach the terminal PTY."""
     ws = web.WebSocketResponse()
     await ws.prepare(request)
+    query = parse_qs(request.query_string)
+    session_id = _first(query, "session_id") or str(uuid.uuid4())
+    _register_websocket(session_id, ws)
     adapter = _AioWSAdapter(request, ws)
     try:
         await _handle_terminal(adapter)
     except Exception as exc:
         logger.exception("Terminal handler failed: %s", exc)
+    finally:
+        _unregister_websocket(session_id)
     return ws
 
 

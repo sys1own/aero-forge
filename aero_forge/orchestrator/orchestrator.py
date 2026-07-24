@@ -401,6 +401,7 @@ class Orchestrator:
                 cwd=crate_root,
                 capture_output=True,
                 text=True,
+                timeout=60,
             )
             if fmt.returncode != 0:
                 raise _BuildFailure(
@@ -419,15 +420,27 @@ class Orchestrator:
             if self.target:
                 build_cmd.extend(["--target", self.target])
 
-            build = subprocess.run(
-                build_cmd,
-                cwd=crate_root,
-                env=env,
-                capture_output=True,
-                text=True,
-            )
+            try:
+                build = subprocess.run(
+                    build_cmd,
+                    cwd=crate_root,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise _BuildFailure(
+                    f"Cargo build timed out after {exc.timeout}s. Try a smaller prompt or reduce optimization flags."
+                ) from exc
+
             if build.returncode != 0:
                 full_output = f"{build.stdout}\n{build.stderr}".strip()
+                if build.returncode < 0:
+                    full_output = (
+                        f"{full_output}\nProcess terminated by signal {-build.returncode} "
+                        f"(possible OOM crash or external kill)."
+                    )
                 logger.debug("Cargo build output:\n%s", full_output)
                 raise _BuildFailure(
                     f"Cargo build failed:\n{full_output}\n{classify_cargo_error(full_output)}"
