@@ -9,6 +9,7 @@ shared library with a Python async service, benchmarks, and a Cargo workspace.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -518,8 +519,8 @@ def generate_monorepo(
     ]
     final_blueprint = Blueprint(
         project=safe_project,
-        architecture="hybrid_polyglot",
-        toolchains=["python", "rust", "pyo3", "maturin", "cargo"],
+        architecture="hybrid_rust_python",
+        toolchains=["python", "cargo"],
         manifest=manifest,
         contracts=contracts,
         output_dir=output_dir / "dist",
@@ -557,3 +558,47 @@ def generate_monorepo(
         "pytest_output": pytest.stdout,
         "pytest_error": pytest.stderr,
     }
+
+
+def orchestrate_hybrid_rust_python(
+    project_name: str,
+    functions: List[str],
+    output_dir: Optional[Path] = None,
+    *,
+    llm_provider: Optional[str] = None,
+    model: Optional[str] = None,
+    max_retries: int = 3,
+    max_tokens: Optional[int] = None,
+    config_override: Optional[ConfigOverride] = None,
+) -> Dict[str, Any]:
+    """High-level helper to generate a hybrid Python-Rust monorepo.
+
+    ``functions`` lists the computational functions to expose through the Rust
+    core. The helper constructs a PyO3/Maturin prompt and delegates to
+    ``generate_monorepo``.
+    """
+    functions_str = ", ".join(functions)
+    prompt = (
+        f"Create a hybrid Python/Rust workspace named '{project_name}' using PyO3 and "
+        f"Maturin. Expose the functions {functions_str} from a Rust core with Python "
+        "wrappers. Use a real-valued numeric implementation without Python complex numbers."
+    )
+    constraints = (
+        f"Project: {project_name}. Functions: {functions_str}. "
+        "Generate Cargo.toml, src/lib.rs, pyproject.toml, and Python wrapper scripts. "
+        "Use explicit type hints and valid string/list arguments."
+    )
+    out = output_dir or Path(f"./{project_name}")
+    return generate_monorepo(
+        prompt,
+        output_dir=out,
+        project_name=project_name,
+        constraints=constraints,
+        llm_provider=llm_provider
+        or os.getenv("AERO_FORGE_LLM_PROVIDER")
+        or ("deepseek" if os.getenv("DEEPSEEK_API_KEY") else None),
+        model=model or os.getenv("AERO_FORGE_MODEL", "deepseek-chat"),
+        max_retries=max_retries,
+        max_tokens=max_tokens or 4096,
+        config_override=config_override,
+    )
