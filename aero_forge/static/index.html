@@ -1167,6 +1167,79 @@
       finally { setBusy(false); }
     }
 
+    function formatBuildSummary(result) {
+      const r = result || {};
+      const build = r.build || {};
+      const success = !!build.success;
+      const lines = [`## Build ${success ? 'Succeeded ✅' : 'Failed ❌'}`];
+
+      if (r.explanation) {
+        lines.push('### Architectural overview');
+        lines.push(r.explanation);
+      }
+
+      // Extract top-level class/function names from generated source.
+      const impl = r.implementation || '';
+      const defs = [];
+      const re = /^(class|def)\s+([A-Za-z_]\w*)/gm;
+      let m;
+      while ((m = re.exec(impl))) defs.push(`\`${m[2]}\` (${m[1]})`);
+      if (defs.length) {
+        lines.push('### Generated components/classes');
+        lines.push(defs.join(', '));
+      }
+
+      lines.push('### Created or modified files');
+      if (r.source_path) lines.push(`- Source: \`${r.source_path}\``);
+      if (r.test_path) lines.push(`- Tests: \`${r.test_path}\``);
+      if (r.blueprint_path) lines.push(`- Blueprint: \`${r.blueprint_path}\``);
+      const artifacts = new Set();
+      (build.results || []).forEach(res => { if (res.artifact) artifacts.add(res.artifact); });
+      artifacts.forEach(a => lines.push(`- Compiled artifact: \`${a}\``));
+
+      lines.push('### Unit test status');
+      if (build.total !== undefined && build.total !== null) {
+        lines.push(`- **Passed:** ${build.passed || 0} / ${build.total}`);
+        if (build.failed) lines.push(`- **Failed:** ${build.failed}`);
+      } else if (success) {
+        lines.push('- All checks passed.');
+      } else {
+        lines.push('- Test status unavailable.');
+      }
+      if (build.error) lines.push(`- **Error:** \`${build.error}\``);
+
+      const functions = new Set();
+      (build.results || []).forEach(res => { (res.functions || []).forEach(f => functions.add(f)); });
+      if (functions.size) {
+        lines.push('### Functions');
+        Array.from(functions).forEach(f => lines.push(`- \`${f}\``));
+      }
+
+      const iterations = r.iterations || [];
+      if (iterations.length) {
+        lines.push('### Self-healing iterations');
+        lines.push(`- ${iterations.length} optimization iteration(s) attempted.`);
+        iterations.forEach((it, idx) => {
+          const b = it.build || {};
+          lines.push(`- Iteration ${idx + 1}: ${b.success ? 'passed' : 'failed'} (${b.passed || 0}/${b.total || 0})`);
+          if (it.explanation) lines.push(`  - ${it.explanation}`);
+        });
+      }
+      (build.results || []).forEach(res => {
+        if (res.iterations > 1) lines.push(`- \`${res.source}\` required ${res.iterations} compilation attempt(s).`);
+        if (res.explanation) lines.push(`- Fix for \`${res.source}\`: ${res.explanation}`);
+      });
+
+      if (build.logs) {
+        lines.push('### Build logs');
+        lines.push('```');
+        lines.push(build.logs.slice(0, 2000));
+        lines.push('```');
+      }
+
+      return lines.join('\n');
+    }
+
     async function runBuild() {
       const prompt = ui.promptInput.value.trim();
       if (!prompt) return;
@@ -1179,16 +1252,17 @@
         state.sessionId = data.session_id;
         try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
         ui.settingSession.value = state.sessionId;
+
+        const summary = formatBuildSummary(data.result);
         if (data.result && data.result.build) {
           const b = data.result.build;
-          if (b.success) {
-            log(`Build succeeded: ${b.passed || 0}/${b.total || 0} tests`, 'success');
-            addChat('assistant', data.result.build.summary || 'Build complete!');
-          } else {
-            log(`Build failed: ${b.error || 'unknown'}`, 'error');
-            addChat('assistant', `Build failed: ${b.error || 'unknown'}`);
-          }
-        } else { log('Build response received', 'success'); addChat('assistant', 'Build response received.'); }
+          if (b.success) log(`Build succeeded: ${b.passed || 0}/${b.total || 0} tests`, 'success');
+          else log(`Build failed: ${b.error || 'unknown'}`, 'error');
+        } else {
+          log('Build response received', 'success');
+        }
+        // Render the full summary into the chat stream while still busy, then go idle.
+        addChat('assistant', summary);
         reconnectTerminal();
         await loadTree();
       } catch (e) {
@@ -1229,6 +1303,9 @@
       let safe = escapeHtml(text);
       safe = safe.replace(/```([\s\S]*?)```/g, (m, c) => `<pre>${c}</pre>`);
       safe = safe.replace(/`([^`]+)`/g, (m, c) => `<code>${c}</code>`);
+      safe = safe.replace(/\*\*([^*]+)\*\*/g, (m, c) => `<strong>${c}</strong>`);
+      safe = safe.replace(/^#{1,6}\s+(.*)$/gm, (m, c) => `<strong>${c}</strong>`);
+      safe = safe.replace(/^-\s+(.*)$/gm, (m, c) => `• ${c}`);
       return safe.replace(/\n/g, '<br>');
     }
 
