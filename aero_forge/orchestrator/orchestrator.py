@@ -22,6 +22,12 @@ from typing import Any, Dict, List, Optional
 from aero_forge.builder import build_engine, spec_from_python
 from aero_forge.cache.fix_cache import FixCache
 from aero_forge.config import ConfigOverride, load_config, resolve_settings
+from aero_forge.overlay import OverlayManager, ReapplyStatus
+from aero_forge.precision_shield.rust_shield import RustSemanticShield
+from aero_forge.scaffold.active_merge import find_compiled_library, merge_active
+from aero_forge.scaffold.import_pruner import prune_source
+from aero_forge.scaffold.pre_write_validator import PreWriteValidator, ValidationError
+from aero_forge.scaffold.workspace import OutOfTreeWorkspace
 from aero_forge.errors import (
     UserError,
     check_toolchain,
@@ -174,6 +180,11 @@ class Orchestrator:
         self.test_path = self.test_paths[0] if self.test_paths else None
         self.output_dir = Path(output_dir) if output_dir else self.source_path.parent
         self._project_root: Optional[Path] = None
+        self.overlay_manager = OverlayManager(self.output_dir)
+        self.pre_write_validator = PreWriteValidator(
+            context=getattr(self, "_extra_context", None) or {},
+            language="rust",
+        )
         self.max_iterations = self.settings["MAX_ITERATIONS"]
         self.use_llm = self.settings.get("LLM_PROVIDER", "none") != "none"
         self.compiler_flags = compiler_flags or []
@@ -216,6 +227,10 @@ class Orchestrator:
         ensure_cargo_in_path()
         if not self.source_path.is_file():
             raise UserError(f"Source file not found: {self.source_path}")
+
+        reapply_status = self.overlay_manager.reapply(self.source_path)
+        if reapply_status == ReapplyStatus.CONFLICT:
+            logger.warning("Overlay conflict for %s; keeping generated baseline", self.source_path)
 
         original_source = self.source_path.read_text(encoding="utf-8")
         source = original_source
@@ -303,6 +318,7 @@ class Orchestrator:
                 result = sandbox.run_tests()
                 if result["passed"]:
                     self._merge_back(sandbox, artifact)
+                    self.overlay_manager.record_generated(self.source_path)
                     logger.info("Tests passed after %d iteration(s)", iteration)
                     return {
                         "success": True,
@@ -422,6 +438,18 @@ class Orchestrator:
             project_root=self._project_root,
         ) as sandbox:
             sandbox.source_in_sandbox.write_text(source, encoding="utf-8")
+            try:
+                self.pre_write_validator.validate(sandbox.root, language="python")
+            except ValidationError as exc:
+                return {
+                    "success": False,
+                    "iterations": 0,
+                    "route": route_payload["route"],
+                    "reasons": route_payload["reasons"],
+                    "target_functions": route_payload["target_functions"],
+                    "error": f"{base_error}: pre-write validation failed",
+                    "logs": exc.output,
+                }
             result = sandbox.run_tests()
             if result["passed"]:
                 package_path = self._package_general_purpose(source)
@@ -566,6 +594,14 @@ class Orchestrator:
                 source=source,
                 target_mode=self.target_mode,
             )
+
+            lib_rs = crate_root / "src" / "lib.rs"
+            if lib_rs.is_file():
+                rust_source = lib_rs.read_text(encoding="utf-8")
+                report = RustSemanticShield().apply(rust_source)
+                if report.changed:
+                    lib_rs.write_text(report.source, encoding="utf-8")
+                    logger.info("Applied Rust semantic shield: %s", report.applied)
         except Exception as exc:
             raise _BuildFailure(
                 format_transpiler_error_with_traceback(
