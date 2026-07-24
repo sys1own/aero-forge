@@ -275,10 +275,11 @@ llm:
 
 ### Configuration Precedence
 
-1. CLI flags
-2. Environment variables
-3. `llm` block in `blueprint.aero`
-4. Built-in defaults
+1. `ConfigOverride` passed to a build or generation task (request-scoped)
+2. CLI flags
+3. Environment variables
+4. `llm` block in `blueprint.aero`
+5. Built-in defaults
 
 Example environment setup:
 
@@ -286,6 +287,16 @@ Example environment setup:
 export AERO_FORGE_LLM_PROVIDER=openrouter
 export AERO_FORGE_MODEL=openrouter/free
 export OPENROUTER_API_KEY="sk-or-v1-..."
+```
+
+For web or programmatic use, pass a request-scoped ``ConfigOverride`` instead of mutating the environment:
+
+```python
+from aero_forge.config import ConfigOverride, override
+from aero_forge.generate import generate_and_build
+
+with override(ConfigOverride(llm_provider="deepseek", model="deepseek-v4-flash", api_key="...")):
+    result = generate_and_build("Build a fast fibonacci function")
 ```
 
 ## Algorithm Library
@@ -386,6 +397,22 @@ See `BLUEPRINT.md` and `stress_tests/README.md` for the full supported-construct
 5. **Test** - `pytest` runs against the compiled extension in an isolated sandbox.
 6. **Heal** - On failure, the orchestrator classifies the error, tries router-only fixes, then falls back to the configured LLM with retry and exponential backoff.
 7. **Cache** - Compilation and fix results are cached so unchanged files rebuild instantly.
+
+## Web Integration and Session Isolation
+
+For embedded or web backends, use ``SandboxManager`` to create UUID-isolated sandbox directories:
+
+```python
+from aero_forge.sandbox.manager import SandboxManager
+
+manager = SandboxManager()
+sandbox_dir = manager.create_session_sandbox("550e8400-e29b-41d4-a716-446655440000")
+# ... write or run files ...
+zip_bytes = manager.archive_session_sandbox(session_id)
+manager.clean_session_sandbox(session_id)
+```
+
+``ConfigOverride`` and ``override()`` let you pass per-request LLM settings without touching global environment variables. ``BuildRunner``, ``Orchestrator``, ``generate_and_build``, and ``ProjectBuilder`` all accept a ``config_override`` argument.
 
 ## Running Tests
 

@@ -20,6 +20,7 @@ from aero_forge.blueprint import (
 )
 from aero_forge.build_runner import BuildRunner
 from aero_forge.build_summary import format_build_summary
+from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_project
 
 logger = logging.getLogger("aero_forge.project_builder")
@@ -64,6 +65,7 @@ class ProjectBuilder:
         max_workers: int = 4,
         cache_enabled: bool = True,
         target: str = "native",
+        config_override: Optional[ConfigOverride] = None,
     ):
         self.project_root = Path(project_root).resolve()
         self.output_dir = Path(output_dir) if output_dir else self.project_root / "dist"
@@ -78,6 +80,7 @@ class ProjectBuilder:
         self.max_workers = max_workers
         self.cache_enabled = cache_enabled
         self.target = target
+        self.config_override = config_override
 
     def _discover(self) -> List[Any]:
         """Return discovered ``FunctionSpec`` objects for the project."""
@@ -120,6 +123,7 @@ class ProjectBuilder:
             model=self.model,
             cache_enabled=self.cache_enabled,
             target=self.target,
+            config_override=self.config_override,
         )
         build_result = runner.build()
 
@@ -138,6 +142,7 @@ class ProjectBuilder:
                 output_dir=self.output_dir,
                 llm_provider=self.llm_provider,
                 model=self.model,
+                config_override=self.config_override,
             )
 
         return {
@@ -195,6 +200,7 @@ class ProjectBuilder:
             llm_provider=self.llm_provider,
             model=self.model,
             prompt_template=prompt_template,
+            config_override=self.config_override,
         )
 
         return self.build()

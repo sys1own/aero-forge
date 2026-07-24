@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -21,6 +23,7 @@ class Sandbox:
         test_paths: Optional[List[Path]] = None,
         extra_files: Optional[List[Path]] = None,
         project_root: Optional[Path] = None,
+        root: Optional[Path] = None,
     ):
         self.source = Path(source)
         self.function_name = function_name
@@ -35,8 +38,15 @@ class Sandbox:
         self.test_file = self.test_paths[0]
         self.extra_files = [Path(f) for f in (extra_files or [])]
         self.project_root = project_root
-        self._tmpdir = tempfile.TemporaryDirectory(prefix="aero-forge-sandbox-")
-        self.root = Path(self._tmpdir.name)
+        if root is None:
+            self._tmpdir = tempfile.TemporaryDirectory(prefix="aero-forge-sandbox-")
+            self.root = Path(self._tmpdir.name)
+            self._own_root = True
+        else:
+            self._tmpdir = None
+            self.root = Path(root)
+            self.root.mkdir(parents=True, exist_ok=True)
+            self._own_root = False
         self._populate()
 
     @property
@@ -49,7 +59,8 @@ class Sandbox:
 
     def _populate(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
-        shutil.copy(self.source, self.source_in_sandbox)
+        if self.source.is_file() and self.source.resolve() != self.source_in_sandbox.resolve():
+            shutil.copy(self.source, self.source_in_sandbox)
         for test_path in self.test_paths:
             if test_path and test_path.is_file():
                 shutil.copy(test_path, self.root / test_path.name)
@@ -118,10 +129,67 @@ class Sandbox:
         }
 
     def cleanup(self) -> None:
-        self._tmpdir.cleanup()
+        if self._tmpdir is not None:
+            self._tmpdir.cleanup()
 
     def __enter__(self) -> "Sandbox":
         return self
 
     def __exit__(self, *exc: Any) -> None:
-        self.cleanup()
+        if self._own_root:
+            self.cleanup()
+
+
+class SandboxManager:
+    """Manage ephemeral, UUID-isolated sandbox directories for web requests."""
+
+    def __init__(self, base_dir: Optional[Path] = None) -> None:
+        self.base_dir = (
+            Path(base_dir)
+            if base_dir
+            else Path(tempfile.gettempdir()) / "aero-forge-sandboxes"
+        )
+        self._sessions: Dict[str, Sandbox] = {}
+
+    def _session_dir(self, session_id: str) -> Path:
+        return (self.base_dir / session_id).resolve()
+
+    def create_session_sandbox(self, session_id: str) -> Path:
+        """Create and return a sandbox directory for ``session_id``."""
+        session_dir = self._session_dir(session_id)
+        session_dir.mkdir(parents=True, exist_ok=True)
+        source = session_dir / "source.py"
+        if not source.is_file():
+            source.write_text("# placeholder\n", encoding="utf-8")
+        sandbox = Sandbox(
+            source=source,
+            function_name="main",
+            root=session_dir,
+        )
+        self._sessions[session_id] = sandbox
+        return session_dir
+
+    def get_session_sandbox(self, session_id: str) -> Sandbox:
+        """Return an existing ``Sandbox`` for ``session_id``."""
+        if session_id not in self._sessions:
+            self.create_session_sandbox(session_id)
+        return self._sessions[session_id]
+
+    def clean_session_sandbox(self, session_id: str) -> None:
+        """Delete the sandbox directory for ``session_id``."""
+        session_dir = self._session_dir(session_id)
+        if session_dir.is_dir():
+            shutil.rmtree(session_dir, ignore_errors=True)
+        self._sessions.pop(session_id, None)
+
+    def archive_session_sandbox(self, session_id: str) -> bytes:
+        """Return a zip archive of the ``session_id`` sandbox as bytes."""
+        session_dir = self._session_dir(session_id)
+        if not session_dir.is_dir():
+            raise ValueError(f"Sandbox for session '{session_id}' does not exist")
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for path in session_dir.rglob("*"):
+                if path.is_file():
+                    zf.write(path, path.relative_to(session_dir))
+        return buf.getvalue()

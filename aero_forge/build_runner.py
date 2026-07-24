@@ -17,6 +17,7 @@ import click
 
 from aero_forge.blueprint import Blueprint, FunctionSpec, discover_functions
 from aero_forge.cache.build_cache import BuildCache
+from aero_forge.config import ConfigOverride
 from aero_forge.error_explainer import explain_error
 from aero_forge.gpu import compile_gpu_kernel, find_gpu_functions
 from aero_forge.orchestrator.orchestrator import Orchestrator
@@ -66,6 +67,7 @@ class BuildRunner:
         distributed: bool = False,
         dry_run: bool = False,
         progress: bool = False,
+        config_override: Optional[ConfigOverride] = None,
     ):
         self.blueprint = blueprint
         self.max_workers = max(1, max_workers)
@@ -78,6 +80,7 @@ class BuildRunner:
         self.target = target
         self.distributed = distributed
         self.progress = progress and sys.stderr.isatty()
+        self.config_override = config_override
         self._host_target = _host_target()
         env_cache = os.getenv("AERO_FORGE_CACHE_ENABLED", "true").lower() not in (
             "0",
@@ -331,6 +334,7 @@ class BuildRunner:
             compiler_flags=flags,
             output_dir=source_output,
             target=self.target if self.target != "native" else None,
+            config_override=self.config_override,
         )
         result = orchestrator.run()
         success = result.get("success", False)

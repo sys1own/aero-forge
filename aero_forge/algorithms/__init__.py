@@ -149,6 +149,7 @@ def select_algorithm(
     category: Optional[str] = None,
     llm_provider: Optional[str] = None,
     model: Optional[str] = None,
+    config_override: Optional["ConfigOverride"] = None,
 ) -> Optional[Algorithm]:
     """Select the best algorithm for a prompt.
 
@@ -164,7 +165,9 @@ def select_algorithm(
     if llm_provider:
         from aero_forge.llm.clients import get_llm_client
 
-        client = get_llm_client(llm_provider, model=model)
+        client = get_llm_client(
+            llm_provider, model=model, config_override=config_override
+        )
         if client is not None:
             descriptions = []
             for algo in candidates.values():

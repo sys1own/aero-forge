@@ -10,6 +10,8 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Union
 
+from aero_forge.config import ConfigOverride, current_override
+
 logger = logging.getLogger("aero_forge.llm")
 
 
@@ -364,12 +366,24 @@ def get_llm_client(
     model: Optional[str] = None,
     max_retries: int = 3,
     api_key: Optional[str] = None,
+    config_override: Optional[ConfigOverride] = None,
 ) -> Optional[BaseLLMClient]:
     """Return a configured LLM client for ``provider``.
 
     Returns ``None`` when provider is ``none``/empty or when a required key is
     missing, after logging a clear error.
     """
+    override = config_override or current_override()
+    if override is not None:
+        if provider is None:
+            provider = override.llm_provider
+        if model is None:
+            model = override.model
+        if api_key is None:
+            api_key = override.api_key
+        if override.max_retries is not None:
+            max_retries = override.max_retries
+
     if not provider or provider.lower() in {"none", "null", ""}:
         return None
 
