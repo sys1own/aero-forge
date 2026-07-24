@@ -80,7 +80,7 @@ RULES:
 11. Do NOT use list comprehensions. Use explicit for loops instead.
 12. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 13. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
-14. The implementation file is named `generated.py` and the test file `test_generated.py`; tests must import with `from generated import function_name`. Wrap the implementation in ```python ... ``` and the tests in a second ```python ... ``` block. No other explanation.
+14. The implementation file is named after the primary function or prompt domain (e.g. `cache_engine.py`); the test file is named `test_<module>.py`. Tests may import with `from generated import function_name` and the build pipeline rewrites `generated` to the saved module name. Wrap the implementation in ```python ... ``` and the tests in a second ```python ... ``` block. No other explanation.
 
 OUTPUT FORMAT:
 def function_name(param1: type, param2: type) -> return_type:
@@ -117,7 +117,7 @@ RULES:
 8. Do NOT use list comprehensions. Use explicit for loops instead.
 9. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 10. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
-11. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+11. The implementation file is named after the primary function or prompt domain (e.g. `square.py`); tests may import with `from generated import function_name` and the build pipeline rewrites `generated` to the saved module name.
 For the Mandelbrot escape-time algorithm, use real and imaginary parts separately. If `cr*cr + ci*ci >= 4` return 0 immediately. Start with `zr = 0.0` and `zi = 0.0`. For `i` from `0` to `max_iter - 1`, compute `new_zr = zr*zr - zi*zi + cr` and `new_zi = 2*zr*zi + ci`. If `new_zr*new_zr + new_zi*new_zi > 4` return `i + 1` (the number of iterations performed). Otherwise set `zr = new_zr` and `zi = new_zi`. Return `max_iter` if it never escapes. Test guidance: `(0.0, 0.0, 100) -> 100`, `(-0.9, 0.0, 100) -> 100`, `(-1.5, 0.0, 100) -> 100`, `(0.25, 0.5, 100) -> 100`, `(-1.3, 0.0, 100) -> 100`; escape cases: `(2.0, 0.0, 100) -> 0`, `(1.0, 0.0, 100) -> 3`. Avoid ambiguous boundary points in tests.
 Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
@@ -147,7 +147,7 @@ RULES:
 8. Do NOT use list comprehensions. Use explicit for loops instead.
 9. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 10. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
-11. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+11. The implementation file is named after the primary function or prompt domain (e.g. `square.py`); tests may import with `from generated import function_name` and the build pipeline rewrites `generated` to the saved module name.
 For the Mandelbrot escape-time algorithm, use real and imaginary parts separately. If `cr*cr + ci*ci >= 4` return 0 immediately. Start with `zr = 0.0` and `zi = 0.0`. For `i` from `0` to `max_iter - 1`, compute `new_zr = zr*zr - zi*zi + cr` and `new_zi = 2*zr*zi + ci`. If `new_zr*new_zr + new_zi*new_zi > 4` return `i + 1` (the number of iterations performed). Otherwise set `zr = new_zr` and `zi = new_zi`. Return `max_iter` if it never escapes. Test guidance: `(0.0, 0.0, 100) -> 100`, `(-0.9, 0.0, 100) -> 100`, `(-1.5, 0.0, 100) -> 100`, `(0.25, 0.5, 100) -> 100`, `(-1.3, 0.0, 100) -> 100`; escape cases: `(2.0, 0.0, 100) -> 0`, `(1.0, 0.0, 100) -> 3`. Avoid ambiguous boundary points in tests.
 Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
@@ -177,7 +177,7 @@ RULES:
 8. Do NOT use list comprehensions. Use explicit for loops instead.
 9. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 10. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
-11. The implementation file is named `generated.py` and the test file `test_generated.py`; tests must import with `from generated import function_name`. Wrap the implementation in ```python ... ``` and the tests in a second ```python ... ``` block. No other explanation.
+11. The implementation file is named after the primary function or prompt domain (e.g. `cache_engine.py`); the test file is named `test_<module>.py`. Tests may import with `from generated import function_name` and the build pipeline rewrites `generated` to the saved module name. Wrap the implementation in ```python ... ``` and the tests in a second ```python ... ``` block. No other explanation.
 
 OUTPUT FORMAT:
 def function_name(param1: type, param2: type) -> return_type:
@@ -211,7 +211,7 @@ RULES:
 6. Do NOT use list comprehensions. Use explicit for loops instead.
 7. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 8. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
-9. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+9. The implementation file is named after the primary function or prompt domain (e.g. `square.py`); tests may import with `from generated import function_name` and the build pipeline rewrites `generated` to the saved module name.
 For the Mandelbrot escape-time algorithm, use real and imaginary parts separately. If `cr*cr + ci*ci >= 4` return 0 immediately. Start with `zr = 0.0` and `zi = 0.0`. For `i` from `0` to `max_iter - 1`, compute `new_zr = zr*zr - zi*zi + cr` and `new_zi = 2*zr*zi + ci`. If `new_zr*new_zr + new_zi*new_zi > 4` return `i + 1` (the number of iterations performed). Otherwise set `zr = new_zr` and `zi = new_zi`. Return `max_iter` if it never escapes. Test guidance: `(0.0, 0.0, 100) -> 100`, `(-0.9, 0.0, 100) -> 100`, `(-1.5, 0.0, 100) -> 100`, `(0.25, 0.5, 100) -> 100`, `(-1.3, 0.0, 100) -> 100`; escape cases: `(2.0, 0.0, 100) -> 0`, `(1.0, 0.0, 100) -> 3`. Avoid ambiguous boundary points in tests.
 Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
@@ -239,7 +239,7 @@ RULES:
 6. Do NOT use list comprehensions. Use explicit for loops instead.
 7. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 8. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
-9. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+9. The implementation file is named after the primary function or prompt domain (e.g. `square.py`); tests may import with `from generated import function_name` and the build pipeline rewrites `generated` to the saved module name.
 For the Mandelbrot escape-time algorithm, use real and imaginary parts separately. If `cr*cr + ci*ci >= 4` return 0 immediately. Start with `zr = 0.0` and `zi = 0.0`. For `i` from `0` to `max_iter - 1`, compute `new_zr = zr*zr - zi*zi + cr` and `new_zi = 2*zr*zi + ci`. If `new_zr*new_zr + new_zi*new_zi > 4` return `i + 1` (the number of iterations performed). Otherwise set `zr = new_zr` and `zi = new_zi`. Return `max_iter` if it never escapes. Test guidance: `(0.0, 0.0, 100) -> 100`, `(-0.9, 0.0, 100) -> 100`, `(-1.5, 0.0, 100) -> 100`, `(0.25, 0.5, 100) -> 100`, `(-1.3, 0.0, 100) -> 100`; escape cases: `(2.0, 0.0, 100) -> 0`, `(1.0, 0.0, 100) -> 3`. Avoid ambiguous boundary points in tests.
 Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
@@ -268,7 +268,7 @@ RULES:
 7. Do NOT use list comprehensions. Use explicit for loops instead.
 8. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
 9. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
-10. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+10. The implementation file is named after the primary function or prompt domain (e.g. `square.py`); tests may import with `from generated import function_name` and the build pipeline rewrites `generated` to the saved module name.
 For the Mandelbrot escape-time algorithm, use real and imaginary parts separately. If `cr*cr + ci*ci >= 4` return 0 immediately. Start with `zr = 0.0` and `zi = 0.0`. For `i` from `0` to `max_iter - 1`, compute `new_zr = zr*zr - zi*zi + cr` and `new_zi = 2*zr*zi + ci`. If `new_zr*new_zr + new_zi*new_zi > 4` return `i + 1` (the number of iterations performed). Otherwise set `zr = new_zr` and `zi = new_zi`. Return `max_iter` if it never escapes. Test guidance: `(0.0, 0.0, 100) -> 100`, `(-0.9, 0.0, 100) -> 100`, `(-1.5, 0.0, 100) -> 100`, `(0.25, 0.5, 100) -> 100`, `(-1.3, 0.0, 100) -> 100`; escape cases: `(2.0, 0.0, 100) -> 0`, `(1.0, 0.0, 100) -> 3`. Avoid ambiguous boundary points in tests.
 Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
@@ -297,7 +297,7 @@ RULES:
 7. Do NOT use `isinstance`, `raise`, `assert`, `try/except`, `with`, `sum()`, `map()`, `filter()`, `eval()`, `exec()`, generators, `async`/`await`, `match`/`case`, or walrus operators.
 8. Keep code simple and explicit; avoid Python idioms that do not map directly to Rust.
 9. All return statements must return the same number of values.
-10. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+10. The implementation file is named after the primary function or prompt domain (e.g. `square.py`); tests may import with `from generated import function_name` and the build pipeline rewrites `generated` to the saved module name.
 For the Mandelbrot escape-time algorithm, use real and imaginary parts separately. If `cr*cr + ci*ci >= 4` return 0 immediately. Start with `zr = 0.0` and `zi = 0.0`. For `i` from `0` to `max_iter - 1`, compute `new_zr = zr*zr - zi*zi + cr` and `new_zi = 2*zr*zi + ci`. If `new_zr*new_zr + new_zi*new_zi > 4` return `i + 1` (the number of iterations performed). Otherwise set `zr = new_zr` and `zi = new_zi`. Return `max_iter` if it never escapes. Test guidance: `(0.0, 0.0, 100) -> 100`, `(-0.9, 0.0, 100) -> 100`, `(-1.5, 0.0, 100) -> 100`, `(0.25, 0.5, 100) -> 100`, `(-1.3, 0.0, 100) -> 100`; escape cases: `(2.0, 0.0, 100) -> 0`, `(1.0, 0.0, 100) -> 3`. Avoid ambiguous boundary points in tests.
 Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
@@ -335,7 +335,7 @@ STATIC ANALYSIS RULES (the pre-write validator will reject code that violates th
 - Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
 - Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
 - Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
-12. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
+12. The implementation file is named after the primary function or prompt domain (e.g. `square.py`); tests may import with `from generated import function_name` and the build pipeline rewrites `generated` to the saved module name.
 """,
     "Emphasizes algorithmic correctness and transpiler-friendly explicit loops.",
 )

@@ -42,6 +42,104 @@ class GenerationError(Exception):
 DEFAULT_SYSTEM_PROMPT = get_default_template().system_prompt
 
 
+# Words ignored when deriving a module name from the user's prompt.
+_STOP_WORDS = {
+    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for", "of",
+    "with", "by", "from", "as", "is", "are", "be", "being", "been", "have",
+    "has", "had", "do", "does", "did", "will", "would", "could", "should",
+    "may", "might", "can", "shall", "this", "that", "these", "those", "i",
+    "you", "he", "she", "it", "we", "they", "me", "him", "her", "us", "them",
+    "my", "your", "his", "its", "our", "their", "what", "which", "who", "when",
+    "where", "why", "how", "all", "each", "every", "some", "any", "no",
+    "write", "implement", "create", "build", "generate", "make", "function",
+    "program", "code", "algorithm", "routine", "method", "fast", "optimized",
+    "quick", "simple",
+}
+
+# Names too generic to use as a module name.
+_GENERIC_NAMES = {"main", "run", "solve", "helper", "generated", "app", "test"}
+
+
+_PYTHON_KEYWORDS = {
+    "False", "None", "True", "and", "as", "assert", "async", "await", "break",
+    "class", "continue", "def", "del", "elif", "else", "except", "finally",
+    "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal",
+    "not", "or", "pass", "raise", "return", "try", "while", "with", "yield",
+}
+
+
+def _sanitize_module_name(name: str) -> str:
+    """Convert *name* into a valid Python module identifier."""
+    name = re.sub(r"[^A-Za-z0-9]+", "_", name)
+    # Convert CamelCase to snake_case.
+    name = re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+    name = re.sub(r"_+", "_", name).strip("_")
+    if not name or name[0].isdigit() or name in _PYTHON_KEYWORDS or name in _GENERIC_NAMES:
+        name = "engine"
+    return name[:40]
+
+
+def _detect_public_names(source: str) -> List[str]:
+    """Return public top-level function and class names from *source*."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    names: List[str] = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and not node.name.startswith("_"):
+            names.append(node.name)
+    return names
+
+
+def _derive_module_name(prompt: str, implementation: str, existing: Optional[str] = None) -> str:
+    """Pick a domain-specific Python module name from context and code."""
+    if existing:
+        return existing
+    for name in _detect_public_names(implementation):
+        if name not in _GENERIC_NAMES:
+            return _sanitize_module_name(name)
+    words = re.findall(r"[A-Za-z]+", prompt or "")
+    filtered = [w for w in words if w.lower() not in _STOP_WORDS and len(w) > 1]
+    if filtered:
+        # Use the first 1-3 meaningful words to keep names concise but descriptive.
+        return _sanitize_module_name("_".join(filtered[:3]))
+    return "generated"
+
+
+def _derive_export_names(source: str) -> List[str]:
+    """Return public top-level functions/classes that ``src/__init__.py`` should re-export."""
+    return _detect_public_names(source)
+
+
+def _find_generated_python_paths(output_dir: Path) -> Tuple[Path, Path]:
+    """Return the primary implementation and test paths in ``output_dir``.
+
+    Falls back to ``src/generated.py`` / ``tests/test_generated.py`` when no
+    generated source has been written yet.
+    """
+    src_dir = output_dir / "src"
+    tests_dir = output_dir / "tests"
+    candidates = [p for p in src_dir.glob("*.py") if p.name != "__init__.py"]
+    if candidates:
+        source_path = candidates[0]
+        test_path = tests_dir / f"test_{source_path.stem}.py"
+        if not test_path.is_file():
+            alt = tests_dir / f"test_{source_path.stem}.py"
+            test_path = alt
+        return source_path, test_path
+    return src_dir / "generated.py", tests_dir / "test_generated.py"
+
+
+def _rewrite_generated_imports(tests: str, module_name: str) -> str:
+    """Point tests at the real module name instead of the ``generated`` placeholder."""
+    if not tests:
+        return tests
+    tests = re.sub(r"\bfrom\s+generated\s+import\b", f"from {module_name} import", tests)
+    tests = re.sub(r"\bimport\s+generated\b", f"import {module_name}", tests)
+    return tests
+
+
 def _build_user_prompt(
     prompt: str,
     constraints: Optional[str] = None,
@@ -252,9 +350,15 @@ def write_generated_project(
     implementation: str,
     tests: str,
     project_name: str = "generated_project",
+    prompt: str = "",
+    module_name: Optional[str] = None,
     validate: bool = True,
 ) -> Tuple[Path, Path, Blueprint]:
     """Write implementation, tests, and a blueprint to ``output_dir``.
+
+    The module filename is derived from the primary function/class in
+    *implementation* or from the *prompt* domain context so workspaces use
+    descriptive names instead of generic ``generated.py``.
 
     Runs pre-write validation and performs an active structural merge when a
     previous generated baseline exists, preserving user edits from the workspace.
@@ -267,20 +371,32 @@ def write_generated_project(
     if tests and not tests.endswith("\n"):
         tests += "\n"
 
-    if validate:
-        validator = PreWriteValidator(context={}, language="python")
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            (tmp_path / "generated.py").write_text(implementation, encoding="utf-8")
-            validator.validate(tmp_path, language="python")
-
     src_dir = output_dir / "src"
     tests_dir = output_dir / "tests"
     src_dir.mkdir(parents=True, exist_ok=True)
     tests_dir.mkdir(parents=True, exist_ok=True)
 
-    source_path = src_dir / "generated.py"
-    test_path = tests_dir / "test_generated.py"
+    # Preserve the existing module name across incremental rewrites so overlays
+    # remain anchored to the same file.
+    if module_name is None:
+        existing_modules = [
+            p.stem for p in src_dir.glob("*.py") if p.name != "__init__.py"
+        ]
+        existing_stem = existing_modules[0] if existing_modules else None
+        module_name = _derive_module_name(prompt, implementation, existing=existing_stem)
+
+    # Point smoke/generated tests at the real module name.
+    tests = _rewrite_generated_imports(tests, module_name)
+
+    source_path = src_dir / f"{module_name}.py"
+    test_path = tests_dir / f"test_{module_name}.py"
+
+    if validate:
+        validator = PreWriteValidator(context={}, language="python")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / f"{module_name}.py").write_text(implementation, encoding="utf-8")
+            validator.validate(tmp_path, language="python")
 
     # Active structural merge: preserve committed user overlays on re-generation.
     overlay_store = OverlayStore(
@@ -303,6 +419,16 @@ def write_generated_project(
 
     test_path.write_text(tests, encoding="utf-8")
     overlay_manager.record_generated(test_path)
+
+    # Expose generated public functions/classes through the package root.
+    export_names = _derive_export_names(implementation)
+    init_path = src_dir / "__init__.py"
+    if export_names:
+        init_lines = [f"from .{module_name} import {', '.join(export_names)}", ""]
+        init_lines.append("__all__ = [" + ", ".join(f'"{n}"' for n in export_names) + "]")
+        init_path.write_text("\n".join(init_lines) + "\n", encoding="utf-8")
+    else:
+        init_path.write_text("# Generated Aero-Forge module\n", encoding="utf-8")
 
     blueprint = Blueprint(
         project=project_name,
@@ -416,7 +542,7 @@ def _review_code(
     return implementation
 
 
-def generate_smoke_tests(implementation: str) -> str:
+def generate_smoke_tests(implementation: str, module_name: str = "generated") -> str:
     """Generate pytest smoke tests from the implementation when none were provided."""
     try:
         tree = ast.parse(implementation)
@@ -450,7 +576,7 @@ def generate_smoke_tests(implementation: str) -> str:
                     return f"[{inner}, {inner}, {inner}]"
         return "1"
 
-    lines = ["from generated import {name}\n\n"]
+    lines = [f"from {module_name} import {{name}}\n\n"]
     test_lines: List[str] = []
     for item in tree.body:
         if not isinstance(item, ast.FunctionDef):
@@ -476,7 +602,7 @@ def generate_smoke_tests(implementation: str) -> str:
             if isinstance(item, ast.FunctionDef) and not item.name.startswith("_")
         }
     )
-    imports = "\n".join(f"from generated import {n}" for n in impl_names)
+    imports = "\n".join(f"from {module_name} import {n}" for n in impl_names)
     # Rebuild with a single import line to avoid repeated imports.
     return imports + "\n\n" + "\n".join(test_lines)
 
@@ -556,10 +682,26 @@ def generate_project(
         )
         implementation = sanitize_generated_code(implementation)
     explanation = extract_explanation(response) if explain else ""
+
+    # Derive a domain-specific module name once so smoke tests and the saved
+    # file are consistent.
+    existing_modules = [
+        p.stem for p in (output_dir / "src").glob("*.py") if p.name != "__init__.py"
+    ] if (output_dir / "src").is_dir() else []
+    module_name = _derive_module_name(
+        prompt, implementation, existing=existing_modules[0] if existing_modules else None
+    )
     if not tests.strip():
-        tests = generate_smoke_tests(implementation)
+        tests = generate_smoke_tests(implementation, module_name=module_name)
+    else:
+        tests = _rewrite_generated_imports(tests, module_name)
     source_path, test_path, blueprint = write_generated_project(
-        output_dir, implementation, tests, project_name=project_name
+        output_dir,
+        implementation,
+        tests,
+        project_name=project_name,
+        prompt=prompt,
+        module_name=module_name,
     )
     if progress_callback:
         progress_callback("Code written; ready to compile.")
@@ -735,8 +877,7 @@ def optimize_generated_code(
     import time
 
     iterations: List[Dict[str, Any]] = []
-    source_path = output_dir / "src" / "generated.py"
-    test_path = output_dir / "tests" / "test_generated.py"
+    source_path, test_path = _find_generated_python_paths(output_dir)
     previous_time: Optional[float] = None
 
     for iteration in range(1, max_iterations + 1):

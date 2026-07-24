@@ -44,20 +44,24 @@ def test_python_repo_from_prompt(generator: UniversalRepoGenerator) -> None:
     result = generator.generate(prompt, target_language="python", project_name="demo_python")
 
     assert result.language == "python"
-    assert (result.root / "main.py").is_file()
+    assert (result.root / "src" / "add.py").is_file()
+    assert (result.root / "src" / "__init__.py").is_file()
+    assert (result.root / "tests" / "test_add.py").is_file()
     assert (result.root / "pyproject.toml").is_file()
     assert (result.root / "requirements.txt").is_file()
     assert (result.root / "README.md").is_file()
     assert (result.root / ".gitignore").is_file()
 
-    main_py = (result.root / "main.py").read_text(encoding="utf-8")
+    main_py = (result.root / "src" / "add.py").read_text(encoding="utf-8")
     assert "def add" in main_py
+    init = (result.root / "src" / "__init__.py").read_text(encoding="utf-8")
+    assert "from .add import add" in init
     pyproject = (result.root / "pyproject.toml").read_text(encoding="utf-8")
     assert 'name = "demo_python"' in pyproject
 
     import py_compile
 
-    py_compile.compile(str(result.root / "main.py"), doraise=True)
+    py_compile.compile(str(result.root / "src" / "add.py"), doraise=True)
 
 
 def test_python_repo_multi_file_workspace(generator: UniversalRepoGenerator) -> None:
@@ -68,13 +72,16 @@ def test_python_repo_multi_file_workspace(generator: UniversalRepoGenerator) -> 
     )
     result = generator.generate(prompt, target_language="python", project_name="greet_app")
     files = {f for f in result.files}
-    assert {"main.py", "pyproject.toml", "requirements.txt", "README.md", ".gitignore"} <= files
+    assert {
+        "src/greet.py", "src/__init__.py", "tests/test_greet.py",
+        "pyproject.toml", "requirements.txt", "README.md", ".gitignore",
+    } <= files
 
 
 def test_incremental_feature_merge_preserves_user_edit(generator: UniversalRepoGenerator) -> None:
     initial = "def add(a: int, b: int) -> int:\n    return a + b\n"
     result = generator.generate(initial, target_language="python", project_name="demo")
-    main = result.root / "main.py"
+    main = result.root / "src" / "add.py"
 
     # User makes a local edit to the generated entry file.
     original = main.read_text(encoding="utf-8")

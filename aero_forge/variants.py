@@ -136,8 +136,8 @@ def select_best_variant(
     best = max(front, key=sort_key)
     src = Path(best["source_path"])
     tests = Path(best["test_path"])
-    out_src = output_dir / "src" / "generated.py"
-    out_tests = output_dir / "tests" / "test_generated.py"
+    out_src = output_dir / "src" / src.name
+    out_tests = output_dir / "tests" / tests.name
     out_src.parent.mkdir(parents=True, exist_ok=True)
     out_tests.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src, out_src)

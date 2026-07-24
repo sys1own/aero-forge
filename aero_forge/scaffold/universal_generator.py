@@ -67,7 +67,7 @@ class UniversalRepoGenerator:
         *,
         target_language: str = "rust",
         project_name: Optional[str] = None,
-        entry_filename: str = "main.py",
+        entry_filename: str = "",
     ) -> tuple[BuildOutput, Union[RepoSpec, PythonRepoSpec], Path, Path]:
         """Return emitted source, repo spec, destination root, and main source file path."""
         source = _extract_source_from_prompt(prompt)
@@ -106,7 +106,7 @@ class UniversalRepoGenerator:
         *,
         target_language: str = "rust",
         project_name: Optional[str] = None,
-        entry_filename: str = "main.py",
+        entry_filename: str = "",
     ) -> UniversalGenerationResult:
         """Generate a project for *target_language* from a Python source *prompt*."""
         build_output, repo_spec, dest, source_file = self._build(
@@ -137,7 +137,15 @@ class UniversalRepoGenerator:
     def commit_overlay(self, file: Path) -> Optional[str]:
         """Commit the current on-disk contents of *file* as a user overlay."""
         path = Path(file).resolve()
-        manager = self._overlay_managers.get(path.parent)
+        # Find an overlay manager whose workspace is an ancestor of the file.
+        manager: Optional[OverlayManager] = None
+        for ws, m in self._overlay_managers.items():
+            try:
+                path.relative_to(ws)
+                manager = m
+                break
+            except ValueError:
+                continue
         if manager is None:
             manager = OverlayManager(path.parent)
             self._overlay_managers[path.parent] = manager
@@ -151,7 +159,7 @@ class UniversalRepoGenerator:
         *,
         target_language: str = "rust",
         project_name: Optional[str] = None,
-        entry_filename: str = "main.py",
+        entry_filename: str = "",
     ) -> UniversalGenerationResult:
         """Generate while re-applying any committed overlays for incremental updates."""
         build_output, repo_spec, dest, source_file = self._build(
