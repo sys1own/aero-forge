@@ -202,7 +202,12 @@ async def _handle_build_async(request: web.Request) -> web.Response:
     except Exception as exc:
         logger.exception("Build endpoint failed")
         return web.json_response(
-            {"status": "error", "message": str(exc)}, status=500, headers=_CORS_HEADERS
+            _build_web_response(
+                session_id,
+                session_dir,
+                {"build": {"success": False, "error": str(exc)}},
+            ),
+            headers=_CORS_HEADERS,
         )
     finally:
         heartbeat_task.cancel()
@@ -378,9 +383,22 @@ def _build_web_response(
     files = _build_file_list(session_dir)
     tree = _build_tree(session_dir)
     build = result.get("build") or {}
+    variants = result.get("variants", [])
+    if variants:
+        success_count = sum(
+            1 for v in variants if (v.get("build") or {}).get("success")
+        )
+        if success_count == len(variants):
+            status = "success"
+        elif success_count > 0:
+            status = "partial"
+        else:
+            status = "failure"
+    else:
+        status = "success" if build.get("success") else "failure"
     return {
         "session_id": session_id,
-        "status": "success" if build.get("success") else "failure",
+        "status": status,
         "files": files,
         "tree": tree,
         "result": result,
@@ -528,7 +546,15 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             return _send_json(self, 200, _build_web_response(session_id, session_dir, result))
         except Exception as exc:  # pragma: no cover
             logger.exception("Build endpoint failed")
-            return _send_json(self, 500, {"error": str(exc)})
+            return _send_json(
+                self,
+                200,
+                _build_web_response(
+                    session_id,
+                    session_dir,
+                    {"build": {"success": False, "error": str(exc)}},
+                ),
+            )
 
     def _handle_save_file(self) -> None:
         try:

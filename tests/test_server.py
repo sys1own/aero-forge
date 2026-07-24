@@ -286,6 +286,61 @@ def test_api_build_passes_config_override(server, monkeypatch):
     assert captured["config_override"].api_key == "sk-test"
 
 
+def test_api_build_partial_variant_failure(server, monkeypatch, tmp_path):
+    """A multi-variant request returns structured JSON even if one variant fails."""
+
+    def fake_generate_and_build(prompt, *, output_dir=None, variants=1, **kwargs):
+        return {
+            "source_path": str(tmp_path / "src" / "f.py"),
+            "test_path": str(tmp_path / "tests" / "test_f.py"),
+            "build": {"success": True, "passed": 2, "total": 2},
+            "variants": [
+                {
+                    "variant": 0,
+                    "elapsed_seconds": 1.0,
+                    "build": {"success": True, "passed": 1, "total": 1, "error": ""},
+                },
+                {
+                    "variant": 1,
+                    "elapsed_seconds": 0.5,
+                    "build": {
+                        "success": False,
+                        "passed": 0,
+                        "total": 0,
+                        "error": "SyntaxError: invalid syntax",
+                        "logs": "Traceback (most recent call last):\n  File ...",
+                    },
+                },
+                {
+                    "variant": 2,
+                    "elapsed_seconds": 2.0,
+                    "build": {"success": True, "passed": 1, "total": 1, "error": ""},
+                },
+            ],
+        }
+
+    monkeypatch.setattr("aero_forge.server.generate_and_build", fake_generate_and_build)
+
+    status, data = _post_json(
+        server + "/api/build",
+        {
+            "prompt": "Build a fast fibonacci function",
+            "provider": "deepseek",
+            "api_key": "sk-test",
+            "variants": True,
+        },
+    )
+    assert status == 200
+    assert data["status"] == "partial"
+    assert "result" in data
+    variants = data["result"]["variants"]
+    assert len(variants) == 3
+    failed = [v for v in variants if not v["build"]["success"]]
+    assert len(failed) == 1
+    assert "SyntaxError" in failed[0]["build"]["error"]
+    assert "Traceback" in failed[0]["build"]["logs"]
+
+
 def test_api_chat_passes_config_override(server, monkeypatch):
     captured = {}
 
