@@ -9,8 +9,10 @@ import pytest
 
 from aero_forge.precision_shield.rust_shield import RustSemanticShield
 from aero_forge.scaffold.pre_write_validator import (
+    BuildOutputError,
     PreWriteValidator,
     ValidationError,
+    validate_build_outputs,
 )
 from aero_forge.scaffold.workspace import (
     OutOfTreeWorkspace,
@@ -295,3 +297,35 @@ def test_int_matrix_zero_value(tmp_path: Path) -> None:
     (tmp_path / "zero_int.py").write_text(rewritten)
     result = PreWriteValidator().validate(tmp_path, language="python")
     assert result.succeeded
+
+
+def test_validate_build_outputs_rejects_empty_dist(tmp_path: Path) -> None:
+    """A build output directory with zero files must fail validation."""
+    with pytest.raises(BuildOutputError) as exc_info:
+        validate_build_outputs(tmp_path / "dist")
+    assert "zero artifacts" in str(exc_info.value).lower()
+
+
+def test_validate_build_outputs_rejects_missing_manifest(tmp_path: Path) -> None:
+    """A build output directory missing a manifest-declared file must fail."""
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "lib.so").write_text("data")
+
+    class FakeEntry:
+        path = "missing.so"
+
+    class FakeBlueprint:
+        manifest = [FakeEntry()]
+
+    with pytest.raises(BuildOutputError) as exc_info:
+        validate_build_outputs(dist, FakeBlueprint())
+    assert "missing.so" in str(exc_info.value)
+
+
+def test_validate_build_outputs_passes_with_files(tmp_path: Path) -> None:
+    """A build output directory with at least one file passes."""
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "artifact.so").write_text("data")
+    validate_build_outputs(dist)

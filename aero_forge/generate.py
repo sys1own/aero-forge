@@ -19,6 +19,7 @@ from aero_forge.overlay import OverlayManager
 from aero_forge.overlay.store import OverlayStore
 from aero_forge.prompts import get_default_template, get_template
 from aero_forge.scaffold.pre_write_validator import PreWriteValidator, ValidationError
+from aero_forge.scaffold.test_generator import generate_smoke_tests
 from aero_forge.algorithms import (
     Algorithm,
     algorithm_prompt_context,
@@ -544,71 +545,6 @@ def _review_code(
     except Exception:
         pass
     return implementation
-
-
-def generate_smoke_tests(implementation: str, module_name: str = "generated") -> str:
-    """Generate pytest smoke tests from the implementation when none were provided."""
-    try:
-        tree = ast.parse(implementation)
-    except SyntaxError:
-        return ""
-
-    examples: Dict[str, Any] = {
-        "int": "5",
-        "float": "1.5",
-        "bool": "True",
-        "List[int]": "[1, 2, 3]",
-        "list": "[1, 2, 3]",
-        "List[float]": "[1.0, 2.0, 3.0]",
-        "List[List[int]]": "[[1, 2], [3, 4]]",
-        "List[List[float]]": "[[1.0, 2.0], [3.0, 4.0]]",
-    }
-
-    def example_for(node: Optional[ast.AST]) -> str:
-        if node is None:
-            return "1"
-        if isinstance(node, ast.Name):
-            return examples.get(node.id, "1")
-        if isinstance(node, ast.Subscript):
-            base = getattr(node.value, "id", "")
-            if base == "List":
-                slice_node = node.slice
-                if isinstance(slice_node, ast.Name):
-                    inner = examples.get(slice_node.id, "1")
-                    if inner.startswith("["):
-                        return inner
-                    return f"[{inner}, {inner}, {inner}]"
-        return "1"
-
-    lines = [f"from {module_name} import {{name}}\n\n"]
-    test_lines: List[str] = []
-    for item in tree.body:
-        if not isinstance(item, ast.FunctionDef):
-            continue
-        name = item.name
-        if name.startswith("_"):
-            continue
-        args = [example_for(arg.annotation) for arg in item.args.args]
-        call = f"{name}({', '.join(args)})"
-        return_annotation = item.returns
-        if isinstance(return_annotation, ast.Name) and return_annotation.id == "bool":
-            assertion = f"    assert {call} in (True, False)"
-        else:
-            assertion = f"    result = {call}\n    assert result is not None"
-        test_lines.append(f"def test_{name}():\n{assertion}\n")
-
-    if not test_lines:
-        return ""
-    impl_names = sorted(
-        {
-            item.name
-            for item in tree.body
-            if isinstance(item, ast.FunctionDef) and not item.name.startswith("_")
-        }
-    )
-    imports = "\n".join(f"from {module_name} import {n}" for n in impl_names)
-    # Rebuild with a single import line to avoid repeated imports.
-    return imports + "\n\n" + "\n".join(test_lines)
 
 
 def sanitize_generated_code(source: str) -> str:
