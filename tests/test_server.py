@@ -323,11 +323,12 @@ def test_api_file_content_path_traversal(server):
     assert "Invalid path" in data["error"]
 
 
-def test_api_files_missing_session(server):
-    status, body = _get(server + "/api/files?session_id=does-not-exist")
-    assert status == 404
+def test_api_files_creates_session_lazily(server):
+    status, body = _get(server + "/api/files?session_id=does-not-exist-yet")
+    assert status == 200
     data = json.loads(body.decode("utf-8"))
-    assert "not found" in data["error"].lower()
+    assert data["session_id"] == "does-not-exist-yet"
+    assert data["tree"]["type"] == "directory"
 
 
 def test_websocket_terminal(server):
