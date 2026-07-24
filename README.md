@@ -345,13 +345,19 @@ The transpiler handles common numerical and algorithmic Python patterns:
 - `enumerate()` and `zip()` in `for` loop iteration.
 - List slicing for reads (`a[:]`, `a[1:3]`) and slice assignment (`a[1:3] = b`).
 - `len()` on lists and nested list rows.
-- `append()` and `extend()` on lists.
-- Basic `list[list[T]]` matrices and indexing (`m[i][j]`), including row caching (`row = m[i]`).
+- `append()`, `extend()`, and `pop()` on lists.
+- `not list` emptiness tests (e.g. `if not a: return []`).
+- Negative literal subscripts (`arr[-1]`).
+- Generic `list`/`List[T]` annotations where the element type is inferred from usage.
+- Basic `list[list[T]]` matrices and indexing (`m[i][j]`), including row caching (`row = m[i]`) and direct nested subscript assignment (`m[i][j] = value`).
+- Tuple unpacking on name and subscript targets (`a, b = b, a` and `a[i], a[j] = a[j], a[i]`).
 - `min()` and `max()` on two scalar values.
 - `sorted(values)` with no key.
 - `int()` and `float()` casts.
-- Mixed `int`/`float` arithmetic and `math` functions (`math.cos`, `math.sin`, `math.sqrt`, etc.).
+- Mixed `int`/`float` arithmetic and `math` functions (`math.cos`, `math.sin`, `math.sqrt`, etc.), including bare math names and constants when `import math` is used.
+- Bitwise operators (`&`, `|`, `^`, `<<`, `>>`) on integer-typed values.
 - Automatic empty-list guard for scalar-returning functions that index into a list.
+- List replication (`[0] * n`) with safe ordering relative to input guards.
 
 ## Known Limitations
 
@@ -359,7 +365,7 @@ The transpiler is intentionally narrow. It works well for numerical/algorithmic 
 
 Currently not supported:
 
-- `pop`, `insert`, `remove`, and most other list methods (only `append`, `extend`, and indexing/slicing are supported).
+- `insert`, `remove`, and most other list methods (only `append`, `extend`, `pop`, and indexing/slicing are supported).
 - Nested function, class, or method definitions (refactor to top-level functions).
 - Dictionaries and sets.
 - Complex class inheritance, properties, and dataclasses.

@@ -1,0 +1,5 @@
+project: level32_real_world_campaign
+functions:
+  - file: campaign.py
+    name: "*"
+output_dir: dist

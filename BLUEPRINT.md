@@ -161,13 +161,19 @@ Aero-Forge's transpiler targets numerical and algorithmic Python. The following 
 - `enumerate()` and `zip()` in `for` loop iteration.
 - List slicing for reads (`a[:]`, `a[1:3]`, `a[2:]`) and assignment (`a[1:3] = b`).
 - `len()` on lists and nested list rows (`len(a)`, `len(a[0])`).
-- `append()` and `extend()` on list variables.
-- Nested `list[list[T]]` matrices with row/column indexing (`m[i][j]`), including caching a row (`row = m[i]`) via `.clone()`.
+- `append()`, `extend()`, and `pop()` on list variables.
+- `not list` emptiness tests (e.g. `if not a: return []`).
+- Negative literal subscripts (`arr[-1]`).
+- Generic `list`/`List[T]` annotations where the element type is inferred from usage.
+- Nested `list[list[T]]` matrices with row/column indexing (`m[i][j]`), including caching a row (`row = m[i]`) via `.clone()` and direct nested subscript assignment (`m[i][j] = value`).
+- Tuple unpacking on name and subscript targets (`a, b = b, a` and `a[i], a[j] = a[j], a[i]`).
 - `min()` and `max()` on two scalar values.
 - `sorted(values)` with no key.
 - `int()` and `float()` casts.
-- Mixed `int`/`float` arithmetic and `math` functions such as `math.cos`, `math.sin`, and `math.sqrt`.
+- Mixed `int`/`float` arithmetic and `math` functions such as `math.cos`, `math.sin`, and `math.sqrt`, including bare math names and constants when `import math` is used.
+- Bitwise operators (`&`, `|`, `^`, `<<`, `>>`) on integer-typed values.
 - Automatic empty-list guard for scalar-returning functions that index into a list.
+- List replication (`[0] * n`) with safe ordering relative to input guards.
 
 The following are intentionally not supported and produce clear errors:
 

@@ -17,6 +17,33 @@ from aero_forge.precision_shield.shield import _FLOAT_MATH_FUNCS
 
 logger = logging.getLogger("aero_forge.scaffold.engine")
 
+# Names that may appear on the right-hand side of an initializer before their
+# own declaration (e.g. builtins, imported modules, or typing helpers).
+_ALLOWED_UNBOUND_RHS_NAMES = {
+    "len",
+    "range",
+    "int",
+    "float",
+    "bool",
+    "str",
+    "list",
+    "tuple",
+    "dict",
+    "set",
+    "sorted",
+    "min",
+    "max",
+    "abs",
+    "pow",
+    "round",
+    "enumerate",
+    "zip",
+    "sum",
+    "math",
+    "numpy",
+    "np",
+}
+
 
 class Engine:
     """Write a Rust source crate for the functions described by ``annotated_graph``."""
@@ -140,7 +167,10 @@ class RustGenerator:
         self.arg_types = arg_types
 
         annotated_return = _annotation_to_rust_type(func.returns, self.class_names)
-        self.annotated_return = bool(annotated_return)
+        # Generic annotations such as ``list`` or ``List`` produce ``Vec<?>``.
+        # Treat them as not annotated so the concrete element/return type can
+        # be inferred from usage.
+        self.annotated_return = bool(annotated_return) and "?" not in annotated_return
         if annotated_return:
             self.return_type = annotated_return
 
@@ -215,6 +245,9 @@ class RustGenerator:
             return t.replace("?", self.function_type)
 
         self.type_env = {k: resolve(v) for k, v in types.items() if v is not None}
+        self.arg_types = [resolve(t) for t in self.arg_types]
+        if self.return_type:
+            self.return_type = resolve(self.return_type)
 
         if not self.annotated_return:
             ret_type = resolve(types.get("__return__"))
@@ -357,6 +390,8 @@ class RustGenerator:
                 return "()"
             return None
         if isinstance(expr, ast.Name):
+            if expr.id in MATH_CONSTANTS:
+                return "f64"
             return types.get(expr.id)
         if isinstance(expr, ast.Attribute):
             if (
@@ -412,8 +447,13 @@ class RustGenerator:
                 return "i64"
             if base == "math" and name in _FLOAT_MATH_FUNCS:
                 return "f64"
-            if name in ("sqrt", "sin", "cos", "tan", "exp", "log", "log10"):
+            if base is None and name in _FLOAT_MATH_FUNCS:
                 return "f64"
+            if base is None and name == "sorted" and expr.args:
+                arg_type = self._infer_expr_type(expr.args[0], types)
+                if arg_type and arg_type.startswith("Vec<"):
+                    return arg_type
+                return f"Vec<{self.function_type}>"
             if name == self.func.name:
                 return self.return_type or self.function_type
             if name in self.class_names:
@@ -435,6 +475,17 @@ class RustGenerator:
             else:
                 self._propagate_subscript_types(base, f"Vec<{element_type}>", types)
         elif isinstance(expr, ast.BinOp):
+            # In list replication like ``[0] * n`` the scalar operand is the
+            # repeat count and should not inherit the element type.
+            if isinstance(expr.op, ast.Mult):
+                left_is_list = isinstance(expr.left, ast.List)
+                right_is_list = isinstance(expr.right, ast.List)
+                if left_is_list and not right_is_list:
+                    self._propagate_subscript_types(expr.left, element_type, types)
+                    return
+                if right_is_list and not left_is_list:
+                    self._propagate_subscript_types(expr.right, element_type, types)
+                    return
             self._propagate_subscript_types(expr.left, element_type, types)
             self._propagate_subscript_types(expr.right, element_type, types)
         elif isinstance(expr, ast.UnaryOp):
@@ -445,6 +496,13 @@ class RustGenerator:
         elif isinstance(expr, ast.BoolOp):
             for v in expr.values:
                 self._propagate_subscript_types(v, element_type, types)
+        elif isinstance(expr, ast.Call):
+            name = _call_name(expr)
+            if name == "sorted" and expr.args:
+                if element_type and element_type.startswith("Vec<"):
+                    # The argument of sorted() has the same container type as
+                    # the sorted result.
+                    self._propagate_subscript_types(expr.args[0], element_type, types)
         elif isinstance(expr, ast.IfExp):
             self._propagate_subscript_types(expr.body, element_type, types)
             self._propagate_subscript_types(expr.orelse, element_type, types)
@@ -567,6 +625,8 @@ class RustGenerator:
             if expr.value is None:
                 return "()"
         if isinstance(expr, ast.Name):
+            if expr.id in MATH_CONSTANTS:
+                return "f64"
             return self.type_env.get(expr.id, self.function_type)
         if isinstance(expr, ast.Attribute):
             if (
@@ -636,7 +696,7 @@ class RustGenerator:
                 return "i64"
             if base == "math" and name in _FLOAT_MATH_FUNCS:
                 return "f64"
-            if name in ("sqrt", "sin", "cos", "tan", "exp", "log", "log10"):
+            if base is None and name in _FLOAT_MATH_FUNCS:
                 return "f64"
             if name in ("pow",):
                 return self.function_type
@@ -652,8 +712,10 @@ class RustGenerator:
                 return "i64" if name == "int" else "f64"
             if base is None and name == "sorted":
                 if expr.args:
-                    return self._type_of(expr.args[0])
-                return "Vec<?>"
+                    arg_type = self._type_of(expr.args[0])
+                    if arg_type.startswith("Vec<"):
+                        return arg_type
+                return f"Vec<{self.function_type}>"
         return self.function_type
 
     def _type_of_numpy_call(self, name: str, expr: ast.Call) -> str:
@@ -857,8 +919,44 @@ class RustGenerator:
                 if new_targets and all(
                     not self._name_in_expr(stmt.value, n) for n in new_targets
                 ):
-                    # Only hoist the initializer if all RHS references are already
-                    # declared; otherwise fall back to normal body emission.
+                    # Only hoist the initializer if the RHS is safe to evaluate
+                    # before the full body runs. Subscript/indexing expressions may
+                    # panic on empty containers, so keep them in source order.
+                    if any(
+                        isinstance(node, ast.Subscript) for node in ast.walk(stmt.value)
+                    ):
+                        body.append(stmt)
+                        continue
+                    # Do not hoist if the RHS refers to a local that is not yet
+                    # declared (e.g. ``result = [..] * cols_b`` where ``cols_b``
+                    # itself is computed later in the body).
+                    rhs_names = {
+                        node.id
+                        for node in ast.walk(stmt.value)
+                        if isinstance(node, ast.Name)
+                    }
+                    if any(
+                        n not in declared and n not in _ALLOWED_UNBOUND_RHS_NAMES
+                        for n in rhs_names
+                    ):
+                        body.append(stmt)
+                        continue
+                    # Do not hoist list replication whose count depends on a
+                    # variable before input guards (e.g. ``[True] * (n + 1)``
+                    # may allocate a huge/zero buffer for negative ``n``).
+                    if (
+                        isinstance(stmt.value, ast.BinOp)
+                        and isinstance(stmt.value.op, ast.Mult)
+                    ):
+                        left_is_list = isinstance(stmt.value.left, ast.List)
+                        right_is_list = isinstance(stmt.value.right, ast.List)
+                        if left_is_list or right_is_list:
+                            count_expr = (
+                                stmt.value.right if left_is_list else stmt.value.left
+                            )
+                            if not isinstance(count_expr, ast.Constant):
+                                body.append(stmt)
+                                continue
                     first_new = new_targets[0]
                     if (
                         isinstance(stmt.value, ast.List)
@@ -1078,6 +1176,7 @@ class RustGenerator:
             if isinstance(stmt.value, ast.Call) and _call_name(stmt.value) in (
                 "append",
                 "extend",
+                "pop",
             ):
                 if _call_name(stmt.value) == "append":
                     return self._emit_append(stmt.value)
@@ -1435,6 +1534,10 @@ class RustGenerator:
         if isinstance(expr, ast.Constant):
             return self._emit_constant(expr, ctx)
         if isinstance(expr, ast.Name):
+            if expr.id in MATH_CONSTANTS:
+                return self._emit_constant(
+                    ast.Constant(value=MATH_CONSTANTS[expr.id]), ctx
+                )
             return self._coerce(expr.id, self._type_of(expr), ctx)
         if isinstance(expr, ast.BinOp):
             return self._emit_binop(expr, ctx)
@@ -1731,14 +1834,22 @@ class RustGenerator:
 
         base_expr = self._emit_expr(base, base_type)
         final_type = base_type
-        parts: List[str] = []
+        access = base_expr
         for idx in indices:
             element_type = _element_type(final_type)
-            index_expr = self._emit_expr(idx, "i64")
-            parts.append(f"[({index_expr}) as usize]")
+            if (
+                isinstance(idx, ast.UnaryOp)
+                and isinstance(idx.op, ast.USub)
+                and isinstance(idx.operand, ast.Constant)
+                and isinstance(idx.operand.value, int)
+            ):
+                n = idx.operand.value
+                index_expr = f"(({access}).len() as i64 - {n}_i64)"
+            else:
+                index_expr = self._emit_expr(idx, "i64")
+            access = f"{access}[({index_expr}) as usize]"
             final_type = element_type
 
-        access = f"{base_expr}{''.join(parts)}"
         # When the final value is a non-Copy container and the context expects an
         # owned value, clone it.  Scalar/copy types (i64, f64, bool) dereference
         # automatically through the reference returned by indexing.
@@ -1785,6 +1896,10 @@ class RustGenerator:
             operand = self._emit_expr(expr.operand, operand_type)
             return self._coerce(f"-({operand})", operand_type, ctx)
         if isinstance(expr.op, ast.Not):
+            operand_type = self._type_of(expr.operand)
+            if operand_type.startswith("Vec<") or isinstance(expr.operand, ast.List):
+                operand = self._emit_expr(expr.operand, operand_type)
+                return self._coerce(f"({operand}).is_empty()", "bool", ctx)
             operand = self._emit_expr(expr.operand, "bool")
             return self._coerce(f"!({operand})", "bool", ctx)
         raise UnsupportedError(
@@ -1861,7 +1976,8 @@ class RustGenerator:
                 return self._coerce(f"({left}).powf({right})", result_type, ctx)
             return self._coerce(f"({left}).pow(({right}) as u32)", result_type, ctx)
         if isinstance(op, (ast.LShift, ast.RShift, ast.BitOr, ast.BitXor, ast.BitAnd)):
-            if self.function_type != "i64":
+            result_type = self._type_of(expr)
+            if result_type != "i64":
                 raise UnsupportedError(
                     "Bitwise operations are only supported on integer-typed values",
                     node=expr,
@@ -1948,10 +2064,12 @@ class RustGenerator:
             raise UnsupportedError(
                 "Only simple binary comparisons are supported", node=expr
             )
-        # Comparison operands are always evaluated in the function's numeric
-        # type, even when the comparison itself is used as a boolean (e.g. in
-        # an `if` or `while` condition).
-        numeric_ctx = self.function_type
+        # Pick a common numeric type for the operands (e.g. `len(x) == 0` needs
+        # `i64`, while float comparisons need `f64`).
+        numeric_ctx = (
+            self._unify(self._type_of(expr.left), self._type_of(expr.comparators[0]))
+            or self.function_type
+        )
         left = self._emit_expr(expr.left, numeric_ctx)
         right = self._emit_expr(expr.comparators[0], numeric_ctx)
         op = expr.ops[0]
@@ -2083,7 +2201,7 @@ class RustGenerator:
         if base in ("np", "numpy"):
             return self._emit_numpy_call(name, expr, ctx)
 
-        if base == "math" and name in self.MATH_ATTRS:
+        if (base == "math" or base is None) and name in self.MATH_ATTRS:
             math_args = [
                 self._strip_outer_parens(self._emit_expr(a, "f64")) for a in expr.args
             ]
@@ -2103,6 +2221,20 @@ class RustGenerator:
 
         if base is None and name == "sorted":
             return self._emit_sorted(expr, ctx)
+
+        if base is not None and name == "pop":
+            if expr.args:
+                raise UnsupportedError(
+                    "pop() with arguments is not supported", node=expr
+                )
+            target = expr.func.value
+            target_type = self._type_of(target)
+            if not target_type.startswith("Vec<"):
+                raise UnsupportedError(
+                    "pop() is only supported on list/Vec types", node=expr
+                )
+            target_str = self._emit_expr(target, target_type)
+            return f"{target_str}.pop().unwrap()"
 
         if base in self.IO_MODULES or name in self.IO_NAMES:
             raise UnsupportedError("io", node=expr)
@@ -2585,17 +2717,25 @@ class ClassMethodGenerator(RustGenerator):
 # Helpers
 # ---------------------------------------------------------------------------
 def _find_top_level(tree: ast.AST, name: str) -> Tuple[Optional[ast.AST], bool]:
-    """Find a top-level class or function by name."""
+    """Find a top-level class or function by name.
+
+    When multiple top-level definitions share the same name, the last one is
+    returned so it matches Python's runtime semantics and the final variant
+    produced by multi-attempt LLM outputs.
+    """
+    found: Optional[Tuple[ast.AST, bool]] = None
     for node in getattr(tree, "body", []):
         if isinstance(node, ast.ClassDef) and node.name == name:
-            return node, True
-        if (
+            found = (node, True)
+        elif (
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and node.name == name
         ):
             if isinstance(node, ast.AsyncFunctionDef):
                 raise UnsupportedError("async/await is not supported", node=node)
-            return node, False
+            found = (node, False)
+    if found:
+        return found
     # Fallback: search the whole tree, but prefer classes when both exist.
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name == name:
@@ -2750,6 +2890,10 @@ def _annotation_to_rust_type(
         name = annotation.id
         if name in class_names:
             return name
+        if name in ("list", "List"):
+            return "Vec<?>"
+        if name in ("tuple", "Tuple"):
+            return "(?,)"
         return _SCALAR_TYPE_MAP.get(name)
 
     if isinstance(annotation, ast.Subscript):
