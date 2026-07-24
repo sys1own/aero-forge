@@ -75,3 +75,35 @@ def test_orchestrator_uses_cache_and_router_first(fibonacci_fixture, tmp_path):
     # A valid function should pass without ever touching the LLM.
     result = orchestrator.run()
     assert result["success"]
+
+
+def test_orchestrator_routes_non_numeric_function_to_standard_runtime(tmp_path):
+    """String/dict logic is bypassed from HIN and packaged as a Python artifact."""
+    src = tmp_path / "decision_matrix_pro.py"
+    test = tmp_path / "test_decision_matrix_pro.py"
+    src.write_text(
+        "def decision_matrix_pro(options: dict[str, float], weights: dict[str, float]) -> str:\n"
+        "    scores: dict[str, float] = {}\n"
+        "    for key in options:\n"
+        "        scores[key] = options[key] * weights.get(key, 1.0)\n"
+        "    best = max(scores, key=scores.get)\n"
+        "    return f'best option: {best}'\n"
+    )
+    test.write_text(
+        "from decision_matrix_pro import decision_matrix_pro\n\n"
+        "def test_decision_matrix_pro():\n"
+        "    assert decision_matrix_pro({'a': 1.0}, {'a': 2.0}) == 'best option: a'\n"
+    )
+    orchestrator = Orchestrator(
+        src,
+        function_name="decision_matrix_pro",
+        test_path=test,
+        max_iterations=1,
+        use_llm=False,
+    )
+    result = orchestrator.run()
+    assert result["success"] is True
+    assert "[HIN Bypass]" in result["logs"]
+    assert "decision_matrix_pro" in result["logs"]
+    assert "non-numerical" in result["logs"].lower() or "dynamic dictionary" in result["logs"].lower()
+    assert (tmp_path / "python_pkg").is_dir()

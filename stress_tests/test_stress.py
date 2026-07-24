@@ -32,6 +32,7 @@ def _run_build(
     # explicitly via the ``env`` argument.
     run_env = os.environ.copy()
     run_env.pop("AERO_FORGE_LLM_PROVIDER", None)
+    run_env["AERO_FORGE_CACHE_ENABLED"] = "false"
     run_env.update(env or {})
     return subprocess.run(
         cmd,
@@ -258,11 +259,12 @@ class TestLevel14AdvancedPython:
         ],
     )
     def test_unsupported_advanced_python(self, blueprint, expected):
-        """Advanced Python constructs produce clear, specific error messages."""
+        """Advanced Python constructs are routed to the standard Python runtime."""
         bp = STRESS_DIR / "level14_advanced_python" / blueprint
         result = _run_build(bp)
         output = result.stderr + result.stdout
-        assert result.returncode != 0
+        assert result.returncode == 0, output
+        assert "[HIN Bypass]" in output
         assert expected.lower() in output.lower()
 
 
@@ -483,12 +485,14 @@ class TestLevel29IndexingTypeInference:
 
 
 class TestLevel30NestedFunctions:
-    def test_nested_functions_rejected(self):
-        """Nested function definitions are rejected with a clear message."""
+    def test_nested_functions_routed_to_general_runtime(self):
+        """Nested function definitions are routed to the standard Python runtime."""
         blueprint = STRESS_DIR / "level30_nested_functions" / "blueprint.aero"
         result = _run_build(blueprint)
-        assert result.returncode != 0
-        assert "nested" in (result.stderr + result.stdout).lower()
+        output = result.stderr + result.stdout
+        assert result.returncode == 0, output
+        assert "[HIN Bypass]" in output
+        assert "nested" in output.lower()
 
 
 class TestLevel31MatrixBorrow:

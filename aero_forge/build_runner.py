@@ -469,6 +469,8 @@ class BuildRunner:
                     target_mode=self.target_mode,
                 )
                 artifact_path = source_output / artifact.name
+            elif artifact.is_dir():
+                artifact_path = artifact
 
         logs = result.get("logs", "")
         if not success:
@@ -555,12 +557,14 @@ class BuildRunner:
                 total_functions,
             )
 
-        # Surface the first concrete failure for the web UI.
+        # Surface the first concrete failure for the web UI; when everything
+        # passes, still surface the first non-empty log so bypass messages show.
         first_error = ""
         first_logs = ""
         for r in results:
-            if not r.success:
+            if r.logs and not first_logs:
                 first_logs = r.logs
+            if not r.success:
                 first_error = first_logs.splitlines()[0] if first_logs else "Build failed"
                 break
 
