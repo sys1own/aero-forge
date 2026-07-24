@@ -346,6 +346,7 @@ class BuildRunner:
                 source=source_text,
                 llm_provider=self.llm_provider,
                 model=self.model,
+                config_override=self.config_override,
             )
             logger.info("\n%s", explanation)
         if success and result.get("artifact"):
