@@ -313,12 +313,13 @@ def generate_monorepo(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Pass 1: plan the workspace and emit blueprint.aero at the project root.
+    # Keep the planning pass deterministic; the LLM is used later for the core.
     plan_workspace(
         prompt,
         output_dir,
         project_name=project_name,
         constraints=constraints,
-        llm_provider=llm_provider,
+        llm_provider=None,
         model=model,
         max_retries=max_retries,
         max_tokens=max_tokens,
