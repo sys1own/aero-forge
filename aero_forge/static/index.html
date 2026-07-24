@@ -93,11 +93,11 @@
       background: var(--panel);
       border-right: 1px solid var(--border);
       display: flex; flex-direction: column;
-      transition: margin-left 0.2s ease;
+      transition: width 0.2s ease;
       min-height: 0;
       flex-shrink: 0;
     }
-    #sidebar.collapsed { margin-left: -50vw; overflow: hidden; }
+    #sidebar.collapsed { width: 40px !important; min-width: 40px !important; max-width: 40px !important; overflow: hidden; }
     .sidebar-header {
       height: 34px; padding: 0 0.5rem; border-bottom: 1px solid var(--border);
       display: flex; align-items: center; justify-content: space-between; background: var(--panel); gap: 0.3rem;
@@ -1313,9 +1313,10 @@
         const onMove = (ev) => {
           const currentPos = client(ev, axis);
           const delta = currentPos - startPos;
-          // For the bottom terminal panel, the mouse Y increases as it moves
-          // downward, so height must increase with a positive deltaY.
-          const newSize = axis === 'y' ? startSize + delta : (invert ? startSize - delta : startSize + delta);
+          // The bottom terminal panel is resized by its top edge: dragging the
+          // edge upward (negative deltaY) grows the panel, and dragging it
+          // downward (positive deltaY) shrinks the panel.
+          const newSize = axis === 'y' ? startSize - delta : (invert ? startSize - delta : startSize + delta);
           const clamped = Math.max(min, Math.min(max, newSize));
           target.style[prop] = `${clamped}px`;
           if (state.editor) state.editor.layout();
