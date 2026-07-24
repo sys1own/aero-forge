@@ -21,6 +21,12 @@ class ValidationError(Exception):
         self.output = output
 
 
+class BlueprintValidationError(ValidationError):
+    """Raised when a workspace is missing a file declared in ``blueprint.aero``."""
+
+    pass
+
+
 @dataclass
 class ValidationResult:
     """Outcome of a delegated validation run."""
@@ -29,6 +35,43 @@ class ValidationResult:
     command: List[str]
     output: str
     return_code: int
+
+
+def validate_blueprint_manifest(
+    workspace_root: Path,
+    blueprint_path: Optional[Path] = None,
+) -> None:
+    """Validate that every file declared in ``blueprint.aero`` exists.
+
+    Raises ``BlueprintValidationError`` with the exact required message when a
+    declared file is missing from the workspace.
+    """
+    bp_path = blueprint_path or workspace_root / "blueprint.aero"
+    if not bp_path.is_file():
+        return
+
+    from aero_forge.blueprint import parse_blueprint
+
+    try:
+        blueprint = parse_blueprint(bp_path)
+    except Exception as exc:
+        raise BlueprintValidationError(
+            f"Invalid blueprint.aero: {exc}",
+            output=str(exc),
+        ) from exc
+
+    missing: List[str] = []
+    for entry in blueprint.manifest:
+        candidate = workspace_root / entry.path
+        if not candidate.is_file():
+            missing.append(entry.path)
+
+    if missing:
+        # Surface the first missing file with the contract error format.
+        raise BlueprintValidationError(
+            f"Missing declared file {missing[0]} from blueprint.aero",
+            output=f"Missing declared files: {', '.join(missing)}",
+        )
 
 
 def _default_validation_command(language: str, workspace_root: Path) -> Optional[List[str]]:
@@ -407,6 +450,9 @@ class PreWriteValidator:
 
         # Generator-side static analysis runs first so bad patterns are caught
         # before any sandboxed command or filesystem promotion.
+        # Enforce the workspace blueprint before any per-file checks.
+        validate_blueprint_manifest(workspace)
+
         if lang == "python":
             for path in workspace.rglob("*.py"):
                 try:

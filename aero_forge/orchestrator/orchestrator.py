@@ -15,10 +15,14 @@ import logging
 import os
 import shutil
 import subprocess
+import tempfile
 import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import yaml
+
+from aero_forge.blueprint import Blueprint, LLMConfig, write_blueprint
 from aero_forge.builder import build_engine, spec_from_python
 from aero_forge.cache.fix_cache import FixCache
 from aero_forge.config import ConfigOverride, load_config, resolve_settings
@@ -610,9 +614,15 @@ class Orchestrator:
             graph.traits = graph.traits_by_name
 
             engine = Engine()
+            workspace_root = (
+                self.output_dir.parent
+                if self.output_dir.name == "dist"
+                else self.output_dir
+            )
             crate_root = engine.generate(
                 graph,
                 sandbox_root,
+                workspace_root=workspace_root,
                 module_name=module_name,
                 function_names=self.function_names,
                 source=source,
@@ -914,4 +924,144 @@ def _find_artifact(
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
-__all__ = ["Orchestrator", "ForgeError"]
+def _infer_architecture(prompt: str) -> str:
+    """Classify a prompt into the build architecture family."""
+    lowered = prompt.lower()
+    hybrid_markers = ("rust", "pyo3", "maturin", "ffi", "hybrid", "polyglot")
+    is_hybrid = any(marker in lowered for marker in hybrid_markers) and "python" in lowered
+    if is_hybrid:
+        return "hybrid_polyglot"
+    if any(marker in lowered for marker in hybrid_markers):
+        return "pure_rust"
+    return "pure_python"
+
+
+def _infer_toolchains(architecture: str) -> List[str]:
+    """Return the default toolchains for an architecture."""
+    if architecture == "hybrid_polyglot":
+        return ["python", "rust", "pyo3", "maturin", "cargo"]
+    if architecture == "pure_rust":
+        return ["rust", "cargo"]
+    return ["python"]
+
+
+def _llm_plan_blueprint(
+    prompt: str,
+    project_name: str,
+    constraints: Optional[str],
+    output_dir: Path,
+    llm_provider: str,
+    model: Optional[str],
+    max_retries: int,
+    max_tokens: Optional[int],
+    config_override: Optional[ConfigOverride],
+) -> Optional[Blueprint]:
+    """Ask the LLM for a structured blueprint.aero; return None on parse failure."""
+    plan_prompt = (
+        "You are a systems architect. Given the user prompt and constraints, "
+        "produce a valid YAML blueprint.aero with exactly these top-level keys:\n"
+        "project, architecture, toolchains, manifest, contracts, output_dir, "
+        "prompt, constraints, llm.\n"
+        "manifest is a list of objects with keys: path, lang, purpose.\n"
+        "contracts is a list of objects with keys: name, signature, language, "
+        "python_name, purpose.\n"
+        "Use relative paths for files and keep the blueprint minimal.\n\n"
+        f"Prompt: {prompt}\n"
+        f"Constraints: {constraints or 'none'}\n"
+    )
+
+    from aero_forge.llm import get_llm_client
+
+    client = get_llm_client(
+        llm_provider,
+        model=model,
+        max_retries=max_retries,
+        config_override=config_override,
+    )
+    try:
+        raw = client.generate(
+            plan_prompt,
+            system_prompt=None,
+            max_tokens=max_tokens,
+        )
+    except Exception as exc:
+        logger.warning("LLM planning call failed: %s", exc)
+        return None
+
+    if not raw:
+        return None
+
+    try:
+        data = yaml.safe_load(raw)
+        if not isinstance(data, dict):
+            return None
+        if "llm" in data and isinstance(data["llm"], dict):
+            data["llm"] = LLMConfig.model_validate(data["llm"])
+        else:
+            data["llm"] = LLMConfig(provider=llm_provider, model=model)
+        return Blueprint.model_validate(data)
+    except Exception as exc:
+        logger.warning("Failed to parse LLM blueprint response: %s", exc)
+        return None
+
+
+def plan_workspace(
+    prompt: str,
+    output_dir: Path | str,
+    *,
+    project_name: str = "aero_forge_project",
+    constraints: Optional[str] = None,
+    llm_provider: Optional[str] = None,
+    model: Optional[str] = None,
+    max_retries: int = 3,
+    max_tokens: Optional[int] = None,
+    config_override: Optional[ConfigOverride] = None,
+) -> Blueprint:
+    """Pass 1: plan the workspace and emit ``blueprint.aero``.
+
+    The generated ``blueprint.aero`` contains the architecture, toolchains,
+    manifest, and exported contracts. It is written at the root of *output_dir*.
+    """
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    architecture = _infer_architecture(prompt)
+    toolchains = _infer_toolchains(architecture)
+    blueprint: Optional[Blueprint] = None
+
+    if llm_provider and llm_provider != "none":
+        try:
+            blueprint = _llm_plan_blueprint(
+                prompt,
+                project_name,
+                constraints,
+                output_dir,
+                llm_provider,
+                model,
+                max_retries,
+                max_tokens,
+                config_override,
+            )
+        except Exception as exc:
+            logger.warning("LLM planning failed, using deterministic fallback: %s", exc)
+
+    if blueprint is None:
+        blueprint = Blueprint(
+            project=project_name,
+            architecture=architecture,
+            toolchains=toolchains,
+            manifest=[],
+            contracts=[],
+            output_dir=output_dir / "dist",
+            llm=LLMConfig(provider=llm_provider or "none", model=model),
+            prompt=prompt,
+            constraints=constraints,
+        )
+
+    blueprint_path = output_dir / "blueprint.aero"
+    write_blueprint(blueprint, blueprint_path)
+    logger.info("Wrote planning blueprint to %s", blueprint_path)
+    return blueprint
+
+
+__all__ = ["Orchestrator", "ForgeError", "plan_workspace"]
