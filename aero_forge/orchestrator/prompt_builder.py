@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from aero_forge.prompts import (
+    BLUEPRINT_PLAN_INSTRUCTIONS,
+    POLYGLOT_BLUEPRINT_EXAMPLE,
+)
+
 
 class PromptBuilder:
     """Accumulate error context and produce a single repair prompt."""
@@ -55,4 +60,42 @@ class PromptBuilder:
         ]
 
 
-__all__ = ["PromptBuilder"]
+def build_blueprint_plan_prompt(
+    prompt: str,
+    project_name: str,
+    constraints: Optional[str] = None,
+    intent: Optional[str] = None,
+    correction_context: Optional[str] = None,
+) -> str:
+    """Return the planning prompt for generating a ``blueprint.aero``.
+
+    The prompt explicitly instructs the model to emit a polyglot
+    ``hybrid_rust_python`` blueprint whenever the user intent involves both
+    Python and Rust/PyO3/Maturin/FFI, and includes a concrete few-shot example.
+    """
+    parts = [
+        BLUEPRINT_PLAN_INSTRUCTIONS,
+        "",
+        POLYGLOT_BLUEPRINT_EXAMPLE,
+        "",
+        f"User intent classified as: {intent or 'unspecified'}. "
+        "Respect that intent when choosing architecture and toolchains.",
+        "",
+        f"Project: {project_name}",
+        f"Prompt: {prompt}",
+        f"Constraints: {constraints or 'none'}",
+        "",
+        "Return ONLY the YAML blueprint.aero. No markdown fences, no explanation.",
+    ]
+    if correction_context:
+        parts.extend(
+            [
+                "",
+                "CORRECTION REQUIRED:",
+                correction_context,
+            ]
+        )
+    return "\n".join(parts)
+
+
+__all__ = ["PromptBuilder", "build_blueprint_plan_prompt"]

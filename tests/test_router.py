@@ -1,146 +1,58 @@
-"""Unit tests for the self-healing and AST routing routers."""
+"""Tests for the build-intent router."""
 
-from aero_forge.healing.router import try_auto_fix
+import pytest
+
 from aero_forge.orchestrator.router import (
-    GENERAL_PURPOSE,
-    HIN_COMPUTE,
-    CodeRouteClassifier,
-    classify,
+    BUILD_INTENT_HYBRID_RUST_PYTHON,
+    BUILD_INTENT_PURE_PYTHON,
+    BUILD_INTENT_PURE_RUST,
+    classify_build_intent,
+    required_manifest_for_intent,
+    toolchains_for_intent,
 )
 
 
-def test_adds_missing_math_import():
-    code = "def sqrt_x(x):\n    return math.sqrt(x)\n"
-    error = "NameError: name 'math' is not defined"
-    fixed = try_auto_fix(error, code)
-    assert fixed is not None
-    assert "import math" in fixed
+@pytest.mark.parametrize(
+    "prompt, expected",
+    [
+        ("Implement a Python service", BUILD_INTENT_PURE_PYTHON),
+        ("Sort a list of integers in Python", BUILD_INTENT_PURE_PYTHON),
+        ("Implement a Rust crate for parsing", BUILD_INTENT_PURE_RUST),
+        ("cargo build a Rust parser", BUILD_INTENT_PURE_RUST),
+        ("Build a Python Rust hybrid with PyO3", BUILD_INTENT_HYBRID_RUST_PYTHON),
+        ("Create a polyglot orchestration in Python and Rust", BUILD_INTENT_HYBRID_RUST_PYTHON),
+        ("Use maturin to expose a Rust core to Python", BUILD_INTENT_HYBRID_RUST_PYTHON),
+        ("Build a Python-Rust FFI bridge", BUILD_INTENT_HYBRID_RUST_PYTHON),
+        ("Native core Python engine using cargo", BUILD_INTENT_HYBRID_RUST_PYTHON),
+        ("Python Rust orchestration build for batch processing", BUILD_INTENT_HYBRID_RUST_PYTHON),
+    ],
+)
+def test_classify_build_intent(prompt: str, expected: str) -> None:
+    assert classify_build_intent(prompt) == expected
 
 
-def test_no_fix_for_unknown_error():
-    code = "def f(x):\n    return x\n"
-    assert try_auto_fix("some random error", code) is None
+def test_toolchains_for_intent() -> None:
+    assert toolchains_for_intent(BUILD_INTENT_PURE_PYTHON) == ["python"]
+    assert toolchains_for_intent(BUILD_INTENT_PURE_RUST) == ["rust", "cargo"]
+    assert toolchains_for_intent(BUILD_INTENT_HYBRID_RUST_PYTHON) == ["python", "cargo"]
 
 
-# ---------------------------------------------------------------------------
-# CodeRouteClassifier tests
-# ---------------------------------------------------------------------------
+def test_required_manifest_for_hybrid() -> None:
+    manifest = required_manifest_for_intent(BUILD_INTENT_HYBRID_RUST_PYTHON, "batch_processor")
+    paths = {entry["path"] for entry in manifest}
+    assert "Cargo.toml" in paths
+    assert "rust_core/Cargo.toml" in paths
+    assert "rust_core/src/lib.rs" in paths
+    assert "python_engine/pyproject.toml" in paths
+    assert "python_engine/src/batch_processor/__init__.py" in paths
 
 
-def test_pure_numeric_dot_product_routes_to_hin():
-    source = (
-        "def dot(a: list[float], b: list[float]) -> float:\n"
-        "    s = 0.0\n"
-        "    for i in range(len(a)):\n"
-        "        s += a[i] * b[i]\n"
-        "    return s\n"
-    )
-    result = classify(source, ["dot"])
-    assert result["route"] == HIN_COMPUTE
-    assert "dot" in result["target_functions"]
+def test_required_manifest_for_pure_python_is_empty() -> None:
+    assert required_manifest_for_intent(BUILD_INTENT_PURE_PYTHON, "foo") == []
 
 
-def test_mandelbrot_loop_routes_to_hin():
-    source = (
-        "def mandelbrot(c: complex, max_iter: int) -> int:\n"
-        "    z = 0 + 0j\n"
-        "    for n in range(max_iter):\n"
-        "        if abs(z) > 2.0:\n"
-        "            return n\n"
-        "        z = z * z + c\n"
-        "    return max_iter\n"
-    )
-    result = classify(source, ["mandelbrot"])
-    assert result["route"] == HIN_COMPUTE
-    assert "mandelbrot" in result["target_functions"]
-
-
-def test_vector_operation_routes_to_hin():
-    source = (
-        "def scale(v: list[float], k: float) -> list[float]:\n"
-        "    out: list[float] = []\n"
-        "    for x in v:\n"
-        "        out.append(x * k)\n"
-        "    return out\n"
-    )
-    result = classify(source, ["scale"])
-    assert result["route"] == HIN_COMPUTE
-    assert "scale" in result["target_functions"]
-
-
-def test_file_reading_routes_to_general():
-    source = (
-        "def read_data(path: str) -> str:\n"
-        "    with open(path) as f:\n"
-        "        return f.read()\n"
-    )
-    result = classify(source, ["read_data"])
-    assert result["route"] == GENERAL_PURPOSE
-    assert result["target_functions"] == []
-
-
-def test_dictionary_manipulation_routes_to_hin():
-    source = (
-        "def freq(items: list[str]) -> dict[str, int]:\n"
-        "    out = {}\n"
-        "    for x in items:\n"
-        "        out[x] = out.get(x, 0) + 1\n"
-        "    return out\n"
-    )
-    result = classify(source, ["freq"])
-    assert result["route"] == HIN_COMPUTE
-    assert "freq" in result["target_functions"]
-
-
-def test_f_string_routes_to_general():
-    source = (
-        "def greet(name: str) -> str:\n"
-        "    return f'Hello {name}'\n"
-    )
-    result = classify(source, ["greet"])
-    assert result["route"] == GENERAL_PURPOSE
-
-
-def test_unannotated_dynamic_function_routes_to_general():
-    source = (
-        "def add_and_report(a, b):\n"
-        "    print(a + b)\n"
-        "    return a + b\n"
-    )
-    result = classify(source, ["add_and_report"])
-    assert result["route"] == GENERAL_PURPOSE
-
-
-def test_web_route_routes_to_general():
-    source = (
-        "def handle(data: dict) -> str:\n"
-        "    return data.get('name', 'guest')\n"
-    )
-    result = classify(source, ["handle"])
-    assert result["route"] == GENERAL_PURPOSE
-    assert result["target_functions"] == []
-
-
-def test_classifier_class_returns_same_payload():
-    source = (
-        "def square(x: int) -> int:\n"
-        "    return x * x\n"
-    )
-    payload = CodeRouteClassifier(source, ["square"]).classify()
-    direct = classify(source, ["square"])
-    assert payload == direct
-    assert payload["route"] == HIN_COMPUTE
-    assert payload["target_functions"] == ["square"]
-
-
-def test_hin_function_calling_general_callee_routes_general():
-    source = (
-        "def helper(x: str) -> str:\n"
-        "    return f'value: {x}'\n"
-        "\n"
-        "def compute(a: int) -> int:\n"
-        "    return a + len(helper(str(a)))\n"
-    )
-    result = classify(source, ["compute"])
-    assert result["route"] == GENERAL_PURPOSE
-    assert "compute" not in result["target_functions"]
+def test_required_manifest_for_pure_rust() -> None:
+    manifest = required_manifest_for_intent(BUILD_INTENT_PURE_RUST, "foo")
+    paths = {entry["path"] for entry in manifest}
+    assert "Cargo.toml" in paths
+    assert "src/lib.rs" in paths

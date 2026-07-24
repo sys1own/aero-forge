@@ -52,8 +52,18 @@ from aero_forge.orchestrator.error_classifier import (
     format_transpiler_error_with_traceback,
     is_fatal,
 )
-from aero_forge.orchestrator.prompt_builder import PromptBuilder
-from aero_forge.orchestrator.router import HIN_COMPUTE, classify
+from aero_forge.orchestrator.prompt_builder import (
+    PromptBuilder,
+    build_blueprint_plan_prompt,
+)
+from aero_forge.orchestrator.router import (
+    BUILD_INTENT_HYBRID_RUST_PYTHON,
+    HIN_COMPUTE,
+    classify,
+    classify_build_intent,
+    required_manifest_for_intent,
+    toolchains_for_intent,
+)
 from aero_forge.precision_shield.shield import Shield
 from aero_forge.sandbox.manager import Sandbox, ensure_cargo_in_path
 from aero_forge.scaffold.engine import (
@@ -930,69 +940,48 @@ def _find_artifact(
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
-def _infer_architecture(prompt: str) -> str:
-    """Classify a prompt into the build architecture family."""
-    lowered = prompt.lower()
-    hybrid_markers = {
-        "rust",
-        "cargo",
-        "pyo3",
-        "maturin",
-        "ffi",
-        "native",
-        "hybrid",
-        "polyglot",
-    }
-    python_markers = {"python", "py", "pyo3", "maturin"}
-    has_hybrid_marker = any(marker in lowered for marker in hybrid_markers)
-    has_python_marker = any(marker in lowered for marker in python_markers)
-    if has_hybrid_marker and has_python_marker:
-        return "hybrid_rust_python"
-    if has_hybrid_marker:
-        return "pure_rust"
-    return "pure_python"
+def _validate_blueprint_against_intent(
+    prompt: str,
+    blueprint: Blueprint,
+) -> Optional[str]:
+    """Return an error string if the blueprint conflicts with the prompt intent."""
+    intent = classify_build_intent(prompt)
+    if intent == BUILD_INTENT_HYBRID_RUST_PYTHON and blueprint.architecture != BUILD_INTENT_HYBRID_RUST_PYTHON:
+        return (
+            f"User prompt requests a Python/Rust polyglot build, but the generated "
+            f"blueprint has architecture={blueprint.architecture!r}. "
+            f"Set architecture to '{BUILD_INTENT_HYBRID_RUST_PYTHON}' and toolchains to "
+            f"{toolchains_for_intent(intent)!r} and include rust_core and python_engine "
+            "manifest entries."
+        )
+    if "cargo" in toolchains_for_intent(intent) and "cargo" not in blueprint.toolchains:
+        return (
+            f"User prompt requests Rust/cargo tooling, but the generated blueprint "
+            f"toolchains {blueprint.toolchains!r} does not include 'cargo'."
+        )
+    return None
 
 
-def _infer_toolchains(architecture: str) -> List[str]:
-    """Return the default toolchains for an architecture."""
-    if architecture == "hybrid_rust_python":
-        return ["python", "cargo"]
-    if architecture == "pure_rust":
-        return ["rust", "cargo"]
-    return ["python"]
-
-
-def _default_manifest(architecture: str, project_name: str) -> List[ManifestEntry]:
-    """Return required workspace files for an architecture."""
-    if architecture != "hybrid_rust_python":
-        return []
-    return [
-        ManifestEntry(
-            path="Cargo.toml",
-            lang="toml",
-            purpose="Rust workspace manifest",
-        ),
-        ManifestEntry(
-            path="src/lib.rs",
-            lang="rust",
-            purpose="Rust/PyO3 core library",
-        ),
-        ManifestEntry(
-            path="pyproject.toml",
-            lang="toml",
-            purpose="Python package and Maturin configuration",
-        ),
-        ManifestEntry(
-            path=f"{project_name}_engine/__init__.py",
-            lang="python",
-            purpose="Python wrapper package",
-        ),
-        ManifestEntry(
-            path=f"{project_name}_engine/core.py",
-            lang="python",
-            purpose="Python wrapper importing the Rust extension",
-        ),
-    ]
+def _parse_llm_blueprint(
+    raw: str,
+    llm_provider: str,
+    model: Optional[str],
+) -> Optional[Blueprint]:
+    """Parse a raw LLM YAML response into a ``Blueprint``."""
+    if not raw:
+        return None
+    try:
+        data = yaml.safe_load(raw)
+        if not isinstance(data, dict):
+            return None
+        if "llm" in data and isinstance(data["llm"], dict):
+            data["llm"] = LLMConfig.model_validate(data["llm"])
+        else:
+            data["llm"] = LLMConfig(provider=llm_provider, model=model)
+        return Blueprint.model_validate(data)
+    except Exception as exc:
+        logger.warning("Failed to parse LLM blueprint response: %s", exc)
+        return None
 
 
 def _llm_plan_blueprint(
@@ -1005,19 +994,16 @@ def _llm_plan_blueprint(
     max_retries: int,
     max_tokens: Optional[int],
     config_override: Optional[ConfigOverride],
+    correction_context: Optional[str] = None,
 ) -> Optional[Blueprint]:
     """Ask the LLM for a structured blueprint.aero; return None on parse failure."""
-    plan_prompt = (
-        "You are a systems architect. Given the user prompt and constraints, "
-        "produce a valid YAML blueprint.aero with exactly these top-level keys:\n"
-        "project, architecture, toolchains, manifest, contracts, output_dir, "
-        "prompt, constraints, llm.\n"
-        "manifest is a list of objects with keys: path, lang, purpose.\n"
-        "contracts is a list of objects with keys: name, signature, language, "
-        "python_name, purpose.\n"
-        "Use relative paths for files and keep the blueprint minimal.\n\n"
-        f"Prompt: {prompt}\n"
-        f"Constraints: {constraints or 'none'}\n"
+    intent = classify_build_intent(prompt)
+    plan_prompt = build_blueprint_plan_prompt(
+        prompt,
+        project_name,
+        constraints=constraints,
+        intent=intent,
+        correction_context=correction_context,
     )
 
     from aero_forge.llm import get_llm_client
@@ -1034,21 +1020,7 @@ def _llm_plan_blueprint(
         logger.warning("LLM planning call failed: %s", exc)
         return None
 
-    if not raw:
-        return None
-
-    try:
-        data = yaml.safe_load(raw)
-        if not isinstance(data, dict):
-            return None
-        if "llm" in data and isinstance(data["llm"], dict):
-            data["llm"] = LLMConfig.model_validate(data["llm"])
-        else:
-            data["llm"] = LLMConfig(provider=llm_provider, model=model)
-        return Blueprint.model_validate(data)
-    except Exception as exc:
-        logger.warning("Failed to parse LLM blueprint response: %s", exc)
-        return None
+    return _parse_llm_blueprint(raw, llm_provider, model)
 
 
 def plan_workspace(
@@ -1067,47 +1039,69 @@ def plan_workspace(
 
     The generated ``blueprint.aero`` contains the architecture, toolchains,
     manifest, and exported contracts. It is written at the root of *output_dir*.
+    If the LLM returns a blueprint that conflicts with the detected user intent,
+    the planner re-prompts with an explicit correction before falling back to a
+    deterministic blueprint.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    architecture = _infer_architecture(prompt)
-    toolchains = _infer_toolchains(architecture)
+    intent = classify_build_intent(prompt)
+    toolchains = toolchains_for_intent(intent)
+    manifest_entries = [
+        ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
+        for e in required_manifest_for_intent(intent, project_name)
+    ]
     blueprint: Optional[Blueprint] = None
 
     if llm_provider and llm_provider != "none":
-        try:
-            blueprint = _llm_plan_blueprint(
-                prompt,
-                project_name,
-                constraints,
-                output_dir,
-                llm_provider,
-                model,
-                max_retries,
-                max_tokens,
-                config_override,
-            )
-        except Exception as exc:
-            logger.warning("LLM planning failed, using deterministic fallback: %s", exc)
+        correction_context: Optional[str] = None
+        for attempt in range(max(1, max_retries)):
+            try:
+                blueprint = _llm_plan_blueprint(
+                    prompt,
+                    project_name,
+                    constraints,
+                    output_dir,
+                    llm_provider,
+                    model,
+                    max_retries,
+                    max_tokens,
+                    config_override,
+                    correction_context=correction_context,
+                )
+            except Exception as exc:
+                logger.warning("LLM planning failed, using deterministic fallback: %s", exc)
+                break
+
+            if blueprint is None:
+                break
+
+            mismatch = _validate_blueprint_against_intent(prompt, blueprint)
+            if mismatch is None:
+                break
+
+            logger.warning("Blueprint intent mismatch on attempt %s: %s", attempt + 1, mismatch)
+            correction_context = mismatch
+            blueprint = None
+        else:
+            logger.warning("Blueprint intent correction exhausted; using deterministic fallback.")
 
     if blueprint is None:
         blueprint = Blueprint(
             project=project_name,
-            architecture=architecture,
+            architecture=intent,
             toolchains=toolchains,
-            manifest=_default_manifest(architecture, project_name),
+            manifest=manifest_entries,
             contracts=[],
             output_dir=output_dir / "dist",
             llm=LLMConfig(provider=llm_provider or "none", model=model),
             prompt=prompt,
             constraints=constraints,
         )
-    elif architecture == "hybrid_rust_python" and not blueprint.manifest:
+    elif intent == BUILD_INTENT_HYBRID_RUST_PYTHON and not blueprint.manifest:
         # Even if the LLM returned an empty manifest, force required hybrid paths.
-        blueprint = blueprint.model_copy(
-            update={"manifest": _default_manifest(architecture, project_name)}
-        )
+        blueprint = blueprint.model_copy(update={"manifest": manifest_entries})
 
     blueprint_path = output_dir / "blueprint.aero"
     write_blueprint(blueprint, blueprint_path)

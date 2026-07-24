@@ -98,8 +98,54 @@ def test_plan_workspace_detects_hybrid_rust_python(tmp_path: Path) -> None:
     assert "python" in blueprint.toolchains
     paths = {entry.path for entry in blueprint.manifest}
     assert "Cargo.toml" in paths
-    assert "src/lib.rs" in paths
-    assert "pyproject.toml" in paths
+    assert "rust_core/Cargo.toml" in paths
+    assert "rust_core/src/lib.rs" in paths
+    assert "python_engine/pyproject.toml" in paths
+    assert "python_engine/src/aero_test/__init__.py" in paths
+
+
+def test_plan_workspace_rejects_pure_python_for_polyglot_prompt(tmp_path: Path) -> None:
+    """If the LLM emits pure_python for a hybrid prompt, the planner corrects it."""
+    pure_python_yaml = (
+        "project: bad\n"
+        "architecture: pure_python\n"
+        "toolchains:\n  - python\n"
+        "manifest: []\n"
+        "contracts: []\n"
+        "output_dir: dist\n"
+        "prompt: test\n"
+        "constraints: none\n"
+        "llm: null\n"
+    )
+    client = MagicMock()
+    client.generate.return_value = pure_python_yaml
+
+    with patch("aero_forge.orchestrator.orchestrator.get_llm_client", return_value=client):
+        blueprint = plan_workspace(
+            "Build a Python Rust polyglot orchestration with native core",
+            tmp_path,
+            project_name="aero_test",
+            llm_provider="openai",
+            max_retries=1,
+        )
+
+    assert blueprint.architecture == "hybrid_rust_python"
+    assert "cargo" in blueprint.toolchains
+
+
+def test_plan_workspace_detects_batch_processing_polyglot(tmp_path: Path) -> None:
+    """A batch-processing polyglot prompt emits the correct hybrid blueprint."""
+    blueprint = plan_workspace(
+        "Python Rust orchestration build for batch processing with PyO3 and cargo",
+        tmp_path,
+        project_name="batch_processor",
+        llm_provider="none",
+    )
+    assert blueprint.architecture == "hybrid_rust_python"
+    assert blueprint.toolchains == ["python", "cargo"]
+    paths = {entry.path for entry in blueprint.manifest}
+    assert "rust_core/src/lib.rs" in paths
+    assert "python_engine/src/batch_processor/__init__.py" in paths
 
 
 def test_orchestrate_hybrid_rust_python_builds(tmp_path: Path) -> None:
