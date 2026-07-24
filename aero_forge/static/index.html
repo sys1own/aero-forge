@@ -82,6 +82,7 @@
     button.icon-btn:hover { background: var(--panel-2); color: var(--accent); }
 
     /* App layout */
+    html, body, .app { height: 100vh; width: 100vw; margin: 0; padding: 0; overflow: hidden; }
     .app { display: flex; flex: 1; overflow: hidden; min-height: 0; }
 
     /* Sidebar */
@@ -147,6 +148,7 @@
 
     /* Main */
     main { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; min-height: 0; }
+    #workspace { flex: 1; display: flex; flex-direction: row; overflow: hidden; min-height: 0; }
     .toggle-sidebar {
       position: absolute; left: 0; top: 50%; transform: translateY(-50%);
       background: var(--panel-2); border: 1px solid var(--border); border-left: none; color: var(--text);
@@ -156,9 +158,8 @@
 
     /* Code panel */
     #code-panel {
-      flex: 1; display: flex; flex-direction: column; min-height: 0;
+      flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0;
       background: var(--editor);
-      border-bottom: 1px solid var(--border);
       overflow: hidden;
     }
     .code-header {
@@ -186,10 +187,10 @@
 
     /* Prompt deck */
     #prompt-deck {
-      height: 300px; min-height: 160px; max-height: 50vh; flex-shrink: 0;
+      width: 360px; min-width: 260px; max-width: 50vw; flex-shrink: 0;
       display: flex; flex-direction: column;
       background: var(--panel);
-      border-top: 1px solid var(--border);
+      border-left: 1px solid var(--border);
       overflow: hidden;
     }
     .deck-tabs {
@@ -201,11 +202,11 @@
     }
     .deck-tab.active { color: var(--text); border-bottom-color: var(--accent); background: var(--panel-2); }
     .deck-body { flex: 1; display: flex; min-height: 0; overflow: hidden; }
-    .deck-panel { flex: 1; display: none; flex-direction: column; padding: 0.85rem; gap: 0.65rem; overflow: auto; }
+    .deck-panel { flex: 1; display: none; flex-direction: column; padding: 0.85rem; gap: 0.65rem; overflow: hidden; }
     .deck-panel.active { display: flex; }
-    .chat-feed { flex: 1; overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 0.6rem; }
+    .chat-feed { flex: 1; overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 0.6rem; padding: 0.75rem; }
     .msg { padding: 0.55rem 0.75rem; border-radius: 4px; max-width: 90%; font-size: 0.85rem; line-height: 1.45; }
-    .msg.user { align-self: flex-end; background: var(--panel-3); border: 1px solid var(--border); }
+    .msg.user { align-self: flex-end; background: var(--panel-3); border: 1px solid var(--border); max-height: 120px; overflow-y: auto; }
     .msg.assistant { align-self: flex-start; background: var(--panel-2); border: 1px solid var(--border); }
     .msg.system { align-self: center; background: transparent; color: var(--muted); font-size: 0.75rem; font-style: italic; border: none; }
     .msg.error { color: var(--danger); border-color: var(--danger); }
@@ -338,47 +339,49 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
       </button>
 
-      <section id="code-panel">
-        <div class="code-header">
-          <div id="code-tabs" class="code-tabs"></div>
-        </div>
-        <div id="editor-container"></div>
-      </section>
+      <div id="workspace">
+        <section id="code-panel">
+          <div class="code-header">
+            <div id="code-tabs" class="code-tabs"></div>
+          </div>
+          <div id="editor-container"></div>
+        </section>
 
-      <section id="prompt-deck">
-        <div class="deck-tabs">
-          <button class="deck-tab active" data-tab="build">Build</button>
-          <button class="deck-tab" data-tab="chat">Co-pilot Chat</button>
-        </div>
-        <div class="deck-body">
-          <div id="build-panel" class="deck-panel active">
-            <div class="prompt-row">
-              <textarea id="prompt-input" placeholder="Build a fast iterative Fibonacci function..."></textarea>
-              <button id="build-btn" class="primary" style="min-width:84px">Build</button>
+        <section id="prompt-deck">
+          <div class="deck-tabs">
+            <button class="deck-tab active" data-tab="build">Build</button>
+            <button class="deck-tab" data-tab="chat">Co-pilot Chat</button>
+          </div>
+          <div class="deck-body">
+            <div id="build-panel" class="deck-panel active">
+              <div class="prompt-row">
+                <textarea id="prompt-input" placeholder="Build a fast iterative Fibonacci function..."></textarea>
+                <button id="build-btn" class="primary" style="min-width:84px">Build</button>
+              </div>
+              <div class="deck-controls">
+                <label class="toggle">
+                  <input id="variant-toggle" type="checkbox">
+                  <span>Generate 3 variants &amp; benchmark</span>
+                </label>
+                <div class="status-bar">
+                  <span id="status-dot" class="dot"></span>
+                  <span id="status-text">Ready</span>
+                </div>
+              </div>
             </div>
-            <div class="deck-controls">
-              <label class="toggle">
-                <input id="variant-toggle" type="checkbox">
-                <span>Generate 3 variants &amp; benchmark</span>
-              </label>
-              <div class="status-bar">
-                <span id="status-dot" class="dot"></span>
-                <span id="status-text">Ready</span>
+
+            <div id="chat-panel" class="deck-panel">
+              <div id="chat-feed" class="chat-feed">
+                <div class="msg system">Welcome to the Aero Forge co-pilot. Ask for builds, optimizations, or explanations.</div>
+              </div>
+              <div class="prompt-row">
+                <textarea id="chat-input" placeholder="Ask the co-pilot..."></textarea>
+                <button id="chat-send" class="primary" style="min-width:72px">Send</button>
               </div>
             </div>
           </div>
-
-          <div id="chat-panel" class="deck-panel">
-            <div id="chat-feed" class="chat-feed">
-              <div class="msg system">Welcome to the Aero Forge co-pilot. Ask for builds, optimizations, or explanations.</div>
-            </div>
-            <div class="prompt-row">
-              <textarea id="chat-input" placeholder="Ask the co-pilot..."></textarea>
-              <button id="chat-send" class="primary" style="min-width:72px">Send</button>
-            </div>
-          </div>
-        </div>
-      </section>
+        </section>
+      </div>
 
       <section id="bottom-panel">
         <div class="bottom-tabs">
