@@ -630,6 +630,91 @@ def sanitize_generated_code(source: str) -> str:
     return sanitized
 
 
+def _has_float_literal(node: ast.AST) -> bool:
+    """Return True when *node* contains any float Constant."""
+    return any(
+        isinstance(n, ast.Constant) and isinstance(n.value, float)
+        for n in ast.walk(node)
+    )
+
+
+def _is_literal_expression(node: ast.AST) -> bool:
+    """Return True for simple literal containers used as expected values."""
+    return isinstance(node, (ast.Constant, ast.List, ast.Tuple, ast.Set, ast.Dict))
+
+
+def _is_pytest_approx(node: ast.AST) -> bool:
+    """Return True if *node* is already ``pytest.approx(...)``."""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "pytest"
+        and node.func.attr == "approx"
+    )
+
+
+def _normalize_float_assertions(tests: str) -> str:
+    """Rewrite exact equality assertions on floats to use ``pytest.approx``.
+
+    Floating-point arithmetic in compiled Rust can produce tiny differences
+    (e.g. ``1.7000000000000002`` instead of ``1.7``). Wrapping the expected
+    literal in ``pytest.approx`` makes generated tests robust.
+    """
+    try:
+        tree = ast.parse(tests)
+    except SyntaxError:
+        return tests
+
+    class ApproxTransformer(ast.NodeTransformer):
+        def visit_Assert(self, node: ast.Assert) -> ast.AST:
+            test = node.test
+            if (
+                not isinstance(test, ast.Compare)
+                or len(test.ops) != 1
+                or not isinstance(test.ops[0], ast.Eq)
+            ):
+                return node
+            left = test.left
+            right = test.comparators[0]
+            if _is_pytest_approx(left) or _is_pytest_approx(right):
+                return node
+            left_has_float = _has_float_literal(left)
+            right_has_float = _has_float_literal(right)
+            if not left_has_float and not right_has_float:
+                return node
+            if _is_literal_expression(right) and right_has_float:
+                expected, actual = right, left
+            elif _is_literal_expression(left) and left_has_float:
+                expected, actual = left, right
+            else:
+                return node
+            approx_call = ast.Call(
+                func=ast.Attribute(
+                    value=ast.Name(id="pytest", ctx=ast.Load()),
+                    attr="approx",
+                    ctx=ast.Load(),
+                ),
+                args=[expected],
+                keywords=[],
+            )
+            new_test = ast.Compare(
+                left=actual,
+                ops=[ast.Eq()],
+                comparators=[approx_call],
+            )
+            new_test.lineno = getattr(test, "lineno", None)
+            new_test.col_offset = getattr(test, "col_offset", None)
+            return ast.Assert(test=new_test, msg=node.msg)
+
+    tree = ApproxTransformer().visit(tree)
+    ast.fix_missing_locations(tree)
+    result = ast.unparse(tree)
+    if "import pytest" not in result:
+        result = "import pytest\n" + result
+    return result
+
+
 def generate_project(
     prompt: str,
     *,
@@ -695,6 +780,7 @@ def generate_project(
         tests = generate_smoke_tests(implementation, module_name=module_name)
     else:
         tests = _rewrite_generated_imports(tests, module_name)
+    tests = _normalize_float_assertions(tests)
     source_path, test_path, blueprint = write_generated_project(
         output_dir,
         implementation,

@@ -79,7 +79,7 @@ def test_file_reading_routes_to_general():
     assert result["target_functions"] == []
 
 
-def test_dictionary_manipulation_routes_to_general():
+def test_dictionary_manipulation_routes_to_hin():
     source = (
         "def freq(items: list[str]) -> dict[str, int]:\n"
         "    out = {}\n"
@@ -88,8 +88,8 @@ def test_dictionary_manipulation_routes_to_general():
         "    return out\n"
     )
     result = classify(source, ["freq"])
-    assert result["route"] == GENERAL_PURPOSE
-    assert result["target_functions"] == []
+    assert result["route"] == HIN_COMPUTE
+    assert "freq" in result["target_functions"]
 
 
 def test_f_string_routes_to_general():

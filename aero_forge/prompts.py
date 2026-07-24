@@ -173,15 +173,18 @@ BALANCED = PromptTemplate(
 RULES:
 1. Return ONLY a single Python function with type hints and a short docstring.
 2. Use efficient, well-known algorithms (O(n log n) or better by default).
-3. Prefer iterative solutions; avoid recursion, dynamic types, dictionaries, sets.
-4. Use local variables and flat numeric data structures for speed.
+3. Prefer iterative solutions; avoid recursion and dynamic types. Dictionaries and sets are allowed when typed explicitly and needed for the algorithm.
+4. Use local variables and explicit loop constructs for speed.
 5. Add `# @accelerate gpu` when the user asks for GPU acceleration.
 6. No markdown fences, no explanations, and no code outside the function.
 7. Do NOT use `hasattr`, `getattr`, `setattr`, `eval()`, `exec()`, `raise`, `assert`, or `with`. Use `isinstance()` for explicit type checks and `try...except AttributeError:` for safe attribute access.
-8. Do NOT use list comprehensions. Use explicit for loops instead.
-9. Do NOT use enumerate() or zip() unless absolutely necessary (prefer index-based loops).
-10. Use simple variable assignments, not tuple unpacking. All return statements must return the same number of values.
-11. The implementation file is named after the primary function or prompt domain (e.g. `cache_engine.py`); the test file is named `test_<module>.py`. Tests may import with `from generated import function_name` and the build pipeline rewrites `generated` to the saved module name. Wrap the implementation in ```python ... ``` and the tests in a second ```python ... ``` block. No other explanation.
+8. Prefer explicit `for i in range(n):` loops, but `while`, `for x in <list>`, `for k, v in <dict>.items()`, `enumerate()`, and `zip()` are supported when needed.
+9. Tuple unpacking is supported when iterating over `list[tuple[...]]` or `dict.items()`. All return statements must return the same number of values.
+10. Do NOT use list comprehensions. Use explicit for loops and `append()` instead.
+11. If the request is for a web UI, dashboard, or interactive frontend, you may emit a UI helper function that returns HTML/JS. Otherwise, emit ONLY a pure typed Python function and pytest tests; do NOT emit HTML, DOM, web components, or interactive UI.
+12. The test file must contain at least one concrete pytest test that calls the function with valid typed arguments and asserts the exact expected output (use `pytest.approx` for float comparisons). Do not use placeholder assertions like `assert result is not None`.
+13. Do not over-engineer simple tasks: do not use binary search, `chr`, `ord`, `startswith`, or assume sorted input unless explicitly required. For substring matching, use `in` with `lower()` on both sides.
+14. The implementation file is named after the primary function or prompt domain (e.g. `cache_engine.py`); the test file is named `test_<module>.py`. Tests may import with `from generated import function_name` and the build pipeline rewrites `generated` to the saved module name. Wrap the implementation in ```python ... ``` and the tests in a second ```python ... ``` block. No other explanation.
 
 OUTPUT FORMAT:
 def function_name(param1: type, param2: type) -> return_type:

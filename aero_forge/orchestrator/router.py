@@ -26,6 +26,7 @@ _ALLOWED_BUILTINS = {
     "float",
     "bool",
     "str",
+    "isinstance",
     "sorted",
     "sum",
     "enumerate",
@@ -52,7 +53,6 @@ _IO_BUILTINS = {
     "getattr",
     "setattr",
     "hasattr",
-    "isinstance",
     "super",
     "type",
     "vars",
@@ -82,6 +82,7 @@ _IO_METHODS = {
 }
 
 _LIST_MUTATORS = {"append", "extend", "pop"}
+_COLLECTION_ACCESSORS = {"get", "items", "keys", "values"}
 
 
 def _annotation_name(node: ast.AST) -> Optional[str]:
@@ -234,13 +235,13 @@ class _FunctionClassifier(ast.NodeVisitor):
                 )
 
     def _is_valid_type_name(self, name: str, context: str) -> bool:
-        """Return True if ``name`` is a scalar or nested list/tuple of scalars."""
+        """Return True if ``name`` is a scalar or nested list/tuple/dict of scalars."""
         if not name:
             return False
         base = name.split("[", 1)[0].strip()
         if base in _SCALAR_TYPES:
             return True
-        if base not in ("list", "tuple"):
+        if base not in ("list", "tuple", "dict"):
             return False
         if "[" not in name or not name.endswith("]"):
             return False
@@ -258,12 +259,7 @@ class _FunctionClassifier(ast.NodeVisitor):
         if name is None:
             return
         base = name.split("[", 1)[0]
-        if base == "dict":
-            self._reject(
-                f"Function '{self.function.name}' uses dynamic dictionary in {context}"
-            )
-            return
-        if base not in ("list", "tuple"):
+        if base not in ("list", "tuple", "dict"):
             return
         if "[" not in name or not name.endswith("]"):
             self._reject(
@@ -272,7 +268,7 @@ class _FunctionClassifier(ast.NodeVisitor):
             return
         if not self._is_valid_type_name(name, context):
             self._reject(
-                f"Function '{self.function.name}' {base} annotation '{name}' is not homogeneous numeric"
+                f"Function '{self.function.name}' {base} annotation '{name}' is not a valid homogeneous/primitive collection"
             )
 
     def classify(self) -> Dict[str, Any]:
@@ -335,7 +331,8 @@ class _FunctionClassifier(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Dict(self, node: ast.Dict) -> None:
-        self._reject(f"Function '{self.function.name}' uses dynamic dictionary literal")
+        # HIN-backed Rust generation now supports HashMap construction and
+        # dict.{keys,values,items} iteration, so dictionary literals are allowed.
         self.generic_visit(node)
 
     def visit_Set(self, node: ast.Set) -> None:
@@ -404,6 +401,9 @@ class _FunctionClassifier(ast.NodeVisitor):
                 pass
             elif attr in _LIST_MUTATORS:
                 # Local list/vector mutation methods are supported by the HIN pipeline.
+                pass
+            elif attr in _COLLECTION_ACCESSORS:
+                # HashMap/Vec read accessors (get, keys, values, items) are supported.
                 pass
             elif attr in _IO_METHODS:
                 self._reject(
