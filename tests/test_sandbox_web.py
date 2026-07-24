@@ -1,5 +1,6 @@
 """Unit tests for web-facing sandbox session isolation."""
 
+import os
 import threading
 import time
 import uuid
@@ -9,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from aero_forge.sandbox.manager import SandboxManager
+from aero_forge.sandbox import manager as manager_module
+from aero_forge.sandbox.manager import SandboxManager, ensure_cargo_in_path
 
 
 @pytest.fixture
@@ -128,3 +130,43 @@ def test_get_session_sandbox_reuses_existing(manager):
     first = manager.get_session_sandbox(session_id)
     second = manager.get_session_sandbox(session_id)
     assert first.root == second.root
+
+
+def test_ensure_cargo_in_path_prepends_cargo_bin(monkeypatch, tmp_path):
+    fake_cargo_bin = tmp_path / ".cargo" / "bin"
+    fake_cargo_bin.mkdir(parents=True)
+    (fake_cargo_bin / "cargo").write_text("#!/bin/sh\necho fake", encoding="utf-8")
+    (fake_cargo_bin / "cargo").chmod(0o755)
+
+    original_path = os.environ.get("PATH", "")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setattr(manager_module, "CARGO_BIN_DIR", fake_cargo_bin)
+    # Ensure shutil.which sees the bare environment without cargo.
+    monkeypatch.setattr(manager_module.shutil, "which", lambda name: None)
+
+    ensure_cargo_in_path()
+
+    assert str(fake_cargo_bin) in os.environ["PATH"]
+    assert os.environ["PATH"].startswith(str(fake_cargo_bin))
+
+    os.environ["PATH"] = original_path
+
+
+def test_ensure_cargo_in_path_does_nothing_when_cargo_present(monkeypatch, tmp_path):
+    original_path = os.environ.get("PATH", "")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    calls = []
+
+    def fake_which(name):
+        calls.append(name)
+        return "/usr/bin/cargo" if name == "cargo" else None
+
+    monkeypatch.setattr(manager_module.shutil, "which", fake_which)
+
+    ensure_cargo_in_path()
+
+    assert calls == ["cargo"]
+    # PATH should be unchanged when cargo is already on PATH.
+    assert os.environ["PATH"] == "/usr/bin"
+
+    os.environ["PATH"] = original_path

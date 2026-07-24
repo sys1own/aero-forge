@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import os
 import shutil
 from pathlib import Path
 from typing import Optional
@@ -23,9 +24,11 @@ def check_toolchain() -> None:
     """Verify that cargo and rustc are installed."""
     missing = [tool for tool in ("cargo", "rustc") if not shutil.which(tool)]
     if missing:
+        path_dirs = os.environ.get("PATH", "").split(os.pathsep)
         raise UserError(
             f"Missing Rust toolchain: {', '.join(missing)}. "
-            "Install Rust from https://rustup.rs/ and ensure cargo/rustc are on your PATH."
+            "Install Rust from https://rustup.rs/ and ensure cargo/rustc are on your PATH. "
+            f"Searched PATH directories: {', '.join(d for d in path_dirs if d)}"
         )
 
 

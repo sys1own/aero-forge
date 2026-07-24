@@ -36,7 +36,7 @@ from aero_forge.orchestrator.error_classifier import (
 )
 from aero_forge.orchestrator.prompt_builder import PromptBuilder
 from aero_forge.precision_shield.shield import Shield
-from aero_forge.sandbox.manager import Sandbox
+from aero_forge.sandbox.manager import Sandbox, ensure_cargo_in_path
 from aero_forge.scaffold.engine import (
     Engine,
     _find_function,
@@ -161,6 +161,7 @@ class Orchestrator:
         )
         self._project_root = find_project_root(self.source_path)
         ensure_sys_path(self._project_root)
+        ensure_cargo_in_path()
         check_toolchain()
         if not self.source_path.is_file():
             raise UserError(f"Source file not found: {self.source_path}")
