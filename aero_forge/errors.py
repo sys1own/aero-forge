@@ -103,3 +103,18 @@ def format_unsupported_error(
 
 class UserError(Exception):
     """A runtime error that should be shown to the user without a traceback."""
+
+
+class SemanticRegressionError(Exception):
+    """Reference and target executions diverged semantically."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        delta: int = 0,
+        report: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.delta = delta
+        self.report = report
