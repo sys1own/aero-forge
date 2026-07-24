@@ -50,11 +50,10 @@ def explain_error(
 def _build_explain_prompt(error_log: str, source: Optional[str]) -> str:
     context = f"\n\nPython source that produced the error:\n{source}" if source else ""
     return (
-        "You are an expert Rust/Python engineer helping a user fix an error from a "
-        "Python-to-Rust transpiler called Aero-Forge.\n\n"
-        "Explain the following build error in plain English.  Identify the likely cause, "
-        "the line/construct involved, and give one or two concrete, minimal fixes the "
-        "user can apply.  Keep the response concise and use bullet points.\n\n"
+        "You are Aero-Forge, a fast, friendly coding co-pilot. "
+        "Explain this build error in 2-3 short, punchy sentences. "
+        "Translate the dry compiler log into plain language, identify the likely culprit, "
+        "and suggest one concrete, minimal fix. Avoid bullet lists and raw JSON.\n\n"
         f"Error log:\n{error_log}{context}"
     )
 

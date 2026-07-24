@@ -83,19 +83,23 @@ def format_build_summary(
             "benchmark_seconds": benchmark_seconds,
             "prompt": prompt,
         }
+        raw_logs = build_result.get("logs") or build_result.get("error")
+        if raw_logs:
+            metrics["raw_backend_logs"] = raw_logs[:2000]
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "You are a friendly coding assistant. Write a 2-4 sentence casual, "
-                    "conversational summary of the build below. Mention what was built, "
-                    "whether tests passed, any timing if available, and where the output is. "
-                    "Do not use markdown headings or bullet points."
+                    "You are Aero-Forge, a fast, friendly coding co-pilot. "
+                    "Reply in 2-4 short, punchy sentences. Be casual and dense. "
+                    "Turn dry build/test logs into a lively narrative. Mention what was built, "
+                    "test results, any speedup or timing, and where the output lives. "
+                    "Never dump raw JSON or bullet lists."
                 ),
             },
             {
                 "role": "user",
-                "content": f"Build metrics: {json.dumps(metrics, indent=2)}",
+                "content": f"Build metrics and logs: {json.dumps(metrics, indent=2, default=str)}",
             },
         ]
         try:
