@@ -481,3 +481,28 @@ def test_safe_stdlib_imports_and_calls(tmp_path: Path) -> None:
         source,
         "def test_safe_stdlib_calls():\n    assert safe_stdlib_calls(5) == 10\n",
     )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_infinity_constants(tmp_path: Path) -> None:
+    source = (
+        "import math\n"
+        "def infinity_constants(x: float) -> float:\n"
+        "    if x > 0:\n"
+        "        return float('inf')\n"
+        "    if x < 0:\n"
+        "        return -math.inf\n"
+        "    return 'infinity'\n"
+    )
+    _run_case(
+        tmp_path,
+        "infinity_constants",
+        source,
+        "def test_infinity_constants():\n"
+        "    assert infinity_constants(1) == float('inf')\n"
+        "    assert infinity_constants(-1) == float('-inf')\n"
+        "    assert infinity_constants(0) == float('inf')\n",
+    )

@@ -1317,8 +1317,11 @@
         const rect = target.getBoundingClientRect();
         const startSize = axis === 'x' ? rect.width : rect.height;
         const onMove = (ev) => {
-          const delta = client(ev, axis) - startPos;
-          const newSize = invert ? startSize - delta : startSize + delta;
+          const currentPos = client(ev, axis);
+          const delta = currentPos - startPos;
+          // For the bottom terminal panel, the mouse Y increases as it moves
+          // downward, so height must increase with a positive deltaY.
+          const newSize = axis === 'y' ? startSize + delta : (invert ? startSize - delta : startSize + delta);
           const clamped = Math.max(min, Math.min(max, newSize));
           target.style[prop] = `${clamped}px`;
           if (state.editor) state.editor.layout();
