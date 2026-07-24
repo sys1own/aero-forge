@@ -13,7 +13,7 @@ import pytest
 import websockets
 
 from aero_forge.sandbox.manager import SandboxManager
-from aero_forge.server import AeroForgeHandler, _start_websocket_server, make_server
+from aero_forge.server import make_server
 
 
 def _free_port() -> int:
@@ -32,16 +32,13 @@ def server(tmp_path, monkeypatch):
     server = make_server(port)
     http_thread = threading.Thread(target=server.serve_forever, daemon=True)
     http_thread.start()
-    ws_thread = threading.Thread(target=_start_websocket_server, args=(port + 1,), daemon=True)
-    ws_thread.start()
-    # Give the WebSocket server a moment to bind before tests connect.
+    # Give the aiohttp server a moment to bind before tests connect.
     import time
     time.sleep(0.5)
     yield f"http://localhost:{port}"
     server.shutdown()
     server.server_close()
     http_thread.join(timeout=2)
-    ws_thread.join(timeout=2)
 
 
 def _get(url: str) -> tuple:
@@ -333,7 +330,7 @@ def test_api_files_creates_session_lazily(server):
 
 def test_websocket_terminal(server):
     port = int(server.rsplit(":", 1)[-1])
-    ws_url = f"ws://localhost:{port + 1}/ws/terminal?session_id=test-ws-terminal"
+    ws_url = f"ws://localhost:{port}/ws/terminal?session_id=test-ws-terminal"
 
     async def _client():
         async with websockets.connect(ws_url) as ws:
