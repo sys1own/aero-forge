@@ -17,6 +17,7 @@ dependencies = [
     "numpy",
     "networkx",
     "z3-solver",
+    "websockets>=10.0",
 ]
 
 [project.optional-dependencies]

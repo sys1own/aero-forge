@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import fcntl
 import json
 import logging
 import mimetypes
 import os
+import pty
 import re
+import shutil
+import struct
+import termios
 import threading
 import uuid
 import zipfile
@@ -15,6 +21,8 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
+
+import websockets
 
 from aero_forge.chat import ChatSession
 from aero_forge.config import ConfigOverride
@@ -471,22 +479,179 @@ def make_server(port: int = DEFAULT_PORT) -> ThreadingHTTPServer:
     return ReusableThreadingHTTPServer(("", port), AeroForgeHandler)
 
 
+def _set_pty_size(master_fd: int, cols: int, rows: int) -> None:
+    """Set the PTY window size so tools like top, htop and editors render."""
+    try:
+        fcntl.ioctl(master_fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+    except OSError as exc:
+        logger.debug("Could not set PTY size: %s", exc)
+
+
+def _child_setup(master_fd: int, slave_fd: int) -> None:
+    """Close the PTY master fd in the child before exec'ing the shell."""
+    try:
+        os.close(master_fd)
+    except OSError:
+        pass
+
+
+async def _handle_terminal(websocket: Any) -> None:
+    """Spawn a per-session subshell over a PTY and relay I/O to the WebSocket."""
+    request_path = websocket.request.path if websocket.request else "/ws/terminal"
+    parsed = urlparse(request_path)
+    if parsed.path != "/ws/terminal":
+        await websocket.close(code=1002, reason="Invalid path")
+        return
+
+    query = parse_qs(parsed.query)
+    session_id = _first(query, "session_id") or str(uuid.uuid4())
+    session_dir = _manager.create_session_sandbox(session_id)
+
+    shell = shutil.which("bash") or shutil.which("sh")
+    if not shell:
+        await websocket.close(code=1011, reason="No shell available on this system")
+        return
+
+    master_fd: int = -1
+    process: Optional[Any] = None
+    reader_added = False
+    loop = asyncio.get_running_loop()
+
+    try:
+        master_fd, slave_fd = pty.openpty()
+        os.set_blocking(master_fd, False)
+
+        env = os.environ.copy()
+        env["TERM"] = "xterm-256color"
+        env["AERO_FORGE_SESSION"] = session_id
+        env["AERO_FORGE_SESSION_DIR"] = str(session_dir)
+
+        process = await asyncio.create_subprocess_exec(
+            shell,
+            "-i",
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            cwd=session_dir,
+            env=env,
+            start_new_session=True,
+            preexec_fn=lambda: _child_setup(master_fd, slave_fd),
+        )
+        try:
+            os.close(slave_fd)
+        except OSError:
+            pass
+
+        _set_pty_size(master_fd, 80, 24)
+
+        async def _send_to_client(data: bytes) -> None:
+            try:
+                await websocket.send(data)
+            except Exception:
+                pass
+
+        def _on_master_readable() -> None:
+            try:
+                data = os.read(master_fd, 4096)
+            except (BlockingIOError, OSError):
+                return
+            if data:
+                asyncio.create_task(_send_to_client(data))
+            else:
+                loop.remove_reader(master_fd)
+
+        loop.add_reader(master_fd, _on_master_readable)
+        reader_added = True
+
+        async def _wait_for_process() -> None:
+            if process is None:
+                return
+            try:
+                await process.wait()
+            except Exception:
+                pass
+            finally:
+                try:
+                    await websocket.close()
+                except Exception:
+                    pass
+
+        asyncio.create_task(_wait_for_process())
+
+        async for message in websocket:
+            data = message.encode("utf-8") if isinstance(message, str) else message
+            if not data:
+                continue
+
+            # Resize messages are sent by xterm.js as JSON {cols, rows}
+            if data.startswith(b"{"):
+                try:
+                    payload = json.loads(data.decode("utf-8"))
+                    if isinstance(payload, dict) and "cols" in payload and "rows" in payload:
+                        _set_pty_size(master_fd, int(payload["cols"]), int(payload["rows"]))
+                        continue
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    pass
+
+            try:
+                os.write(master_fd, data)
+            except (BlockingIOError, OSError):
+                break
+
+    except websockets.exceptions.ConnectionClosed:
+        pass
+    finally:
+        if reader_added and master_fd >= 0:
+            try:
+                loop.remove_reader(master_fd)
+            except Exception:
+                pass
+        if process is not None and process.returncode is None:
+            try:
+                process.kill()
+                await asyncio.wait_for(process.wait(), timeout=2)
+            except Exception:
+                pass
+        if master_fd >= 0:
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+
+
+async def _run_websocket_server(ws_port: int) -> None:
+    """Run the terminal WebSocket server on the given port."""
+    async with websockets.serve(_handle_terminal, "", ws_port, ping_interval=20, ping_timeout=10):
+        logger.info("Terminal WebSocket server listening on ws://localhost:%s/ws/terminal", ws_port)
+        await asyncio.Future()  # run forever
+
+
+def _start_websocket_server(ws_port: int) -> None:
+    """Start the asyncio WebSocket server in a dedicated daemon thread."""
+    asyncio.run(_run_websocket_server(ws_port))
+
+
 def run_server(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     """Start the web server and optionally open the user's browser."""
     _static_dir.mkdir(parents=True, exist_ok=True)
     server = make_server(port)
 
-    def serve() -> None:
+    def http_serve() -> None:
         try:
             server.serve_forever()
         finally:
             server.server_close()
 
-    thread = threading.Thread(target=serve, daemon=True)
-    thread.start()
+    http_thread = threading.Thread(target=http_serve, daemon=True)
+    http_thread.start()
+
+    ws_port = port + 1
+    ws_thread = threading.Thread(target=_start_websocket_server, args=(ws_port,), daemon=True)
+    ws_thread.start()
 
     url = f"http://localhost:{port}"
     logger.info("Aero-Forge web server running at %s", url)
+    logger.info("Terminal WebSocket available at ws://localhost:%s/ws/terminal", ws_port)
 
     if open_browser:
         import webbrowser
@@ -494,8 +659,8 @@ def run_server(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
         webbrowser.open(url)
 
     try:
-        while thread.is_alive():
-            thread.join(timeout=1)
+        while http_thread.is_alive():
+            http_thread.join(timeout=1)
     except KeyboardInterrupt:
         logger.info("Shutting down web server...")
     finally:

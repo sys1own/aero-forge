@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Aero Forge</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs/loader.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" />
   <style>
     :root {
       --bg: #1e1e1e;
@@ -204,13 +205,29 @@
     .status-bar .dot.busy { background: var(--warning); animation: pulse 1s infinite; }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
 
-    /* Terminal / Build log */
-    #log-stream {
-      height: 170px; min-height: 90px; background: var(--terminal-bg); border-top: 1px solid var(--border);
+    /* Bottom panel (Terminal / Build log) */
+    #bottom-panel {
+      height: 220px; min-height: 90px; background: var(--terminal-bg); border-top: 1px solid var(--border);
       display: flex; flex-direction: column; font-family: Consolas, Monaco, "Courier New", monospace;
     }
-    .log-header { height: 26px; padding: 0 0.75rem; display: flex; align-items: center; font-size: 0.65rem; font-weight: 700; color: var(--text); text-transform: uppercase; letter-spacing: 0.06em; background: var(--panel); border-bottom: 1px solid var(--border); }
-    #log-lines { flex: 1; overflow: auto; padding: 0.5rem 0.75rem; font-size: 0.8rem; color: var(--terminal-text); }
+    .bottom-tabs {
+      display: flex; background: var(--panel); border-bottom: 1px solid var(--border); flex-shrink: 0;
+    }
+    .bottom-tab {
+      padding: 0.45rem 0.9rem; font-size: 0.65rem; font-weight: 700; color: var(--muted); cursor: pointer;
+      text-transform: uppercase; letter-spacing: 0.06em; background: transparent; border: none;
+      border-bottom: 2px solid transparent;
+    }
+    .bottom-tab.active { color: var(--text); background: var(--panel-2); border-bottom-color: var(--accent); }
+    .bottom-tab:hover { color: var(--text); background: var(--panel-2); }
+    .bottom-body { flex: 1; position: relative; min-height: 0; }
+    .bottom-panel {
+      position: absolute; inset: 0; display: none; overflow: hidden;
+    }
+    .bottom-panel.active { display: block; }
+    #terminal-panel .xterm-screen { background: var(--terminal-bg) !important; }
+    #terminal-panel .xterm-rows { color: var(--terminal-text); }
+    #log-lines { flex: 1; overflow: auto; padding: 0.5rem 0.75rem; font-size: 0.8rem; color: var(--terminal-text); height: 100%; }
     .log-line { border-bottom: 1px solid rgba(255,255,255,0.03); padding: 0.15rem 0; }
     .log-line.info { color: var(--terminal-info); }
     .log-line.success { color: var(--terminal-success); }
@@ -326,9 +343,17 @@
         </div>
       </section>
 
-      <section id="log-stream">
-        <div class="log-header">Terminal / Build Log</div>
-        <div id="log-lines"></div>
+      <section id="bottom-panel">
+        <div class="bottom-tabs">
+          <button class="bottom-tab active" data-bottom="terminal">Terminal</button>
+          <button class="bottom-tab" data-bottom="build-log">Build Log</button>
+        </div>
+        <div class="bottom-body">
+          <div id="terminal-panel" class="bottom-panel active"></div>
+          <div id="build-log-panel" class="bottom-panel">
+            <div id="log-lines"></div>
+          </div>
+        </div>
       </section>
     </main>
   </div>
@@ -384,6 +409,9 @@
       monaco: null,
       tabs: [],
       activeTab: null,
+      term: null,
+      fitAddon: null,
+      socket: null,
     };
 
     const ui = {
@@ -417,6 +445,9 @@
       keyGroup: document.getElementById('key-group'),
       deckTabs: document.querySelectorAll('.deck-tab'),
       deckPanels: document.querySelectorAll('.deck-panel'),
+      bottomTabs: document.querySelectorAll('.bottom-tab'),
+      bottomPanels: document.querySelectorAll('.bottom-panel'),
+      terminalPanel: document.getElementById('terminal-panel'),
     };
 
     function loadSettings() {
@@ -448,6 +479,7 @@
         log('localStorage unavailable; settings not persisted', 'info');
       }
       applySettingsUI();
+      reconnectTerminal();
     }
 
     function applySettingsUI() {
@@ -489,9 +521,7 @@
     async function api(method, path, body, contentType='application/json') {
       const opts = { method, mode: 'cors' };
       const headers = {};
-      if (state.apiKey) {
-        headers['X-API-Key'] = state.apiKey;
-      }
+      if (state.apiKey) headers['X-API-Key'] = state.apiKey;
       if (body) {
         if (contentType === 'application/json') opts.body = JSON.stringify(body);
         else opts.body = body;
@@ -546,9 +576,7 @@
         li.appendChild(childUl);
       }
 
-      if (!isDir) {
-        div.addEventListener('click', () => openFile(node.path));
-      }
+      if (!isDir) div.addEventListener('click', () => openFile(node.path));
       return li;
     }
 
@@ -568,9 +596,7 @@
       return map[ext] || 'plaintext';
     }
 
-    function fileName(path) {
-      return path.split('/').pop();
-    }
+    function fileName(path) { return path.split('/').pop(); }
 
     function setTreeActive(path) {
       document.querySelectorAll('.tree-node.active').forEach(n => n.classList.remove('active'));
@@ -580,35 +606,22 @@
     async function openFile(path) {
       if (!state.monaco || !state.editor) return;
       const existing = state.tabs.find(t => t.path === path);
-      if (existing) {
-        switchTab(existing);
-        setTreeActive(path);
-        return;
-      }
+      if (existing) { switchTab(existing); setTreeActive(path); return; }
       try {
         const data = await api('GET', `/api/file-content?session_id=${encodeURIComponent(state.sessionId)}&path=${encodeURIComponent(path)}`);
         const monaco = state.monaco;
         const uri = monaco.Uri.parse('aero://' + path);
         const model = monaco.editor.createModel(data.content, detectLanguage(path), uri);
         const tab = { path, model, dirty: false, viewState: null };
-        model.onDidChangeContent(() => {
-          if (!tab.dirty) {
-            tab.dirty = true;
-            renderTabs();
-          }
-        });
+        model.onDidChangeContent(() => { if (!tab.dirty) { tab.dirty = true; renderTabs(); } });
         state.tabs.push(tab);
         switchTab(tab);
         setTreeActive(path);
-      } catch (e) {
-        log(`Failed to open ${path}: ${e.message}`, 'error');
-      }
+      } catch (e) { log(`Failed to open ${path}: ${e.message}`, 'error'); }
     }
 
     function switchTab(tab) {
-      if (state.activeTab && state.activeTab !== tab) {
-        state.activeTab.viewState = state.editor.saveViewState();
-      }
+      if (state.activeTab && state.activeTab !== tab) state.activeTab.viewState = state.editor.saveViewState();
       state.activeTab = tab;
       state.editor.setModel(tab.model);
       if (tab.viewState) state.editor.restoreViewState(tab.viewState);
@@ -626,12 +639,8 @@
       state.tabs.splice(idx, 1);
       if (state.activeTab === tab) {
         state.activeTab = state.tabs[state.tabs.length - 1] || null;
-        if (state.activeTab) {
-          state.editor.setModel(state.activeTab.model);
-          if (state.activeTab.viewState) state.editor.restoreViewState(state.activeTab.viewState);
-        } else {
-          state.editor.setModel(null);
-        }
+        if (state.activeTab) { state.editor.setModel(state.activeTab.model); if (state.activeTab.viewState) state.editor.restoreViewState(state.activeTab.viewState); }
+        else state.editor.setModel(null);
       }
       renderTabs();
     }
@@ -645,9 +654,7 @@
         tab.dirty = false;
         renderTabs();
         log(`Saved ${fileName(tab.path)}`, 'success');
-      } catch (e) {
-        log(`Save failed: ${e.message}`, 'error');
-      }
+      } catch (e) { log(`Save failed: ${e.message}`, 'error'); }
     }
 
     function renderTabs() {
@@ -660,7 +667,7 @@
         const el = document.createElement('div');
         el.className = 'code-tab' + (tab === state.activeTab ? ' active' : '');
         el.title = tab.path;
-        el.innerHTML = `<span class="dirty">${tab.dirty ? '&#8226; ' : ''}</span><span>${escapeHtml(fileName(tab.path))}</span><span class="close" title="Close">&#10005;</span>`;
+        el.innerHTML = `<span class="dirty">${tab.dirty ? '&#8226; ' : ''}</span><span>${escapeHtml(fileName(tab.path))}</span>&nbsp;<span class="close" title="Close">&#10005;</span>`;
         el.addEventListener('click', () => switchTab(tab));
         el.querySelector('.close').addEventListener('click', e => closeTab(tab.path, e));
         ui.codeTabs.appendChild(el);
@@ -672,27 +679,81 @@
       require(['vs/editor/editor.main'], () => {
         state.monaco = window.monaco;
         state.editor = window.monaco.editor.create(ui.editorContainer, {
-          value: '',
-          language: 'plaintext',
-          theme: 'vs-dark',
-          automaticLayout: true,
-          minimap: { enabled: false },
-          scrollBeyondLastLine: false,
-          fontFamily: 'Consolas, Monaco, "Courier New", monospace',
-          fontSize: 13,
-          lineNumbers: 'on',
-          roundedSelection: false,
-          renderLineHighlight: 'line',
-          folding: true,
-          matchBrackets: 'always',
+          value: '', language: 'plaintext', theme: 'vs-dark', automaticLayout: true, minimap: { enabled: false },
+          scrollBeyondLastLine: false, fontFamily: 'Consolas, Monaco, "Courier New", monospace', fontSize: 13,
+          lineNumbers: 'on', roundedSelection: false, renderLineHighlight: 'line', folding: true, matchBrackets: 'always',
         });
-        state.editor.addCommand(
-          window.monaco.KeyMod.CtrlCmd | window.monaco.KeyCode.KeyS,
-          saveCurrentFile
-        );
+        state.editor.addCommand(window.monaco.KeyMod.CtrlCmd | window.monaco.KeyCode.KeyS, saveCurrentFile);
         renderTabs();
         loadTree();
       });
+    }
+
+    function initTerminal() {
+      require.config({
+        paths: {
+          'xterm': 'https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min',
+          'xterm-addon-fit': 'https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min',
+        }
+      });
+      require(['xterm', 'xterm-addon-fit'], (Terminal, FitAddon) => {
+        let TerminalClass = Terminal && Terminal.Terminal ? Terminal.Terminal : Terminal;
+        let FitClass = FitAddon && FitAddon.FitAddon ? FitAddon.FitAddon : FitAddon;
+        if (typeof TerminalClass !== 'function') { log('xterm.js not loaded; terminal unavailable', 'error'); return; }
+
+        state.term = new TerminalClass({
+          theme: { background: '#181818', foreground: '#cccccc', cursor: '#007acc', selectionBackground: '#264f78' },
+          fontFamily: 'Consolas, Monaco, "Courier New", monospace',
+          fontSize: 13,
+          cursorBlink: true,
+          convertEol: true,
+        });
+        if (FitClass) {
+          state.fitAddon = new FitClass();
+          state.term.loadAddon(state.fitAddon);
+        }
+        state.term.open(ui.terminalPanel);
+        if (state.fitAddon) state.fitAddon.fit();
+        state.term.writeln('\r\nAero Forge terminal. Connecting to session...\r\n');
+        connectTerminal();
+      }, (err) => {
+        log('Failed to load xterm.js: ' + err, 'error');
+      });
+    }
+
+    function connectTerminal() {
+      if (state.socket) { try { state.socket.close(); } catch (e) {} state.socket = null; }
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const httpPort = parseInt(window.location.port || (window.location.protocol === 'https:' ? '443' : '80'));
+      const wsPort = httpPort + 1;
+      const wsUrl = `${protocol}//${window.location.hostname}:${wsPort}/ws/terminal?session_id=${encodeURIComponent(state.sessionId)}`;
+      try {
+        state.socket = new WebSocket(wsUrl);
+      } catch (e) {
+        state.term.writeln(`\r\nWebSocket error: ${e.message}\r\n`);
+        return;
+      }
+      state.socket.binaryType = 'arraybuffer';
+      state.socket.onopen = () => { if (state.term) state.term.writeln('\r\nConnected.\r\n'); };
+      state.socket.onmessage = (event) => {
+        const data = (event.data instanceof ArrayBuffer) ? new Uint8Array(event.data) : event.data;
+        if (state.term) state.term.write(data);
+      };
+      state.socket.onclose = () => { if (state.term) state.term.writeln('\r\nTerminal disconnected.\r\n'); };
+      state.socket.onerror = (e) => { if (state.term) state.term.writeln('\r\nTerminal connection error.\r\n'); };
+      state.term.onData(data => { if (state.socket && state.socket.readyState === WebSocket.OPEN) state.socket.send(data); });
+      state.term.onResize(({ cols, rows }) => { if (state.socket && state.socket.readyState === WebSocket.OPEN) state.socket.send(JSON.stringify({cols, rows})); });
+      window.addEventListener('resize', () => { if (state.fitAddon) state.fitAddon.fit(); });
+    }
+
+    function reconnectTerminal() {
+      if (state.term) connectTerminal();
+    }
+
+    function switchBottomTab(name) {
+      ui.bottomTabs.forEach(t => t.classList.toggle('active', t.dataset.bottom === name));
+      ui.bottomPanels.forEach(p => p.classList.toggle('active', p.id === `${name}-panel`));
+      if (name === 'terminal' && state.fitAddon) setTimeout(() => state.fitAddon.fit(), 50);
     }
 
     async function uploadZip(file) {
@@ -705,12 +766,10 @@
         try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
         ui.settingSession.value = state.sessionId;
         log('Upload complete', 'success');
+        reconnectTerminal();
         await loadTree();
-      } catch (e) {
-        log(`Upload failed: ${e.message}`, 'error');
-      } finally {
-        setBusy(false);
-      }
+      } catch (e) { log(`Upload failed: ${e.message}`, 'error'); }
+      finally { setBusy(false); }
     }
 
     async function downloadZip() {
@@ -746,17 +805,13 @@
             log(`Build failed: ${b.error || 'unknown'}`, 'error');
             addChat('assistant', `Build failed: ${b.error || 'unknown'}`);
           }
-        } else {
-          log('Build response received', 'success');
-          addChat('assistant', 'Build response received.');
-        }
+        } else { log('Build response received', 'success'); addChat('assistant', 'Build response received.'); }
+        reconnectTerminal();
         await loadTree();
       } catch (e) {
         log(`Build error: ${e.message}`, 'error');
         addChat('assistant', `Build error: ${e.message}`);
-      } finally {
-        setBusy(false);
-      }
+      } finally { setBusy(false); }
     }
 
     async function sendChat() {
@@ -772,11 +827,8 @@
         ui.settingSession.value = state.sessionId;
         state.messages = data.messages || [];
         addChat('assistant', data.response);
-      } catch (e) {
-        addChat('assistant', `Chat error: ${e.message}`, true);
-      } finally {
-        setBusy(false);
-      }
+      } catch (e) { addChat('assistant', `Chat error: ${e.message}`, true); }
+      finally { setBusy(false); }
     }
 
     function addChat(role, text, isError=false) {
@@ -785,11 +837,8 @@
       msg.innerHTML = renderMarkdown(text);
       ui.chatFeed.appendChild(msg);
       ui.chatFeed.scrollTop = ui.chatFeed.scrollHeight;
-      if (role === 'assistant' && !isError) {
-        state.messages.push({ role: 'assistant', content: text });
-      } else if (role === 'user') {
-        state.messages.push({ role: 'user', content: text });
-      }
+      if (role === 'assistant' && !isError) state.messages.push({ role: 'assistant', content: text });
+      else if (role === 'user') state.messages.push({ role: 'user', content: text });
     }
 
     function renderMarkdown(text) {
@@ -803,7 +852,7 @@
     // Sidebar toggle
     ui.toggleSidebar.addEventListener('click', () => ui.sidebar.classList.toggle('collapsed'));
 
-    // Tabs
+    // Deck tabs
     ui.deckTabs.forEach(tab => tab.addEventListener('click', () => {
       ui.deckTabs.forEach(t => t.classList.remove('active'));
       ui.deckPanels.forEach(p => p.classList.remove('active'));
@@ -811,17 +860,16 @@
       document.getElementById(`${tab.dataset.tab}-panel`).classList.add('active');
     }));
 
+    // Bottom tabs
+    ui.bottomTabs.forEach(tab => tab.addEventListener('click', () => switchBottomTab(tab.dataset.bottom)));
+
     // Settings modal
     ui.settingsBtn.addEventListener('click', () => { applySettingsUI(); ui.settingsModal.classList.add('open'); });
     ui.cancelSettings.addEventListener('click', () => ui.settingsModal.classList.remove('open'));
     ui.saveSettings.addEventListener('click', () => { saveSettings(); ui.settingsModal.classList.remove('open'); loadTree(); });
     ui.settingTier.addEventListener('change', () => {
-      if (ui.settingTier.value === 'lifetime') {
-        ui.keyGroup.classList.add('hidden');
-        ui.settingProvider.value = 'deepseek';
-      } else {
-        ui.keyGroup.classList.remove('hidden');
-      }
+      if (ui.settingTier.value === 'lifetime') { ui.keyGroup.classList.add('hidden'); ui.settingProvider.value = 'deepseek'; }
+      else ui.keyGroup.classList.remove('hidden');
     });
 
     // Drag and drop
@@ -841,6 +889,7 @@
     // Init
     loadSettings();
     initMonaco();
+    initTerminal();
     log('Aero Forge UI loaded');
   </script>
 </body>

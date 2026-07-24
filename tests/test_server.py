@@ -1,5 +1,6 @@
 """Integration tests for the embedded Aero-Forge web server."""
 
+import asyncio
 import io
 import json
 import socket
@@ -9,9 +10,10 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import pytest
+import websockets
 
 from aero_forge.sandbox.manager import SandboxManager
-from aero_forge.server import AeroForgeHandler, make_server
+from aero_forge.server import AeroForgeHandler, _start_websocket_server, make_server
 
 
 def _free_port() -> int:
@@ -28,12 +30,15 @@ def server(tmp_path, monkeypatch):
 
     port = _free_port()
     server = make_server(port)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    http_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    http_thread.start()
+    ws_thread = threading.Thread(target=_start_websocket_server, args=(port + 1,), daemon=True)
+    ws_thread.start()
     yield f"http://localhost:{port}"
     server.shutdown()
     server.server_close()
-    thread.join(timeout=2)
+    http_thread.join(timeout=2)
+    ws_thread.join(timeout=2)
 
 
 def _get(url: str) -> tuple:
@@ -245,6 +250,32 @@ def test_api_files_missing_session(server):
     assert status == 404
     data = json.loads(body.decode("utf-8"))
     assert "not found" in data["error"].lower()
+
+
+def test_websocket_terminal(server):
+    port = int(server.rsplit(":", 1)[-1])
+    ws_url = f"ws://localhost:{port + 1}/ws/terminal?session_id=test-ws-terminal"
+
+    async def _client():
+        async with websockets.connect(ws_url) as ws:
+            # Wait for shell prompt / motd
+            await asyncio.sleep(0.5)
+            await ws.send("echo aero_forge_terminal_test\r")
+            output = b""
+            for _ in range(30):
+                try:
+                    data = await asyncio.wait_for(ws.recv(), timeout=0.2)
+                except asyncio.TimeoutError:
+                    break
+                if isinstance(data, str):
+                    data = data.encode("utf-8")
+                output += data
+                if b"aero_forge_terminal_test" in output:
+                    break
+            return output
+
+    output = asyncio.run(_client())
+    assert b"aero_forge_terminal_test" in output
 
 
 def _collect_paths(node, prefix=""):
