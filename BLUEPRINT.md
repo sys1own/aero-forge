@@ -112,6 +112,15 @@ aero-forge build --auto-detect
 # Show build progress with a progress bar
 aero-forge build blueprint.aero --progress
 
+# Build a whole project directory and produce a zip bundle
+aero-forge build --project ./my_project --output-zip my_project_bundle.zip
+
+# Build from an uploaded zip
+aero-forge build --upload user_project.zip --output-zip result_bundle.zip
+
+# Generate a new function into an existing project and rebuild the bundle
+aero-forge generate --prompt "Add a fast FFT" --project ./my_project --output-zip result.zip
+
 # Explain a compilation error
 aero-forge explain src/broken.py --error-file error.log
 
