@@ -64,6 +64,9 @@
     .brand h1 { font-size: 0.95rem; margin: 0; font-weight: 500; letter-spacing: 0.01em; color: var(--text); }
     .brand small { color: var(--muted); font-size: 0.65rem; display: block; margin-top: -2px; }
     .header-actions { display: flex; align-items: center; gap: 0.6rem; }
+    .run-btn { display: inline-flex; align-items: center; gap: 0.35rem; background: var(--accent); color: #fff; border: none; border-radius: 4px; padding: 0.35rem 0.75rem; font-size: 0.8rem; font-weight: 600; cursor: pointer; }
+    .run-btn:hover { background: #1177bb; }
+    .run-btn:disabled { opacity: 0.6; cursor: not-allowed; }
     .tier-badge {
       font-size: 0.65rem; font-weight: 600; text-transform: uppercase; padding: 0.15rem 0.45rem;
       border-radius: 999px; border: 1px solid var(--border); color: var(--muted);
@@ -245,6 +248,10 @@
     #terminal-panel .xterm-rows { color: var(--terminal-text); }
     #log-lines { flex: 1; overflow: auto; padding: 0.5rem 0.75rem; font-size: 0.8rem; color: var(--terminal-text); height: 100%; }
     .log-line { border-bottom: 1px solid rgba(255,255,255,0.03); padding: 0.15rem 0; }
+    #run-output { flex: 1; overflow: auto; padding: 0.5rem 0.75rem; font-size: 0.82rem; color: var(--terminal-text); white-space: pre-wrap; font-family: Consolas, Monaco, 'Courier New', monospace; height: 100%; }
+    .run-line { border-bottom: 1px solid rgba(255,255,255,0.03); padding: 0.15rem 0; }
+    .run-line.stderr { color: #f48771; }
+    .run-summary { color: #75beff; padding-top: 0.5rem; }
     .log-line.info { color: var(--terminal-info); }
     .log-line.success { color: var(--terminal-success); }
     .log-line.error { color: var(--terminal-error); }
@@ -285,6 +292,9 @@
       </div>
     </div>
     <div class="header-actions">
+      <button id="run-btn" class="run-btn" title="Run current file (Ctrl+Enter)" aria-label="Run">
+        <span>&#9654;</span> Run
+      </button>
       <span id="tier-badge" class="tier-badge">Free</span>
       <button id="settings-btn" class="icon-btn" title="Settings" aria-label="Settings">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -371,11 +381,15 @@
         <div class="bottom-tabs">
           <button class="bottom-tab active" data-bottom="terminal">Terminal</button>
           <button class="bottom-tab" data-bottom="build-log">Build Log</button>
+          <button class="bottom-tab" data-bottom="run">Run Output</button>
         </div>
         <div class="bottom-body">
           <div id="terminal-panel" class="bottom-panel active"></div>
           <div id="build-log-panel" class="bottom-panel">
             <div id="log-lines"></div>
+          </div>
+          <div id="run-panel" class="bottom-panel">
+            <div id="run-output"><div class="placeholder" style="color:var(--muted);padding:0.5rem 0">Click Run or press Ctrl+Enter to execute the active file.</div></div>
           </div>
         </div>
       </section>
@@ -482,6 +496,9 @@
       bottomTabs: document.querySelectorAll('.bottom-tab'),
       bottomPanels: document.querySelectorAll('.bottom-panel'),
       terminalPanel: document.getElementById('terminal-panel'),
+      runBtn: document.getElementById('run-btn'),
+      runOutput: document.getElementById('run-output'),
+      runPanel: document.getElementById('run-panel'),
       newFileRoot: document.getElementById('new-file-root'),
       newFolderRoot: document.getElementById('new-folder-root'),
       contextMenu: document.getElementById('context-menu'),
@@ -793,6 +810,7 @@
           lineNumbers: 'on', roundedSelection: false, renderLineHighlight: 'line', folding: true, matchBrackets: 'always',
         });
         state.editor.addCommand(window.monaco.KeyMod.CtrlCmd | window.monaco.KeyCode.KeyS, saveCurrentFile);
+        state.editor.addCommand(window.monaco.KeyMod.CtrlCmd | window.monaco.KeyCode.Enter, runCurrentFile);
         renderTabs();
         loadTree();
       });
@@ -863,6 +881,59 @@
       ui.bottomTabs.forEach(t => t.classList.toggle('active', t.dataset.bottom === name));
       ui.bottomPanels.forEach(p => p.classList.toggle('active', p.id === `${name}-panel`));
       if (name === 'terminal' && state.fitAddon) setTimeout(() => state.fitAddon.fit(), 50);
+    }
+
+    function appendRunOutput(html, cls='') {
+      const div = document.createElement('div');
+      div.className = `run-line ${cls}`;
+      div.innerHTML = html;
+      ui.runOutput.appendChild(div);
+      ui.runOutput.scrollTop = ui.runOutput.scrollHeight;
+    }
+
+    async function runCurrentFile() {
+      if (state.busy) return;
+      if (!state.sessionId) { log('No session; save settings first', 'error'); return; }
+      const file = state.activeTab ? state.activeTab.path : null;
+      ui.runOutput.innerHTML = '';
+      appendRunOutput(`Running ${file || 'entry file'}...`, 'info');
+      switchBottomTab('run');
+      setBusy(true);
+      try {
+        const res = await fetch('/api/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildBody({ path: file })),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          appendRunOutput(`Run failed: ${data.error || `HTTP ${res.status}`}`, 'error');
+          return;
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop();
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const msg = JSON.parse(line);
+              if (msg.type === 'stdout') appendRunOutput(escapeHtml(msg.data), '');
+              else if (msg.type === 'stderr') appendRunOutput(escapeHtml(msg.data), 'stderr');
+              else if (msg.type === 'summary') appendRunOutput(`Process finished with exit code ${msg.exit_code} in ${msg.duration_ms}ms (${msg.file})`, 'run-summary');
+            } catch (e) { appendRunOutput(escapeHtml(line), ''); }
+          }
+        }
+      } catch (e) {
+        appendRunOutput(`Run error: ${e.message}`, 'error');
+      } finally {
+        setBusy(false);
+      }
     }
 
     async function uploadZip(file) {
@@ -1010,6 +1081,13 @@
     ui.promptInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runBuild(); } });
     ui.chatSend.addEventListener('click', sendChat);
     ui.chatInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } });
+
+    // Run
+    ui.runBtn.addEventListener('click', runCurrentFile);
+    document.addEventListener('keydown', e => {
+      if (e.key === 'F5') { e.preventDefault(); runCurrentFile(); }
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); runCurrentFile(); }
+    });
 
     // Init
     loadSettings();

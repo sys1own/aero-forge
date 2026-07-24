@@ -9,11 +9,14 @@ import logging
 import mimetypes
 import os
 import pty
+import queue
 import re
 import shutil
 import struct
+import subprocess
 import termios
 import threading
+import time
 import uuid
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -192,6 +195,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_rename_node()
             if path == "/api/delete-node":
                 return self._handle_delete_node()
+            if path == "/api/run":
+                return self._handle_run()
 
             return _send_json(self, 404, {"error": "Not found"})
         except Exception as exc:
@@ -549,6 +554,104 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             return _send_json(self, 400, {"error": str(exc)})
         except Exception as exc:
             logger.exception("Delete-node endpoint failed")
+            return _send_json(self, 500, {"error": str(exc)})
+
+    def _handle_run(self) -> None:
+        """Run a Python entry file in the session sandbox and stream NDJSON output."""
+        try:
+            body = _parse_json_body(self)
+            session_id = body.get("session_id", "").strip()
+            if not session_id:
+                return _send_json(self, 400, {"error": "Missing 'session_id'"})
+
+            session_dir = _manager.create_session_sandbox(session_id)
+
+            file_path = body.get("path", "").strip()
+            if not file_path:
+                for candidate in ("src/main.py", "main.py"):
+                    if (session_dir / candidate).is_file():
+                        file_path = candidate
+                        break
+            if not file_path:
+                for py_file in sorted(session_dir.rglob("*.py")):
+                    rel = str(py_file.relative_to(session_dir))
+                    if "test_" in rel or "/tests/" in rel or "_test" in rel:
+                        continue
+                    file_path = rel
+                    break
+            if not file_path:
+                return _send_json(self, 400, {"error": "No Python entry file found"})
+
+            try:
+                target = _resolve_file(session_dir, file_path)
+            except ValueError:
+                return _send_json(self, 400, {"error": "Invalid path"})
+
+            if not target.is_file():
+                return _send_json(self, 404, {"error": "Entry file not found"})
+
+            env = os.environ.copy()
+            env["AERO_FORGE_SESSION"] = session_id
+            env["AERO_FORGE_SESSION_DIR"] = str(session_dir)
+
+            start = time.time()
+            proc = subprocess.Popen(
+                ["python", str(target)],
+                cwd=str(session_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+            )
+
+            q: queue.Queue = queue.Queue()
+
+            def reader(pipe, tag):
+                try:
+                    for line in iter(pipe.readline, b""):
+                        q.put((tag, line.decode("utf-8", errors="replace")))
+                finally:
+                    pipe.close()
+
+            threading.Thread(target=reader, args=(proc.stdout, "stdout"), daemon=True).start()
+            threading.Thread(target=reader, args=(proc.stderr, "stderr"), daemon=True).start()
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/x-ndjson")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            def _write_chunk(obj):
+                data = (json.dumps(obj) + "\n").encode("utf-8")
+                self.wfile.write(f"{len(data):X}\r\n".encode("ascii"))
+                self.wfile.write(data)
+                self.wfile.write(b"\r\n")
+                self.wfile.flush()
+
+            finished = False
+            while True:
+                try:
+                    tag, line = q.get(timeout=0.1)
+                    _write_chunk({"type": tag, "data": line})
+                except queue.Empty:
+                    if finished:
+                        break
+                    if proc.poll() is not None:
+                        finished = True
+
+            duration = (time.time() - start) * 1000
+            _write_chunk(
+                {
+                    "type": "summary",
+                    "exit_code": proc.returncode,
+                    "duration_ms": round(duration, 1),
+                    "file": file_path,
+                }
+            )
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+        except Exception as exc:
+            logger.exception("Run endpoint failed")
             return _send_json(self, 500, {"error": str(exc)})
 
     def _handle_download_zip(self, query: Dict[str, List[str]]) -> None:

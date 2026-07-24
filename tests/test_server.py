@@ -214,6 +214,36 @@ def test_api_download_zip(server):
         assert zf.read("data.txt").decode("utf-8") == "hello"
 
 
+def test_api_run_streaming(server):
+    session_id = "test-session-run"
+    status, _ = _post_json(
+        server + "/api/create-node",
+        {"session_id": session_id, "path": "main.py", "is_dir": False},
+    )
+    assert status == 200
+
+    status, _ = _post_json(
+        server + "/api/save-file",
+        {"session_id": session_id, "path": "main.py", "content": "print('aero_forge_run_ok')"},
+    )
+    assert status == 200
+
+    body_json = json.dumps(
+        {"session_id": session_id, "path": "main.py"}
+    ).encode("utf-8")
+    req = Request(server + "/api/run", data=body_json, headers={"Content-Type": "application/json"}, method="POST")
+    with urlopen(req, timeout=10) as resp:
+        assert resp.status == 200
+        raw = resp.read().decode("utf-8")
+
+    lines = [line for line in raw.strip().split("\n") if line]
+    assert any("aero_forge_run_ok" in line for line in lines)
+    summary = json.loads(lines[-1])
+    assert summary["type"] == "summary"
+    assert summary["exit_code"] == 0
+    assert summary["file"] == "main.py"
+
+
 def test_api_build_passes_config_override(server, monkeypatch):
     captured = {}
 
