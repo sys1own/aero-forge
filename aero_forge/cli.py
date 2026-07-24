@@ -886,6 +886,14 @@ def generate(
 
     if no_llm:
         llm_provider = "none"
+    elif not llm_provider:
+        llm_provider = os.getenv("AERO_FORGE_LLM_PROVIDER")
+    if not llm_provider and not no_llm:
+        click.echo(
+            "Error: --llm-provider or AERO_FORGE_LLM_PROVIDER is required for generation.",
+            err=True,
+        )
+        sys.exit(1)
 
     if prompt_file:
         prompt = Path(prompt_file).read_text(encoding="utf-8").strip()
