@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import functools
+import io
 import json
 import logging
 import mimetypes
@@ -19,13 +21,15 @@ import threading
 import time
 import uuid
 import zipfile
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.client import HTTPResponse
+from http.server import BaseHTTPRequestHandler
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
-import websockets
+import aiohttp
+from aiohttp import web
 
 from aero_forge.chat import ChatSession
 from aero_forge.config import ConfigOverride
@@ -38,7 +42,6 @@ DEFAULT_PORT = 8080
 
 _manager = SandboxManager()
 _static_dir = Path(__file__).parent / "static"
-_ws_port: Optional[int] = None
 
 
 def _session_dir(session_id: str) -> Path:
@@ -711,17 +714,6 @@ def _first(query: Dict[str, List[str]], key: str) -> Optional[str]:
     return values[0] if values else None
 
 
-class ReusableThreadingHTTPServer(ThreadingHTTPServer):
-    """Threaded HTTP server that allows immediate rebinding to the same port."""
-
-    allow_reuse_address = True
-
-
-def make_server(port: int = DEFAULT_PORT) -> ThreadingHTTPServer:
-    """Return a threaded HTTP server bound to the given port."""
-    return ReusableThreadingHTTPServer(("", port), AeroForgeHandler)
-
-
 def _set_pty_size(master_fd: int, cols: int, rows: int) -> None:
     """Set the PTY window size so tools like top, htop and editors render."""
     try:
@@ -841,7 +833,7 @@ async def _handle_terminal(websocket: Any) -> None:
             except (BlockingIOError, OSError):
                 break
 
-    except websockets.exceptions.ConnectionClosed:
+    except Exception:
         pass
     finally:
         if reader_added and master_fd >= 0:
@@ -862,26 +854,193 @@ async def _handle_terminal(websocket: Any) -> None:
                 pass
 
 
-async def _run_websocket_server(ws_port: int) -> None:
-    """Run the terminal WebSocket server on the given port."""
-    global _ws_port
-    async with websockets.serve(_handle_terminal, "", ws_port, ping_interval=20, ping_timeout=10):
-        _ws_port = ws_port
-        logger.info("Terminal WebSocket server listening on ws://localhost:%s/ws/terminal", ws_port)
-        await asyncio.Future()  # run forever
+class _FakeSocket:
+    """Stand-in for a TCP socket when driving BaseHTTPRequestHandler in memory."""
+
+    def __init__(self, request_bytes: bytes) -> None:
+        self.r = io.BytesIO(request_bytes)
+        self.w = io.BytesIO()
+
+    def makefile(self, mode: str, *args: Any, **kwargs: Any) -> Any:
+        if "r" in mode:
+            return io.BufferedReader(self.r)
+        if "w" in mode:
+            return io.BufferedWriter(self.w)
+        raise ValueError(mode)
+
+    def settimeout(self, *args: Any) -> None:
+        pass
+
+    def setsockopt(self, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def sendall(self, data: bytes) -> int:
+        return self.w.write(data)
+
+    def close(self) -> None:
+        pass
+
+    def shutdown(self, *args: Any) -> None:
+        pass
 
 
-def _start_websocket_server(ws_port: int) -> None:
-    """Start the asyncio WebSocket server, scanning for an available port if needed."""
-    global _ws_port
-    for offset in range(20):
-        candidate = ws_port + offset
+class _FakeServer:
+    """Minimal server object required by BaseHTTPRequestHandler."""
+
+    def __init__(self, server_address: Any) -> None:
+        self.server_address = server_address
+
+
+class _HttpResponseSock:
+    """Wrapper that lets http.client.HTTPResponse read from a BytesIO buffer."""
+
+    def __init__(self, fp: io.BytesIO) -> None:
+        self.fp = fp
+
+    def makefile(self, *args: Any, **kwargs: Any) -> io.BytesIO:
+        return self.fp
+
+    def close(self) -> None:
+        pass
+
+
+def _parse_http_response(response_bytes: bytes) -> web.Response:
+    """Parse a raw HTTP response produced by BaseHTTPRequestHandler into an aiohttp response."""
+    sock = _HttpResponseSock(io.BytesIO(response_bytes))
+    response = HTTPResponse(sock)
+    response.begin()
+    body = response.read()
+    headers: Dict[str, str] = {}
+    for name, value in response.getheaders():
+        if name.lower() in {"transfer-encoding", "content-length", "connection", "date", "server"}:
+            continue
+        headers[name] = value
+    return web.Response(status=response.status, reason=response.reason, headers=headers, body=body)
+
+
+async def _build_raw_request(request: web.Request) -> bytes:
+    """Convert an aiohttp request into raw HTTP bytes for BaseHTTPRequestHandler."""
+    body = await request.read()
+    raw = f"{request.method} {request.raw_path} HTTP/1.1\r\n".encode()
+    raw += f"Host: {request.host}\r\n".encode()
+    for name, value in request.headers.items():
+        if name.lower() == "host":
+            continue
+        raw += f"{name}: {value}\r\n".encode()
+    if body:
+        raw += f"Content-Length: {len(body)}\r\n".encode()
+    raw += b"\r\n"
+    raw += body
+    return raw
+
+
+def _run_http_handler(raw_request: bytes, port: int) -> bytes:
+    """Execute the existing BaseHTTPRequestHandler against an in-memory socket."""
+    sock = _FakeSocket(raw_request)
+    server = _FakeServer(("", port))
+    handler = AeroForgeHandler(sock, ("127.0.0.1", 0), server)
+    try:
+        handler.handle()
+    except Exception as exc:
+        logger.exception("HTTP handler failed: %s", exc)
+        sock.w.write(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n")
+    return sock.w.getvalue()
+
+
+async def _aiohttp_http_handler(request: web.Request, port: int) -> web.Response:
+    """Route any non-WebSocket HTTP request through the existing handler stack."""
+    raw = await _build_raw_request(request)
+    loop = asyncio.get_event_loop()
+    response_bytes = await loop.run_in_executor(None, _run_http_handler, raw, port)
+    return _parse_http_response(response_bytes)
+
+
+class _AioWSAdapter:
+    """Make an aiohttp WebSocketResponse look like the websocket object _handle_terminal expects."""
+
+    def __init__(self, request: web.Request, ws: web.WebSocketResponse) -> None:
+        self.request = type("Request", (), {"path": str(request.rel_url)})()
+        self._ws = ws
+
+    async def send(self, data: Any) -> None:
+        if isinstance(data, bytes):
+            await self._ws.send_bytes(data)
+        elif isinstance(data, str):
+            await self._ws.send_str(data)
+        else:
+            await self._ws.send_str(str(data))
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        await self._ws.close(code=code, message=reason.encode("utf-8") if reason else b"")
+
+    def __aiter__(self) -> Any:
+        return self._aiter()
+
+    async def _aiter(self) -> Any:
+        async for msg in self._ws:
+            if msg.type == aiohttp.WSMsgType.TEXT or msg.type == aiohttp.WSMsgType.BINARY:
+                yield msg.data
+            elif msg.type == aiohttp.WSMsgType.CLOSE:
+                break
+
+
+async def _aiohttp_ws_handler(request: web.Request) -> web.WebSocketResponse:
+    """Accept WebSocket upgrades on the same HTTP port and attach the terminal PTY."""
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    adapter = _AioWSAdapter(request, ws)
+    try:
+        await _handle_terminal(adapter)
+    except Exception as exc:
+        logger.exception("Terminal handler failed: %s", exc)
+    return ws
+
+
+class AioForgeServer:
+    """Combined HTTP + WebSocket server using aiohttp on a single port."""
+
+    def __init__(self, port: int = DEFAULT_PORT) -> None:
+        self.port = port
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._thread: Optional[threading.Thread] = None
+        self._stop_event: Optional[asyncio.Event] = None
+        self.runner: Optional[web.AppRunner] = None
+        self.app = web.Application()
+        self.app.router.add_get("/ws/terminal", _aiohttp_ws_handler)
+        self.app.router.add_route("*", "/{tail:.*}", functools.partial(_aiohttp_http_handler, port=port))
+
+    async def _serve(self) -> None:
+        self.runner = web.AppRunner(self.app)
+        await self.runner.setup()
+        site = web.TCPSite(self.runner, host="", port=self.port)
+        await site.start()
+        self._stop_event = asyncio.Event()
+        await self._stop_event.wait()
+        await self.runner.cleanup()
+
+    def serve_forever(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
         try:
-            asyncio.run(_run_websocket_server(candidate))
-            return
-        except OSError as exc:
-            logger.warning("Could not bind WebSocket server to port %s: %s", candidate, exc)
-    logger.error("WebSocket server could not bind to any port in %s-%s", ws_port, ws_port + 19)
+            self._loop.run_until_complete(self._serve())
+        finally:
+            self._loop.close()
+
+    def shutdown(self) -> None:
+        if self._loop and self._stop_event:
+            self._loop.call_soon_threadsafe(self._stop_event.set)
+
+    def server_close(self) -> None:
+        pass
+
+    @property
+    def server_address(self) -> tuple:
+        return ("", self.port)
+
+
+def make_server(port: int = DEFAULT_PORT) -> AioForgeServer:
+    """Return an aiohttp-based server bound to the given port."""
+    return AioForgeServer(port)
 
 
 def run_server(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
@@ -889,22 +1048,17 @@ def run_server(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
     _static_dir.mkdir(parents=True, exist_ok=True)
     server = make_server(port)
 
-    def http_serve() -> None:
+    def serve() -> None:
         try:
             server.serve_forever()
         finally:
             server.server_close()
 
-    http_thread = threading.Thread(target=http_serve, daemon=True)
-    http_thread.start()
-
-    ws_port = port + 1
-    ws_thread = threading.Thread(target=_start_websocket_server, args=(ws_port,), daemon=True)
-    ws_thread.start()
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
 
     url = f"http://localhost:{port}"
-    logger.info("Aero-Forge web server running at %s", url)
-    logger.info("Terminal WebSocket available at ws://localhost:%s/ws/terminal", ws_port)
+    logger.info("Aero-Forge web server running at %s (HTTP + WebSocket on one port)", url)
 
     if open_browser:
         import webbrowser
@@ -912,8 +1066,8 @@ def run_server(port: int = DEFAULT_PORT, open_browser: bool = True) -> None:
         webbrowser.open(url)
 
     try:
-        while http_thread.is_alive():
-            http_thread.join(timeout=1)
+        while thread.is_alive():
+            thread.join(timeout=1)
     except KeyboardInterrupt:
         logger.info("Shutting down web server...")
     finally:
