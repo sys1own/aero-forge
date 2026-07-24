@@ -21,6 +21,8 @@ from aero_forge.config import ConfigOverride
 from aero_forge.error_explainer import explain_error
 from aero_forge.gpu import compile_gpu_kernel, find_gpu_functions
 from aero_forge.orchestrator.orchestrator import Orchestrator
+from aero_forge.scaffold.engine import _generate_pyi
+from aero_forge.translator import TargetMode
 from aero_forge.wasm import build_wasm_module
 
 logger = logging.getLogger("aero_forge.build")
@@ -64,6 +66,7 @@ class BuildRunner:
         force: bool = False,
         gpu: bool = False,
         target: str = "native",
+        target_mode: str = TargetMode.PYO3,
         distributed: bool = False,
         dry_run: bool = False,
         progress: bool = False,
@@ -78,6 +81,7 @@ class BuildRunner:
         self.force = force
         self.gpu = gpu
         self.target = target
+        self.target_mode = target_mode
         self.distributed = distributed
         self.progress = progress and sys.stderr.isatty()
         self.config_override = config_override
@@ -87,7 +91,9 @@ class BuildRunner:
             "false",
             "no",
         )
-        effective_cache_enabled = cache_enabled and env_cache and not force
+        effective_cache_enabled = (
+            cache_enabled and env_cache and not force and target_mode == TargetMode.PYO3
+        )
         cache_root = cache_dir or _cache_dir_from_env()
         self.cache = BuildCache(root=cache_root, enabled=effective_cache_enabled)
         self.dry_run = dry_run
@@ -292,7 +298,9 @@ class BuildRunner:
                 )
 
         cache_key_name = f"{source.stem}_{'_'.join(function_names)}"
-        cached = self.cache.get(source_text, flags, cache_key_name, target=self.target)
+        cached = self.cache.get(
+            source_text, flags, cache_key_name, target=self.target, target_mode=self.target_mode
+        )
 
         if cached is not None:
             try:
@@ -301,6 +309,9 @@ class BuildRunner:
                 module_name = f"aero_forge_{source.stem}"
                 self._write_loader(
                     source_output, cached.name, function_names, source.name, module_name
+                )
+                _generate_pyi(
+                    source_text, function_names, source_output / f"{source.name}i"
                 )
                 return BuildResult(
                     source=source,
@@ -334,6 +345,7 @@ class BuildRunner:
             compiler_flags=flags,
             output_dir=source_output,
             target=self.target if self.target != "native" else None,
+            target_mode=self.target_mode,
             config_override=self.config_override,
         )
         result = orchestrator.run()
@@ -353,7 +365,12 @@ class BuildRunner:
             artifact = Path(result["artifact"])
             if artifact.is_file():
                 self.cache.put(
-                    source_text, flags, cache_key_name, artifact, target=self.target
+                    source_text,
+                    flags,
+                    cache_key_name,
+                    artifact,
+                    target=self.target,
+                    target_mode=self.target_mode,
                 )
                 artifact_path = source_output / artifact.name
 

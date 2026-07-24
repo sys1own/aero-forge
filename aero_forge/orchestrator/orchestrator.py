@@ -42,12 +42,17 @@ from aero_forge.scaffold.engine import (
     Engine,
     _find_function,
     _find_top_level,
+    _generate_pyi,
     _rust_identifier,
     ensure_init_files,
     ensure_sys_path,
     find_project_root,
 )
-from aero_forge.translator import UASTToHINTranslator, python_source_to_uast
+from aero_forge.translator import (
+    UASTToHINTranslator,
+    python_source_to_uast,
+    TargetMode,
+)
 
 logger = logging.getLogger("aero_forge.orchestrator")
 
@@ -125,6 +130,7 @@ class Orchestrator:
         compiler_flags: Optional[List[str]] = None,
         output_dir: Optional[str | Path] = None,
         target: Optional[str] = None,
+        target_mode: str = TargetMode.PYO3,
         config_override: Optional[ConfigOverride] = None,
     ):
         overrides: Dict[str, Any] = {}
@@ -171,6 +177,7 @@ class Orchestrator:
         self.use_llm = self.settings.get("LLM_PROVIDER", "none") != "none"
         self.compiler_flags = compiler_flags or []
         self.target = target
+        self.target_mode = target_mode
 
         self.cache = FixCache(enabled=self.settings["CACHE_ENABLED"])
         # prompt_builder and llm_client are retained for API compatibility but
@@ -287,7 +294,10 @@ class Orchestrator:
                 last_working_source = source
                 last_working_artifact = artifact
 
-                self._install_native_module(sandbox, artifact)
+                if self.target_mode == TargetMode.C_ABI:
+                    self._install_c_abi_module(sandbox, artifact)
+                else:
+                    self._install_native_module(sandbox, artifact)
 
                 result = sandbox.run_tests()
                 if result["passed"]:
@@ -522,6 +532,7 @@ class Orchestrator:
                 module_name=module_name,
                 function_names=self.function_names,
                 source=source,
+                target_mode=self.target_mode,
             )
         except Exception as exc:
             raise _BuildFailure(
@@ -586,6 +597,9 @@ class Orchestrator:
                 raise _BuildFailure(
                     "No compiled shared library found after cargo build."
                 )
+            pyi_path = self.output_dir / f"{self.source_path.stem}.pyi"
+            pyi_path.parent.mkdir(parents=True, exist_ok=True)
+            _generate_pyi(source, self.function_names, pyi_path)
             return artifact
         finally:
             try:
@@ -631,6 +645,134 @@ class Orchestrator:
             "\n__all__ = [" + ", ".join(f'"{n}"' for n in function_names) + "]"
         )
         return "\n".join(lines) + "\n"
+
+    def _install_c_abi_module(self, sandbox: Sandbox, artifact: Path) -> None:
+        """Place a ctypes-based loader for the C-ABI shared library in the sandbox."""
+        loader = sandbox.source_in_sandbox
+        so_path = loader.parent / artifact.name
+        loader.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(artifact, so_path)
+        source = self.source_path.read_text(encoding="utf-8")
+        loader.write_text(
+            self._c_abi_loader_source(so_path, source, self.function_names),
+            encoding="utf-8",
+        )
+        ensure_init_files(loader, project_root=sandbox.root)
+
+    def _c_abi_loader_source(
+        self, so_path: Path, source: str, function_names: List[str]
+    ) -> str:
+        """Generate a ctypes loader that mirrors the compiled C-ABI symbols."""
+        tree = ast.parse(source)
+
+        def _py_ann(node: Optional[ast.expr]) -> str:
+            if node is None:
+                return "Any"
+            try:
+                return ast.unparse(node)
+            except AttributeError:
+                return "Any"
+
+        type_map = {"int": "ctypes.c_int64", "float": "ctypes.c_double", "bool": "ctypes.c_bool"}
+        free_map = {"int": "free_buffer_i64", "float": "free_buffer_f64", "bool": "free_buffer_bool"}
+
+        lines: List[str] = [
+            "import ctypes",
+            "import pathlib",
+            "",
+            "_HERE = pathlib.Path(__file__).parent",
+            f'_SO = _HERE / "{so_path.name}"',
+            "_LIB = ctypes.CDLL(str(_SO))",
+            "",
+            "_LIB.free_buffer_i64.argtypes = [ctypes.POINTER(ctypes.c_int64), ctypes.c_size_t]",
+            "_LIB.free_buffer_f64.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.c_size_t]",
+            "_LIB.free_buffer_bool.argtypes = [ctypes.POINTER(ctypes.c_bool), ctypes.c_size_t]",
+            "",
+        ]
+        all_names: List[str] = []
+        for func in tree.body:
+            if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if func.name not in function_names:
+                continue
+            all_names.append(func.name)
+            arg_info = []
+            for arg in func.args.args:
+                ann = _py_ann(arg.annotation)
+                if ann.startswith(("list[", "List[")):
+                    elem = ann.split("[", 1)[1].split("]", 1)[0]
+                    ctype = type_map.get(elem, "ctypes.c_void_p")
+                    arg_info.append(("array", elem, ctype, arg.arg))
+                else:
+                    ctype = type_map.get(ann, "ctypes.c_void_p")
+                    arg_info.append(("scalar", ann, ctype, arg.arg))
+
+            ret_ann = _py_ann(func.returns)
+            ret_array = ret_ann.startswith(("list[", "List["))
+            ret_elem = ret_ann.split("[", 1)[1].split("]", 1)[0] if ret_array else ret_ann
+            ret_ctype = type_map.get(ret_elem, "ctypes.c_void_p")
+
+            # Configure argument and return types on the C symbol.
+            c_args = []
+            for kind, _, ctype, name in arg_info:
+                if kind == "scalar":
+                    c_args.append(ctype)
+                else:
+                    c_args.append(f"ctypes.POINTER({ctype})")
+                    c_args.append("ctypes.c_size_t")
+            if ret_array:
+                c_args.append("ctypes.POINTER(ctypes.c_size_t)")
+            lines.append(f"_LIB.{func.name}.argtypes = [{', '.join(c_args)}]")
+            if ret_array:
+                lines.append(f"_LIB.{func.name}.restype = ctypes.POINTER({ret_ctype})")
+            else:
+                lines.append(f"_LIB.{func.name}.restype = {ret_ctype}")
+            lines.append("")
+
+            # Build the Python wrapper.
+            py_args = ", ".join(name for _, _, _, name in arg_info)
+            body_lines = []
+            call_args = []
+            for kind, elem, ctype, name in arg_info:
+                if kind == "scalar":
+                    call_args.append(name)
+                else:
+                    body_lines.append(
+                        f"    _{name}_arr = ({ctype} * len({name}))(*{name})"
+                    )
+                    body_lines.append(
+                        f"    _{name}_ptr = ctypes.cast(_{name}_arr, ctypes.POINTER({ctype}))"
+                    )
+                    call_args.append(f"_{name}_ptr")
+                    call_args.append(f"len({name})")
+
+            if ret_array:
+                body_lines.append("    _out_len = ctypes.c_size_t()")
+                call_args.append("ctypes.byref(_out_len)")
+                body_lines.append(
+                    f"    _ptr = _LIB.{func.name}({', '.join(call_args)})"
+                )
+                body_lines.append(
+                    f"    _result = [_ptr[i] for i in range(_out_len.value)]"
+                )
+                free_name = free_map.get(ret_elem, "free_buffer_i64")
+                body_lines.append(
+                    f"    _LIB.{free_name}(_ptr, _out_len.value)"
+                )
+                body_lines.append("    return _result")
+            else:
+                body_lines.append(
+                    f"    return _LIB.{func.name}({', '.join(call_args)})"
+                )
+
+            lines.append(f"def {func.name}({py_args}):")
+            lines.extend(body_lines)
+            lines.append("")
+
+        if all_names:
+            lines.append(f"__all__ = {all_names!r}")
+            lines.append("")
+        return "\n".join(lines)
 
     def _merge_back(self, sandbox: Sandbox, artifact: Path) -> None:
         """Copy the loader and compiled extension to the output directory."""
