@@ -638,18 +638,30 @@ class RustGenerator:
             return self._field_type(expr.value, expr.attr)
         if isinstance(expr, ast.Subscript):
             base_type = self._type_of(expr.value)
-            if not base_type.startswith("Vec<"):
-                return self.function_type
-            element_type = _element_type(base_type)
             if isinstance(expr.slice, ast.Slice):
-                return f"Vec<{element_type}>"
-            return element_type
+                if base_type.startswith("Vec<"):
+                    return f"Vec<{_element_type(base_type)}>"
+                return self.function_type
+            if base_type.startswith("Vec<"):
+                return _element_type(base_type)
+            if _is_tuple_type(base_type):
+                idx = _const_int_index(expr.slice)
+                if idx is not None:
+                    element_type = self._tuple_element_at(base_type, idx)
+                    if element_type is not None:
+                        return element_type
+            return self.function_type
         if isinstance(expr, ast.List):
             if not expr.elts:
                 return "Vec<?>"
             return f"Vec<{self._type_of(expr.elts[0])}>"
         if isinstance(expr, ast.ListComp):
             return f"Vec<{self._type_of(expr.elt)}>"
+        if isinstance(expr, ast.Tuple):
+            elts = [self._type_of(e) for e in expr.elts]
+            if all(elts):
+                return f"({', '.join(elts)})"
+            return self.function_type
         if isinstance(expr, ast.BinOp):
             if isinstance(expr.op, ast.Mult):
                 left_type = self._type_of(expr.left)
@@ -1827,28 +1839,49 @@ class RustGenerator:
 
         base, indices = _flatten(expr, [])
         base_type = self._type_of(base)
-        if not base_type.startswith("Vec<"):
+        if not (base_type.startswith("Vec<") or _is_tuple_type(base_type)):
             raise UnsupportedError(
-                "Subscript/indexing is only supported on Vec/list types", node=expr
+                "Subscript/indexing is only supported on Vec/list or tuple types",
+                node=expr,
             )
 
         base_expr = self._emit_expr(base, base_type)
         final_type = base_type
         access = base_expr
         for idx in indices:
-            element_type = _element_type(final_type)
-            if (
-                isinstance(idx, ast.UnaryOp)
-                and isinstance(idx.op, ast.USub)
-                and isinstance(idx.operand, ast.Constant)
-                and isinstance(idx.operand.value, int)
-            ):
-                n = idx.operand.value
-                index_expr = f"(({access}).len() as i64 - {n}_i64)"
+            if _is_tuple_type(final_type):
+                idx_val = _const_int_index(idx)
+                if idx_val is None:
+                    raise UnsupportedError(
+                        "Tuple subscripts require a constant integer index", node=idx
+                    )
+                parts = self._tuple_element_types(final_type)
+                if idx_val < 0:
+                    idx_val = len(parts) + idx_val
+                if idx_val < 0 or idx_val >= len(parts):
+                    raise UnsupportedError(
+                        f"Tuple index {idx_val} out of bounds", node=idx
+                    )
+                final_type = parts[idx_val]
+                access = f"{access}.{idx_val}"
+            elif final_type.startswith("Vec<"):
+                element_type = _element_type(final_type)
+                if (
+                    isinstance(idx, ast.UnaryOp)
+                    and isinstance(idx.op, ast.USub)
+                    and isinstance(idx.operand, ast.Constant)
+                    and isinstance(idx.operand.value, int)
+                ):
+                    n = idx.operand.value
+                    index_expr = f"(({access}).len() as i64 - {n}_i64)"
+                else:
+                    index_expr = self._emit_expr(idx, "i64")
+                access = f"{access}[({index_expr}) as usize]"
+                final_type = element_type
             else:
-                index_expr = self._emit_expr(idx, "i64")
-            access = f"{access}[({index_expr}) as usize]"
-            final_type = element_type
+                raise UnsupportedError(
+                    f"Cannot index into type {final_type}", node=idx
+                )
 
         # When the final value is a non-Copy container and the context expects an
         # owned value, clone it.  Scalar/copy types (i64, f64, bool) dereference
@@ -1865,6 +1898,7 @@ class RustGenerator:
             self.return_type in ("i64", "f64", "bool")
             and final_type in ("i64", "f64", "bool")
             and isinstance(base, ast.Name)
+            and base_type.startswith("Vec<")
             and not all(
                 isinstance(idx, ast.Name) and idx.id in self.loop_vars
                 for idx in indices
@@ -3003,6 +3037,21 @@ def _vec_depth(rust_type: str) -> int:
 
 def _is_numeric_scalar(rust_type: str) -> bool:
     return rust_type in ("i64", "f64")
+
+
+def _is_tuple_type(rust_type: str) -> bool:
+    return rust_type.startswith("(") and rust_type.endswith(")") and rust_type != "()"
+
+
+def _const_int_index(expr: ast.expr) -> Optional[int]:
+    """Return the integer value of ``expr`` if it is a constant integer literal."""
+    if isinstance(expr, ast.Constant) and isinstance(expr.value, int):
+        return expr.value
+    if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.USub):
+        inner = _const_int_index(expr.operand)
+        if inner is not None:
+            return -inner
+    return None
 
 
 def _is_vec_type(rust_type: str) -> bool:
