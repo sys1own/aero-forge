@@ -203,3 +203,46 @@ def test_validator_output_includes_message_and_path(tmp_path: Path) -> None:
         validator.validate(tmp_path, language="python")
     assert "main.py" in exc_info.value.output
     assert "dict" in exc_info.value.output
+
+
+def test_primitive_type_annotations_accepted(tmp_path: Path) -> None:
+    """Standard built-ins (str, int, list[str], None) must pass primitive validation."""
+    validator = PreWriteValidator()
+    (tmp_path / "main.py").write_text(
+        "def search(query: str, limit: int = 10) -> list[str]:\n"
+        "    return [query] * limit\n"
+    )
+    result = validator.validate(tmp_path, language="python")
+    assert result.succeeded
+
+
+def test_bytes_and_none_return_accepted(tmp_path: Path) -> None:
+    """``bytes`` and ``None`` return types are valid primitives."""
+    validator = PreWriteValidator()
+    (tmp_path / "main.py").write_text(
+        "def read_chunk(path: str) -> bytes | None:\n"
+        "    return None\n"
+    )
+    result = validator.validate(tmp_path, language="python")
+    assert result.succeeded
+
+
+def test_typing_optional_and_list_accepted(tmp_path: Path) -> None:
+    """``typing.List`` and ``Optional`` generics of primitives are accepted."""
+    validator = PreWriteValidator()
+    (tmp_path / "main.py").write_text(
+        "from typing import List, Optional\n"
+        "def items(x: Optional[str]) -> List[int]:\n"
+        "    return [1]\n"
+    )
+    result = validator.validate(tmp_path, language="python")
+    assert result.succeeded
+
+
+def test_primitive_subscript_rejected(tmp_path: Path) -> None:
+    """Subscripting a primitive builtin like ``str[int]`` is not a valid type."""
+    validator = PreWriteValidator()
+    (tmp_path / "main.py").write_text("def bad(x: str[int]) -> None:\n    pass\n")
+    with pytest.raises(ValidationError) as exc_info:
+        validator.validate(tmp_path, language="python")
+    assert "non-primitive" in str(exc_info.value).lower()
