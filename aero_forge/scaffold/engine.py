@@ -152,6 +152,7 @@ class RustGenerator:
                     "refactor them into top-level functions.",
                     node=node,
                 )
+        self.loop_vars = self._collect_loop_vars()
         self.type_env: Dict[str, str] = {}
         for name, typ in zip(self.arg_names, self.arg_types):
             self.type_env[name] = typ
@@ -358,6 +359,12 @@ class RustGenerator:
         if isinstance(expr, ast.Name):
             return types.get(expr.id)
         if isinstance(expr, ast.Attribute):
+            if (
+                isinstance(expr.value, ast.Name)
+                and expr.value.id == "math"
+                and expr.attr in MATH_CONSTANTS
+            ):
+                return "f64"
             return self._field_type(expr.value, expr.attr)
         if isinstance(expr, ast.Subscript):
             base_type = self._infer_expr_type(expr.value, types)
@@ -442,13 +449,15 @@ class RustGenerator:
             self._propagate_subscript_types(expr.body, element_type, types)
             self._propagate_subscript_types(expr.orelse, element_type, types)
         elif isinstance(expr, ast.Name):
-            # Propagate the expected scalar type to a plain variable (e.g., a
-            # loop variable used in an f64 expression).  Do not overwrite a
-            # container variable; that happens through subscript propagation.
+            # Propagate the expected scalar type only to variables that are not
+            # already typed. Loop variables and locals with a concrete type keep
+            # that type and are coerced at the point of use.
+            if expr.id in self.loop_vars:
+                return
             current = types.get(expr.id)
-            if current is None or (
-                not current.startswith("Vec<") and not current.startswith("(")
-            ):
+            if current is None:
+                types[expr.id] = element_type
+            elif current == "?":
                 types[expr.id] = self._unify(current, element_type)
         elif isinstance(expr, ast.Tuple):
             for i, e in enumerate(expr.elts):
@@ -560,6 +569,12 @@ class RustGenerator:
         if isinstance(expr, ast.Name):
             return self.type_env.get(expr.id, self.function_type)
         if isinstance(expr, ast.Attribute):
+            if (
+                isinstance(expr.value, ast.Name)
+                and expr.value.id == "math"
+                and expr.attr in MATH_CONSTANTS
+            ):
+                return "f64"
             return self._field_type(expr.value, expr.attr)
         if isinstance(expr, ast.Subscript):
             base_type = self._type_of(expr.value)
@@ -722,6 +737,25 @@ class RustGenerator:
                 names.update(_names_in_target(node.target))
         return names
 
+    def _collect_loop_vars(self) -> set[str]:
+        """Return names introduced by for-loop targets.
+
+        Loop variables get their type from the iterator (e.g. ``range`` yields
+        ``i64``), so type propagation should not promote them to ``f64`` just
+        because they appear in a float expression.
+        """
+        names: set[str] = set()
+        for node in ast.walk(self.func):
+            if isinstance(node, ast.For):
+                target = node.target
+                if isinstance(target, ast.Name):
+                    names.add(target.id)
+                elif isinstance(target, ast.Tuple):
+                    for elt in target.elts:
+                        if isinstance(elt, ast.Name):
+                            names.add(elt.id)
+        return names
+
     @staticmethod
     def _name_in_expr(expr: ast.expr, name: str) -> bool:
         for node in ast.walk(expr):
@@ -879,6 +913,13 @@ class RustGenerator:
             parts = self._tuple_element_types(typ)
             return f"({', '.join(self._zero_for_type(p) for p in parts)})"
         return "0_i64"
+
+    def _sentinel_for_type(self, typ: str) -> str:
+        if typ == "f64":
+            return "(-1.0_f64)"
+        if typ == "bool":
+            return "false"
+        return "(-1_i64)"
 
     def _return_type(self) -> str:
         """Derive the Rust return type from the function's return statements."""
@@ -1703,7 +1744,26 @@ class RustGenerator:
         # automatically through the reference returned by indexing.
         if final_type.startswith("Vec<") and ctx == final_type:
             access = f"{access}.clone()"
-        return self._coerce(access, final_type, ctx)
+        access = self._coerce(access, final_type, ctx)
+        # Guard indexing on empty containers. If the container is empty and the
+        # function returns a scalar, return a sentinel value before indexing so
+        # the compiled extension does not panic on out-of-bounds access.  Skip
+        # loop-variable indices where the loop itself typically ranges over the
+        # container and the caller is expected to handle empty inputs.
+        if (
+            self.return_type in ("i64", "f64", "bool")
+            and final_type in ("i64", "f64", "bool")
+            and isinstance(base, ast.Name)
+            and not all(
+                isinstance(idx, ast.Name) and idx.id in self.loop_vars
+                for idx in indices
+            )
+        ):
+            sentinel = self._sentinel_for_type(self.return_type)
+            access = (
+                f"{{ if ({base_expr}).is_empty() {{ return {sentinel}; }} {access} }}"
+            )
+        return access
 
     def _emit_unaryop(self, expr: ast.UnaryOp, ctx: str) -> str:
         if isinstance(expr.op, ast.Invert):
@@ -2024,7 +2084,10 @@ class RustGenerator:
             return self._emit_numpy_call(name, expr, ctx)
 
         if base == "math" and name in self.MATH_ATTRS:
-            return self._emit_math_call(name, args, ctx)
+            math_args = [
+                self._strip_outer_parens(self._emit_expr(a, "f64")) for a in expr.args
+            ]
+            return self._emit_math_call(name, math_args, ctx)
 
         if base is None and name in {"int", "float"}:
             if len(expr.args) != 1:

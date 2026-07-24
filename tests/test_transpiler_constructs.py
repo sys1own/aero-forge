@@ -276,3 +276,78 @@ def test_list_comprehension_filter_and_step(tmp_path: Path) -> None:
         source,
         "def test_primes_sieve():\n    assert primes_sieve(10) == [2, 3, 5, 7]\n",
     )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_nested_function_rejected(tmp_path: Path) -> None:
+    source = (
+        "def outer(x: int) -> int:\n"
+        "    def inner(y: int) -> int:\n"
+        "        return y + 1\n"
+        "    return inner(x)\n"
+    )
+    src = tmp_path / "nested.py"
+    src.write_text(source)
+    test = tmp_path / "test_nested.py"
+    test.write_text(
+        "from nested import outer\ndef test_outer():\n    assert outer(1) == 2\n"
+    )
+    orchestrator = Orchestrator(
+        src,
+        function_name="outer",
+        test_path=test,
+        max_iterations=1,
+        use_llm=False,
+    )
+    result = orchestrator.run()
+    assert not result["success"]
+    assert "Nested functions" in result.get("error", "")
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_mixed_float_int_math(tmp_path: Path) -> None:
+    source = (
+        "import math\n\n"
+        "def dft_real(vals: list[float]) -> list[float]:\n"
+        "    n = len(vals)\n"
+        "    out = []\n"
+        "    for k in range(n):\n"
+        "        s = 0.0\n"
+        "        for t in range(n):\n"
+        "            angle = 2 * math.pi * t * k / n\n"
+        "            s += vals[t] * math.cos(angle)\n"
+        "        out.append(s)\n"
+        "    return out\n"
+    )
+    _run_case(
+        tmp_path,
+        "dft_real",
+        source,
+        "def test_dft():\n    r = dft_real([1.0, 0.0])\n    assert abs(r[0] - 1.0) < 0.01\n",
+    )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_sorted_empty_list_guard(tmp_path: Path) -> None:
+    source = (
+        "def most_frequent(values: list[int]) -> int:\n"
+        "    s = sorted(values)\n"
+        "    return s[len(values) // 2]\n"
+    )
+    _run_case(
+        tmp_path,
+        "most_frequent",
+        source,
+        "def test_most_frequent():\n"
+        "    assert most_frequent([1, 2, 2, 3]) == 2\n"
+        "    assert most_frequent([]) == -1\n",
+    )
