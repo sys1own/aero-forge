@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -267,6 +268,7 @@ def generate_from_prompt(
     llm_provider: Optional[str] = None,
     model: Optional[str] = None,
     max_retries: int = 3,
+    max_tokens: Optional[int] = None,
     system_prompt: Optional[str] = None,
     prompt_template: Optional[str] = None,
     algorithm_library: bool = False,
@@ -339,7 +341,9 @@ def generate_from_prompt(
         },
     ]
 
-    response = client.generate(messages, temperature=0.2)
+    if max_tokens is None:
+        max_tokens = int(os.getenv("AERO_FORGE_MAX_TOKENS", "4096"))
+    response = client.generate(messages, temperature=0.2, max_tokens=max_tokens)
     if not response:
         raise GenerationError("LLM returned an empty response")
     return response
@@ -724,6 +728,7 @@ def generate_project(
     llm_provider: Optional[str] = None,
     model: Optional[str] = None,
     max_retries: int = 3,
+    max_tokens: Optional[int] = None,
     prompt_template: Optional[str] = None,
     algorithm_library: bool = False,
     selected_algorithm: Optional[str] = None,
@@ -745,6 +750,7 @@ def generate_project(
         llm_provider=llm_provider,
         model=model,
         max_retries=max_retries,
+        max_tokens=max_tokens,
         prompt_template=prompt_template,
         algorithm_library=algorithm_library,
         selected_algorithm=selected_algorithm,
@@ -803,6 +809,7 @@ def generate_and_build(
     llm_provider: Optional[str] = None,
     model: Optional[str] = None,
     max_retries: int = 3,
+    max_tokens: Optional[int] = None,
     max_iterations: int = 5,
     build_kwargs: Optional[Dict[str, Any]] = None,
     optimize: bool = False,
@@ -832,6 +839,7 @@ def generate_and_build(
             llm_provider=llm_provider,
             model=model,
             max_retries=max_retries,
+            max_tokens=max_tokens,
             prompt_template=prompt_template,
             algorithm_library=algorithm_library,
             selected_algorithm=selected_algorithm,
@@ -860,6 +868,7 @@ def generate_and_build(
             llm_provider=llm_provider,
             model=model,
             max_retries=max_retries,
+            max_tokens=max_tokens,
             prompt_template=prompt_template,
             algorithm_library=algorithm_library,
             selected_algorithm=selected_algorithm,
