@@ -365,6 +365,7 @@ class Orchestrator:
         # same file are compiled into a single extension.
         module_name = f"aero_forge_{self.source_path.stem}"
         crate_name = _rust_identifier(module_name)
+        native_rust_dir = self.output_dir / "native_rust" / crate_name
 
         try:
             uast = python_source_to_uast(source)
@@ -454,6 +455,16 @@ class Orchestrator:
                 )
             return artifact
         finally:
+            try:
+                if crate_root.exists():
+                    native_rust_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(
+                        crate_root,
+                        native_rust_dir,
+                        dirs_exist_ok=True,
+                    )
+            except Exception as exc:
+                logger.warning("Could not persist generated Rust crate to %s: %s", native_rust_dir, exc)
             shutil.rmtree(crate_root, ignore_errors=True)
 
     def _install_native_module(self, sandbox: Sandbox, artifact: Path) -> None:

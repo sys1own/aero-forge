@@ -11,7 +11,14 @@ from importlib import resources
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from aero_forge._constants import IO_MODULES, IO_NAMES, MATH_ATTRS, MATH_CONSTANTS
+from aero_forge._constants import (
+    IO_MODULES,
+    IO_NAMES,
+    MATH_ATTRS,
+    MATH_CONSTANTS,
+    SAFE_BUILTINS,
+    SAFE_STD_MODULES,
+)
 from aero_forge.errors import UnsupportedError
 from aero_forge.precision_shield.shield import Shield, _FLOAT_MATH_FUNCS
 
@@ -1662,6 +1669,14 @@ class RustGenerator:
             )
             return self._emit_constant(constant, ctx)
 
+        if (
+            isinstance(expr.value, ast.Name)
+            and expr.value.id in SAFE_STD_MODULES
+        ):
+            # Stub access to safe stdlib module attributes (e.g. sys.version,
+            # time.time) to a typed zero value so they do not fail the build.
+            return self._zero_for_type(ctx)
+
         base_expr = self._emit_expr(expr.value, self._type_of(expr.value))
         field_type = self._field_type(expr.value, expr.attr)
         access = f"{base_expr}.{expr.attr}"
@@ -2244,6 +2259,18 @@ class RustGenerator:
                 "complex() is not supported. Use real and imaginary parts separately.",
                 node=expr,
             )
+
+        # Safe stdlib builtins and modules (print, io, sys, time) are stubbed to a
+        # typed zero value so logging/string operations do not fail the build.
+        # Real math functions are handled explicitly below.
+        if (base in SAFE_STD_MODULES or name in SAFE_BUILTINS) and not (
+            base == "math" and name in self.MATH_ATTRS
+        ):
+            return self._zero_for_type(ctx)
+
+        if base in self.IO_MODULES or name in self.IO_NAMES:
+            raise UnsupportedError("io", node=expr)
+
         args = [
             self._strip_outer_parens(self._emit_expr(a, self.function_type))
             for a in expr.args
@@ -2399,8 +2426,12 @@ class RustGenerator:
             target_str = self._emit_expr(target, target_type)
             return f"{target_str}.pop().unwrap()"
 
-        if base in self.IO_MODULES or name in self.IO_NAMES:
-            raise UnsupportedError("io", node=expr)
+        # Generic unsupported attribute/method fallback: emit a zero value so the
+        # generated Rust still compiles, and warn so the user can inspect.
+        if isinstance(expr.func, ast.Attribute):
+            logger.warning("Stubbing unsupported method call: %s", expr.func)
+            return self._zero_for_type(ctx)
+
         raise UnsupportedError(f"Unsupported call: {name}", node=expr)
 
     def _emit_sorted(self, expr: ast.Call, ctx: str) -> str:

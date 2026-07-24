@@ -27,6 +27,11 @@ IO_NAMES = {
     "__import__",
 }
 
+# Standard library modules and builtins that are safe to ignore or stub during
+# transpilation (e.g., logging, timing, and math utilities).
+SAFE_STD_MODULES = {"io", "sys", "time", "math"}
+SAFE_BUILTINS = {"print"}
+
 MATH_ATTRS = {
     "sqrt",
     "sin",

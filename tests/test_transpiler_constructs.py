@@ -454,3 +454,30 @@ def test_function_return_subscript(tmp_path: Path) -> None:
         source,
         "def test_first_mag():\n    assert first_mag([5.0, 6.0]) == 5.0\n",
     )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_safe_stdlib_imports_and_calls(tmp_path: Path) -> None:
+    source = (
+        "import io\n"
+        "import sys\n"
+        "import time\n"
+        "import math\n"
+        "\n"
+        "def safe_stdlib_calls(x: int) -> int:\n"
+        "    print(\"start\")\n"
+        "    io.StringIO(\"data\")\n"
+        "    sys.version\n"
+        "    time.time()\n"
+        "    math.pi\n"
+        "    return x * 2\n"
+    )
+    _run_case(
+        tmp_path,
+        "safe_stdlib_calls",
+        source,
+        "def test_safe_stdlib_calls():\n    assert safe_stdlib_calls(5) == 10\n",
+    )
