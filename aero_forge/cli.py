@@ -251,6 +251,26 @@ def fix(
     help="Auto-detect project structure (src/ and tests/) and build.",
 )
 @click.option(
+    "--project",
+    "project_dir",
+    type=click.Path(file_okay=False, exists=True, path_type=str),
+    default=None,
+    help="Build every public function in a project directory and bundle the result.",
+)
+@click.option(
+    "--upload",
+    "upload_zip",
+    type=click.Path(dir_okay=False, exists=True, path_type=str),
+    default=None,
+    help="Extract a zip archive, build the project, and produce an output zip.",
+)
+@click.option(
+    "--output-zip",
+    type=click.Path(dir_okay=False, path_type=str),
+    default=None,
+    help="Path for the resulting bundled zip (used with --project or --upload).",
+)
+@click.option(
     "--llm-provider",
     default=None,
     help="LLM provider: openai, openrouter, deepseek, gemini, or none.",
@@ -383,6 +403,9 @@ def build(
     blueprint: str,
     auto_file: str | None,
     auto_detect: bool,
+    project_dir: str | None,
+    upload_zip: str | None,
+    output_zip: str | None,
     llm_provider: str | None,
     model: str | None,
     max_iterations: int | None,
@@ -408,6 +431,51 @@ def build(
     """Build all functions described by BLUEPRINT (default: blueprint.aero)."""
     _setup_logging(verbose)
     start = time.perf_counter()
+
+    if project_dir or upload_zip:
+        from .project_builder import ProjectBuilder, build_from_upload
+
+        if upload_zip:
+            result = build_from_upload(
+                Path(upload_zip),
+                output_zip=Path(output_zip) if output_zip else None,
+                llm_provider=llm_provider,
+                model=model,
+                max_workers=workers or jobs or 4,
+                cache_enabled=not no_cache,
+                target=target,
+            )
+        else:
+            builder = ProjectBuilder(
+                Path(project_dir),
+                output_zip=Path(output_zip) if output_zip else None,
+                output_dir=Path(output_dir) if output_dir else None,
+                llm_provider=llm_provider,
+                model=model,
+                max_workers=workers or jobs or 4,
+                cache_enabled=not no_cache,
+                target=target,
+            )
+            result = builder.build()
+
+        elapsed = time.perf_counter() - start
+        result["total_time_seconds"] = round(elapsed, 3)
+
+        if json_output:
+            click.echo(json.dumps(result, default=str))
+        else:
+            click.echo(f"Status: {result['status']}")
+            click.echo(
+                f"Functions compiled: {', '.join(result['functions_compiled']) or 'none'}"
+            )
+            click.echo(f"Tests passed: {result['passed']}/{result['total']}")
+            click.echo(f"Output zip: {result['output_zip']}")
+            if result.get("summary"):
+                click.echo(f"\n{result['summary']}")
+
+        if not result.get("success"):
+            sys.exit(1)
+        return
 
     try:
         if auto_file:
@@ -592,7 +660,22 @@ def build(
     help="Directory where src/generated.py and tests/test_generated.py will be written.",
 )
 @click.option(
+    "--project-dir",
     "--project",
+    "project_dir",
+    type=click.Path(file_okay=False, exists=True, path_type=str),
+    default=None,
+    help="Generate code into an existing project directory and rebuild it.",
+)
+@click.option(
+    "--output-zip",
+    type=click.Path(dir_okay=False, path_type=str),
+    default=None,
+    help="Path for the bundled output zip (used with --project).",
+)
+@click.option(
+    "--project-name",
+    "project_name",
     default="generated_project",
     help="Project name to use in the generated blueprint.",
 )
@@ -702,7 +785,9 @@ def generate(
     prompt_file: str | None,
     constraints: str | None,
     output_dir: str,
-    project: str,
+    project_dir: str | None,
+    output_zip: str | None,
+    project_name: str,
     llm_provider: str | None,
     model: str | None,
     do_build: bool,
@@ -734,15 +819,56 @@ def generate(
         sys.exit(1)
 
     def _progress(message: str) -> None:
-        if stream_progress:
+        if stream_progress or json_output:
             click.echo(
                 json.dumps({"type": "progress", "message": message}, default=str)
             )
-        elif json_output:
-            # NDJSON events are the same for --json; final summary is printed at end.
-            click.echo(
-                json.dumps({"type": "progress", "message": message}, default=str)
+
+    if project_dir:
+        try:
+            from .project_builder import ProjectBuilder
+
+            builder = ProjectBuilder(
+                Path(project_dir),
+                output_zip=Path(output_zip) if output_zip else None,
+                llm_provider=llm_provider,
+                model=model,
+                max_workers=1,
+                cache_enabled=False,
             )
+            result = builder.generate_and_build(
+                prompt,
+                constraints=constraints,
+                prompt_template=prompt_template,
+                output_name="generated",
+            )
+            _progress("Done")
+            elapsed = time.perf_counter() - start
+            result["total_time_seconds"] = round(elapsed, 3)
+
+            if json_output:
+                click.echo(json.dumps(result, default=str))
+            else:
+                click.echo(f"Generated into project: {project_dir}")
+                click.echo(f"Status: {result['status']}")
+                click.echo(
+                    f"Functions compiled: {', '.join(result['functions_compiled']) or 'none'}"
+                )
+                click.echo(f"Tests passed: {result['passed']}/{result['total']}")
+                click.echo(f"Output zip: {result['output_zip']}")
+                if result.get("summary"):
+                    click.echo(f"\n{result['summary']}")
+
+            if not result.get("success"):
+                sys.exit(1)
+            return
+        except Exception as exc:
+            _emit_json_or_text(
+                {"success": False, "error": str(exc), "prompt": prompt},
+                f"Project generation failed: {exc}",
+                json_output=json_output,
+            )
+            sys.exit(1)
 
     try:
         from .generate import generate_and_build
@@ -751,7 +877,7 @@ def generate(
             prompt,
             constraints=constraints,
             output_dir=Path(output_dir),
-            project_name=project,
+            project_name=project_name,
             llm_provider=llm_provider,
             model=model,
             max_iterations=max_iterations,

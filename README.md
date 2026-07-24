@@ -18,6 +18,9 @@ It is designed for numerical, algorithmic, and performance-critical code. The to
 - **Explainable Builds** - Add `--explain` to get the LLM to describe the algorithm choice, complexity, and tradeoffs.
 - **Blueprint Support** - Declarative `.aero` files for multi-function projects with tests, compiler flags, and LLM configuration.
 - **Auto-Discovery** - `aero-forge build --auto-detect` discovers `src/` and `tests/` and compiles everything it understands.
+- **Project Builds & Zip Bundles** - `aero-forge build --project <dir>` compiles every public function in a project directory and produces a downloadable zip with source, compiled libraries, a Python package, and a build manifest.
+- **Zip Uploads** - `aero-forge build --upload project.zip` extracts, builds, and re-bundles an uploaded project.
+- **Project-Aware Generation** - `aero-forge generate --prompt "..." --project <dir>` adds a new function to an existing project and rebuilds the bundle.
 - **Interactive Chat** - Refine prompts conversationally with `aero-forge chat`.
 - **Examples Gallery** - Try pre-built examples and build them with one command.
 - **Multiple LLM Providers** - OpenAI, Gemini, OpenRouter, and DeepSeek are supported.
@@ -173,7 +176,11 @@ After every successful `aero-forge generate --build` or `aero-forge build`, Aero
 |---------|-------------|
 | `aero-forge fix <file> --function <name>` | Transpile and compile a single function. |
 | `aero-forge build [blueprint]` | Build all functions in a blueprint. |
+| `aero-forge build --project <dir>` | Build every public function in a project directory and bundle it as a zip. |
+| `aero-forge build --upload <zip>` | Extract an uploaded project zip, build it, and produce a result zip. |
+| `aero-forge build --output-zip <path>` | Path for the bundled output zip. |
 | `aero-forge generate --prompt "..."` | Generate code from a natural language prompt. |
+| `aero-forge generate --prompt "..." --project <dir>` | Generate a new function into an existing project and rebuild it. |
 | `aero-forge chat` | Start an interactive chat session (`--session-id` to resume). |
 | `aero-forge examples list` | List available example projects. |
 | `aero-forge examples run <name>` | Build an example. |
