@@ -51,7 +51,12 @@ For the Mandelbrot escape-time algorithm, use real and imaginary parts separatel
 Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
-If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b: return []` before accessing `a[0]` or `b[0]`; do not alias `result[i]` to a temporary list, set `result[i][j] = total` directly after the inner loop.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b` before accessing `a[0]` or `b[0]`; do not return a plain `[]`. Instead return a zero matrix with the correct outer dimensions (`[[0] * cols for _ in range(rows)]`). Do not alias `result[i]` to a temporary list; set `result[i][j] = total` directly after the inner loop.
+
+STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
+- Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
+- Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
+- Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
 """,
     "Minimal baseline prompt.",
 )
@@ -86,7 +91,12 @@ For the Mandelbrot escape-time algorithm, use real and imaginary parts separatel
 Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
-If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b: return []` before accessing `a[0]` or `b[0]`; do not alias `result[i]` to a temporary list, set `result[i][j] = total` directly after the inner loop.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b` before accessing `a[0]` or `b[0]`; do not return a plain `[]`. Instead return a zero matrix with the correct outer dimensions (`[[0] * cols for _ in range(rows)]`). Do not alias `result[i]` to a temporary list; set `result[i][j] = total` directly after the inner loop.
+
+STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
+- Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
+- Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
+- Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
 """,
     "Structured rules + output format.",
 )
@@ -112,7 +122,12 @@ For the Mandelbrot escape-time algorithm, use real and imaginary parts separatel
 Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
-If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b: return []` before accessing `a[0]` or `b[0]`; do not alias `result[i]` to a temporary list, set `result[i][j] = total` directly after the inner loop.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b` before accessing `a[0]` or `b[0]`; do not return a plain `[]`. Instead return a zero matrix with the correct outer dimensions (`[[0] * cols for _ in range(rows)]`). Do not alias `result[i]` to a temporary list; set `result[i][j] = total` directly after the inner loop.
+
+STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
+- Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
+- Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
+- Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
 """,
     "Focus on algorithmic efficiency.",
 )
@@ -137,7 +152,12 @@ For the Mandelbrot escape-time algorithm, use real and imaginary parts separatel
 Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
-If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b: return []` before accessing `a[0]` or `b[0]`; do not alias `result[i]` to a temporary list, set `result[i][j] = total` directly after the inner loop.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b` before accessing `a[0]` or `b[0]`; do not return a plain `[]`. Instead return a zero matrix with the correct outer dimensions (`[[0] * cols for _ in range(rows)]`). Do not alias `result[i]` to a temporary list; set `result[i][j] = total` directly after the inner loop.
+
+STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
+- Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
+- Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
+- Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
 """,
     "Focus on low-level performance and SIMD-friendly code.",
 )
@@ -168,7 +188,12 @@ For the Mandelbrot escape-time algorithm, use real and imaginary parts separatel
 Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
-If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b: return []` before accessing `a[0]` or `b[0]`; do not alias `result[i]` to a temporary list, set `result[i][j] = total` directly after the inner loop.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b` before accessing `a[0]` or `b[0]`; do not return a plain `[]`. Instead return a zero matrix with the correct outer dimensions (`[[0] * cols for _ in range(rows)]`). Do not alias `result[i]` to a temporary list; set `result[i][j] = total` directly after the inner loop.
+
+STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
+- Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
+- Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
+- Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
 """,
     "Balanced combination of V2, V3, and V4.",
 )
@@ -191,7 +216,12 @@ For the Mandelbrot escape-time algorithm, use real and imaginary parts separatel
 Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
-If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b: return []` before accessing `a[0]` or `b[0]`; do not alias `result[i]` to a temporary list, set `result[i][j] = total` directly after the inner loop.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b` before accessing `a[0]` or `b[0]`; do not return a plain `[]`. Instead return a zero matrix with the correct outer dimensions (`[[0] * cols for _ in range(rows)]`). Do not alias `result[i]` to a temporary list; set `result[i][j] = total` directly after the inner loop.
+
+STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
+- Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
+- Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
+- Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
 """,
     "Encourage novel algorithm choices.",
 )
@@ -214,7 +244,12 @@ For the Mandelbrot escape-time algorithm, use real and imaginary parts separatel
 Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
-If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b: return []` before accessing `a[0]` or `b[0]`; do not alias `result[i]` to a temporary list, set `result[i][j] = total` directly after the inner loop.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b` before accessing `a[0]` or `b[0]`; do not return a plain `[]`. Instead return a zero matrix with the correct outer dimensions (`[[0] * cols for _ in range(rows)]`). Do not alias `result[i]` to a temporary list; set `result[i][j] = total` directly after the inner loop.
+
+STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
+- Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
+- Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
+- Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
 """,
     "Use only well-known algorithms.",
 )
@@ -238,7 +273,12 @@ For the Mandelbrot escape-time algorithm, use real and imaginary parts separatel
 Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
-If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b: return []` before accessing `a[0]` or `b[0]`; do not alias `result[i]` to a temporary list, set `result[i][j] = total` directly after the inner loop.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b` before accessing `a[0]` or `b[0]`; do not return a plain `[]`. Instead return a zero matrix with the correct outer dimensions (`[[0] * cols for _ in range(rows)]`). Do not alias `result[i]` to a temporary list; set `result[i][j] = total` directly after the inner loop.
+
+STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
+- Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
+- Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
+- Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
 """,
     "Optimizes with iterative feedback.",
 )
@@ -262,7 +302,12 @@ For the Mandelbrot escape-time algorithm, use real and imaginary parts separatel
 Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
 Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
 You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
-If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b: return []` before accessing `a[0]` or `b[0]`; do not alias `result[i]` to a temporary list, set `result[i][j] = total` directly after the inner loop.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b` before accessing `a[0]` or `b[0]`; do not return a plain `[]`. Instead return a zero matrix with the correct outer dimensions (`[[0] * cols for _ in range(rows)]`). Do not alias `result[i]` to a temporary list; set `result[i][j] = total` directly after the inner loop.
+
+STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
+- Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
+- Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
+- Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
 """,
     "Explicitly forbids constructs that are hard for the transpiler to handle.",
 )
@@ -284,7 +329,12 @@ RULES:
 9. All return statements must return the same number of values.
 10. Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays.
 11. You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
-If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b: return []` before accessing `a[0]` or `b[0]`; do not alias `result[i]` to a temporary list, set `result[i][j] = total` directly after the inner loop.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b` before accessing `a[0]` or `b[0]`; do not return a plain `[]`. Instead return a zero matrix with the correct outer dimensions (`[[0] * cols for _ in range(rows)]`). Do not alias `result[i]` to a temporary list; set `result[i][j] = total` directly after the inner loop.
+
+STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
+- Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
+- Do NOT inherit state-machine enums from raw `Enum`; use `IntEnum` from `enum` or a `@dataclass` for structured state data.
+- Do NOT return `[]` from matrix/array functions. On empty input, return a zero-filled structure with the expected target dimensions (e.g. `[[0] * cols for _ in range(rows)]`), never a plain empty list.
 12. The implementation file is named `generated.py`; tests must import with `from generated import function_name`.
 """,
     "Emphasizes algorithmic correctness and transpiler-friendly explicit loops.",

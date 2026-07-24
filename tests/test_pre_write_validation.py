@@ -83,3 +83,67 @@ def test_rust_shield_is_idempotent() -> None:
     report2 = RustSemanticShield().apply(report1.source)
     assert report2.applied == []
     assert report2.source == report1.source
+
+
+def test_bare_dict_annotation_rejected(tmp_path: Path) -> None:
+    validator = PreWriteValidator()
+    (tmp_path / "main.py").write_text(
+        "def evaluate_rule_tree(event: dict) -> int:\n    return 0\n"
+    )
+    with pytest.raises(ValidationError) as exc_info:
+        validator.validate(tmp_path, language="python")
+    assert "dict" in str(exc_info.value).lower()
+
+
+def test_generic_dict_annotation_accepted(tmp_path: Path) -> None:
+    validator = PreWriteValidator()
+    (tmp_path / "main.py").write_text(
+        "from typing import Any\n"
+        "def evaluate_rule_tree(event: dict[str, Any]) -> int:\n    return 0\n"
+    )
+    result = validator.validate(tmp_path, language="python")
+    assert result.succeeded
+
+
+def test_raw_enum_rejected(tmp_path: Path) -> None:
+    validator = PreWriteValidator()
+    (tmp_path / "main.py").write_text(
+        "from enum import Enum\n"
+        "class State(Enum):\n    ON = 1\n"
+    )
+    with pytest.raises(ValidationError) as exc_info:
+        validator.validate(tmp_path, language="python")
+    assert "IntEnum" in str(exc_info.value)
+
+
+def test_intenum_accepted(tmp_path: Path) -> None:
+    validator = PreWriteValidator()
+    (tmp_path / "main.py").write_text(
+        "from enum import IntEnum\n"
+        "class State(IntEnum):\n    ON = 1\n"
+    )
+    result = validator.validate(tmp_path, language="python")
+    assert result.succeeded
+
+
+def test_empty_matrix_return_rejected(tmp_path: Path) -> None:
+    validator = PreWriteValidator()
+    (tmp_path / "main.py").write_text(
+        "def zero_matrix(rows: int, cols: int) -> list[list[int]]:\n"
+        "    return []\n"
+    )
+    with pytest.raises(ValidationError) as exc_info:
+        validator.validate(tmp_path, language="python")
+    assert "zero-filled" in str(exc_info.value).lower()
+
+
+def test_zero_matrix_filled_accepted(tmp_path: Path) -> None:
+    validator = PreWriteValidator()
+    (tmp_path / "main.py").write_text(
+        "def zero_matrix(rows: int, cols: int) -> list[list[int]]:\n"
+        "    if rows == 0 or cols == 0:\n"
+        "        return [[0] * cols for _ in range(rows)]\n"
+        "    return [[0] * cols for _ in range(rows)]\n"
+    )
+    result = validator.validate(tmp_path, language="python")
+    assert result.succeeded
