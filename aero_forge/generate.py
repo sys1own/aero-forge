@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from aero_forge.blueprint import Blueprint, FunctionSpec, discover_functions
 from aero_forge.build_runner import BuildRunner
+from aero_forge.config import ConfigOverride
 from aero_forge.llm.clients import get_llm_client
 from aero_forge.prompts import get_default_template, get_template
 from aero_forge.algorithms import (
@@ -169,9 +170,15 @@ def generate_from_prompt(
     selected_algorithm: Optional[str] = None,
     discover: bool = False,
     explain: bool = False,
+    config_override: Optional[ConfigOverride] = None,
 ) -> str:
     """Call the configured LLM and return the raw generated text."""
-    client = get_llm_client(llm_provider, model=model, max_retries=max_retries)
+    client = get_llm_client(
+        llm_provider,
+        model=model,
+        max_retries=max_retries,
+        config_override=config_override,
+    )
     if client is None:
         raise GenerationError(
             f"LLM provider '{llm_provider}' is not configured or no API key is set"
@@ -190,7 +197,9 @@ def generate_from_prompt(
     if selected_algorithm:
         selected = get_algorithm(selected_algorithm)
     elif algorithm_library:
-        selected = select_algorithm(prompt, llm_provider=llm_provider, model=model)
+        selected = select_algorithm(
+            prompt, llm_provider=llm_provider, model=model, config_override=config_override
+        )
         if selected is None and not discover:
             raise GenerationError(
                 "No library algorithm matched the prompt. Use --discover to "
@@ -309,13 +318,19 @@ def _review_code(
     model: Optional[str],
     max_retries: int,
     prompt_template: Optional[str] = None,
+    config_override: Optional[ConfigOverride] = None,
 ) -> str:
     """Ask the LLM to review and improve generated code.
 
     Returns the corrected implementation. If the LLM is unavailable or the
     response cannot be parsed, the original implementation is returned.
     """
-    client = get_llm_client(llm_provider, model=model, max_retries=max_retries)
+    client = get_llm_client(
+        llm_provider,
+        model=model,
+        max_retries=max_retries,
+        config_override=config_override,
+    )
     if client is None:
         return implementation
 
@@ -463,6 +478,7 @@ def generate_project(
     explain: bool = False,
     review: bool = False,
     progress_callback: Optional[Callable[[str], None]] = None,
+    config_override: Optional[ConfigOverride] = None,
 ) -> GeneratedProject:
     """Generate code from a prompt and write the project files.
 
@@ -481,6 +497,7 @@ def generate_project(
         selected_algorithm=selected_algorithm,
         discover=discover,
         explain=explain,
+        config_override=config_override,
     )
     implementation, tests = parse_generated_response(response)
     implementation = sanitize_generated_code(implementation)
@@ -493,6 +510,7 @@ def generate_project(
             model,
             max_retries,
             prompt_template=prompt_template,
+            config_override=config_override,
         )
         implementation = sanitize_generated_code(implementation)
     explanation = extract_explanation(response) if explain else ""
@@ -526,6 +544,7 @@ def generate_and_build(
     explain: bool = False,
     review: bool = False,
     progress_callback: Optional[Callable[[str], None]] = None,
+    config_override: Optional[ConfigOverride] = None,
 ) -> Dict[str, Any]:
     """Generate code from a prompt and optionally build/optimize it.
 
@@ -549,6 +568,7 @@ def generate_and_build(
             discover=discover,
             explain=explain,
             review=review,
+            config_override=config_override,
         )
         best = select_best_variant(variant_results, output_dir=output_dir)
         best["variants"] = variant_results
@@ -575,6 +595,7 @@ def generate_and_build(
         discover=discover,
         explain=explain,
         review=review,
+        config_override=config_override,
     )
 
     result: Dict[str, Any] = {
@@ -602,6 +623,7 @@ def generate_and_build(
             max_iterations=max_iterations,
             prompt_template=prompt_template,
             progress_callback=progress_callback,
+            config_override=config_override,
         )
         result["build"] = (
             result["iterations"][-1].get("build") if result["iterations"] else None
@@ -623,7 +645,7 @@ def generate_and_build(
         )
         if progress_callback:
             progress_callback("Running tests...")
-        runner = BuildRunner(bp, **build_kwargs)
+        runner = BuildRunner(bp, **build_kwargs, config_override=config_override)
         result["build"] = runner.build()
         if progress_callback:
             build = result["build"] or {}
@@ -644,6 +666,7 @@ def optimize_generated_code(
     max_iterations: int = 5,
     prompt_template: Optional[str] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
+    config_override: Optional[ConfigOverride] = None,
 ) -> List[Dict[str, Any]]:
     """Iteratively compile, benchmark, and optimize generated code.
 
@@ -680,7 +703,12 @@ def optimize_generated_code(
         start = time.perf_counter()
         if progress_callback:
             progress_callback("Compiling optimized version...")
-        runner = BuildRunner(bp, max_workers=1, cache_enabled=False)
+        runner = BuildRunner(
+            bp,
+            max_workers=1,
+            cache_enabled=False,
+            config_override=config_override,
+        )
         build_result = runner.build()
         elapsed = time.perf_counter() - start
 
@@ -704,6 +732,7 @@ def optimize_generated_code(
                 model,
                 max_retries,
                 prompt_template=prompt_template,
+                config_override=config_override,
             )
             if fixed:
                 source_path.write_text(fixed, encoding="utf-8")
@@ -723,6 +752,7 @@ def optimize_generated_code(
                 model,
                 max_retries,
                 prompt_template=prompt_template,
+                config_override=config_override,
             )
             if optimized:
                 source_path.write_text(optimized, encoding="utf-8")
@@ -741,12 +771,18 @@ def _ask_for_optimize(
     model: Optional[str],
     max_retries: int,
     prompt_template: Optional[str] = None,
+    config_override: Optional[ConfigOverride] = None,
 ) -> Optional[str]:
     """Ask the LLM to optimize a working implementation.
 
     Returns the optimized Python source, or None if the request failed.
     """
-    client = get_llm_client(llm_provider, model=model, max_retries=max_retries)
+    client = get_llm_client(
+        llm_provider,
+        model=model,
+        max_retries=max_retries,
+        config_override=config_override,
+    )
     if client is None:
         return None
 
@@ -798,9 +834,15 @@ def _ask_for_fix(
     model: Optional[str],
     max_retries: int,
     prompt_template: Optional[str] = None,
+    config_override: Optional[ConfigOverride] = None,
 ) -> Optional[str]:
     """Ask the LLM to fix compilation errors in the generated implementation."""
-    client = get_llm_client(llm_provider, model=model, max_retries=max_retries)
+    client = get_llm_client(
+        llm_provider,
+        model=model,
+        max_retries=max_retries,
+        config_override=config_override,
+    )
     if client is None:
         return None
 

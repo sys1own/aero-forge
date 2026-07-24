@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from aero_forge.config import ConfigOverride
 from aero_forge.llm.clients import get_llm_client
 
 logger = logging.getLogger("aero_forge.build_summary")
@@ -22,6 +23,8 @@ def format_build_summary(
     llm_provider: Optional[str] = None,
     model: Optional[str] = None,
     max_retries: int = 3,
+    api_key: Optional[str] = None,
+    config_override: Optional[ConfigOverride] = None,
 ) -> str:
     """Return a 2-4 sentence casual summary of a successful build.
 
@@ -64,7 +67,13 @@ def format_build_summary(
         else ""
     )
 
-    client = get_llm_client(llm_provider, model=model, max_retries=max_retries)
+    client = get_llm_client(
+        llm_provider,
+        model=model,
+        max_retries=max_retries,
+        api_key=api_key,
+        config_override=config_override,
+    )
     if client is not None:
         metrics = {
             "function": name_str,

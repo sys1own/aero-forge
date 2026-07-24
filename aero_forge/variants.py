@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
 
 
@@ -26,6 +27,7 @@ def generate_variants(
     discover: bool = False,
     explain: bool = False,
     review: bool = False,
+    config_override: Optional["ConfigOverride"] = None,
 ) -> List[Dict[str, Any]]:
     """Generate and build ``variants`` implementations of ``prompt``.
 
@@ -58,6 +60,7 @@ def generate_variants(
             explain=explain,
             review=review,
             build_kwargs={"max_workers": 1, "cache_enabled": False},
+            config_override=config_override,
         )
         elapsed = time.perf_counter() - start
         result["variant"] = i

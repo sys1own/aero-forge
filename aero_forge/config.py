@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+from contextlib import contextmanager
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 
 def find_config(start: Optional[Path] = None) -> Optional[Path]:
@@ -81,12 +84,45 @@ def get(config: Dict[str, Any], *keys: str, default: Any = None) -> Any:
     return current
 
 
+@dataclass
+class ConfigOverride:
+    """Request-scoped configuration overrides.
+
+    Instances can be passed directly to build/generation tasks or entered as a
+    context manager to make the override thread-local and request-scoped without
+    mutating global environment variables.
+    """
+
+    llm_provider: Optional[str] = None
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+    max_retries: Optional[int] = None
+    cache_enabled: Optional[bool] = None
+    max_iterations: Optional[int] = None
+    compiler_flags: Optional[List[str]] = field(default_factory=list)
+    target: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a uppercase-keyed settings dict suitable for ``resolve_settings``."""
+        result: Dict[str, Any] = {}
+        for key, value in asdict(self).items():
+            if value is None:
+                continue
+            if key == "compiler_flags" and not value:
+                continue
+            result[key.upper()] = value
+        return result
+
+
 DEFAULTS: Dict[str, Any] = {
     "LLM_PROVIDER": "none",
     "MODEL": None,
+    "API_KEY": None,
     "MAX_RETRIES": 3,
     "CACHE_ENABLED": True,
     "MAX_ITERATIONS": 5,
+    "COMPILER_FLAGS": [],
+    "TARGET": None,
 }
 
 
@@ -114,8 +150,35 @@ def _env_int(name: str) -> Optional[int]:
         return None
 
 
+_tls = threading.local()
+
+
+def current_override() -> Optional[ConfigOverride]:
+    """Return the active request-scoped override for this thread, if any."""
+    stack: List[ConfigOverride] = getattr(_tls, "override_stack", [])
+    return stack[-1] if stack else None
+
+
+@contextmanager
+def override(
+    override: Optional[ConfigOverride] = None,
+    **kwargs: Any,
+) -> Generator[ConfigOverride, None, None]:
+    """Push a request-scoped ``ConfigOverride`` for the current thread."""
+    if override is None:
+        override = ConfigOverride(**kwargs)
+    if not hasattr(_tls, "override_stack"):
+        _tls.override_stack = []
+    _tls.override_stack.append(override)
+    try:
+        yield override
+    finally:
+        _tls.override_stack.pop()
+
+
 def resolve_settings(
     file_config: Optional[Dict[str, Any]] = None,
+    override: Optional[ConfigOverride] = None,
     **overrides: Any,
 ) -> Dict[str, Any]:
     """Merge defaults, file config, environment variables, and explicit overrides."""
@@ -149,6 +212,13 @@ def resolve_settings(
     if env_use_llm is False:
         settings["LLM_PROVIDER"] = "none"
 
+    # Request-scoped override (explicit or thread-local)
+    active = override or current_override()
+    if active is not None:
+        for key, value in active.to_dict().items():
+            if value is not None:
+                settings[key] = value
+
     # Explicit overrides (e.g. CLI flags)
     for key, value in overrides.items():
         if value is not None:
@@ -159,8 +229,11 @@ def resolve_settings(
 
 __all__ = [
     "DEFAULTS",
+    "ConfigOverride",
+    "current_override",
     "find_config",
     "get",
     "load_config",
+    "override",
     "resolve_settings",
 ]

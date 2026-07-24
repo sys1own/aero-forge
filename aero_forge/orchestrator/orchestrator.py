@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from aero_forge.cache.fix_cache import FixCache
-from aero_forge.config import load_config, resolve_settings
+from aero_forge.config import ConfigOverride, load_config, resolve_settings
 from aero_forge.errors import (
     UserError,
     check_toolchain,
@@ -72,6 +72,7 @@ class Orchestrator:
         compiler_flags: Optional[List[str]] = None,
         output_dir: Optional[str | Path] = None,
         target: Optional[str] = None,
+        config_override: Optional[ConfigOverride] = None,
     ):
         overrides: Dict[str, Any] = {}
         if max_iterations is not None:
@@ -97,7 +98,7 @@ class Orchestrator:
             overrides["LLM_PROVIDER"] = "none"
 
         file_config = load_config()
-        self.settings = resolve_settings(file_config, **overrides)
+        self.settings = resolve_settings(file_config, override=config_override, **overrides)
 
         self.source_path = Path(source_path)
         self.function_name = function_name
@@ -126,6 +127,7 @@ class Orchestrator:
                 self.settings.get("LLM_PROVIDER"),
                 model=self.settings.get("MODEL"),
                 max_retries=self.settings["MAX_RETRIES"],
+                api_key=self.settings.get("API_KEY"),
             )
             if self.llm_client is None:
                 logger.warning(
