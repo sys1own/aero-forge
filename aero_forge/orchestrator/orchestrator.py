@@ -22,7 +22,13 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
-from aero_forge.blueprint import Blueprint, LLMConfig, write_blueprint
+from aero_forge.blueprint import (
+    Blueprint,
+    ContractEntry,
+    LLMConfig,
+    ManifestEntry,
+    write_blueprint,
+)
 from aero_forge.builder import build_engine, spec_from_python
 from aero_forge.cache.fix_cache import FixCache
 from aero_forge.config import ConfigOverride, load_config, resolve_settings
@@ -927,22 +933,66 @@ def _find_artifact(
 def _infer_architecture(prompt: str) -> str:
     """Classify a prompt into the build architecture family."""
     lowered = prompt.lower()
-    hybrid_markers = ("rust", "pyo3", "maturin", "ffi", "hybrid", "polyglot")
-    is_hybrid = any(marker in lowered for marker in hybrid_markers) and "python" in lowered
-    if is_hybrid:
-        return "hybrid_polyglot"
-    if any(marker in lowered for marker in hybrid_markers):
+    hybrid_markers = {
+        "rust",
+        "cargo",
+        "pyo3",
+        "maturin",
+        "ffi",
+        "native",
+        "hybrid",
+        "polyglot",
+    }
+    python_markers = {"python", "py", "pyo3", "maturin"}
+    has_hybrid_marker = any(marker in lowered for marker in hybrid_markers)
+    has_python_marker = any(marker in lowered for marker in python_markers)
+    if has_hybrid_marker and has_python_marker:
+        return "hybrid_rust_python"
+    if has_hybrid_marker:
         return "pure_rust"
     return "pure_python"
 
 
 def _infer_toolchains(architecture: str) -> List[str]:
     """Return the default toolchains for an architecture."""
-    if architecture == "hybrid_polyglot":
-        return ["python", "rust", "pyo3", "maturin", "cargo"]
+    if architecture == "hybrid_rust_python":
+        return ["python", "cargo"]
     if architecture == "pure_rust":
         return ["rust", "cargo"]
     return ["python"]
+
+
+def _default_manifest(architecture: str, project_name: str) -> List[ManifestEntry]:
+    """Return required workspace files for an architecture."""
+    if architecture != "hybrid_rust_python":
+        return []
+    return [
+        ManifestEntry(
+            path="Cargo.toml",
+            lang="toml",
+            purpose="Rust workspace manifest",
+        ),
+        ManifestEntry(
+            path="src/lib.rs",
+            lang="rust",
+            purpose="Rust/PyO3 core library",
+        ),
+        ManifestEntry(
+            path="pyproject.toml",
+            lang="toml",
+            purpose="Python package and Maturin configuration",
+        ),
+        ManifestEntry(
+            path=f"{project_name}_engine/__init__.py",
+            lang="python",
+            purpose="Python wrapper package",
+        ),
+        ManifestEntry(
+            path=f"{project_name}_engine/core.py",
+            lang="python",
+            purpose="Python wrapper importing the Rust extension",
+        ),
+    ]
 
 
 def _llm_plan_blueprint(
@@ -1046,12 +1096,17 @@ def plan_workspace(
             project=project_name,
             architecture=architecture,
             toolchains=toolchains,
-            manifest=[],
+            manifest=_default_manifest(architecture, project_name),
             contracts=[],
             output_dir=output_dir / "dist",
             llm=LLMConfig(provider=llm_provider or "none", model=model),
             prompt=prompt,
             constraints=constraints,
+        )
+    elif architecture == "hybrid_rust_python" and not blueprint.manifest:
+        # Even if the LLM returned an empty manifest, force required hybrid paths.
+        blueprint = blueprint.model_copy(
+            update={"manifest": _default_manifest(architecture, project_name)}
         )
 
     blueprint_path = output_dir / "blueprint.aero"
