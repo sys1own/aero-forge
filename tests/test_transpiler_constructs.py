@@ -351,3 +351,22 @@ def test_sorted_empty_list_guard(tmp_path: Path) -> None:
         "    assert most_frequent([1, 2, 2, 3]) == 2\n"
         "    assert most_frequent([]) == -1\n",
     )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_tuple_subscript(tmp_path: Path) -> None:
+    source = (
+        "def tuple_first(t: tuple[float, float]) -> float:\n"
+        "    return t[0]\n"
+    )
+    _run_case(
+        tmp_path,
+        "tuple_first",
+        source,
+        "def test_tuple_first():\n"
+        "    assert tuple_first((1.0, 2.0)) == 1.0\n"
+        "    assert tuple_first((3.0, 4.0)) == 3.0\n",
+    )
