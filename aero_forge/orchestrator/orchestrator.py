@@ -51,6 +51,49 @@ from aero_forge.translator import UASTToHINTranslator, python_source_to_uast
 logger = logging.getLogger("aero_forge.orchestrator")
 
 
+def _is_main_guard(stmt: ast.stmt) -> bool:
+    """Return True if ``stmt`` is ``if __name__ == '__main__':`` (any quote style)."""
+    if not isinstance(stmt, ast.If):
+        return False
+    test = stmt.test
+    if not isinstance(test, ast.Compare):
+        return False
+    if not isinstance(test.left, ast.Name) or test.left.id != "__name__":
+        return False
+    if len(test.ops) != 1 or not isinstance(test.ops[0], ast.Eq):
+        return False
+    if len(test.comparators) != 1:
+        return False
+    comparator = test.comparators[0]
+    if isinstance(comparator, ast.Constant) and isinstance(comparator.value, str):
+        return comparator.value == "__main__"
+    # Python < 3.8 compatibility for string literals in AST.
+    if isinstance(comparator, getattr(ast, "Str", ())) and comparator.s == "__main__":
+        return True
+    return False
+
+
+def _strip_main_guard(source: str) -> str:
+    """Remove top-level ``if __name__ == '__main__':`` blocks from source.
+
+    This keeps the transpiler from trying to lower entry-point code that may
+    wrap function definitions or contain unsupported statements.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+    lines = source.splitlines(keepends=True)
+    removed = set()
+    for stmt in tree.body:
+        if _is_main_guard(stmt):
+            for lineno in range(stmt.lineno, getattr(stmt, "end_lineno", stmt.lineno) + 1):
+                removed.add(lineno - 1)
+    if not removed:
+        return source
+    return "".join(line for i, line in enumerate(lines) if i not in removed)
+
+
 class ForgeError(Exception):
     """Raised when the forge loop cannot produce a passing function."""
 
@@ -328,7 +371,9 @@ class Orchestrator:
                 continue
             sizes: Dict[int, int] = {}
             for ret in _returns(node):
-                if ret.value is None:
+                if ret.value is None or (
+                    isinstance(ret.value, ast.Constant) and ret.value.value is None
+                ):
                     continue
                 if isinstance(ret.value, ast.Tuple):
                     size = len(ret.value.elts)
@@ -348,6 +393,9 @@ class Orchestrator:
 
     def _compile_to_native(self, source: str, sandbox_root: Path) -> Path:
         """Transpile ``source`` to Rust, build it, and return the compiled .so path."""
+        # Isolate ``if __name__ == '__main__':`` blocks from function definitions
+        # and the transpiler so entry-point code cannot wrap DSL functions.
+        source = _strip_main_guard(source)
         try:
             tree = ast.parse(source)
         except SyntaxError as exc:

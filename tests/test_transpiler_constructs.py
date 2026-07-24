@@ -634,3 +634,44 @@ def test_list_index_assignment(tmp_path: Path) -> None:
         "def test_bump_first():\n"
         "    assert bump_first([10, 20]) == [11, 20]\n",
     )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_tuple_return_with_none_fallback(tmp_path: Path) -> None:
+    source = (
+        "def pair_or_none(x: int):\n"
+        "    if x > 0:\n"
+        "        return (x, x * 2)\n"
+        "    return None\n"
+    )
+    _run_case(
+        tmp_path,
+        "pair_or_none",
+        source,
+        "def test_pair_or_none():\n"
+        "    assert pair_or_none(3) == (3, 6)\n",
+    )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_main_guard_isolated(tmp_path: Path) -> None:
+    source = (
+        "def hello(n: int) -> int:\n"
+        "    return n + 1\n"
+        "\n"
+        "if __name__ == '__main__':\n"
+        "    print(hello(5))\n"
+    )
+    _run_case(
+        tmp_path,
+        "hello",
+        source,
+        "def test_hello():\n"
+        "    assert hello(3) == 4\n",
+    )

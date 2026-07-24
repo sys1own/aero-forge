@@ -11,7 +11,13 @@ class PromptBuilder:
     def __init__(self, system_message: Optional[str] = None):
         self.system_message = (
             system_message
-            or "You are an expert Python and Rust programmer. Fix the provided function so it compiles and passes its tests. If the code already compiles but tests fail, correct the algorithm based on the test output. Return ONLY the corrected function definition (no markdown fences, no explanation)."
+            or (
+                "You are an expert Python and Rust programmer. Fix the provided function so it compiles and passes its tests. "
+                "If the code already compiles but tests fail, correct the algorithm based on the test output. "
+                "If the failure is an IndexError or any out-of-order execution issue, ensure all lists, tuples, dictionaries, and data structures are fully initialized and populated before any calculation or indexing operation. "
+                "Do not invoke methods or access indices before the structure has been built. "
+                "Return ONLY the corrected function definition (no markdown fences, no explanation)."
+            )
         )
         self.errors: List[str] = []
 

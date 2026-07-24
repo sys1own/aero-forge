@@ -848,9 +848,12 @@ def _ask_for_fix(
 
     system = (
         "You are an expert Python and Rust engineer. The implementation below "
-        "was generated from a user request but failed to compile. Fix only the "
-        "implementation; keep the same function signature and public function "
-        "names. Return the corrected Python code in a single fenced code block."
+        "was generated from a user request but failed to compile or pass tests. "
+        "Fix only the implementation; keep the same function signature and public function "
+        "names. If the error is an IndexError, out-of-bounds access, or any out-of-order "
+        "execution issue, make sure all lists, tuples, dictionaries, and data structures "
+        "are fully initialized and populated before any calculation, indexing, or method call. "
+        "Return the corrected Python code in a single fenced code block."
     )
     user = (
         f"Original request: {prompt}\n"

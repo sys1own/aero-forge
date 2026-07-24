@@ -368,12 +368,15 @@ class RustGenerator:
                     )
                 self._propagate_subscript_types(arg, arg_type, types)
         elif isinstance(stmt, ast.Return):
-            if stmt.value is not None:
-                ret_type = (
-                    self._infer_expr_type(stmt.value, types) or self.function_type
-                )
-                types["__return__"] = self._unify(types.get("__return__"), ret_type)
-                self._propagate_subscript_types(stmt.value, ret_type, types)
+            if stmt.value is None or (
+                isinstance(stmt.value, ast.Constant) and stmt.value.value is None
+            ):
+                return
+            ret_type = (
+                self._infer_expr_type(stmt.value, types) or self.function_type
+            )
+            types["__return__"] = self._unify(types.get("__return__"), ret_type)
+            self._propagate_subscript_types(stmt.value, ret_type, types)
         elif isinstance(stmt, ast.For):
             self._infer_for_types(stmt, types)
 
@@ -644,6 +647,11 @@ class RustGenerator:
         if t1 == "?":
             return t2
         if t2 == "?":
+            return t1
+        # ``()`` is the type of ``None``; it should not override a concrete type.
+        if t1 == "()":
+            return t2
+        if t2 == "()":
             return t1
         if t1.startswith("Vec<") and t2.startswith("Vec<"):
             e1 = _element_type(t1)
@@ -1148,6 +1156,13 @@ class RustGenerator:
     def _return_type(self) -> str:
         """Derive the Rust return type from the function's return statements."""
 
+        def _is_none_value(value: Optional[ast.expr]) -> bool:
+            if value is None:
+                return True
+            if isinstance(value, ast.Constant) and value.value is None:
+                return True
+            return False
+
         def _returns(func: ast.AST) -> List[ast.Return]:
             returns: List[ast.Return] = []
 
@@ -1173,12 +1188,16 @@ class RustGenerator:
         sizes: set[int] = set()
         return_values: List[ast.expr] = []
         for node in _returns(self.func):
-            if node.value is not None:
-                return_values.append(node.value)
-                if isinstance(node.value, ast.Tuple):
-                    sizes.add(len(_elements(node.value)))
-                else:
-                    sizes.add(1)
+            if _is_none_value(node.value):
+                # ``return None`` and bare ``return`` act as the zero value for
+                # the inferred return type; they do not participate in size
+                # or element-type inference.
+                continue
+            return_values.append(node.value)
+            if isinstance(node.value, ast.Tuple):
+                sizes.add(len(_elements(node.value)))
+            else:
+                sizes.add(1)
         if not sizes or sizes == {1}:
             return self.return_type
         if len(sizes) != 1:
