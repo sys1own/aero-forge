@@ -176,3 +176,103 @@ def test_complex_literal_rejected(tmp_path: Path) -> None:
     result = orchestrator.run()
     assert not result["success"]
     assert "Complex numbers are not supported" in result.get("error", "")
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_return_arity_with_empty_list(tmp_path: Path) -> None:
+    source = (
+        "def primes_up_to(n: int) -> list[int]:\n"
+        "    if n < 2:\n"
+        "        return []\n"
+        "    return [2, 3]\n"
+    )
+    _run_case(
+        tmp_path,
+        "primes_up_to",
+        source,
+        "def test_primes_up_to():\n    assert primes_up_to(1) == []\n    assert primes_up_to(5) == [2, 3]\n",
+    )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_subscript_tuple_swap(tmp_path: Path) -> None:
+    source = (
+        "def reverse_in_place(arr: list[int]) -> list[int]:\n"
+        "    i = 0\n"
+        "    j = len(arr) - 1\n"
+        "    while i < j:\n"
+        "        arr[i], arr[j] = arr[j], arr[i]\n"
+        "        i += 1\n"
+        "        j -= 1\n"
+        "    return arr\n"
+    )
+    _run_case(
+        tmp_path,
+        "reverse_in_place",
+        source,
+        "def test_reverse():\n    assert reverse_in_place([1, 2, 3, 4]) == [4, 3, 2, 1]\n",
+    )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_sorted_builtin(tmp_path: Path) -> None:
+    source = (
+        "def median(values: list[float]) -> float:\n"
+        "    s = sorted(values)\n"
+        "    n = len(s)\n"
+        "    if n % 2 == 1:\n"
+        "        return s[n // 2]\n"
+        "    return (s[n // 2 - 1] + s[n // 2]) / 2.0\n"
+    )
+    _run_case(
+        tmp_path,
+        "median",
+        source,
+        "def test_median():\n    assert median([3.0, 1.0, 2.0]) == 2.0\n",
+    )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_int_cast_with_float_math(tmp_path: Path) -> None:
+    source = "def integer_sqrt(n: int) -> int:\n" "    return int(n ** 0.5)\n"
+    _run_case(
+        tmp_path,
+        "integer_sqrt",
+        source,
+        "def test_integer_sqrt():\n    assert integer_sqrt(17) == 4\n",
+    )
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
+def test_list_comprehension_filter_and_step(tmp_path: Path) -> None:
+    source = (
+        "def primes_sieve(n: int) -> list[int]:\n"
+        "    sieve = [True] * (n + 1)\n"
+        "    sieve[0] = sieve[1] = False\n"
+        "    for i in range(2, int(n ** 0.5) + 1):\n"
+        "        if sieve[i]:\n"
+        "            for j in range(i * i, n + 1, i):\n"
+        "                sieve[j] = False\n"
+        "    return [i for i in range(2, n + 1) if sieve[i]]\n"
+    )
+    _run_case(
+        tmp_path,
+        "primes_sieve",
+        source,
+        "def test_primes_sieve():\n    assert primes_sieve(10) == [2, 3, 5, 7]\n",
+    )

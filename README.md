@@ -77,6 +77,12 @@ aero-forge fix src/my_function.py --function my_function
 
 `fix` transpiles the function, compiles it, and runs any matching tests. If compilation fails and an LLM provider is configured, it attempts to heal the code.
 
+```bash
+aero-forge fix src/my_function.py --function my_function --json
+```
+
+With `--json`, `fix` prints a structured result with `status`, `rust_extensions`, `execution_time_ms`, and `error`.
+
 ### 3. Build from a blueprint
 
 Create `blueprint.aero`:
