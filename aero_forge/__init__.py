@@ -10,10 +10,13 @@ from . import (
     scaffold,
     translator,
 )
+from .native_bridge import NativeAccelerator, accelerate
 from .orchestrator.orchestrator import Orchestrator
 from .sandbox.manager import Sandbox
 
 __all__ = [
+    "accelerate",
+    "NativeAccelerator",
     "Orchestrator",
     "Sandbox",
     "config",

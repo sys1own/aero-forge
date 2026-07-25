@@ -26,8 +26,20 @@ from aero_forge.scaffold.pre_write_validator import (
     ValidationError,
     validate_build_outputs,
 )
-from aero_forge.translator import TargetMode
+from aero_forge.translator import TargetMode, python_source_to_uast
 from aero_forge.wasm import build_wasm_module
+
+
+def _function_uast_node(source_text: str, function_name: str) -> Optional[Dict[str, Any]]:
+    """Return the UAST node for *function_name* in *source_text* if it lowers."""
+    try:
+        uast = python_source_to_uast(source_text)
+    except Exception:
+        return None
+    for child in uast.get("children", []):
+        if child.get("type") == "function_declaration" and child.get("name") == function_name:
+            return child
+    return None
 
 logger = logging.getLogger("aero_forge.build")
 
@@ -444,6 +456,35 @@ class BuildRunner:
             except OSError as exc:
                 logger.warning("Cache copy failed for %s: %s", source, exc)
 
+        # Fine-grained UAST node cache: if this exact function node has been
+        # compiled before, avoid running cargo again.
+        uast_node = _function_uast_node(source_text, primary)
+        if uast_node is not None:
+            node_cached = self.cache.get_node(
+                uast_node, primary, flags, target=self.target, target_mode=self.target_mode
+            )
+            if node_cached is not None and node_cached.is_file():
+                try:
+                    so_dest = source_output / node_cached.name
+                    shutil.copy(node_cached, so_dest)
+                    module_name = f"aero_forge_{source.stem}"
+                    self._write_loader(
+                        source_output, node_cached.name, function_names, source.name, module_name
+                    )
+                    _generate_pyi(
+                        source_text, function_names, source_output / f"{source.name}i"
+                    )
+                    return BuildResult(
+                        source=source,
+                        function_names=function_names,
+                        success=True,
+                        artifact=so_dest,
+                        logs="Node cache hit",
+                        iterations=0,
+                    )
+                except OSError as exc:
+                    logger.warning("Node cache copy failed for %s: %s", source, exc)
+
         logger.info(
             "[%s/%s] Compiling %s -> %s",
             list(self._group_by_source(self._expand_specs()).keys()).index(source) + 1,
@@ -492,6 +533,15 @@ class BuildRunner:
                     target=self.target,
                     target_mode=self.target_mode,
                 )
+                if uast_node is not None:
+                    self.cache.put_node(
+                        uast_node,
+                        primary,
+                        artifact,
+                        flags,
+                        target=self.target,
+                        target_mode=self.target_mode,
+                    )
                 artifact_path = source_output / artifact.name
             elif artifact.is_dir():
                 artifact_path = artifact
