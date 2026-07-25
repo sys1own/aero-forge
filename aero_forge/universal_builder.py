@@ -55,7 +55,7 @@ def _build_pure_python(
         model=model,
         max_retries=max_retries,
         max_tokens=max_tokens,
-        build_kwargs={"max_workers": 1, "cache_enabled": False},
+        build_kwargs={"max_workers": 1, "cache_enabled": True},
         config_override=config_override,
     )
     # Ensure the authoritative blueprint carries the language/feature tags.

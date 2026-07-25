@@ -106,6 +106,82 @@ class BuildCache:
         logger.info("Build cache stored for %s", function_name)
         return dest
 
+    def _node_key(
+        self,
+        uast_node: dict,
+        function_name: str,
+        compiler_flags: list,
+        target: Optional[str] = None,
+        target_mode: Optional[str] = None,
+    ) -> str:
+        """Content-addressable hash for a single UAST node."""
+        try:
+            node_bytes = json.dumps(
+                uast_node, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            # Fallback to a simple string hash if the node is not JSON serializable.
+            node_bytes = str(uast_node).encode("utf-8")
+        node_hash = hashlib.sha256(node_bytes).hexdigest()
+        target_token = target or "native"
+        mode_token = target_mode or "pyo3"
+        material = (
+            f"{node_hash}::"
+            f"{function_name}::"
+            f"{','.join(sorted(compiler_flags))}::"
+            f"{self._rustc_version}::"
+            f"{target_token}::"
+            f"{mode_token}"
+        ).encode("utf-8")
+        return hashlib.sha256(material).hexdigest()
+
+    def get_node(
+        self,
+        uast_node: dict,
+        function_name: str,
+        compiler_flags: Optional[List[str]] = None,
+        target: Optional[str] = None,
+        target_mode: Optional[str] = None,
+    ) -> Optional[Path]:
+        """Return a compiled artifact path if the UAST node has been cached."""
+        if not self.enabled:
+            return None
+        key = self._node_key(
+            uast_node, function_name, compiler_flags or [], target, target_mode
+        )
+        artifact_name = self._index.get(key)
+        if not artifact_name:
+            return None
+        artifact_path = self.root / artifact_name
+        if artifact_path.is_file():
+            logger.info("Node cache hit for %s", function_name)
+            return artifact_path
+        self._index.pop(key, None)
+        self._save_index()
+        return None
+
+    def put_node(
+        self,
+        uast_node: dict,
+        function_name: str,
+        artifact: Path,
+        compiler_flags: Optional[List[str]] = None,
+        target: Optional[str] = None,
+        target_mode: Optional[str] = None,
+    ) -> Path:
+        """Store a compiled artifact keyed by a UAST node."""
+        if not self.enabled:
+            return Path(artifact)
+        key = self._node_key(
+            uast_node, function_name, compiler_flags or [], target, target_mode
+        )
+        dest = self.root / f"{key}_{artifact.name}"
+        shutil.copy(artifact, dest)
+        self._index[key] = dest.name
+        self._save_index()
+        logger.info("Node cache stored for %s", function_name)
+        return dest
+
     def clear(self) -> None:
         for child in self.root.iterdir():
             if child.is_file():
