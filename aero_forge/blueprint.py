@@ -29,6 +29,7 @@ class FunctionSpec(BaseModel):
     tests: List[Path] = Field(default_factory=list)
     output_name: Optional[str] = None
     compiler_flags: List[str] = Field(default_factory=list)
+    skip_build: bool = False
 
     @model_validator(mode="after")
     def _resolve(self) -> "FunctionSpec":

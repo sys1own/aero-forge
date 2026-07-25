@@ -36,6 +36,7 @@ from aero_forge.overlay import OverlayManager, ReapplyStatus
 from aero_forge.precision_shield.rust_shield import RustSemanticShield
 from aero_forge.scaffold.active_merge import find_compiled_library, merge_active
 from aero_forge.scaffold.import_pruner import prune_source
+from aero_forge.scaffold.polyglot_materializer import PolyglotMaterializer
 from aero_forge.scaffold.pre_write_validator import (
     BlueprintValidationError,
     PreWriteValidator,
@@ -63,6 +64,7 @@ from aero_forge.orchestrator.prompt_builder import (
 )
 from aero_forge.orchestrator.router import (
     BUILD_INTENT_HYBRID_RUST_PYTHON,
+    BUILD_INTENT_PURE_RUST,
     HIN_COMPUTE,
     classify,
     classify_build_intent,
@@ -1111,6 +1113,13 @@ def plan_workspace(
     blueprint_path = output_dir / "blueprint.aero"
     write_blueprint(blueprint, blueprint_path)
     logger.info("Wrote planning blueprint to %s", blueprint_path)
+
+    if intent in (BUILD_INTENT_HYBRID_RUST_PYTHON, BUILD_INTENT_PURE_RUST):
+        try:
+            blueprint = PolyglotMaterializer(output_dir).materialize(blueprint)
+        except Exception as exc:
+            logger.warning("Polyglot materialization failed: %s", exc)
+
     return blueprint
 
 

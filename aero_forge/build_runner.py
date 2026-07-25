@@ -321,6 +321,9 @@ class BuildRunner:
         """Expand any compile-all specs into individual function specs."""
         expanded: List[FunctionSpec] = []
         for spec in self.blueprint.functions:
+            if spec.skip_build:
+                logger.debug("Skipping build for %s", spec.file)
+                continue
             if spec.compile_all:
                 discovered = discover_functions(spec.file)
                 if not discovered:
