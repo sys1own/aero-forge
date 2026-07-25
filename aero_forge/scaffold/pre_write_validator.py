@@ -661,6 +661,12 @@ class PreWriteValidator:
         lang = language or self.language or "rust"
         workspace = Path(workspace_root)
 
+        # Repair common LLM truncation in Rust/C/C++ sources before validation.
+        if lang in {"rust", "c", "cpp", "c++"}:
+            from aero_forge.scaffold.syntax_guard import repair_workspace
+
+            repair_workspace(workspace)
+
         # Generator-side static analysis runs first so bad patterns are caught
         # before any sandboxed command or filesystem promotion.
         # Enforce the workspace blueprint before any per-file checks.
