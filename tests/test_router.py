@@ -44,11 +44,17 @@ def test_required_manifest_for_hybrid() -> None:
     assert "rust_core/Cargo.toml" in paths
     assert "rust_core/src/lib.rs" in paths
     assert "python_engine/pyproject.toml" in paths
-    assert "python_engine/src/batch_processor/__init__.py" in paths
+    assert "python_engine/src/python_engine/__init__.py" in paths
 
 
-def test_required_manifest_for_pure_python_is_empty() -> None:
-    assert required_manifest_for_intent(BUILD_INTENT_PURE_PYTHON, "foo") == []
+def test_required_manifest_for_pure_python_has_files() -> None:
+    manifest = required_manifest_for_intent(BUILD_INTENT_PURE_PYTHON, "foo")
+    paths = {entry["path"] for entry in manifest}
+    assert "pyproject.toml" in paths
+    assert "src/foo/__init__.py" in paths
+    assert "src/foo/core.py" in paths
+    assert "tests/test_core.py" in paths
+    assert "README.md" in paths
 
 
 def test_required_manifest_for_pure_rust() -> None:

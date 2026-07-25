@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from aero_forge.blueprint_templates import load_all_templates
 from aero_forge.prompts import (
     BLUEPRINT_PLAN_INSTRUCTIONS,
     POLYGLOT_BLUEPRINT_EXAMPLE,
@@ -75,6 +76,9 @@ def build_blueprint_plan_prompt(
     """
     parts = [
         BLUEPRINT_PLAN_INSTRUCTIONS,
+        "",
+        "Reference blueprint.aero templates (use them as structural guides):",
+        load_all_templates(),
         "",
         POLYGLOT_BLUEPRINT_EXAMPLE,
         "",

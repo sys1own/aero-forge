@@ -101,7 +101,7 @@ def test_plan_workspace_detects_hybrid_rust_python(tmp_path: Path) -> None:
     assert "rust_core/Cargo.toml" in paths
     assert "rust_core/src/lib.rs" in paths
     assert "python_engine/pyproject.toml" in paths
-    assert "python_engine/src/aero_test/__init__.py" in paths
+    assert "python_engine/src/python_engine/__init__.py" in paths
 
 
 def test_plan_workspace_rejects_pure_python_for_polyglot_prompt(tmp_path: Path) -> None:
@@ -147,7 +147,7 @@ def test_plan_workspace_detects_batch_processing_polyglot(tmp_path: Path) -> Non
     assert "cargo" in blueprint.toolchains
     paths = {entry.path for entry in blueprint.manifest}
     assert "rust_core/src/lib.rs" in paths
-    assert "python_engine/src/batch_processor/__init__.py" in paths
+    assert "python_engine/src/python_engine/__init__.py" in paths
 
 
 def test_orchestrate_hybrid_rust_python_builds(tmp_path: Path) -> None:

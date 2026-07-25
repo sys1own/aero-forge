@@ -10,11 +10,14 @@ from typing import Any, Dict, List, Optional
 import yaml
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
-from aero_forge.orchestrator.router import (
-    BUILD_INTENT_HYBRID_RUST_PYTHON,
-    BUILD_INTENT_PURE_RUST,
-    classify_build_intent,
-    toolchains_for_intent,
+from aero_forge.orchestrator.stack_classifier import (
+    INTENT_HYBRID_CPP_PYTHON,
+    INTENT_HYBRID_RUST_PYTHON,
+    INTENT_PURE_PYTHON,
+    INTENT_PURE_RUST,
+    classify_stack,
+    default_manifest_for_architecture,
+    suggested_blueprint_template,
 )
 
 logger = logging.getLogger("aero_forge.blueprint")
@@ -85,6 +88,8 @@ class Blueprint(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     prompt: Optional[str] = None
     constraints: Optional[str] = None
+    languages: List[str] = Field(default_factory=list)
+    features: List[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_files(self) -> "Blueprint":
@@ -294,12 +299,13 @@ def generate_blueprint(
     ``c++``) so multi-language requests are not silently downgraded to
     ``pure_python``.
     """
-    intent = classify_build_intent(prompt or "")
-    toolchains = toolchains_for_intent(intent)
+    classification = classify_stack(prompt or "")
+    intent = classification.architecture
+    toolchains = classification.toolchains or ["python"]
     # For a single generated project, emit a minimal Rust/PyO3 crate manifest.
     # The full monorepo layout (rust_core/, python_engine/) is added later by
-    # the monorepo packager.
-    if intent in (BUILD_INTENT_HYBRID_RUST_PYTHON, BUILD_INTENT_PURE_RUST):
+    # the monorepo packager / plan_workspace.
+    if intent in (INTENT_HYBRID_RUST_PYTHON, INTENT_PURE_RUST):
         manifest_entries = [
             ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust crate manifest"),
             ManifestEntry(path="src/lib.rs", lang="rust", purpose="Rust core library"),
@@ -317,6 +323,8 @@ def generate_blueprint(
         llm=LLMConfig(provider="none"),
         prompt=prompt,
         constraints=constraints,
+        languages=classification.languages,
+        features=classification.features,
     )
 
 

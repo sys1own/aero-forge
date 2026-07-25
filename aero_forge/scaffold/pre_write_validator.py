@@ -95,7 +95,8 @@ def validate_blueprint_intent(prompt: str, blueprint: Any) -> None:
             f"Prompt requests a hybrid Rust/Python build, but blueprint architecture is {architecture!r}",
             output="Set architecture to a hybrid/polyglot value such as 'hybrid_rust_python'.",
         )
-    if "python" not in toolchains or "rust" not in toolchains:
+    has_rust = "rust" in toolchains or "cargo" in toolchains
+    if "python" not in toolchains or not has_rust:
         raise BlueprintValidationError(
             f"Prompt requests a hybrid Rust/Python build, but toolchains {toolchains!r} are missing 'python' or 'rust'",
             output="Include both 'python' and 'rust' (or 'cargo') in toolchains.",
@@ -526,8 +527,10 @@ def validate_build_outputs(
 ) -> None:
     """Fail the build pass if the output workspace contains zero artifacts.
 
-    When a ``blueprint`` is supplied, also verify that every file declared in
-    ``blueprint.manifest`` exists under ``output_dir``.
+    Build artifacts are files produced by the compilation step (``.so``, ``.dll``,
+    ``.dylib``, ``.rlib``, ``.wasm``, ``.exe``, etc.).  Source files declared in
+    ``blueprint.manifest`` are validated separately by
+    ``validate_blueprint_manifest`` against the workspace root.
     """
     output = Path(output_dir)
     files = [p for p in output.rglob("*") if p.is_file()]
@@ -537,21 +540,40 @@ def validate_build_outputs(
             output="",
         )
 
+    artifact_extensions = {".so", ".dll", ".dylib", ".rlib", ".a", ".wasm", ".exe"}
     if blueprint is not None:
         manifest = getattr(blueprint, "manifest", None) or []
-        missing: List[str] = []
+        missing_artifacts: List[str] = []
         for entry in manifest:
             path = getattr(entry, "path", None)
             if not path:
                 continue
+            # Only validate manifest entries that are declared build artifacts.
+            if Path(path).suffix not in artifact_extensions:
+                continue
             candidate = output / path
             if not candidate.is_file():
-                missing.append(str(path))
-        if missing:
+                missing_artifacts.append(str(path))
+        if missing_artifacts:
             raise BuildOutputError(
-                f"Missing declared build artifact {missing[0]} from blueprint.aero",
-                output=f"Missing build artifacts: {', '.join(missing)}",
+                f"Missing declared build artifact {missing_artifacts[0]} from blueprint.aero",
+                output=f"Missing build artifacts: {', '.join(missing_artifacts)}",
             )
+
+        toolchains = getattr(blueprint, "toolchains", []) or []
+        native_toolchains = {"rust", "cargo", "cpp", "cmake", "go", "npm"}
+        if any(t in native_toolchains for t in toolchains):
+            has_native_artifact = any(
+                f.suffix in artifact_extensions for f in files
+            ) or any(
+                f.is_dir() and any(g.suffix in artifact_extensions for g in f.rglob("*"))
+                for f in output.iterdir()
+            )
+            if not has_native_artifact:
+                raise BuildOutputError(
+                    "Build output directory contains no compiled native artifacts",
+                    output=f"Files in {output}: {', '.join(str(f.name) for f in files[:10])}",
+                )
 
 
 class PreWriteValidator:

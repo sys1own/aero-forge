@@ -36,7 +36,6 @@ from aero_forge.overlay import OverlayManager, ReapplyStatus
 from aero_forge.precision_shield.rust_shield import RustSemanticShield
 from aero_forge.scaffold.active_merge import find_compiled_library, merge_active
 from aero_forge.scaffold.import_pruner import prune_source
-from aero_forge.scaffold.polyglot_materializer import PolyglotMaterializer
 from aero_forge.scaffold.pre_write_validator import (
     BlueprintValidationError,
     PreWriteValidator,
@@ -71,6 +70,7 @@ from aero_forge.orchestrator.router import (
     required_manifest_for_intent,
     toolchains_for_intent,
 )
+from aero_forge.orchestrator.stack_classifier import classify_stack as classify_build_stack
 from aero_forge.precision_shield.shield import Shield
 from aero_forge.sandbox.manager import Sandbox, ensure_cargo_in_path
 from aero_forge.scaffold.engine import (
@@ -1048,8 +1048,9 @@ def plan_workspace(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    intent = classify_build_intent(prompt)
-    toolchains = toolchains_for_intent(intent)
+    classification = classify_build_stack(prompt)
+    intent = classification.architecture
+    toolchains = classification.toolchains or toolchains_for_intent(intent)
     manifest_entries = [
         ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
         for e in required_manifest_for_intent(intent, project_name)
@@ -1105,20 +1106,29 @@ def plan_workspace(
             llm=LLMConfig(provider=llm_provider or "none", model=model),
             prompt=prompt,
             constraints=constraints,
+            languages=classification.languages,
+            features=classification.features,
         )
-    elif intent == BUILD_INTENT_HYBRID_RUST_PYTHON and not blueprint.manifest:
-        # Even if the LLM returned an empty manifest, force required hybrid paths.
-        blueprint = blueprint.model_copy(update={"manifest": manifest_entries})
+    else:
+        # Ensure the LLM blueprint carries the inferred language/feature tags and
+        # does not silently downgrade the manifest for a hybrid request.
+        update: Dict[str, Any] = {}
+        if not blueprint.languages:
+            update["languages"] = classification.languages
+        if not blueprint.features:
+            update["features"] = classification.features
+        if intent == BUILD_INTENT_HYBRID_RUST_PYTHON and not blueprint.manifest:
+            update["manifest"] = manifest_entries
+        if update:
+            blueprint = blueprint.model_copy(update=update)
 
     blueprint_path = output_dir / "blueprint.aero"
     write_blueprint(blueprint, blueprint_path)
     logger.info("Wrote planning blueprint to %s", blueprint_path)
 
-    if intent in (BUILD_INTENT_HYBRID_RUST_PYTHON, BUILD_INTENT_PURE_RUST):
-        try:
-            blueprint = PolyglotMaterializer(output_dir).materialize(blueprint)
-        except Exception as exc:
-            logger.warning("Polyglot materialization failed: %s", exc)
+    # Pass 2 (materialization) is intentionally separate from Pass 1.  Callers
+    # such as ``generate_monorepo`` or ``BlueprintMaterializer`` consume the
+    # emitted ``blueprint.aero`` and physically emit/compile the workspace.
 
     return blueprint
 
