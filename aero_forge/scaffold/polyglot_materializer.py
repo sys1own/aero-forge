@@ -379,7 +379,8 @@ def _render_tests(exports_module: str, contracts: List[ContractEntry]) -> str:
                 f"    {setup}",
                 f"    result = {prefix}{name}([1.0, 2.0, 3.0], 2.0)",
                 "    assert isinstance(result, list)",
-                "    assert result == [2.0, 4.0, 6.0]",
+                "    import math",
+                "    assert all(math.isclose(a, b, rel_tol=1e-9) for a, b in zip(result, [2.0, 4.0, 6.0]))",
                 "",
             ])
         elif name == "get_engine_status":

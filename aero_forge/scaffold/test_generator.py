@@ -3,7 +3,56 @@
 from __future__ import annotations
 
 import ast
-from typing import Any, List, Optional, Tuple
+import math
+from typing import Any, Dict, List, Optional, Tuple
+
+
+# Names that suggest a function operates on statistical / aggregated data.
+_STATISTICAL_HINTS = {
+    "anomaly",
+    "anomalies",
+    "detect",
+    "z_score",
+    "zscore",
+    "stat",
+    "stats",
+    "statistics",
+    "metric",
+    "metrics",
+    "aggregate",
+    "aggregation",
+    "mean",
+    "std",
+    "stddev",
+    "variance",
+    "deviation",
+    "outlier",
+    "outliers",
+}
+
+# Dict keys that hold integer counts (do not compare with exact magic numbers).
+_COUNT_KEYS = {
+    "anomalies",
+    "count",
+    "total",
+    "num",
+    "flags",
+}
+
+# Dict keys that hold floating-point statistical results.
+_FLOAT_KEYS = {
+    "mean",
+    "std",
+    "stddev",
+    "variance",
+    "z_score",
+    "zscore",
+    "peak",
+    "max",
+    "min",
+    "sum",
+    "value",
+}
 
 
 def _base_name(node: ast.AST) -> str:
@@ -148,6 +197,148 @@ def _type_name(node: Optional[ast.AST]) -> str:
     return ""
 
 
+def _inner_type_name(node: Optional[ast.AST]) -> str:
+    """Return the element type name for list/tuple subscripts."""
+    if node is None:
+        return ""
+    if isinstance(node, ast.Subscript):
+        args = _type_args(node.slice)
+        if args:
+            return _type_name(args[0])
+    return ""
+
+
+def _is_statistical(name: str, returns: Optional[ast.AST]) -> bool:
+    """Heuristic: does this function look like a statistical/anomaly aggregator?"""
+    lowered = name.lower()
+    if any(hint in lowered for hint in _STATISTICAL_HINTS):
+        return True
+    return_type = _type_name(returns)
+    if return_type in {"dict", "mapping"}:
+        return True
+    if return_type in {"tuple"}:
+        inner = _inner_type_name(returns)
+        if inner in {"float", "f64", "f32"}:
+            return True
+    return False
+
+
+def _return_dict_keys(func: ast.FunctionDef) -> List[str]:
+    """Extract string keys from literal ``return {...}`` statements in *func*."""
+    keys: List[str] = []
+    for node in ast.walk(func):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict):
+            for key in node.value.keys:
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    keys.append(key.value)
+                elif isinstance(key, ast.Str):  # pragma: no cover  # Python < 3.8
+                    keys.append(key.s)
+    return keys
+
+
+def _statistical_fixture(arg_name: str, arg_type: str, inner: str) -> Optional[str]:
+    """Return an outlier-rich fixture literal for a statistical argument, or None."""
+    lowered = arg_name.lower()
+    type_lower = arg_type.lower()
+    if "threshold" in lowered and type_lower in {"float", "f64", "f32"}:
+        return "3.0"
+    if "window" in lowered or "capacity" in lowered or "size" in lowered:
+        if type_lower in {"int", "i64", "i32"}:
+            return "100"
+    if type_lower in {"list", "sequence"}:
+        if inner in {"float", "f64", "f32"}:
+            # 100 normal values plus one >10-sigma outlier so Z > 3.0 is guaranteed.
+            if "data" in lowered or "values" in lowered or "samples" in lowered or "metrics" in lowered:
+                return "[1.0] * 100 + [10000.0]"
+            return "[1.0, 2.0, 3.0, 10000.0]"
+        if inner in {"int", "i64", "i32"}:
+            if "data" in lowered or "values" in lowered or "samples" in lowered or "metrics" in lowered:
+                return "[1] * 100 + [10000]"
+            return "[1, 2, 3, 10000]"
+    return None
+
+
+def _dict_key_assertions(keys: List[str], has_outlier_fixture: bool) -> List[str]:
+    """Generate tolerant assertions for each known key in a returned dict."""
+    if not keys:
+        return ["    assert isinstance(result, dict)"]
+
+    lines = ["    assert isinstance(result, dict)"]
+    for key in keys:
+        lowered = key.lower()
+        if lowered in _COUNT_KEYS:
+            if lowered == "anomalies" and has_outlier_fixture:
+                lines.append(
+                    f'    assert isinstance(result["{key}"], int) and result["{key}"] >= 1'
+                )
+            else:
+                lines.append(
+                    f'    assert isinstance(result["{key}"], int) and result["{key}"] >= 0'
+                )
+        elif lowered in _FLOAT_KEYS:
+            lines.append(
+                f'    assert isinstance(result["{key}"], float) and math.isfinite(result["{key}"])'
+            )
+        else:
+            lines.append(f'    assert "{key}" in result')
+    return lines
+
+
+def _parity_check(value_expr: str, value_type: str) -> str:
+    """Return an assertion that compares two deterministic calls of the same function."""
+    if value_type in {"float", "f64", "f32"}:
+        return f"    assert math.isclose({value_expr}, result2, rel_tol=1e-9)"
+    if value_type in {"int", "i64", "i32"}:
+        return f"    assert {value_expr} == result2"
+    if value_type in {"list", "sequence"}:
+        return f"    assert len({value_expr}) == len(result2) and all(math.isclose(a, b, rel_tol=1e-9) for a, b in zip({value_expr}, result2))"
+    if value_type in {"dict", "mapping"}:
+        return (
+            f"    assert {value_expr}.keys() == result2.keys()\n"
+            f"    for _k in {value_expr}:\n"
+            f"        _v1, _v2 = {value_expr}[_k], result2[_k]\n"
+            f"        if isinstance(_v1, float):\n"
+            f"            assert math.isclose(_v1, _v2, rel_tol=1e-9)\n"
+            f"        else:\n"
+            f"            assert _v1 == _v2"
+        )
+    if value_type in {"tuple"}:
+        return f"    assert all(math.isclose(a, b, rel_tol=1e-9) for a, b in zip({value_expr}, result2))"
+    return f"    assert {value_expr} == result2"
+
+
+def _statistical_assertion(call: str, returns: Optional[ast.AST], func: ast.FunctionDef, has_outlier_fixture: bool) -> str:
+    """Generate a robust, parity-aware assertion block for a statistical function."""
+    return_type = _type_name(returns)
+    lines: List[str] = [f"    result = {call}"]
+
+    if return_type == "dict":
+        keys = _return_dict_keys(func)
+        lines.extend(_dict_key_assertions(keys, has_outlier_fixture))
+        # Add deterministic parity check with a second invocation.
+        lines.append(f"    result2 = {call}")
+        lines.append(_parity_check("result", return_type))
+    elif return_type == "tuple":
+        lines.append("    assert isinstance(result, tuple)")
+        lines.append(f"    result2 = {call}")
+        lines.append(_parity_check("result", return_type))
+    elif return_type in {"float", "int"}:
+        if return_type == "float":
+            lines.append("    assert isinstance(result, float) and math.isfinite(result)")
+        else:
+            lines.append("    assert isinstance(result, int)")
+        lines.append(f"    result2 = {call}")
+        lines.append(_parity_check("result", return_type))
+    elif return_type in {"list", "sequence"}:
+        lines.append("    assert isinstance(result, list)")
+        lines.append(f"    result2 = {call}")
+        lines.append(_parity_check("result", return_type))
+    else:
+        lines.append("    assert result is not None")
+
+    return "\n".join(lines)
+
+
 def _assertion_for_call(call: str, returns: Optional[ast.AST]) -> str:
     """Return a pytest assertion body for a function call."""
     name = _type_name(returns)
@@ -177,7 +368,9 @@ def generate_smoke_tests(implementation: str, module_name: str = "generated") ->
 
     Uses AST inspection of parameter annotations so synthesized test arguments
     match declared types (``str`` gets a string, ``list`` gets a list, etc.).
-    Integer fallbacks are never used for ``str`` or ``list`` parameters.
+    For statistical / anomaly-detection functions, the generated tests use
+    outlier-rich fixtures, soft ``math.isclose`` assertions, and deterministic
+    parity checks instead of fragile exact scalar comparisons.
     """
     try:
         tree = ast.parse(implementation)
@@ -192,14 +385,30 @@ def generate_smoke_tests(implementation: str, module_name: str = "generated") ->
         if name.startswith("_"):
             continue
 
-        args: List[str] = []
+        statistical = _is_statistical(name, item.returns)
+        arg_info: List[Tuple[str, str, str]] = []
+        arg_values: List[str] = []
+        has_outlier_fixture = False
+
         for arg in item.args.args + item.args.posonlyargs + item.args.kwonlyargs:
             if arg.arg in {"self", "cls"}:
                 continue
-            args.append(_value_for_annotation(arg.annotation))
+            arg_type = _type_name(arg.annotation)
+            inner = _inner_type_name(arg.annotation)
+            if statistical:
+                fixture = _statistical_fixture(arg.arg, arg_type, inner)
+                if fixture is not None:
+                    if "10000.0" in fixture or "10000]" in fixture:
+                        has_outlier_fixture = True
+                    arg_values.append(fixture)
+                    continue
+            arg_values.append(_value_for_annotation(arg.annotation))
 
-        call = f"{name}({', '.join(args)})"
-        assertion = _assertion_for_call(call, item.returns)
+        call = f"{name}({', '.join(arg_values)})"
+        if statistical:
+            assertion = _statistical_assertion(call, item.returns, item, has_outlier_fixture)
+        else:
+            assertion = _assertion_for_call(call, item.returns)
         test_lines.append(f"def test_{name}():\n{assertion}\n")
 
     if not test_lines:
@@ -210,5 +419,6 @@ def generate_smoke_tests(implementation: str, module_name: str = "generated") ->
         for item in tree.body
         if isinstance(item, ast.FunctionDef) and not item.name.startswith("_")
     )
-    imports = "\n".join(f"from {module_name} import {n}" for n in all_names)
-    return imports + "\n\n" + "\n".join(test_lines)
+    imports = ["import math", ""]
+    imports.extend(f"from {module_name} import {n}" for n in all_names)
+    return "\n".join(imports) + "\n\n" + "\n".join(test_lines)
