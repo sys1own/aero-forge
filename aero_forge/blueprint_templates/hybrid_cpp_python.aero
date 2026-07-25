@@ -1,0 +1,44 @@
+project: hybrid_cpp_python_project
+architecture: hybrid_cpp_python
+toolchains:
+  - python
+  - cpp
+  - cmake
+  - setuptools
+manifest:
+  - path: CMakeLists.txt
+    lang: cmake
+    purpose: CMake build for the C++ extension module
+  - path: src/cpp_core/<project>.cpp
+    lang: cpp
+    purpose: C++ extension implementation
+  - path: src/cpp_core/<project>.h
+    lang: cpp
+    purpose: C++ header
+  - path: pyproject.toml
+    lang: toml
+    purpose: Python package manifest with scikit-build
+  - path: src/<project>/__init__.py
+    lang: python
+    purpose: Python package exports
+  - path: src/<project>/core.py
+    lang: python
+    purpose: Python wrapper importing the C++ extension
+  - path: tests/test_core.py
+    lang: python
+    purpose: pytest tests
+  - path: README.md
+    lang: markdown
+    purpose: Project README
+contracts:
+  - name: <main_function>
+    signature: "def <main_function>(x: list[float]) -> list[float]"
+    language: python/cpp
+    python_name: <project>.core.<main_function>
+    purpose: C++/Python extension entry point
+output_dir: dist
+prompt: "Build a Python-C++ hybrid extension with pybind11."
+constraints: "Use setuptools or scikit-build and expose the primary function."
+llm:
+  provider: none
+  model: null

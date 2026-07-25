@@ -1,0 +1,32 @@
+project: pure_python_project
+architecture: pure_python
+toolchains:
+  - python
+manifest:
+  - path: pyproject.toml
+    lang: toml
+    purpose: Python package manifest
+  - path: src/<project>/__init__.py
+    lang: python
+    purpose: Package exports
+  - path: src/<project>/core.py
+    lang: python
+    purpose: Pure Python implementation
+  - path: tests/test_core.py
+    lang: python
+    purpose: pytest tests
+  - path: README.md
+    lang: markdown
+    purpose: Project README
+contracts:
+  - name: <main_function>
+    signature: "def <main_function>(x: list[float]) -> list[float]"
+    language: python
+    python_name: <project>.core.<main_function>
+    purpose: Primary computational entry point
+output_dir: dist
+prompt: "Implement a pure Python numeric module."
+constraints: "Use explicit type hints and pytest tests."
+llm:
+  provider: none
+  model: null

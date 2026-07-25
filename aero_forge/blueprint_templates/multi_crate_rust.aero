@@ -1,0 +1,36 @@
+project: multi_crate_rust_project
+architecture: pure_rust
+toolchains:
+  - rust
+  - cargo
+manifest:
+  - path: Cargo.toml
+    lang: toml
+    purpose: Rust workspace manifest referencing all crates
+  - path: crates/core/Cargo.toml
+    lang: toml
+    purpose: Core numeric crate
+  - path: crates/core/src/lib.rs
+    lang: rust
+    purpose: Core Rust library
+  - path: crates/cli/Cargo.toml
+    lang: toml
+    purpose: CLI crate manifest
+  - path: crates/cli/src/main.rs
+    lang: rust
+    purpose: CLI entry point
+  - path: README.md
+    lang: markdown
+    purpose: Project README
+contracts:
+  - name: <main_function>
+    signature: "pub fn <main_function>(x: Vec<f64>) -> Vec<f64>"
+    language: rust
+    python_name: ""
+    purpose: Core library function
+output_dir: dist
+prompt: "Build a multi-crate Rust workspace with a core library and CLI."
+constraints: "Use a Cargo workspace and expose the primary function from the core crate."
+llm:
+  provider: none
+  model: null

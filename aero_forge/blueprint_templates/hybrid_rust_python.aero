@@ -1,0 +1,49 @@
+project: hybrid_rust_python_project
+architecture: hybrid_rust_python
+toolchains:
+  - python
+  - rust
+  - cargo
+manifest:
+  - path: Cargo.toml
+    lang: toml
+    purpose: Rust workspace manifest
+  - path: rust_core/Cargo.toml
+    lang: toml
+    purpose: PyO3 crate manifest
+  - path: rust_core/src/lib.rs
+    lang: rust
+    purpose: Rust native core exposing the primary function
+  - path: python_engine/pyproject.toml
+    lang: toml
+    purpose: Python package and Maturin configuration
+  - path: python_engine/src/<project>/__init__.py
+    lang: python
+    purpose: Python driver package exports
+  - path: python_engine/src/<project>/core.py
+    lang: python
+    purpose: Python wrapper importing rust_core
+  - path: python_engine/tests/test_core.py
+    lang: python
+    purpose: pytest tests
+  - path: python_engine/bench.py
+    lang: python
+    purpose: Benchmark script
+  - path: python_engine/service.py
+    lang: python
+    purpose: Async HTTP service example
+  - path: README.md
+    lang: markdown
+    purpose: Project README
+contracts:
+  - name: <main_function>
+    signature: "def <main_function>(x: list[float]) -> list[float]"
+    language: python/rust
+    python_name: <project>.core.<main_function>
+    purpose: Native/PyO3 exported core function
+output_dir: dist
+prompt: "Build a Python-Rust hybrid workspace using PyO3 and Maturin."
+constraints: "Expose the primary function via PyO3 with Python wrappers and pytest tests."
+llm:
+  provider: none
+  model: null

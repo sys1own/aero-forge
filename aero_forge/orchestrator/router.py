@@ -624,41 +624,33 @@ def classify(source: str, function_names: Optional[List[str]] = None) -> Dict[st
 
 # ---- build architecture / intent classification ----
 
-BUILD_INTENT_PURE_PYTHON = "pure_python"
-BUILD_INTENT_PURE_RUST = "pure_rust"
-BUILD_INTENT_HYBRID_RUST_PYTHON = "hybrid_rust_python"
+from aero_forge.orchestrator.stack_classifier import (
+    INTENT_HYBRID_CPP_PYTHON,
+    INTENT_HYBRID_RUST_PYTHON,
+    INTENT_PURE_PYTHON,
+    INTENT_PURE_RUST,
+    classify_stack,
+    default_manifest_for_architecture,
+    suggested_blueprint_template,
+)
+
+BUILD_INTENT_PURE_PYTHON = INTENT_PURE_PYTHON
+BUILD_INTENT_PURE_RUST = INTENT_PURE_RUST
+BUILD_INTENT_HYBRID_RUST_PYTHON = INTENT_HYBRID_RUST_PYTHON
+BUILD_INTENT_HYBRID_CPP_PYTHON = INTENT_HYBRID_CPP_PYTHON
 
 
 def classify_build_intent(prompt: str) -> str:
     """Classify the high-level build architecture requested by the user prompt."""
-    lowered = prompt.lower().replace("-", " ").replace("_", " ")
-    rust_markers = {
-        "rust",
-        "cargo",
-        "pyo3",
-        "maturin",
-        "ffi",
-        "native core",
-        "native",
-    }
-    python_markers = {"python", "py"}
-    hybrid_markers = {"polyglot", "hybrid", "multi language"}
-    has_rust = any(marker in lowered for marker in rust_markers)
-    has_python = any(marker in lowered for marker in python_markers)
-    has_hybrid = any(marker in lowered for marker in hybrid_markers)
-    if (has_rust and has_python) or (has_hybrid and (has_rust or has_python)):
-        return BUILD_INTENT_HYBRID_RUST_PYTHON
-    if has_rust:
-        return BUILD_INTENT_PURE_RUST
-    return BUILD_INTENT_PURE_PYTHON
+    return classify_stack(prompt).architecture
 
 
 def toolchains_for_intent(intent: str) -> List[str]:
     """Return the toolchains associated with a build intent."""
     if intent == BUILD_INTENT_HYBRID_RUST_PYTHON:
-        # Include the Rust language and the Cargo build tool so validators can
-        # check for either convention.
         return ["python", "rust", "cargo"]
+    if intent == BUILD_INTENT_HYBRID_CPP_PYTHON:
+        return ["python", "cpp", "cmake", "setuptools"]
     if intent == BUILD_INTENT_PURE_RUST:
         return ["rust", "cargo"]
     return ["python"]
@@ -675,25 +667,8 @@ def _sanitize_project_name(name: str) -> str:
 
 def required_manifest_for_intent(intent: str, project_name: str) -> List[Dict[str, str]]:
     """Return required workspace files for the requested architecture."""
-    if intent == BUILD_INTENT_HYBRID_RUST_PYTHON:
-        pkg = _sanitize_project_name(project_name)
-        return [
-            {"path": "Cargo.toml", "lang": "toml", "purpose": "Rust workspace manifest"},
-            {"path": "rust_core/Cargo.toml", "lang": "toml", "purpose": "PyO3 crate manifest"},
-            {"path": "rust_core/src/lib.rs", "lang": "rust", "purpose": "Rust native core"},
-            {"path": "python_engine/pyproject.toml", "lang": "toml", "purpose": "Python package and Maturin configuration"},
-            {"path": f"python_engine/src/{pkg}/__init__.py", "lang": "python", "purpose": "Python driver package"},
-            {"path": f"python_engine/src/{pkg}/core.py", "lang": "python", "purpose": "Python wrapper importing rust_core"},
-            {"path": "python_engine/tests/test_core.py", "lang": "python", "purpose": "pytest tests"},
-            {"path": "README.md", "lang": "markdown", "purpose": "Project README"},
-        ]
-    if intent == BUILD_INTENT_PURE_RUST:
-        return [
-            {"path": "Cargo.toml", "lang": "toml", "purpose": "Rust workspace manifest"},
-            {"path": "src/lib.rs", "lang": "rust", "purpose": "Rust core library"},
-            {"path": "README.md", "lang": "markdown", "purpose": "Project README"},
-        ]
-    return []
+    main = "compute"
+    return default_manifest_for_architecture(intent, project_name, main)
 
 
 __all__ = [
@@ -706,5 +681,6 @@ __all__ = [
     "BUILD_INTENT_PURE_PYTHON",
     "BUILD_INTENT_PURE_RUST",
     "BUILD_INTENT_HYBRID_RUST_PYTHON",
+    "BUILD_INTENT_HYBRID_CPP_PYTHON",
     "CodeRouteClassifier",
 ]

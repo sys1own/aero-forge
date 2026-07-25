@@ -1,0 +1,30 @@
+project: pure_rust_project
+architecture: pure_rust
+toolchains:
+  - rust
+  - cargo
+manifest:
+  - path: Cargo.toml
+    lang: toml
+    purpose: Rust crate manifest
+  - path: src/lib.rs
+    lang: rust
+    purpose: Rust core library
+  - path: tests/test_lib.rs
+    lang: rust
+    purpose: Cargo test module
+  - path: README.md
+    lang: markdown
+    purpose: Project README
+contracts:
+  - name: <main_function>
+    signature: "pub fn <main_function>(x: Vec<f64>) -> Vec<f64>"
+    language: rust
+    python_name: ""
+    purpose: Primary Rust entry point
+output_dir: dist
+prompt: "Implement a pure Rust numeric library."
+constraints: "Use f64 types and cargo tests."
+llm:
+  provider: none
+  model: null

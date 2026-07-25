@@ -399,6 +399,7 @@ project, architecture, toolchains, manifest, contracts, output_dir, prompt, cons
 - If the prompt is purely Python, use pure_python with toolchains [python].
 - manifest is a list of objects with keys: path, lang, purpose. Use relative paths.
 - contracts is a list of objects with keys: name, signature, language, python_name, purpose.
+- Quote all signature strings with double quotes so colons in Python type annotations do not break YAML parsing.
 - output_dir should be "dist".
 - llm should be an object with provider and model keys, or null.
 
@@ -435,7 +436,7 @@ manifest:
     purpose: pytest tests
 contracts:
   - name: compute_batch
-    signature: def compute_batch(data: list[float]) -> list[float]
+    signature: "def compute_batch(data: list[float]) -> list[float]"
     language: python/rust
     python_name: batch_engine.core.compute_batch
     purpose: Native/PyO3 exported core function

@@ -3063,6 +3063,11 @@ class RustGenerator:
                     f"{name}() requires at least one argument", node=expr
                 )
             method = "min" if name == "min" else "max"
+            if len(args) == 1:
+                arg_type = self._type_of(expr.args[0])
+                if arg_type.startswith("Vec<"):
+                    arg = args[0]
+                    return f"({arg}).iter().cloned().reduce(|a, b| a.{method}(b)).unwrap()"
             result = f"({args[0]})"
             for a in args[1:]:
                 result = f"({result}.{method}({a}))"
@@ -3115,6 +3120,18 @@ class RustGenerator:
 
         if base is None and name == "sorted":
             return self._emit_sorted(expr, ctx)
+
+        if base is None and name == "sum":
+            if not expr.args:
+                raise UnsupportedError("sum() requires at least one argument", node=expr)
+            arg = expr.args[0]
+            arg_type = self._type_of(arg)
+            if not arg_type.startswith("Vec<"):
+                raise UnsupportedError("sum() is only supported on list/Vec types", node=expr)
+            arg_str = self._strip_outer_parens(self._emit_expr(arg, arg_type))
+            if arg_type == "Vec<Vec<f64>>":
+                return f"({arg_str}).iter().map(|row| row.iter().sum::<f64>()).sum::<f64>()"
+            return f"({arg_str}).iter().sum::<f64>()"
 
         if base is None and name in self.local_function_nodes and name != self.func.name:
             callee = self.local_function_nodes[name]
