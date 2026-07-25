@@ -1511,10 +1511,14 @@ def make_server(port: Optional[int] = None, host: str = AioForgeServer.DEFAULT_H
     return AioForgeServer(port=port, host=host)
 
 
-def run_server(port: Optional[int] = None, open_browser: bool = True) -> None:
+def run_server(
+    port: Optional[int] = None,
+    host: str = AioForgeServer.DEFAULT_HOST,
+    open_browser: bool = True,
+) -> None:
     """Start the web server and optionally open the user's browser."""
     _static_dir.mkdir(parents=True, exist_ok=True)
-    server = make_server(port)
+    server = make_server(port, host)
 
     def serve() -> None:
         try:
@@ -1554,5 +1558,13 @@ def run_server(port: Optional[int] = None, open_browser: bool = True) -> None:
 
 
 if __name__ == "__main__":  # pragma: no cover
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Aero-Forge web dashboard server")
+    parser.add_argument("--host", default=AioForgeServer.DEFAULT_HOST, help="Host to bind")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Port to bind")
+    parser.add_argument("--no-browser", action="store_true", help="Do not open a browser")
+    args = parser.parse_args()
+
     logging.basicConfig(level=logging.INFO)
-    run_server()
+    run_server(port=args.port, host=args.host, open_browser=not args.no_browser)
