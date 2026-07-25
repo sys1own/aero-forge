@@ -267,7 +267,7 @@ llm:
 |----------|---------------------|---------------|
 | OpenAI | `OPENAI_API_KEY` | `gpt-4` |
 | OpenRouter | `OPENROUTER_API_KEY` | `openrouter/free` |
-| DeepSeek | `DEEPSEEK_API_KEY` | `deepseek-chat` |
+| DeepSeek | `DEEPSEEK_API_KEY` | `deepseek-v4-pro` |
 | Gemini | `GEMINI_API_KEY` | `gemini-2.0-flash` |
 | Router only | none | `none` |
 

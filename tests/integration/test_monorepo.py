@@ -40,7 +40,7 @@ def test_monorepo_builds_and_tests(tmp_path: Path) -> None:
         output_dir=output_dir,
         project_name="decision_matrix_monorepo",
         llm_provider=os.getenv("AERO_FORGE_LLM_PROVIDER", "deepseek"),
-        model=os.getenv("AERO_FORGE_MODEL", "deepseek-chat"),
+        model=os.getenv("AERO_FORGE_MODEL", "deepseek-v4-pro"),
         max_retries=3,
         max_tokens=4096,
     )

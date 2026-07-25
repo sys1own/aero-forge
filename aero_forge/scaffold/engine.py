@@ -1157,6 +1157,24 @@ class RustGenerator:
                 return True
         return False
 
+    @staticmethod
+    def _names_assigned_in_body(stmts: List[ast.stmt]) -> set[str]:
+        """Return all names assigned anywhere in ``stmts`` (including nested blocks)."""
+        names: set[str] = set()
+        for stmt in stmts:
+            if isinstance(stmt, ast.Assign):
+                for target in stmt.targets:
+                    names.update(_names_in_target(target))
+            elif isinstance(stmt, ast.AnnAssign):
+                names.update(_names_in_target(stmt.target))
+            elif isinstance(stmt, ast.AugAssign):
+                names.update(_names_in_target(stmt.target))
+            for child in ("body", "orelse"):
+                child_body = getattr(stmt, child, [])
+                if child_body:
+                    names.update(RustGenerator._names_assigned_in_body(child_body))
+        return names
+
     def _is_mutable(self, name: str) -> bool:
         """Return True if ``name`` is assigned more than once, in a loop, or appended to."""
         count = self._count_targets_in_body(name, self.func.body, in_loop=False)
@@ -1231,12 +1249,35 @@ class RustGenerator:
         ``mut`` keyword is omitted when the variable is never assigned again. This
         preserves source order and avoids dummy zero values that are immediately
         overwritten.
+
+        To keep hoisting safe, we stop hoisting as soon as we encounter any
+        statement that is not a simple top-level assignment (or a passive
+        docstring/import/pass). This prevents moving an initializer like
+        ``variance = m2 / n`` above a preceding loop that mutates ``m2`` or ``n``.
         """
         defaults: List[str] = []
         body: List[ast.stmt] = []
         declared = set(self.arg_names)
+        can_hoist = True
 
-        for stmt in self.func.body:
+        def _is_passive(s: ast.stmt) -> bool:
+            if isinstance(s, (ast.Import, ast.ImportFrom, ast.Pass)):
+                return True
+            if (
+                isinstance(s, ast.Expr)
+                and isinstance(s.value, ast.Constant)
+                and isinstance(s.value.value, str)
+            ):
+                return True
+            return False
+
+        for idx, stmt in enumerate(self.func.body):
+            if not can_hoist:
+                body.append(stmt)
+                continue
+            if _is_passive(stmt):
+                body.append(stmt)
+                continue
             if isinstance(stmt, ast.Assign) and all(
                 isinstance(t, ast.Name) for t in stmt.targets
             ):
@@ -1257,6 +1298,7 @@ class RustGenerator:
                     if any(
                         isinstance(node, ast.Subscript) for node in ast.walk(stmt.value)
                     ):
+                        can_hoist = False
                         body.append(stmt)
                         continue
                     # Do not hoist if the RHS refers to a local that is not yet
@@ -1271,6 +1313,18 @@ class RustGenerator:
                         n not in declared and n not in _ALLOWED_UNBOUND_RHS_NAMES
                         for n in rhs_names
                     ):
+                        can_hoist = False
+                        body.append(stmt)
+                        continue
+                    # Do not hoist if the RHS references a local that is assigned
+                    # later in the body; its value would be stale at the hoisted
+                    # point (e.g. ``variance = m2 / n`` where ``m2`` is updated in
+                    # the following loop).
+                    post_assigned = self._names_assigned_in_body(
+                        self.func.body[idx + 1 :]
+                    )
+                    if any(n in post_assigned for n in rhs_names):
+                        can_hoist = False
                         body.append(stmt)
                         continue
                     # Do not hoist list replication whose count depends on a
@@ -1287,6 +1341,7 @@ class RustGenerator:
                                 stmt.value.right if left_is_list else stmt.value.left
                             )
                             if not isinstance(count_expr, ast.Constant):
+                                can_hoist = False
                                 body.append(stmt)
                                 continue
                     first_new = new_targets[0]
@@ -1308,8 +1363,12 @@ class RustGenerator:
                             defaults.append(f"let {mut}{name} = {value};")
                             declared.add(name)
                     if not all(n in declared for n in target_names):
+                        can_hoist = False
                         body.append(stmt)
                     continue
+            # Any other statement (if, for, while, non-simple assignment, etc.)
+            # ends the hoist window and is emitted in source order.
+            can_hoist = False
             body.append(stmt)
 
         # Reassigned arguments need a mutable shadow binding.
@@ -1932,6 +1991,18 @@ class RustGenerator:
             raise UnsupportedError(
                 "enumerate() is only supported on list/Vec types", node=stmt
             )
+        start = "0_i64"
+        if len(call.args) > 1:
+            start = self._strip_outer_parens(
+                self._emit_expr(call.args[1], "i64")
+            )
+        else:
+            for kw in call.keywords:
+                if kw.arg == "start":
+                    start = self._strip_outer_parens(
+                        self._emit_expr(kw.value, "i64")
+                    )
+                    break
         element_type = _element_type(iterable_type)
         iter_rust = self._emit_expr(iterable, iterable_type)
         iterator = f"{iter_rust}.iter().cloned().enumerate()"
@@ -1941,7 +2012,7 @@ class RustGenerator:
         self._restore_type(val_name, old)
         return (
             f"for ({idx_name}, {val_name}) in {iterator} {{\n"
-            f"    let {idx_name} = {idx_name} as i64;\n"
+            f"    let {idx_name} = ({idx_name} as i64) + ({start});\n"
             f"{body}\n"
             f"}}"
         )

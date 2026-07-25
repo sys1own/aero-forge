@@ -444,5 +444,5 @@ prompt: Build a Python-Rust batch processor
 constraints: none
 llm:
   provider: deepseek
-  model: deepseek-chat
+  model: deepseek-v4-pro
 """
