@@ -42,6 +42,7 @@ from aero_forge.orchestrator.stack_classifier import (
 )
 from aero_forge.scaffold.cargo_runner import run_cargo
 from aero_forge.scaffold.rust_merge import fix_rust_core_impls
+from aero_forge.scaffold.syntax_guard import repair_workspace
 
 logger = logging.getLogger("aero_forge.chat")
 
@@ -306,8 +307,9 @@ class ChatSession:
         self.last_source: Optional[str] = None
         self.last_summary: Optional[str] = None
         self.last_build_result: Optional[Dict[str, Any]] = None
+        self.project_context: Optional[str] = None
 
-        self.system_prompt = (
+        self.base_system_prompt = (
             "You are Aero-Forge, a fast, friendly coding co-pilot. "
             "Talk like a helpful teammate: casual, short, and punchy. "
             "Use dense sentences; avoid walls of text and raw JSON. "
@@ -317,8 +319,15 @@ class ChatSession:
             "in a single Python fenced code block and, if tests are requested, "
             "a second fenced code block for pytest tests."
         )
+        self.system_prompt = self.base_system_prompt
 
+        requested_output_dir = self.output_dir
         self._load_session()
+        # A loaded session may point to a temp directory that no longer exists;
+        # fall back to the directory supplied by the caller.
+        if not self.output_dir.is_dir():
+            self.output_dir = requested_output_dir
+        self._refresh_project_context()
 
     @staticmethod
     def _new_session_id() -> str:
@@ -339,6 +348,7 @@ class ChatSession:
             self.last_summary = data.get("last_summary")
             self.last_error = data.get("last_error")
             self.last_build_result = data.get("last_build_result")
+            self.project_context = data.get("project_context")
             loaded_output = data.get("output_dir")
             if loaded_output:
                 self.output_dir = Path(loaded_output)
@@ -347,6 +357,18 @@ class ChatSession:
             self.prompt_template = data.get("prompt_template", self.prompt_template)
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning("Could not load session %s: %s", self.session_id, exc)
+
+    def _refresh_project_context(self) -> None:
+        """Build and cache a compact workspace bundle for the LLM context."""
+        self.system_prompt = self.base_system_prompt
+        self.project_context = None
+        if not self.output_dir.is_dir():
+            return
+        bundle = bundle_workspace(self.output_dir, max_file_size_kb=50)
+        if bundle["files"] or bundle["blueprint"]:
+            context = format_context_block(bundle, fmt="xml")
+            self.project_context = context
+            self.system_prompt = self.base_system_prompt + "\n\n" + context
 
     def _save_session(self) -> None:
         path = _session_path(self.session_id)
@@ -363,6 +385,7 @@ class ChatSession:
             "last_summary": self.last_summary,
             "last_error": self.last_error,
             "last_build_result": self.last_build_result,
+            "project_context": self.project_context,
         }
         try:
             path.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -554,6 +577,10 @@ class ChatSession:
                 if _make_script_runnable(script, self.output_dir):
                     self._progress(f"Made {script.relative_to(self.output_dir)} runnable from any cwd")
 
+        # Repair common LLM truncation mistakes before compilation.
+        for repaired in repair_workspace(self.output_dir):
+            self._progress(f"Repaired syntax truncation in {repaired.relative_to(self.output_dir)}")
+
         # LLMs often emit a #[pymethods] impl whose methods duplicate an
         # inherent impl for the same struct; merge them before compiling.
         if fix_rust_core_impls(self.output_dir):
@@ -647,7 +674,7 @@ class ChatSession:
         if client is None:
             return {"message": "No LLM provider configured for multi-file generation."}
 
-        system = (
+        generation_rules = (
             "You are a senior Rust and Python engineer. Given the user's request, "
             "produce a complete, buildable workspace. Return every file as a separate "
             "Markdown code fence. The first non-blank line inside each fence must be a "
@@ -674,13 +701,14 @@ class ChatSession:
             "Avoid brittle exact scalar equality like ``assert res['anomalies'] == 1``.\n\n"
             "Do not include explanatory text outside the code fences.\n\n"
             "If CURRENT_PROJECT_CONTEXT is provided below, preserve existing file paths and "
-            "behavior unless the user explicitly asks to change them." 
+            "behavior unless the user explicitly asks to change them."
         )
 
-        # Inject the current workspace state so follow-up turns know what already exists.
-        bundle = bundle_workspace(self.output_dir, max_file_size_kb=50)
-        if bundle["files"] or bundle["blueprint"]:
-            system = system + "\n\n" + format_context_block(bundle, fmt="xml")
+        # Refresh the workspace context so follow-up turns know what already exists.
+        self._refresh_project_context()
+        system = self.system_prompt
+        if generation_rules not in system:
+            system = system + "\n\n" + generation_rules
 
         messages = [
             {"role": "system", "content": system},

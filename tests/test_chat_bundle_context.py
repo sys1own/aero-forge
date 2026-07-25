@@ -140,3 +140,37 @@ def test_multi_file_generate_self_heals_test_typo(tmp_path: Path) -> None:
     fixed_test = (tmp_path / "tests" / "test_demo.py").read_text(encoding="utf-8")
     assert "rstats" in fixed_test
     assert "r_stats" not in fixed_test
+
+
+def test_project_context_persisted_and_used_by_reply(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("def main(): pass\n", encoding="utf-8")
+
+    session = ChatSession(tmp_path, session_id="ctx-test")
+    assert session.project_context is not None
+    assert "CURRENT_PROJECT_CONTEXT" in session.system_prompt
+    assert "app.py" in session.project_context
+
+    # Persist and reload.
+    session._save_session()
+    loaded = ChatSession(tmp_path, session_id="ctx-test")
+    assert loaded.project_context == session.project_context
+    assert "CURRENT_PROJECT_CONTEXT" in loaded.system_prompt
+
+
+def test_reply_messages_include_project_context(tmp_path: Path) -> None:
+    (tmp_path / "app.py").write_text("def main(): pass\n", encoding="utf-8")
+
+    captured: dict = {}
+
+    class FakeClient:
+        def generate(self, messages, **kwargs):
+            captured["messages"] = messages
+            return "You have an app.py file."
+
+    with patch("aero_forge.chat.get_llm_client", return_value=FakeClient()):
+        session = ChatSession(tmp_path, llm_provider="deepseek", model="deepseek-v4-pro")
+        session.reply("What files do I have?")
+
+    system_message = captured["messages"][0]["content"]
+    assert "CURRENT_PROJECT_CONTEXT" in system_message
+    assert "app.py" in system_message

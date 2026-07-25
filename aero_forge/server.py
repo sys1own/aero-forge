@@ -31,6 +31,7 @@ from urllib.parse import parse_qs, urlparse
 import aiohttp
 from aiohttp import web
 
+from aero_forge.blueprint import generate_blueprint_from_uploaded_repo
 from aero_forge.chat import ChatSession
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
@@ -718,6 +719,13 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
 
+            # Repair common LLM truncation in Rust/C/C++ files saved through the editor.
+            if target.suffix.lower() in {".rs", ".cpp", ".c", ".h", ".hpp"}:
+                from aero_forge.scaffold.syntax_guard import repair_file
+
+                if repair_file(target):
+                    logger.info("Repaired syntax truncation in saved file %s", target)
+
             _notify_tree_changed(session_id)
 
             return _send_json(
@@ -875,6 +883,23 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 dest = session_dir
 
             _extract_zip_safely(zip_bytes, dest)
+
+            # Repair truncated Rust/C/C++ sources before any build or bundling.
+            from aero_forge.scaffold.syntax_guard import repair_workspace
+
+            repair_workspace(session_dir)
+
+            # Synthesize a blueprint if none exists, then bundle the repo for chat context.
+            try:
+                generate_blueprint_from_uploaded_repo(session_dir)
+            except Exception as exc:
+                logger.warning("Could not auto-generate blueprint for upload: %s", exc)
+
+            # Refresh the chat session context with a compact workspace bundle so
+            # subsequent chat turns can see the uploaded source tree.
+            chat = ChatSession(session_dir, session_id=session_id)
+            chat._save_session()
+
             _notify_tree_changed(session_id)
 
             return _send_json(
