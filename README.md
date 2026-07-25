@@ -1,22 +1,34 @@
-# Aero-Forge: Prompt-Driven Python-to-Rust Build System
+# Aero-Forge: Universal Prompt-Driven Polyglot Build Engine
 
-Aero-Forge turns a natural language prompt (or a Python function) into a fast, compiled Rust extension that you can import from Python. It handles code generation, deterministic transpilation, native compilation, testing, and static healing. LLM calls are strictly confined to upstream intent parsing, high-level strategy selection, and human-facing diagnostics.
+Aero-Forge turns a natural language prompt into a complete, tested, polyglot software project. While it retains high-speed deterministic Python-to-Rust transpilation for heavy numerical code, it is now a universal build orchestrator that can generate, scaffold, compile, and verify pure Python, pure Rust, and hybrid Rust/Python applications from a single prompt.
 
 ## What is Aero-Forge?
 
-Aero-Forge is a prompt-driven build system for Python. You describe the function you want in plain English, or point it at an existing `.py` file, and it produces a native Rust/PyO3 extension that is typically **10-100x faster** than the equivalent pure-Python implementation.
+Aero-Forge is a prompt-driven build system for software projects. You describe what you want in plain English, or point it at an existing `.py` file, and it produces working source, native extensions, packaging manifests, tests, and a downloadable project bundle.
 
-It is designed for numerical, algorithmic, and performance-critical code. The toolchain is opinionated: it focuses on scalar arithmetic, loops, conditionals, lists, simple classes, and NumPy-style 1D/2D array operations. When it cannot compile something, it produces a clear error message instead of silently generating broken Rust.
+The engine is built around a declarative contract called `blueprint.aero`. For every request, Aero-Forge first classifies the prompt to infer the target architecture (for example `pure_python`, `pure_rust`, or `hybrid_rust_python`), the required toolchains (such as `python`, `cargo`, `maturin`, or `cmake`), the file manifest, and the exported contracts. It then materializes every declared file and invokes the appropriate native toolchains. When compilation or tests fail, it applies deterministic AST and pattern-based repairs first and reports precise diagnostics. LLM calls are strictly confined to intent interpretation, high-level strategy selection, and human-facing summaries.
+
+Supported outputs include:
+
+- Pure Python packages and libraries.
+- Pure Rust crates and Cargo workspaces.
+- Hybrid Rust/Python extensions via PyO3/Maturin.
+- Multi-crate Rust monorepos.
+- C++/Python extensions via pybind11 and CMake.
+- Cross-compiled Rust artifacts and `wasm32-unknown-unknown` binaries.
 
 ## Key Features
 
+- **Universal Intent Detection** - Parses any high-level prompt to infer languages, build tools, module boundaries, and concurrency patterns. Hybrid stacks are never silently downgraded to a fallback.
+- **Declarative Blueprinting (`blueprint.aero`)** - Every build starts with a generated contract that declares `architecture`, `toolchains`, `manifest`, `contracts`, `functions`, and verification steps.
+- **Strict Blueprint Materialization** - Every manifest file, source module, native backend library, compiler config, and target binding declared in `blueprint.aero` is physically emitted and built.
 - **Natural Language Prompts** - Describe what you want and Aero-Forge generates Python code, tests, and a build blueprint.
-- **Zero Manual Rust Boilerplate** - No Cargo.toml, `#[pyfunction]` annotations, or linker flags are required from the user.
+- **Zero Manual Rust Boilerplate** - No `Cargo.toml`, `#[pyfunction]` annotations, or linker flags are required from the user for standard Python/Rust hybrid builds.
+- **Interactive Web Dashboard** - Start a local web server to prompt, build, test, monitor real-time build logs, browse generated files in a multi-tab editor, and download compiled ZIP project artifacts from any modern browser.
 - **Symbolic & AST Static Healing Core** - If `cargo build` or tests fail, Aero-Forge applies deterministic AST/pattern-based repairs first. Failures surface precise exception type, file, and line diagnostics. Optional LLM-generated summaries are generated only for human viewing after the build.
 - **Algorithm Library** - Pick from a curated library of reference implementations (sorting, matrix, FFT, math) or let the LLM select one automatically.
 - **Multi-Variant Testing** - Generate several implementations, compile them in parallel, benchmark each, and select the fastest variant that passes.
 - **Explainable Builds** - Add `--explain` to get the LLM to describe the algorithm choice, complexity, and tradeoffs.
-- **Blueprint Support** - Declarative `.aero` files for multi-function projects with tests, compiler flags, and LLM configuration.
 - **Auto-Discovery** - `aero-forge build --auto-detect` discovers `src/` and `tests/` and compiles everything it understands.
 - **Project Builds & Zip Bundles** - `aero-forge build --project <dir>` compiles every public function in a project directory and produces a downloadable zip with source, compiled libraries, a Python package, and a build manifest.
 - **Zip Uploads** - `aero-forge build --upload project.zip` extracts, builds, and re-bundles an uploaded project.
@@ -55,10 +67,10 @@ aero-forge generate --prompt "Build a fast iterative Fibonacci function" --build
 
 Aero-Forge will:
 
-1. Send the prompt to the configured LLM.
-2. Parse the generated Python code and tests.
-3. Write `src/generated.py` and `tests/test_generated.py`.
-4. Build a native Rust extension and run the tests.
+1. Parse the prompt and classify the required architecture and toolchains.
+2. Generate `blueprint.aero` describing the workspace.
+3. Generate Python source and tests.
+4. Materialize any declared native crate, build the Rust extension, and run the tests.
 
 Example output:
 
@@ -89,6 +101,10 @@ Create `blueprint.aero`:
 
 ```aero
 project: my_project
+architecture: hybrid_rust_python
+toolchains:
+  - python
+  - cargo
 functions:
   - file: src/math_ops.py
     compile_all: true
@@ -176,10 +192,44 @@ Useful chat phrases:
 
 After every successful `aero-forge generate --build` or `aero-forge build`, Aero-Forge prints a short, friendly summary of what was built, whether tests passed, and where the compiled library is. In chat mode the summary is part of the assistant's reply.
 
+## Web Interface Setup
+
+Aero-Forge includes an embedded web dashboard. Opening it in any modern browser gives you access to the full build engine, an interactive prompt generator, a multi-tab project editor, real-time build log streaming, and a ZIP bundle downloader.
+
+Start the web server on the default port:
+
+```bash
+python3 -m aero_forge.server
+```
+
+The dashboard is then available at `http://localhost:8080`.
+
+To bind a custom host or port:
+
+```bash
+python3 -m aero_forge.server --host 0.0.0.0 --port 8889
+```
+
+Add `--no-browser` to prevent a browser tab from opening automatically:
+
+```bash
+python3 -m aero_forge.server --port 8889 --no-browser
+```
+
+Alternatively, use the CLI wrapper:
+
+```bash
+aero-forge web --port 8080
+```
+
+The web interface supports the same providers and environment variables as the CLI. Set `AERO_FORGE_LLM_PROVIDER` and the appropriate API key before starting the server.
+
 ## Commands Reference
 
 | Command | Description |
 |---------|-------------|
+| `aero-forge web` | Start the embedded web dashboard. |
+| `python3 -m aero_forge.server` | Start the web server directly (`--host`, `--port`, `--no-browser`). |
 | `aero-forge fix <file> --function <name>` | Transpile and compile a single function. |
 | `aero-forge build [blueprint]` | Build all functions in a blueprint. |
 | `aero-forge build --project <dir>` | Build every public function in a project directory and bundle it as a zip. |
@@ -211,17 +261,25 @@ After every successful `aero-forge generate --build` or `aero-forge build`, Aero
 
 ## Blueprint Reference
 
+`blueprint.aero` is the authoritative declarative contract for every build. The engine writes it first, validates it against the detected intent, and then materializes every declared file before invoking toolchains.
+
 ### Top-Level Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `project` | string | Project name. |
-| `functions` | list | Function specifications (see below). |
-| `prompt` | string | Natural language prompt to generate code. |
-| `constraints` | string or object | Constraints passed to the LLM. |
+| `architecture` | string | Build strategy: `pure_python`, `pure_rust`, `hybrid_rust_python`, `hybrid_cpp_python`, `hybrid_polyglot`. |
+| `toolchains` | list | Required tools: `python`, `pip`, `cargo`, `maturin`, `cmake`, `npm`, `go`, etc. |
+| `manifest` | list | Files to create (see Manifest Entry). |
+| `contracts` | list | Exported symbols, FFI bindings, or shared data structures (see Contract Entry). |
+| `functions` | list | Function specifications (see Function Specification). |
+| `prompt` | string | Natural language prompt used to generate the blueprint. |
+| `constraints` | string or object | Constraints passed to the LLM or materializer. |
 | `output_dir` | path | Output directory (default `dist`). |
 | `llm` | object | LLM provider and model configuration. |
 | `compiler_flags` | list | Global Rust compiler flags. |
+| `languages` | list | Detected languages (e.g. `python`, `rust`, `cpp`). |
+| `features` | list | Detected features (e.g. `web`, `async`, `gpu`, `wasm`). |
 
 ### Function Specification
 
@@ -234,10 +292,63 @@ After every successful `aero-forge generate --build` or `aero-forge build`, Aero
 | `output_name` | string | Custom output module name. |
 | `compiler_flags` | list | Per-function Rust flags. |
 
+### Manifest Entry
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `path` | path | Relative path of the file to materialize. |
+| `lang` | string | Language or format: `python`, `rust`, `toml`, `markdown`, `cmake`. |
+| `purpose` | string | Human-readable description of the file's role. |
+
+### Contract Entry
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `name` | string | Exported symbol name. |
+| `signature` | string | Function signature, quoted to avoid YAML parsing issues. |
+| `language` | string | Language boundary: `python`, `rust`, `python/rust`, etc. |
+| `python_name` | string | Python import path for the binding. |
+| `purpose` | string | Description of the contract. |
+
 ### Example Blueprint
 
 ```aero
 project: my_optimized_project
+architecture: hybrid_rust_python
+toolchains:
+  - python
+  - cargo
+  - maturin
+
+manifest:
+  - path: Cargo.toml
+    lang: toml
+    purpose: Workspace Cargo manifest
+  - path: rust_core/Cargo.toml
+    lang: toml
+    purpose: PyO3 crate manifest
+  - path: rust_core/src/lib.rs
+    lang: rust
+    purpose: Native core exposing the primary function
+  - path: python_engine/pyproject.toml
+    lang: toml
+    purpose: Python package and Maturin configuration
+  - path: python_engine/src/my_engine/__init__.py
+    lang: python
+    purpose: Python driver package exports
+  - path: python_engine/src/my_engine/core.py
+    lang: python
+    purpose: Python wrapper importing rust_core
+  - path: python_engine/tests/test_core.py
+    lang: python
+    purpose: pytest tests
+
+contracts:
+  - name: compute_batch
+    signature: "def compute_batch(data: list[float]) -> list[float]"
+    language: python/rust
+    python_name: my_engine.core.compute_batch
+    purpose: Native/PyO3 exported core function
 
 functions:
   - file: src/math_ops.py
@@ -326,6 +437,7 @@ Nine templates are included for different generation styles:
 | `v7_conservative` | Uses only well-known algorithms. |
 | `v8_iterative` | Includes feedback from previous runs. |
 | `v9_transpiler_friendly` | Explicitly forbids edge-case constructs for maximum first-pass success. |
+| `v10_correctness_focused` | Prioritizes correct, maintainable code. |
 
 Use `--prompt-template v5_balanced` to select one. `v5_balanced` is the default and was the most reliable in the prompt-engineering campaign.
 
@@ -344,8 +456,8 @@ These flags turn Aero-Forge into a senior-engineer-style assistant:
 
 Aero-Forge separates **deterministic execution** from **LLM-assisted intent interpretation**:
 
-- **Deterministic Core (no LLM calls):** AST/UAST/HIN lowering, type inference, symbolic constraint verification, vectorization/SIMD planning, Fiedler graph partitioning, Rust code generation, cargo compilation, pytest execution, and all healing attempts are 100% deterministic. The build loop never calls an LLM.
-- **LLM Boundary (intent & diagnostics only):** LLMs are invoked only for initial natural language prompt interpretation, high-level algorithm selection, `--explain` summaries, `--review` feedback, chat responses, and `aero-forge explain` human-facing diagnostics. No generated text enters the transpiler or build loop without being written to disk by an explicit generation step.
+- **Deterministic Core (no LLM calls):** prompt classification, blueprint validation, AST/UAST/HIN lowering, type inference, symbolic constraint verification, vectorization/SIMD planning, Fiedler graph partitioning, Rust/Python/C++ code generation, Cargo/pip/maturin invocation, pytest/cargo test execution, and all healing attempts are 100% deterministic. The build loop never calls an LLM.
+- **LLM Boundary (intent & diagnostics only):** LLMs are invoked only for initial natural language prompt interpretation, blueprint generation, high-level algorithm selection, `--explain` summaries, `--review` feedback, chat responses, and `aero-forge explain` human-facing diagnostics. No generated text enters the transpiler or build loop without being written to disk by an explicit generation step.
 
 This boundary makes builds reproducible, auditable, and safe to run unattended or inside a web backend.
 
@@ -371,7 +483,8 @@ The transpiler handles common numerical and algorithmic Python patterns:
 - Generic `list`/`List[T]` annotations where the element type is inferred from usage.
 - Basic `list[list[T]]` matrices and indexing (`m[i][j]`), including row caching (`row = m[i]`) and direct nested subscript assignment (`m[i][j] = value`).
 - Tuple unpacking on name and subscript targets (`a, b = b, a` and `a[i], a[j] = a[j], a[i]`).
-- `min()` and `max()` on two scalar values.
+- `min()` and `max()` on two scalar values or a single iterable.
+- `sum()` over a single iterable.
 - `sorted(values)` with no key.
 - `int()` and `float()` casts.
 - Mixed `int`/`float` arithmetic and `math` functions (`math.cos`, `math.sin`, `math.sqrt`, etc.), including bare math names and constants when `import math` is used.
@@ -399,16 +512,17 @@ See `BLUEPRINT.md` and `stress_tests/README.md` for the full supported-construct
 
 ## How It Works
 
-1. **Intent** - The user provides a natural language prompt (LLM) or an existing `.py` file.
-2. **Generate** - For prompts, an LLM produces Python source and tests; for existing code, it is read directly.
-3. **Parse** - The Python source is parsed into an AST.
-4. **Transpile** - A deterministic Python-to-Rust transpiler lowers the AST through a UAST/HIN intermediate and emits PyO3 `#[pyfunction]`/`#[pyclass]` code.
-5. **Scaffold** - A temporary Cargo crate is generated automatically.
-6. **Compile** - `cargo build --release` produces a shared library.
-7. **Test** - `pytest` runs against the compiled extension in an isolated sandbox.
-8. **Heal** - On failure, the orchestrator applies deterministic, static AST/pattern-based repairs from the router and fix cache. Failures are reported with the exact exception type, file, and line.
-9. **Explain** - Optional LLM-generated summaries are produced for human viewing after the build.
-10. **Cache** - Compilation and fix results are cached so unchanged files rebuild instantly.
+1. **Intent & Classification** - The user provides a natural language prompt (LLM) or an existing `.py` file. The prompt is classified into an `architecture` (e.g. `pure_python`, `pure_rust`, `hybrid_rust_python`) and `toolchains`.
+2. **Blueprint** - A `blueprint.aero` file is generated describing the workspace, manifest, contracts, and verification steps.
+3. **Materialize** - Every file declared in the blueprint is physically emitted, including `Cargo.toml`, `pyproject.toml`, `src/lib.rs`, Python wrappers, and tests.
+4. **Parse** - The Python source is parsed into an AST.
+5. **Transpile** - A deterministic Python-to-Rust transpiler lowers the AST through a UAST/HIN intermediate and emits PyO3 `#[pyfunction]`/`#[pyclass]` code.
+6. **Scaffold** - A temporary Cargo crate or full workspace is generated automatically, with `.cargo/config.toml` network resilience settings.
+7. **Compile** - `cargo build --release` (or `maturin build`) produces a shared library.
+8. **Test** - `pytest` and `cargo test` run against the generated code in an isolated sandbox.
+9. **Heal** - On failure, the orchestrator applies deterministic, static AST/pattern-based repairs from the router and fix cache. Failures are reported with the exact exception type, file, and line.
+10. **Explain** - Optional LLM-generated summaries are produced for human viewing after the build.
+11. **Cache** - Compilation and fix results are cached so unchanged files rebuild instantly.
 
 ## Web Integration and Session Isolation
 
