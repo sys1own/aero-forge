@@ -3114,10 +3114,26 @@ class RustGenerator:
                     f"{name}() takes exactly one argument", node=expr
                 )
             arg_node = expr.args[0]
-            # Evaluate float() arguments in an f64 context so that string
-            # infinity literals like float('inf') map to f64::INFINITY.
-            arg_ctx = "f64" if name == "float" else self._type_of(arg_node)
+            # String literals: parse numbers and preserve infinity aliases.
+            if isinstance(arg_node, ast.Constant) and isinstance(arg_node.value, str):
+                lowered = arg_node.value.strip().lower()
+                is_inf = lowered in {
+                    "inf", "infinity", "+inf", "+infinity", "-inf", "-infinity",
+                }
+                if is_inf:
+                    ctx = "f64" if name == "float" else "i64"
+                    return self._emit_constant(arg_node, ctx)
+                lit = json.dumps(arg_node.value)
+                if name == "float":
+                    return f"({lit}).parse::<f64>().unwrap_or(0.0)"
+                return f"({lit}).parse::<i64>().unwrap_or(0)"
+            arg_ctx = "f64" if name == "float" else "i64"
             arg = self._strip_outer_parens(self._emit_expr(arg_node, arg_ctx))
+            from_type = self._type_of(arg_node)
+            if from_type in ("String", "&str"):
+                if name == "float":
+                    return f"({arg}).parse::<f64>().unwrap_or(0.0)"
+                return f"({arg}).parse::<i64>().unwrap_or(0)"
             if name == "int":
                 return f"({arg} as i64)"
             return f"({arg} as f64)"

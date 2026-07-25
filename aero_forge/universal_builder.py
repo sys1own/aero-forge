@@ -18,7 +18,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from aero_forge.blueprint import Blueprint, write_blueprint
+from aero_forge.blueprint import Blueprint, ContractEntry, ManifestEntry, write_blueprint
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
 from aero_forge.monorepo import generate_monorepo
@@ -28,6 +28,7 @@ from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_RUST_PYTHON,
     classify_stack,
 )
+from aero_forge.scaffold.polyglot_materializer import PolyglotMaterializer
 
 logger = logging.getLogger("aero_forge.universal_builder")
 
@@ -80,6 +81,84 @@ def _build_pure_python(
     return result
 
 
+def _hybrid_fallback_blueprint(project_name: str, features: list[str]) -> Blueprint:
+    """Return a deterministic hybrid blueprint for use when LLM monorepo generation fails."""
+    if any(f in features for f in ("data_pipeline", "stream", "batch", "math")):
+        contracts = [
+            ContractEntry(
+                name="process_stream",
+                signature="def process_stream(data: list[float], window_size: int) -> list[float]",
+            ),
+            ContractEntry(
+                name="engine_status",
+                signature="def engine_status() -> dict[str, str]",
+            ),
+        ]
+    else:
+        contracts = [
+            ContractEntry(
+                name="fast_vector_transform",
+                signature="def fast_vector_transform(v: list[float], scalar: float) -> list[float]",
+            ),
+            ContractEntry(
+                name="get_engine_status",
+                signature="def get_engine_status() -> dict[str, str]",
+            ),
+        ]
+    return Blueprint(
+        project=project_name,
+        architecture=INTENT_HYBRID_RUST_PYTHON,
+        toolchains=["python", "rust", "cargo"],
+        manifest=[
+            ManifestEntry(path="Cargo.toml", lang="toml", purpose="workspace manifest"),
+            ManifestEntry(path="rust_core/Cargo.toml", lang="toml", purpose="crate manifest"),
+            ManifestEntry(path="rust_core/src/lib.rs", lang="rust", purpose="Rust core"),
+            ManifestEntry(path="aero_polyglot_runner/__init__.py", lang="python", purpose="package init"),
+            ManifestEntry(path="aero_polyglot_runner/orchestrator.py", lang="python", purpose="Python orchestrator"),
+            ManifestEntry(path="run_demo.py", lang="python", purpose="demo"),
+            ManifestEntry(path="tests/test_polyglot.py", lang="python", purpose="tests"),
+            ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python packaging"),
+            ManifestEntry(path="README.md", lang="markdown", purpose="docs"),
+        ],
+        contracts=contracts,
+        output_dir=Path("./dist"),
+    )
+
+
+def _run_polyglot_materializer(
+    project_name: str,
+    features: list[str],
+    output_dir: Path,
+) -> Dict[str, Any]:
+    """Materialize a guaranteed hybrid workspace using the polyglot materializer."""
+    output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    aero_core = output_dir / ".aero_core"
+    if aero_core.is_dir():
+        shutil.rmtree(aero_core, ignore_errors=True)
+    blueprint = _hybrid_fallback_blueprint(project_name, features)
+    materializer = PolyglotMaterializer(output_dir)
+    updated = materializer.materialize(blueprint, build=True)
+    write_blueprint(updated, output_dir / "blueprint.aero")
+
+    test_file = output_dir / "tests" / "test_polyglot.py"
+    pytest_result = subprocess.run(
+        ["python", "-m", "pytest", str(test_file), "-q"],
+        cwd=output_dir,
+        capture_output=True,
+        text=True,
+    )
+    files = sorted(str(p.relative_to(output_dir)) for p in output_dir.rglob("*") if p.is_file())
+    return {
+        "success": pytest_result.returncode == 0,
+        "project_name": project_name,
+        "files": files,
+        "pytest_output": pytest_result.stdout,
+        "pytest_error": pytest_result.stderr,
+        "materializer": "PolyglotMaterializer",
+    }
+
+
 def build_universal_project(
     prompt: str,
     output_dir: Path | str,
@@ -123,18 +202,34 @@ def build_universal_project(
 
     # Pass 2: materialize and verify.
     if blueprint.architecture in (INTENT_HYBRID_RUST_PYTHON, INTENT_HYBRID_CPP_PYTHON):
-        result = generate_monorepo(
-            prompt,
-            output_dir,
-            project_name=project_name,
-            constraints=constraints,
-            llm_provider=llm_provider,
-            model=model,
-            max_retries=max_retries,
-            max_tokens=max_tokens,
-            progress_callback=progress_callback,
-            config_override=config_override,
-        )
+        try:
+            result = generate_monorepo(
+                prompt,
+                output_dir,
+                project_name=project_name,
+                constraints=constraints,
+                llm_provider=llm_provider,
+                model=model,
+                max_retries=max_retries,
+                max_tokens=max_tokens,
+                progress_callback=progress_callback,
+                config_override=config_override,
+            )
+        except Exception as exc:
+            logger.warning("generate_monorepo failed: %s; falling back to PolyglotMaterializer", exc)
+            result = {"success": False, "error": str(exc)}
+        if not result.get("success"):
+            logger.warning(
+                "generate_monorepo failed (%s); falling back to PolyglotMaterializer",
+                result.get("error"),
+            )
+            if progress_callback:
+                progress_callback("Falling back to polyglot materializer...")
+            result = _run_polyglot_materializer(
+                project_name or blueprint.project or "generated",
+                classification.features,
+                output_dir,
+            )
     else:
         result = _build_pure_python(
             blueprint,
