@@ -41,7 +41,7 @@ logger = logging.getLogger("stress_web_builder")
 
 
 Provider = os.getenv("AERO_FORGE_LLM_PROVIDER", "deepseek")
-Model = os.getenv("AERO_FORGE_MODEL", "deepseek-chat")
+Model = os.getenv("AERO_FORGE_MODEL", "deepseek-v4-pro")
 
 
 def _out_dir(name: str) -> Path:

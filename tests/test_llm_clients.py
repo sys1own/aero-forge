@@ -66,6 +66,7 @@ class TestGetLLMClient:
 
     def test_openrouter_defaults_and_key(self, monkeypatch):
         monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or")
+        monkeypatch.delenv("AERO_FORGE_MODEL", raising=False)
         client = get_llm_client("openrouter")
         assert isinstance(client, OpenRouterClient)
         assert client.model == "openrouter/free"

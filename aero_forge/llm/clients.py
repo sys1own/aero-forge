@@ -425,7 +425,7 @@ def get_llm_client(
         )
 
     if provider == "deepseek":
-        resolved_model = model or os.getenv("AERO_FORGE_MODEL") or "deepseek-chat"
+        resolved_model = model or os.getenv("AERO_FORGE_MODEL") or "deepseek-v4-pro"
         key = (
             api_key or os.getenv("DEEPSEEK_API_KEY") or os.getenv("AERO_FORGE_API_KEY")
         )
