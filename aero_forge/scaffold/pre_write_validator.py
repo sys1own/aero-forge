@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from aero_forge.orchestrator.router import classify_build_intent
+from aero_forge.scaffold.cargo_runner import cargo_build, maturin_build
 from aero_forge.scaffold.workspace import OutOfTreeWorkspace
 
 
@@ -599,14 +600,27 @@ class PreWriteValidator:
         language: Optional[str],
     ) -> ValidationResult:
         try:
-            result = subprocess.run(
-                command,
-                cwd=workspace_root,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=300,
-            )
+            if command and command[0] == "cargo" and "build" in command:
+                target = None
+                if "--target" in command:
+                    target = command[command.index("--target") + 1]
+                result = cargo_build(
+                    workspace_root,
+                    release="--release" in command,
+                    target=target,
+                    timeout=300,
+                )
+            elif command and command[0] == "maturin" and "build" in command:
+                result = maturin_build(workspace_root, timeout=300)
+            else:
+                result = subprocess.run(
+                    command,
+                    cwd=workspace_root,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=300,
+                )
         except FileNotFoundError as exc:
             raise ValidationError(
                 f"validation command executable not found: {command[0]}",

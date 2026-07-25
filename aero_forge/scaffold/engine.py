@@ -23,6 +23,7 @@ from aero_forge._constants import (
 )
 from aero_forge.errors import UnsupportedError
 from aero_forge.precision_shield.shield import Shield, _FLOAT_MATH_FUNCS
+from aero_forge.scaffold.cargo_runner import write_cargo_config
 from aero_forge.scaffold.pre_write_validator import (
     BlueprintValidationError,
     validate_blueprint_manifest,
@@ -229,9 +230,11 @@ class Engine:
 
         (crate_root / "Cargo.toml").write_text(cargo, encoding="utf-8")
         (src_dir / "lib.rs").write_text(lib, encoding="utf-8")
+        write_cargo_config(crate_root)
 
         if workspace_root is not None:
             self._emit_from_blueprint(crate_root, Path(workspace_root))
+            write_cargo_config(Path(workspace_root))
 
         return crate_root
 
@@ -285,6 +288,7 @@ class Engine:
             (src_dir / "lib.rs").write_text(
                 (crate_root / "src" / "lib.rs").read_text(encoding="utf-8"), encoding="utf-8"
             )
+            write_cargo_config(dest_dir)
 
         # If a root Cargo.toml exists without a corresponding lib.rs, make it a
         # workspace manifest that references the discovered crate directories.

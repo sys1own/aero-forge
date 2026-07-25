@@ -21,6 +21,7 @@ from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
 from aero_forge.orchestrator.orchestrator import plan_workspace
 from aero_forge.orchestrator.stack_classifier import classify_stack
+from aero_forge.scaffold.cargo_runner import cargo_build
 from aero_forge.scaffold.pre_write_validator import validate_blueprint_manifest
 from aero_forge.translator.translator import TargetMode
 
@@ -259,14 +260,7 @@ def _rewrite_test_imports(tests: str, package_name: str) -> str:
 
 def _run_cargo_build(crate_dir: Path) -> subprocess.CompletedProcess:
     logger.info("Building Rust core in %s", crate_dir)
-    return subprocess.run(
-        ["cargo", "build", "--release"],
-        cwd=crate_dir,
-        capture_output=True,
-        text=True,
-        timeout=600,
-        check=False,
-    )
+    return cargo_build(crate_dir, release=True, timeout=600)
 
 
 def _run_pytest(python_engine_dir: Path) -> subprocess.CompletedProcess:

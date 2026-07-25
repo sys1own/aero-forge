@@ -73,6 +73,7 @@ from aero_forge.orchestrator.router import (
 from aero_forge.orchestrator.stack_classifier import classify_stack as classify_build_stack
 from aero_forge.precision_shield.shield import Shield
 from aero_forge.sandbox.manager import Sandbox, ensure_cargo_in_path
+from aero_forge.scaffold.cargo_runner import cargo_build
 from aero_forge.scaffold.engine import (
     Engine,
     _find_function,
@@ -687,17 +688,12 @@ class Orchestrator:
                     [os.environ.get("RUSTFLAGS", "")] + self.compiler_flags
                 ).strip()
 
-            build_cmd = ["cargo", "build", "--release"]
-            if self.target:
-                build_cmd.extend(["--target", self.target])
-
             try:
-                build = subprocess.run(
-                    build_cmd,
-                    cwd=crate_root,
+                build = cargo_build(
+                    crate_root,
+                    release=True,
+                    target=self.target,
                     env=env,
-                    capture_output=True,
-                    text=True,
                     timeout=600,
                 )
             except subprocess.TimeoutExpired as exc:

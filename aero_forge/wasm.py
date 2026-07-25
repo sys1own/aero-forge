@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from aero_forge.errors import UnsupportedError
+from aero_forge.scaffold.cargo_runner import cargo_build, write_cargo_config
 from aero_forge.scaffold.engine import (
     Engine,
     RustGenerator,
@@ -90,6 +91,7 @@ class WasmEngine:
 
         (crate_root / "Cargo.toml").write_text(cargo, encoding="utf-8")
         (src_dir / "lib.rs").write_text(lib, encoding="utf-8")
+        write_cargo_config(crate_root)
 
         return crate_root, generators
 
@@ -132,11 +134,10 @@ def build_wasm_module(
     if compiler_flags:
         env["RUSTFLAGS"] = " ".join(compiler_flags)
 
-    result = subprocess.run(
-        ["cargo", "build", "--target", "wasm32-unknown-unknown", "--release"],
-        cwd=crate_root,
-        capture_output=True,
-        text=True,
+    result = cargo_build(
+        crate_root,
+        release=True,
+        target="wasm32-unknown-unknown",
         env=env,
     )
     if result.returncode != 0:
