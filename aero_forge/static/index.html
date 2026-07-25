@@ -172,6 +172,7 @@
       flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0;
       background: var(--editor);
       overflow: hidden;
+      position: relative;
     }
     .code-header {
       height: 34px; background: var(--panel); border-bottom: 1px solid var(--border);
@@ -364,6 +365,11 @@
             <div id="code-tabs" class="code-tabs"></div>
           </div>
           <div id="editor-container"></div>
+          <div id="binary-placeholder" style="display:none; position:absolute; inset:0; background:var(--editor); color:var(--text); flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:2rem; z-index:10;">
+            <h3 style="margin:0 0 0.5rem; font-weight:500;">Binary Artifact</h3>
+            <p id="binary-name" style="margin:0 0 1rem; color:var(--muted); font-family:Consolas,Monaco,Courier New,monospace;"></p>
+            <a id="binary-download" class="run-btn" download style="text-decoration:none;">Download</a>
+          </div>
         </section>
 
         <div id="gutter-right" class="gutter-x"></div>
@@ -554,6 +560,9 @@
       runBtn: document.getElementById('run-btn'),
       runOutput: document.getElementById('run-output'),
       runPanel: document.getElementById('run-panel'),
+      binaryPlaceholder: document.getElementById('binary-placeholder'),
+      binaryName: document.getElementById('binary-name'),
+      binaryDownload: document.getElementById('binary-download'),
       newFileRoot: document.getElementById('new-file-root'),
       newFolderRoot: document.getElementById('new-folder-root'),
       cleanWorkspace: document.getElementById('clean-workspace'),
@@ -869,6 +878,21 @@
       if (_treeRefreshTimer) { clearTimeout(_treeRefreshTimer); _treeRefreshTimer = null; }
     }
 
+    function showBinaryPlaceholder(path) {
+      if (!ui.binaryPlaceholder) return;
+      ui.editorContainer.style.display = 'none';
+      ui.binaryPlaceholder.style.display = 'flex';
+      ui.binaryName.textContent = fileName(path);
+      ui.binaryDownload.href = `/api/files/download?session_id=${encodeURIComponent(state.sessionId)}&path=${encodeURIComponent(path)}`;
+      ui.binaryDownload.setAttribute('download', fileName(path));
+    }
+
+    function hideBinaryPlaceholder() {
+      if (!ui.binaryPlaceholder) return;
+      ui.binaryPlaceholder.style.display = 'none';
+      ui.editorContainer.style.display = 'block';
+    }
+
     async function openFile(path) {
       if (!state.monaco || !state.editor) return;
       const existing = state.tabs.find(t => t.path === path);
@@ -877,8 +901,15 @@
         const data = await api('GET', `/api/file-content?session_id=${encodeURIComponent(state.sessionId)}&path=${encodeURIComponent(path)}`);
         const monaco = state.monaco;
         const uri = monaco.Uri.parse('aero://' + path);
+        if (data.binary) {
+          const tab = { path, model: null, binary: true, dirty: false, viewState: null };
+          state.tabs.push(tab);
+          switchTab(tab);
+          setTreeActive(path);
+          return;
+        }
         const model = monaco.editor.createModel(data.content, detectLanguage(path), uri);
-        const tab = { path, model, dirty: false, viewState: null };
+        const tab = { path, model, binary: false, dirty: false, viewState: null };
         model.onDidChangeContent(() => { if (!tab.dirty) { tab.dirty = true; renderTabs(); } });
         state.tabs.push(tab);
         switchTab(tab);
@@ -889,9 +920,15 @@
     function switchTab(tab) {
       if (state.activeTab && state.activeTab !== tab) state.activeTab.viewState = state.editor.saveViewState();
       state.activeTab = tab;
-      state.editor.setModel(tab.model);
-      if (tab.viewState) state.editor.restoreViewState(tab.viewState);
-      state.editor.focus();
+      if (tab && tab.binary) {
+        state.editor.setModel(null);
+        showBinaryPlaceholder(tab.path);
+      } else {
+        hideBinaryPlaceholder();
+        state.editor.setModel(tab.model);
+        if (tab.viewState) state.editor.restoreViewState(tab.viewState);
+        state.editor.focus();
+      }
       renderTabs();
     }
 
@@ -901,19 +938,19 @@
       if (idx === -1) return;
       const tab = state.tabs[idx];
       if (tab.dirty && !confirm(`Discard unsaved changes to ${fileName(tab.path)}?`)) return;
-      tab.model.dispose();
+      if (tab.model) tab.model.dispose();
       state.tabs.splice(idx, 1);
       if (state.activeTab === tab) {
         state.activeTab = state.tabs[state.tabs.length - 1] || null;
-        if (state.activeTab) { state.editor.setModel(state.activeTab.model); if (state.activeTab.viewState) state.editor.restoreViewState(state.activeTab.viewState); }
-        else state.editor.setModel(null);
+        if (state.activeTab) { switchTab(state.activeTab); }
+        else { state.editor.setModel(null); hideBinaryPlaceholder(); }
       }
       renderTabs();
     }
 
     async function saveCurrentFile() {
       const tab = state.activeTab;
-      if (!tab) return;
+      if (!tab || tab.binary) return;
       const content = tab.model.getValue();
       try {
         await api('POST', '/api/save-file', buildBody({ path: tab.path, content }));
@@ -981,6 +1018,9 @@
         }
         state.term.open(ui.terminalPanel);
         if (state.fitAddon) state.fitAddon.fit();
+        state.term.onData(data => { if (state.socket && state.socket.readyState === WebSocket.OPEN) state.socket.send(data); });
+        state.term.onResize(({ cols, rows }) => { if (state.socket && state.socket.readyState === WebSocket.OPEN) state.socket.send(JSON.stringify({cols, rows})); });
+        window.addEventListener('resize', () => { if (state.fitAddon) state.fitAddon.fit(); });
         state.term.writeln('\r\nAero Forge terminal. Connecting to session...\r\n');
         connectTerminal();
       }, (err) => {
@@ -1018,9 +1058,6 @@
         if (state.term) state.term.writeln(`\r\nTerminal disconnected (code ${e.code}).\r\n`);
       };
       state.socket.onerror = () => { if (state.term) state.term.writeln(`\r\nTerminal connection error. Check that the WebSocket server is reachable.\r\n`); };
-      state.term.onData(data => { if (state.socket && state.socket.readyState === WebSocket.OPEN) state.socket.send(data); });
-      state.term.onResize(({ cols, rows }) => { if (state.socket && state.socket.readyState === WebSocket.OPEN) state.socket.send(JSON.stringify({cols, rows})); });
-      window.addEventListener('resize', () => { if (state.fitAddon) state.fitAddon.fit(); });
     }
 
     function reconnectTerminal() {
