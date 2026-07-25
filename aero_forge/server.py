@@ -350,8 +350,102 @@ def _extract_zip_safely(zip_bytes: bytes, dest: Path, archive_name: Optional[str
                 dst.write(src.read())
 
 
+SKIP_DIRS = {
+    "__pycache__",
+    ".git",
+    ".aero",
+    ".build_cache",
+    ".overlays",
+    ".variant_0",
+    ".variant_1",
+    ".variant_2",
+    "target",
+    ".cargo",
+    ".pytest_cache",
+}
+
+_HUMAN_RELEVANT_EXTS = {
+    ".py",
+    ".rs",
+    ".toml",
+    ".aero",
+    ".md",
+    ".json",
+    ".yaml",
+    ".yml",
+    ".txt",
+    ".ini",
+    ".cfg",
+    ".sh",
+    ".html",
+    ".css",
+    ".js",
+    ".ts",
+    ".cpp",
+    ".c",
+    ".h",
+    ".hpp",
+    ".cc",
+}
+
+_BINARY_EXTS = {
+    ".so",
+    ".pyd",
+    ".dylib",
+    ".dll",
+    ".wasm",
+    ".zip",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".ico",
+    ".pdf",
+    ".whl",
+    ".tar",
+    ".gz",
+    ".bz2",
+    ".xz",
+}
+
+
+def _is_interesting_file(rel: Path) -> bool:
+    """Return True for source files and final package outputs; skip build artifacts."""
+    parts = rel.parts
+    if any(part in SKIP_DIRS for part in parts):
+        return False
+    name = rel.name
+    if name == ".gitkeep":
+        return False
+    if name == "Cargo.lock":
+        return False
+    if parts[0] == "dist":
+        return True
+    ext = rel.suffix.lower()
+    if ext in _HUMAN_RELEVANT_EXTS or ext in _BINARY_EXTS:
+        return True
+    return False
+
+
+def _is_binary_file(path: Path) -> bool:
+    """Return True for binary artifact files that should not be opened as text."""
+    ext = path.suffix.lower()
+    if ext in _BINARY_EXTS:
+        return True
+    try:
+        sample = path.read_bytes()[:1024]
+    except OSError:
+        return False
+    if b"\x00" in sample:
+        return True
+    if ext:
+        return False
+    return sample and not all(32 <= b < 127 or b in (9, 10, 13) for b in sample)
+
+
 def _build_tree(directory: Path, rel: Optional[Path] = None) -> Dict[str, Any]:
-    """Return a nested JSON tree of files and directories."""
+    """Return a nested JSON tree of files and directories, pruning build dirs."""
     rel = rel or Path(".")
     name = "." if rel == Path(".") else (rel.name or directory.name or ".")
     node: Dict[str, Any] = {
@@ -363,10 +457,12 @@ def _build_tree(directory: Path, rel: Optional[Path] = None) -> Dict[str, Any]:
     for path in sorted(directory.iterdir()):
         child_rel = rel / path.name
         if path.is_dir():
-            if path.name in {"__pycache__", ".git", ".aero", ".build_cache", ".overlays", ".variant_0", ".variant_1", ".variant_2"}:
+            if path.name in SKIP_DIRS:
                 continue
             node["children"].append(_build_tree(path, child_rel))
         else:
+            if not _is_interesting_file(child_rel):
+                continue
             node["children"].append(
                 {
                     "name": path.name,
@@ -379,18 +475,16 @@ def _build_tree(directory: Path, rel: Optional[Path] = None) -> Dict[str, Any]:
 
 
 def _build_file_list(directory: Path) -> List[Dict[str, Any]]:
-    """Return a flat list of file entries relative to *directory*."""
+    """Return a flat list of human-relevant file entries relative to *directory*."""
     files: List[Dict[str, Any]] = []
     for path in directory.rglob("*"):
         if not path.is_file():
-            continue
-        if path.name == ".gitkeep":
             continue
         try:
             rel = path.relative_to(directory)
         except ValueError:
             continue
-        if any(part.startswith(".") and part in {".aero", ".build_cache", ".overlays"} for part in rel.parts):
+        if not _is_interesting_file(rel):
             continue
         files.append(
             {
@@ -719,6 +813,20 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
 
         if not target.is_file():
             return _send_json(self, 404, {"error": "File not found"})
+
+        if _is_binary_file(target):
+            content_type, _ = mimetypes.guess_type(str(target))
+            return _send_json(
+                self,
+                200,
+                {
+                    "session_id": session_id,
+                    "path": file_path,
+                    "binary": True,
+                    "size": target.stat().st_size,
+                    "mime_type": content_type or "application/octet-stream",
+                },
+            )
 
         try:
             content = target.read_text(encoding="utf-8")

@@ -346,9 +346,11 @@ class SandboxManager:
         """Create and return a sandbox directory for ``session_id``."""
         session_dir = self._session_dir(session_id)
         session_dir.mkdir(parents=True, exist_ok=True)
-        source = session_dir / "source.py"
-        if not source.is_file():
-            source.write_text("# placeholder\n", encoding="utf-8")
+        # Keep a hidden, lazily-created source file for single-function transpile
+        # paths so the project root is not cluttered with a placeholder.
+        aero_dir = session_dir / ".aero"
+        aero_dir.mkdir(parents=True, exist_ok=True)
+        source = aero_dir / "source.py"
         sandbox = Sandbox(
             source=source,
             function_name="main",

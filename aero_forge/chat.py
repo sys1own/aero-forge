@@ -5,20 +5,31 @@ from __future__ import annotations
 import difflib
 import json
 import logging
+import os
+import re
+import shutil
+import subprocess
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from aero_forge.build_summary import format_build_summary
 from aero_forge.config import ConfigOverride
 from aero_forge.error_explainer import explain_error
 from aero_forge.generate import (
     _find_generated_python_paths,
+    extract_code_blocks,
     generate_and_build,
     optimize_generated_code,
 )
 from aero_forge.llm.clients import get_llm_client
+from aero_forge.orchestrator.stack_classifier import (
+    INTENT_HYBRID_CPP_PYTHON,
+    INTENT_HYBRID_RUST_PYTHON,
+    classify_stack,
+)
+from aero_forge.scaffold.cargo_runner import run_cargo
 
 logger = logging.getLogger("aero_forge.chat")
 
@@ -39,6 +50,101 @@ COMMANDS = [
     "exit",
     "quit",
 ]
+
+
+_MULTIFILE_HINTS = {
+    "rust core",
+    "pyo3",
+    "maturin",
+    "cargo",
+    "scripts/",
+    "src/lib.rs",
+    "tests/test_",
+    "python engine",
+    "python and rust",
+    "rust/python",
+    "hybrid",
+    "polyglot",
+}
+
+
+def _is_multifile_hybrid_request(text: str) -> bool:
+    """Return True when the prompt asks for a multi-file Rust/Python workspace."""
+    lowered = text.lower()
+    return any(hint in lowered for hint in _MULTIFILE_HINTS)
+
+
+def _extract_file_path_from_block(code: str) -> Optional[str]:
+    """Look for a ``// file: <path>`` or ``# file: <path>`` marker in the first lines."""
+    for line in code.splitlines()[:5]:
+        match = re.match(r"^\s*(?://|#)\s*file:\s*(\S+)", line)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def _strip_file_marker(code: str) -> str:
+    """Remove the ``// file:`` / ``# file:`` marker line from the start of a code block."""
+    lines = code.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        if line.strip() and re.match(r"^\s*(?://|#)\s*file:\s*\S+", line):
+            return "".join(lines[:i] + lines[i + 1 :]).strip("\n") + "\n"
+    return code
+
+
+def _parse_multifile_response(
+    response: str,
+    output_dir: Path,
+) -> Dict[Path, str]:
+    """Parse an LLM response containing marked code blocks into workspace files."""
+    files: Dict[Path, str] = {}
+    for _lang, code in extract_code_blocks(response):
+        if not code.strip():
+            continue
+        rel_path = _extract_file_path_from_block(code)
+        if not rel_path:
+            continue
+        if any(part == ".." for part in Path(rel_path).parts):
+            continue
+        target = (output_dir / rel_path).resolve()
+        try:
+            target.relative_to(output_dir.resolve())
+        except ValueError:
+            continue
+        files[target] = _strip_file_marker(code)
+    return files
+
+
+def _run_pytest(workspace: Path) -> Tuple[int, str, str]:
+    """Run pytest in *workspace* and return (returncode, stdout, stderr)."""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(workspace)
+    result = subprocess.run(
+        ["python", "-m", "pytest", "tests", "-q"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    return result.returncode, result.stdout, result.stderr
+
+
+def _run_simulation(workspace: Path, timeout: float = 120.0) -> Tuple[int, str, str]:
+    """Run ``python scripts/run_simulation.py`` if it exists."""
+    script = workspace / "scripts" / "run_simulation.py"
+    if not script.is_file():
+        return -1, "", f"{script} not found"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(workspace)
+    result = subprocess.run(
+        ["python", str(script)],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=timeout,
+    )
+    return result.returncode, result.stdout, result.stderr
 
 
 def _session_path(session_id: str) -> Path:
@@ -217,6 +323,12 @@ class ChatSession:
         if lowered in ("help", "?"):
             return self._help_action()
 
+        # Long, structured prompts are generation requests even if they contain
+        # words like "test" or "optimize" mid-sentence.
+        word_count = len(text.split())
+        if word_count > 25 or (text.count("\n") > 1 and word_count > 10):
+            return self._generate_action(text)
+
         if any(
             phrase in lowered
             for phrase in (
@@ -242,8 +354,8 @@ class ChatSession:
             return self._benchmark_action(text)
 
         if any(
-            phrase in lowered for phrase in ("build", "compile", "run tests", "test")
-        ):
+            phrase in lowered for phrase in ("build", "compile", "run tests")
+        ) or lowered in ("test", "run tests"):
             return self._build_action(text)
 
         if any(phrase in lowered for phrase in ("show", "display", "view code")):
@@ -301,6 +413,12 @@ class ChatSession:
         """Generate code from the user's prompt and build it."""
         self._progress("Sure! Generating code...")
         self.last_prompt = text
+        classification = classify_stack(text)
+        if classification.architecture in (
+            INTENT_HYBRID_RUST_PYTHON,
+            INTENT_HYBRID_CPP_PYTHON,
+        ) or _is_multifile_hybrid_request(text):
+            return self._multi_file_generate_action(text)
         result = generate_and_build(
             text,
             output_dir=self.output_dir,
@@ -313,6 +431,144 @@ class ChatSession:
             progress_callback=self._progress,
             config_override=self.config_override,
         )
+        self._update_memory(text, result)
+        return result
+
+    def _multi_file_generate_action(self, text: str) -> Dict[str, Any]:
+        """Generate a multi-file Rust/Python workspace from the prompt and run tests."""
+        self._progress("Building multi-file hybrid workspace...")
+        self.last_prompt = text
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        client = get_llm_client(
+            self.llm_provider,
+            model=self.model,
+            max_retries=self.max_retries,
+            config_override=self.config_override,
+        )
+        if client is None:
+            return {"message": "No LLM provider configured for multi-file generation."}
+
+        system = (
+            "You are a senior Rust and Python engineer. Given the user's request, "
+            "produce a complete, buildable workspace. Return every file as a separate "
+            "Markdown code fence. The first non-blank line inside each fence must be a "
+            "comment containing the relative file path, using one of these forms:\n"
+            "- Rust files: `// file: path/to/file.rs`\n"
+            "- TOML files: `# file: path/to/Cargo.toml`\n"
+            "- Python files: `# file: path/to/file.py`\n\n"
+            "At minimum emit:\n"
+            "- `Cargo.toml` (workspace root) and `rust_core/Cargo.toml` with a PyO3 cdylib crate\n"
+            "- `rust_core/src/lib.rs` exposing the requested Rust functions through PyO3\n"
+            "- `pyproject.toml` (optional package metadata)\n"
+            "- `scripts/run_simulation.py` as a runnable entry point\n"
+            "- `tests/test_metrics.py` pytest tests that import the generated module and assert behavior\n\n"
+            "Use `pyo3 = { version = \"0.20.3\", features = [\"extension-module\", \"abi3-py39\", \"generate-import-lib\"] }`. "
+            "Set crate-type = [\"cdylib\"] in the crate Cargo.toml. "
+            "Ensure the compiled `.so` name matches the `[lib] name` in `rust_core/Cargo.toml` so Python can import it. "
+            "Python wrapper code should look for the compiled shared object in the workspace root, `rust_core/target/release`, `target/release`, or `dist`.\n\n"
+            "Do not include explanatory text outside the code fences."
+        )
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": text},
+        ]
+        try:
+            response = client.generate(messages, temperature=0.2)
+        except Exception as exc:
+            return {"message": f"LLM call failed: {exc}"}
+
+        if not response:
+            return {"message": "LLM returned an empty response."}
+
+        files = _parse_multifile_response(response, self.output_dir)
+        if not files:
+            return {
+                "message": (
+                    "I couldn't parse any marked files from the LLM response. "
+                    "Try a more specific prompt."
+                )
+            }
+
+        for path, content in files.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            self._progress(f"Wrote {path.relative_to(self.output_dir)}")
+
+        # Build the Rust crate if present.
+        cargo_result: Optional[subprocess.CompletedProcess[str]] = None
+        for cargo_toml in [self.output_dir / "Cargo.toml", self.output_dir / "rust_core" / "Cargo.toml"]:
+            if cargo_toml.is_file():
+                crate_dir = cargo_toml.parent
+                self._progress(f"Compiling {cargo_toml.relative_to(self.output_dir)}...")
+                cargo_result = run_cargo(
+                    ["build", "--release"],
+                    cwd=crate_dir,
+                    retries=3,
+                    timeout=600,
+                )
+                if cargo_result.returncode != 0:
+                    return {
+                        "message": (
+                            f"Cargo build failed in {crate_dir.name}: "
+                            f"{cargo_result.stderr or cargo_result.stdout}"
+                        ),
+                        "build": {"success": False, "error": cargo_result.stderr},
+                    }
+                # Make compiled shared objects importable from the workspace root.
+                dist_dir = self.output_dir / "dist"
+                dist_dir.mkdir(parents=True, exist_ok=True)
+                search_roots = [
+                    self.output_dir / "target" / "release",
+                    self.output_dir / "rust_core" / "target" / "release",
+                    crate_dir / "target" / "release",
+                ]
+                for search in search_roots:
+                    for so in search.glob("*.so"):
+                        # Python imports extension modules as <name>.so, not lib<name>.so.
+                        module_so = so.name
+                        if module_so.startswith("lib") and module_so.endswith(".so"):
+                            module_so = module_so[3:]
+                        destinations = [
+                            dist_dir / so.name,
+                            self.output_dir / so.name,
+                            dist_dir / module_so,
+                            self.output_dir / module_so,
+                            search / module_so,
+                        ]
+                        for dst in destinations:
+                            if so.resolve() == dst.resolve():
+                                continue
+                            shutil.copy(so, dst)
+                break
+
+        # Run pytest if tests exist.
+        pytest_rc, pytest_stdout, pytest_stderr = _run_pytest(self.output_dir)
+        tests_passed = pytest_rc == 0
+
+        file_list = sorted(str(p.relative_to(self.output_dir)) for p in self.output_dir.rglob("*") if p.is_file())
+        result = {
+            "success": tests_passed,
+            "build": {
+                "success": (cargo_result is None or cargo_result.returncode == 0) and tests_passed,
+                "cargo_returncode": cargo_result.returncode if cargo_result else 0,
+                "pytest_returncode": pytest_rc,
+                "pytest_output": pytest_stdout,
+                "pytest_error": pytest_stderr,
+            },
+            "files": file_list,
+        }
+        if result["build"]["success"]:
+            result["message"] = (
+                f"Generated {len(files)} files and ran the full Rust/Python build. "
+                f"Tests {'passed' if tests_passed else 'failed'}. "
+                f"Output is in `{self.output_dir}`."
+            )
+        else:
+            result["message"] = (
+                f"Generated {len(files)} files, but the build did not pass all tests. "
+                f"Check the build log for details."
+            )
         self._update_memory(text, result)
         return result
 
