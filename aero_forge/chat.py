@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from aero_forge.build_summary import format_build_summary
+from aero_forge.bundle_repo import bundle_workspace, format_context_block
 from aero_forge.config import ConfigOverride
 from aero_forge.error_explainer import explain_error
 from aero_forge.generate import (
@@ -323,6 +324,11 @@ class ChatSession:
         if lowered in ("help", "?"):
             return self._help_action()
 
+        # Multi-file or hybrid Rust/Python prompts are always generation requests,
+        # even when phrased as "update" or "optimize".
+        if _is_multifile_hybrid_request(text):
+            return self._generate_action(text)
+
         # Long, structured prompts are generation requests even if they contain
         # words like "test" or "optimize" mid-sentence.
         word_count = len(text.split())
@@ -467,8 +473,16 @@ class ChatSession:
             "Set crate-type = [\"cdylib\"] in the crate Cargo.toml. "
             "Ensure the compiled `.so` name matches the `[lib] name` in `rust_core/Cargo.toml` so Python can import it. "
             "Python wrapper code should look for the compiled shared object in the workspace root, `rust_core/target/release`, `target/release`, or `dist`.\n\n"
-            "Do not include explanatory text outside the code fences."
+            "Do not include explanatory text outside the code fences.\n\n"
+            "If CURRENT_PROJECT_CONTEXT is provided below, preserve existing file paths and "
+            "behavior unless the user explicitly asks to change them." 
         )
+
+        # Inject the current workspace state so follow-up turns know what already exists.
+        bundle = bundle_workspace(self.output_dir, max_file_size_kb=50)
+        if bundle["files"] or bundle["blueprint"]:
+            system = system + "\n\n" + format_context_block(bundle, fmt="xml")
+
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": text},
