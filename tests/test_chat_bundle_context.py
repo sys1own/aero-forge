@@ -98,3 +98,45 @@ def test_bundle_excludes_build_artifacts_from_context(tmp_path: Path) -> None:
     context_block = system_message.split("CURRENT_PROJECT_CONTEXT", 1)[-1]
     assert "target/release/libx.so" not in context_block
     assert "dist/libx.so" not in context_block
+
+
+def test_multi_file_generate_self_heals_test_typo(tmp_path: Path) -> None:
+    fake_response = (
+        "```python\n"
+        "# file: tests/test_demo.py\n"
+        "def test_demo():\n"
+        "    rstats = {}\n"
+        "    assert r_stats == {}\n"
+        "```\n"
+    )
+    fake_llm = FakeLLM(fake_response)
+
+    run_count = {"n": 0}
+    def fake_subprocess_run(cmd, **kwargs):
+        run_count["n"] += 1
+        if run_count["n"] == 1:
+            return MagicMock(
+                returncode=1,
+                stdout="",
+                stderr="tests/test_demo.py:3: NameError: name 'r_stats' is not defined",
+            )
+        return MagicMock(returncode=0, stdout="1 passed", stderr="")
+
+    with patch("aero_forge.chat.get_llm_client", return_value=fake_llm), \
+         patch("aero_forge.chat.run_cargo") as mock_run_cargo, \
+         patch("aero_forge.chat.subprocess.run", side_effect=fake_subprocess_run):
+        mock_run_cargo.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        session = ChatSession(
+            tmp_path,
+            llm_provider="deepseek",
+            model="deepseek-v4-pro",
+            progress_callback=lambda _: None,
+        )
+        session.process("Build a hybrid Python and Rust demo project with tests.")
+
+    assert session.last_build_result["success"]
+    assert run_count["n"] == 2
+    fixed_test = (tmp_path / "tests" / "test_demo.py").read_text(encoding="utf-8")
+    assert "rstats" in fixed_test
+    assert "r_stats" not in fixed_test

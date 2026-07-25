@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import ast
 import difflib
 import json
 import logging
 import os
 import re
+
+try:
+    import tomllib as toml_reader
+except ImportError:  # pragma: no cover
+    try:
+        import tomli as toml_reader
+    except ImportError:  # pragma: no cover
+        toml_reader = None  # type: ignore
 import shutil
 import subprocess
 import time
@@ -18,6 +27,7 @@ from aero_forge.build_summary import format_build_summary
 from aero_forge.bundle_repo import bundle_workspace, format_context_block
 from aero_forge.config import ConfigOverride
 from aero_forge.error_explainer import explain_error
+from aero_forge.healing.router import try_auto_fix
 from aero_forge.generate import (
     _find_generated_python_paths,
     extract_code_blocks,
@@ -31,6 +41,7 @@ from aero_forge.orchestrator.stack_classifier import (
     classify_stack,
 )
 from aero_forge.scaffold.cargo_runner import run_cargo
+from aero_forge.scaffold.rust_merge import fix_rust_core_impls
 
 logger = logging.getLogger("aero_forge.chat")
 
@@ -114,6 +125,97 @@ def _parse_multifile_response(
             continue
         files[target] = _strip_file_marker(code)
     return files
+
+
+def _ensure_root_cargo_workspace(workspace_dir: Path) -> bool:
+    """Make sure the workspace root ``Cargo.toml`` is a valid Cargo workspace.
+
+    LLMs occasionally emit a root ``Cargo.toml`` that references the ``rust_core``
+    crate but omits the ``[workspace]`` section, causing ``cargo build`` to fail
+    with "manifest is missing either a [package] or a [workspace]".  This function
+    rewrites the root manifest as a minimal virtual workspace when it is invalid.
+    """
+    root_cargo = workspace_dir / "Cargo.toml"
+    if not root_cargo.is_file():
+        return False
+
+    try:
+        text = root_cargo.read_text(encoding="utf-8")
+    except Exception:
+        return False
+
+    if toml_reader is not None:
+        try:
+            with root_cargo.open("rb") as f:
+                parsed = toml_reader.load(f)
+        except Exception:
+            parsed = {}
+        if parsed.get("workspace") or parsed.get("package"):
+            return False
+        if parsed.get("dependencies") or parsed.get("lib") or parsed.get("bin"):
+            # This looks like a crate manifest without a package section; it
+            # cannot serve as a workspace root.  Ignore it and build the crate directly.
+            root_cargo.unlink()
+            return True
+
+    # Fallback: crude textual check for a manifest section.
+    if re.search(r"^\s*\[(?:workspace|package)\]", text, re.MULTILINE):
+        return False
+
+    root_cargo.write_text(
+        '[workspace]\nmembers = ["rust_core"]\nresolver = "2"\n\n' + text,
+        encoding="utf-8",
+    )
+    return True
+
+
+def _make_script_runnable(script_path: Path, workspace_dir: Path) -> bool:
+    """Prepend ``sys.path`` setup to *script_path* when it imports a local package.
+
+    Generated scripts in ``scripts/`` frequently import a package directory that
+    lives at the workspace root.  When the script is run directly the root is not
+    on ``sys.path``, so insert it before the first non-shebang line.
+    """
+    if not script_path.is_file():
+        return False
+    try:
+        text = script_path.read_text(encoding="utf-8")
+    except Exception:
+        return False
+    if "sys.path.insert" in text:
+        return False
+
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+
+    top_level_imports = {
+        node.names[0].name.split(".")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        and node.names
+    }
+    local_packages = {
+        name for name in top_level_imports
+        if (workspace_dir / name).is_dir() and (workspace_dir / name / "__init__.py").is_file()
+    }
+    if not local_packages:
+        return False
+
+    lines = text.splitlines(keepends=True)
+    insert_at = 0
+    if lines and lines[0].startswith("#!"):
+        insert_at = 1
+    block = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, str(Path(__file__).parent.parent))\n"
+        "\n"
+    )
+    new_text = "".join(lines[:insert_at]) + block + "".join(lines[insert_at:])
+    script_path.write_text(new_text, encoding="utf-8")
+    return True
 
 
 def _run_pytest(workspace: Path) -> Tuple[int, str, str]:
@@ -440,6 +542,96 @@ class ChatSession:
         self._update_memory(text, result)
         return result
 
+    def _build_and_test_workspace(self) -> Tuple[Optional[subprocess.CompletedProcess[str]], int, str, str, bool]:
+        """Run post-processing, compile the Rust crate, and execute pytest.
+
+        Returns ``(cargo_result, pytest_rc, pytest_stdout, pytest_stderr, tests_passed)``.
+        """
+        # Make generated runnable scripts import the workspace root package(s).
+        scripts_dir = self.output_dir / "scripts"
+        if scripts_dir.is_dir():
+            for script in scripts_dir.glob("*.py"):
+                if _make_script_runnable(script, self.output_dir):
+                    self._progress(f"Made {script.relative_to(self.output_dir)} runnable from any cwd")
+
+        # LLMs often emit a #[pymethods] impl whose methods duplicate an
+        # inherent impl for the same struct; merge them before compiling.
+        if fix_rust_core_impls(self.output_dir):
+            self._progress("Merged duplicate Rust impl blocks in rust_core/src/lib.rs")
+
+        # Guard against an LLM-generated root Cargo.toml that is missing
+        # the [workspace] / [package] section.
+        if _ensure_root_cargo_workspace(self.output_dir):
+            self._progress("Fixed workspace root Cargo.toml")
+
+        # Build the Rust crate if present.
+        cargo_result: Optional[subprocess.CompletedProcess[str]] = None
+        for cargo_toml in [self.output_dir / "Cargo.toml", self.output_dir / "rust_core" / "Cargo.toml"]:
+            if cargo_toml.is_file():
+                crate_dir = cargo_toml.parent
+                self._progress(f"Compiling {cargo_toml.relative_to(self.output_dir)}...")
+                cargo_result = run_cargo(
+                    ["build", "--release"],
+                    cwd=crate_dir,
+                    retries=3,
+                    timeout=600,
+                )
+                if cargo_result.returncode != 0:
+                    return cargo_result, 0, "", cargo_result.stderr or cargo_result.stdout, False
+                # Make compiled shared objects importable from the workspace root.
+                dist_dir = self.output_dir / "dist"
+                dist_dir.mkdir(parents=True, exist_ok=True)
+                search_roots = [
+                    self.output_dir / "target" / "release",
+                    self.output_dir / "rust_core" / "target" / "release",
+                    crate_dir / "target" / "release",
+                ]
+                for search in search_roots:
+                    for so in search.glob("*.so"):
+                        # Python imports extension modules as <name>.so, not lib<name>.so.
+                        module_so = so.name
+                        if module_so.startswith("lib") and module_so.endswith(".so"):
+                            module_so = module_so[3:]
+                        destinations = [
+                            dist_dir / so.name,
+                            self.output_dir / so.name,
+                            dist_dir / module_so,
+                            self.output_dir / module_so,
+                            search / module_so,
+                        ]
+                        for dst in destinations:
+                            if so.resolve() == dst.resolve():
+                                continue
+                            shutil.copy(so, dst)
+                break
+
+        # Run pytest if tests exist; attempt deterministic self-healing on
+        # common test typos (e.g. ``r_stats`` when ``rstats`` is defined).
+        pytest_rc, pytest_stdout, pytest_stderr = _run_pytest(self.output_dir)
+        tests_passed = pytest_rc == 0
+        for _ in range(2):
+            if tests_passed:
+                break
+            combined = f"{pytest_stderr}\n{pytest_stdout}"
+            name_error = re.search(r"NameError: name ['\"](\w+)['\"] is not defined", combined)
+            file_line = re.search(r"([\w/]+\.py):\d+:", combined)
+            if not name_error or not file_line:
+                break
+            bad_name = name_error.group(1)
+            test_file = self.output_dir / file_line.group(1)
+            if test_file.is_file():
+                original = test_file.read_text(encoding="utf-8")
+                fixed = try_auto_fix(combined, original)
+                if fixed and fixed != original:
+                    test_file.write_text(fixed, encoding="utf-8")
+                    self._progress(f"Self-healed test typo: {bad_name} -> fixed in {test_file.name}")
+                    pytest_rc, pytest_stdout, pytest_stderr = _run_pytest(self.output_dir)
+                    tests_passed = pytest_rc == 0
+                    continue
+            break
+
+        return cargo_result, pytest_rc, pytest_stdout, pytest_stderr, tests_passed
+
     def _multi_file_generate_action(self, text: str) -> Dict[str, Any]:
         """Generate a multi-file Rust/Python workspace from the prompt and run tests."""
         self._progress("Building multi-file hybrid workspace...")
@@ -476,7 +668,10 @@ class ChatSession:
             "Test rules: for statistical / anomaly functions, generate tests that compare the compiled "
             "native output with the pure-Python fallback (parity) and use `math.isclose` / `pytest.approx` "
             "for floats. For anomaly detection, use a large sample with one extreme outlier (e.g. ``[1.0] * 100 + [10000.0]``) "
-            "so the anomaly is reliably above a 3.0 sigma threshold. Avoid brittle exact scalar equality like ``assert res['anomalies'] == 1``.\n\n"
+            "so the anomaly is reliably above a 3.0 sigma threshold. Avoid testing with an all-zero baseline, "
+            "because zero standard deviation makes every non-zero value an anomaly; use a baseline with non-zero "
+            "variance (e.g. ``[float(i) for i in range(20)]``) and compare the spike value against the threshold. "
+            "Avoid brittle exact scalar equality like ``assert res['anomalies'] == 1``.\n\n"
             "Do not include explanatory text outside the code fences.\n\n"
             "If CURRENT_PROJECT_CONTEXT is provided below, preserve existing file paths and "
             "behavior unless the user explicitly asks to change them." 
@@ -513,56 +708,56 @@ class ChatSession:
             path.write_text(content, encoding="utf-8")
             self._progress(f"Wrote {path.relative_to(self.output_dir)}")
 
-        # Build the Rust crate if present.
-        cargo_result: Optional[subprocess.CompletedProcess[str]] = None
-        for cargo_toml in [self.output_dir / "Cargo.toml", self.output_dir / "rust_core" / "Cargo.toml"]:
-            if cargo_toml.is_file():
-                crate_dir = cargo_toml.parent
-                self._progress(f"Compiling {cargo_toml.relative_to(self.output_dir)}...")
-                cargo_result = run_cargo(
-                    ["build", "--release"],
-                    cwd=crate_dir,
-                    retries=3,
-                    timeout=600,
-                )
-                if cargo_result.returncode != 0:
-                    return {
-                        "message": (
-                            f"Cargo build failed in {crate_dir.name}: "
-                            f"{cargo_result.stderr or cargo_result.stdout}"
-                        ),
-                        "build": {"success": False, "error": cargo_result.stderr},
-                    }
-                # Make compiled shared objects importable from the workspace root.
-                dist_dir = self.output_dir / "dist"
-                dist_dir.mkdir(parents=True, exist_ok=True)
-                search_roots = [
-                    self.output_dir / "target" / "release",
-                    self.output_dir / "rust_core" / "target" / "release",
-                    crate_dir / "target" / "release",
-                ]
-                for search in search_roots:
-                    for so in search.glob("*.so"):
-                        # Python imports extension modules as <name>.so, not lib<name>.so.
-                        module_so = so.name
-                        if module_so.startswith("lib") and module_so.endswith(".so"):
-                            module_so = module_so[3:]
-                        destinations = [
-                            dist_dir / so.name,
-                            self.output_dir / so.name,
-                            dist_dir / module_so,
-                            self.output_dir / module_so,
-                            search / module_so,
-                        ]
-                        for dst in destinations:
-                            if so.resolve() == dst.resolve():
-                                continue
-                            shutil.copy(so, dst)
-                break
+        cargo_result, pytest_rc, pytest_stdout, pytest_stderr, tests_passed = self._build_and_test_workspace()
 
-        # Run pytest if tests exist.
-        pytest_rc, pytest_stdout, pytest_stderr = _run_pytest(self.output_dir)
-        tests_passed = pytest_rc == 0
+        # If tests still fail, ask the LLM to repair the workspace using the failing output.
+        max_heals = max(1, self.max_iterations)
+        for heal_iter in range(max_heals):
+            if tests_passed or cargo_result is None or cargo_result.returncode != 0:
+                break
+            self._progress(f"Healing test failures (attempt {heal_iter + 1}/{max_heals})...")
+            bundle = bundle_workspace(self.output_dir, max_file_size_kb=50)
+            context = format_context_block(bundle, fmt="xml") if bundle["files"] or bundle["blueprint"] else ""
+            heal_system = (
+                "You are repairing a generated Rust/Python workspace. "
+                "The failing pytest output is shown below. "
+                "Return the corrected files using the same Markdown code-fence format with file markers. "
+                "Only include files that need to change; preserve the rest. "
+                "Do not write explanatory text outside the code fences.\n\n"
+                "Fix the implementation and/or tests so `pytest` passes. "
+                "Ensure the Rust core exposes the same methods the tests call (e.g. `__len__`, `clear`, "
+                "`mean`, `peak`, `std_dev`, `z_score`, `is_anomaly`, `process_batch`). "
+                "For `process_batch`, always return `anomalies` as a list (empty list `[]` when none), never `None`."
+            )
+            if context:
+                heal_system += "\n\n" + context
+            error_text = f"{pytest_stderr}\n{pytest_stdout}"
+            heal_messages = [
+                {"role": "system", "content": heal_system},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Original request: {text}\n\n"
+                        f"Failing pytest output:\n```\n{error_text[:4000]}\n```\n\n"
+                        "Return the corrected workspace files."
+                    ),
+                },
+            ]
+            try:
+                heal_response = client.generate(heal_messages, temperature=0.2)
+            except Exception as exc:
+                self._progress(f"LLM healing call failed: {exc}")
+                break
+            if not heal_response:
+                break
+            heal_files = _parse_multifile_response(heal_response, self.output_dir)
+            if not heal_files:
+                break
+            for path, content in heal_files.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+                self._progress(f"Healed {path.relative_to(self.output_dir)}")
+            cargo_result, pytest_rc, pytest_stdout, pytest_stderr, tests_passed = self._build_and_test_workspace()
 
         file_list = sorted(str(p.relative_to(self.output_dir)) for p in self.output_dir.rglob("*") if p.is_file())
         result = {

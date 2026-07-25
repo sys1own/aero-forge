@@ -1184,6 +1184,10 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             env = os.environ.copy()
             env["AERO_FORGE_SESSION"] = session_id
             env["AERO_FORGE_SESSION_DIR"] = str(session_dir)
+            existing_pythonpath = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = (
+                f"{session_dir}{':' + existing_pythonpath if existing_pythonpath else ''}"
+            )
 
             start = time.time()
             proc = subprocess.Popen(
