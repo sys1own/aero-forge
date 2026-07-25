@@ -93,7 +93,7 @@ def _generate_stub_body(name: str, args: List[Tuple[str, str]], return_type: str
     if "list" in rt:
         list_arg = next((a for a in args if "list" in a[1].lower()), None)
         if list_arg:
-            return f"    return list({list_arg[0]})"
+            return f"    return [x for x in {list_arg[0]}]"
         return "    return []"
 
     if "dict" in rt:
@@ -191,7 +191,7 @@ def _function_impl(name: str, args: List[Tuple[str, str]], return_type: str) -> 
     """Return a single Python function that delegates to ``_NATIVE`` or falls back."""
     arg_sig = ", ".join(f"{a}: {t}" for a, t in args)
     arg_call = ", ".join(a for a, _ in args)
-    fallback = _generate_stub_body(name, args, return_type).strip()
+    fallback = _generate_stub_body(name, args, return_type)
     return (
         f"def {name}({arg_sig}) -> {return_type}:\n"
         f"    if _NATIVE is not None and hasattr(_NATIVE, \"{name}\"):\n"
@@ -292,7 +292,7 @@ def _render_orchestrator(contracts: List[ContractEntry], module_name: str) -> st
         lines.append(f"    def {name}({arg_sig}) -> {return_type}:")
         lines.append(f"        if self._native is not None and hasattr(self._native, \"{name}\"):")
         lines.append(f"            return self._native.{name}({arg_call})")
-        lines.append(f"        {fallback}")
+        lines.append(f"        {fallback.lstrip()}")
 
     return "\n".join(lines) + "\n"
 

@@ -34,7 +34,13 @@ from aiohttp import web
 from aero_forge.chat import ChatSession
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
+from aero_forge.orchestrator.stack_classifier import (
+    INTENT_HYBRID_CPP_PYTHON,
+    INTENT_HYBRID_RUST_PYTHON,
+    classify_stack,
+)
 from aero_forge.sandbox.manager import SandboxManager
+from aero_forge.universal_builder import build_universal_project
 
 logger = logging.getLogger("aero_forge.server")
 
@@ -182,18 +188,40 @@ async def _handle_build_async(request: web.Request) -> web.Response:
 
     heartbeat_task: asyncio.Task = asyncio.create_task(heartbeat())
     try:
-        result = await asyncio.to_thread(
-            generate_and_build,
-            prompt,
-            output_dir=session_dir,
-            project_name="generated",
-            max_retries=3,
-            max_iterations=5,
-            variants=variants,
-            build_kwargs={"max_workers": 1, "cache_enabled": False},
-            config_override=config,
-            progress_callback=progress_callback,
-        )
+        classification = classify_stack(prompt)
+        if classification.architecture in (
+            INTENT_HYBRID_RUST_PYTHON,
+            INTENT_HYBRID_CPP_PYTHON,
+        ):
+            universal_result = await asyncio.to_thread(
+                build_universal_project,
+                prompt,
+                session_dir,
+                project_name="generated",
+                constraints=None,
+                llm_provider=config.llm_provider or body.get("provider"),
+                model=config.model or body.get("model"),
+                max_retries=3,
+                config_override=config,
+                progress_callback=progress_callback,
+            )
+            result: Dict[str, Any] = {
+                "build": universal_result,
+                "files": universal_result.get("files", []),
+            }
+        else:
+            result = await asyncio.to_thread(
+                generate_and_build,
+                prompt,
+                output_dir=session_dir,
+                project_name="generated",
+                max_retries=3,
+                max_iterations=5,
+                variants=variants,
+                build_kwargs={"max_workers": 1, "cache_enabled": False},
+                config_override=config,
+                progress_callback=progress_callback,
+            )
         _notify_tree_changed(session_id)
         return web.json_response(
             _build_web_response(session_id, session_dir, result),
@@ -529,18 +557,38 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 max_retries=3,
             )
 
-            result = generate_and_build(
-                prompt,
-                output_dir=session_dir,
-                project_name="generated",
-                llm_provider=config.llm_provider,
-                model=config.model,
-                max_retries=3,
-                max_iterations=5,
-                variants=variants,
-                build_kwargs={"max_workers": 1, "cache_enabled": False},
-                config_override=config,
-            )
+            classification = classify_stack(prompt)
+            if classification.architecture in (
+                INTENT_HYBRID_RUST_PYTHON,
+                INTENT_HYBRID_CPP_PYTHON,
+            ):
+                universal_result = build_universal_project(
+                    prompt,
+                    session_dir,
+                    project_name="generated",
+                    constraints=None,
+                    llm_provider=config.llm_provider,
+                    model=config.model,
+                    max_retries=3,
+                    config_override=config,
+                )
+                result: Dict[str, Any] = {
+                    "build": universal_result,
+                    "files": universal_result.get("files", []),
+                }
+            else:
+                result = generate_and_build(
+                    prompt,
+                    output_dir=session_dir,
+                    project_name="generated",
+                    llm_provider=config.llm_provider,
+                    model=config.model,
+                    max_retries=3,
+                    max_iterations=5,
+                    variants=variants,
+                    build_kwargs={"max_workers": 1, "cache_enabled": False},
+                    config_override=config,
+                )
 
             _notify_tree_changed(session_id)
             return _send_json(self, 200, _build_web_response(session_id, session_dir, result))

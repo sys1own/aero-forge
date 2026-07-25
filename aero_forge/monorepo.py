@@ -586,7 +586,8 @@ def orchestrate_hybrid_rust_python(
     constraints = (
         f"Project: {project_name}. Functions: {functions_str}. "
         "Generate Cargo.toml, src/lib.rs, pyproject.toml, and Python wrapper scripts. "
-        "Use explicit type hints and valid string/list arguments."
+        "Use explicit type hints. All numeric inputs must be list[float] or float, "
+        "not list[str]; do not parse strings inside the generated function."
     )
     out = output_dir or Path(f"./{project_name}")
     return generate_monorepo(
