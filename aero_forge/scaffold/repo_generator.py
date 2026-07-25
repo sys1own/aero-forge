@@ -12,10 +12,11 @@ from aero_forge.scaffold.cargo_manifest import (
     render_manifest,
     sanitize_crate_name,
 )
+from aero_forge.scaffold.cargo_runner import write_cargo_config
 
 _DEFAULT_DEPENDENCY_VERSIONS = {
     "rug": "1.24",
-    "pyo3": {"version": "0.21", "features": list(ensure_pyo3_features({"pyo3": "0.21"}).get("pyo3", {}).get("features", []))},
+    "pyo3": {"version": "0.20.3", "features": list(ensure_pyo3_features({"pyo3": "0.20.3"}).get("pyo3", {}).get("features", []))},
     "rayon": "1.10",
 }
 
@@ -226,4 +227,5 @@ def generate_repo(spec: RepoSpec, dest_dir: Path) -> GeneratedRepo:
     _write("README.md", render_readme(spec))
     _write("test_binding.py", render_test_binding(spec))
 
+    write_cargo_config(root)
     return GeneratedRepo(root=root, files=written, spec=spec)

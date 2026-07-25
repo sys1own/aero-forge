@@ -13,7 +13,11 @@ logger = logging.getLogger("aero_forge.cargo")
 MANIFEST_NAME = "Cargo.toml"
 DEFAULT_EDITION = "2021"
 DEFAULT_VERSION = "0.1.0"
-PYO3_REQUIRED_FEATURES = ("extension-module", "experimental-declarative-modules")
+PYO3_REQUIRED_FEATURES = (
+    "extension-module",
+    "abi3-py39",
+    "generate-import-lib",
+)
 
 
 def _load_toml(path: Path) -> Optional[Dict[str, Any]]:
@@ -189,6 +193,8 @@ def render_manifest(
 ) -> str:
     """Render a minimal, valid ``Cargo.toml`` as text."""
     dependencies = ensure_pyo3_features(dependencies or {})
+    if not crate_type and "pyo3" in dependencies:
+        crate_type = ["cdylib"]
     if header is None:
         header_lines = [
             "# Synthesised by aero-forge. Commit a Cargo.toml to take full control;",
@@ -264,6 +270,9 @@ def prepare_crate(
             render_manifest(crate_name, dependencies, edition, version, crate_type),
             encoding="utf-8",
         )
+        from aero_forge.scaffold.cargo_runner import write_cargo_config
+
+        write_cargo_config(crate_root)
 
     return CargoPlan(
         crate_root=crate_root,

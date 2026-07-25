@@ -23,6 +23,7 @@ from aero_forge.blueprint import (
     write_blueprint,
 )
 from aero_forge.scaffold.cargo_manifest import sanitize_crate_name
+from aero_forge.scaffold.cargo_runner import cargo_build
 from aero_forge.scaffold.engine import Engine
 from aero_forge.scaffold.python_repo_generator import _sanitize_module_name
 from aero_forge.translator import TargetMode, UASTToHINTranslator, python_source_to_uast
@@ -597,12 +598,7 @@ class PolyglotMaterializer:
             ):
                 continue
             logger.info("Building Rust crate in %s", build_dir)
-            subprocess.run(
-                ["cargo", "build", "--release"],
-                cwd=build_dir,
-                check=False,
-                capture_output=True,
-            )
+            cargo_build(build_dir, release=True, timeout=600)
 
         dist = self.workspace / "dist"
         dist.mkdir(parents=True, exist_ok=True)
