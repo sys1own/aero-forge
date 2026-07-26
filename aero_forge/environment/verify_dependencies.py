@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import shutil
 from typing import Any, Dict, List, Optional, Set
+
+
+def _cargo_path() -> str:
+    from aero_forge.scaffold.cargo_runner import _env_with_cargo
+
+    return _env_with_cargo().get("PATH", os.environ.get("PATH", ""))
 
 
 class ContractViolationError(Exception):
@@ -66,7 +73,8 @@ class VerifyDependencies:
     def missing_toolchain_binaries(language: str) -> List[str]:
         """Return required binaries for *language* that are absent from PATH."""
         required = SYSTEM_TOOLCHAINS.get(language, [])
-        return [binary for binary in required if shutil.which(binary) is None]
+        path = _cargo_path()
+        return [binary for binary in required if shutil.which(binary, path=path) is None]
 
     @classmethod
     def verify_toolchain(cls, language: str) -> bool:
@@ -144,7 +152,8 @@ class VerifyDependencies:
 
     def missing_tools(self) -> List[str]:
         """Return required tools that are not on PATH."""
-        return sorted(t for t in self.required_tools() if shutil.which(t) is None)
+        path = _cargo_path()
+        return sorted(t for t in self.required_tools() if shutil.which(t, path=path) is None)
 
     def missing_python_packages(self) -> List[str]:
         """Return required Python packages that are not importable."""
