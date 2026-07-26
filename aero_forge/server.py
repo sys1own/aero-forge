@@ -16,6 +16,7 @@ import re
 import shutil
 import struct
 import subprocess
+import sys
 import termios
 import threading
 import time
@@ -1308,7 +1309,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
 
             start = time.time()
             proc = subprocess.Popen(
-                ["python", str(target)],
+                [sys.executable, str(target)],
                 cwd=str(session_dir),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -1474,6 +1475,11 @@ async def _handle_terminal(websocket: Any) -> None:
         env["AERO_FORGE_SESSION"] = session_id
         env["AERO_FORGE_SESSION_DIR"] = str(session_dir)
 
+        # Ensure the shell's `python` resolves to the same interpreter that built
+        # native extensions. If pyenv is active, force the system version (the
+        # one running this server) so compiled C-ABI artifacts load correctly.
+        env["PYENV_VERSION"] = "system"
+
         process = await asyncio.create_subprocess_exec(
             shell,
             "-i",
@@ -1546,8 +1552,8 @@ async def _handle_terminal(websocket: Any) -> None:
             except (BlockingIOError, OSError):
                 break
 
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.exception("Terminal handler error: %s", exc)
     finally:
         if reader_added and master_fd >= 0:
             try:
