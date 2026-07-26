@@ -54,6 +54,7 @@ INTENT_PURE_PYTHON = "pure_python"
 INTENT_PURE_RUST = "pure_rust"
 INTENT_HYBRID_RUST_PYTHON = "hybrid_rust_python"
 INTENT_HYBRID_CPP_PYTHON = "hybrid_cpp_python"
+INTENT_HYBRID_CPP_RUST = "hybrid_cpp_rust"
 INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON = "tri_polyglot_rust_cpp_python"
 INTENT_GENERIC = "generic"
 
@@ -120,6 +121,9 @@ def classify_stack(prompt: str) -> StackClassification:
     elif has_python and has_cpp:
         architecture = INTENT_HYBRID_CPP_PYTHON
         raw_toolchains.update(["python", "cpp", "cmake"])
+    elif has_rust and has_cpp:
+        architecture = INTENT_HYBRID_CPP_RUST
+        raw_toolchains.update(["rust", "cpp", "cargo"])
     elif has_hybrid_word and (has_python or has_rust):
         # Generic "hybrid" / "polyglot" with no explicit C++ defaults to Rust/Python.
         architecture = INTENT_HYBRID_RUST_PYTHON
@@ -169,6 +173,15 @@ def default_manifest_for_architecture(
             {"path": f"{python_package}/main.py", "lang": "python", "purpose": "Python CLI / REPL entrypoint"},
             {"path": "run_shell.py", "lang": "python", "purpose": "Headless launcher"},
             {"path": "tests/test_tri.py", "lang": "python", "purpose": "pytest tests"},
+            {"path": "README.md", "lang": "markdown", "purpose": "Project README"},
+        ]
+    if architecture == INTENT_HYBRID_CPP_RUST:
+        return [
+            {"path": "Cargo.toml", "lang": "toml", "purpose": "Rust package manifest"},
+            {"path": "build.rs", "lang": "rust", "purpose": "C++ build and link script"},
+            {"path": "src/main.rs", "lang": "rust", "purpose": "Rust CLI binary"},
+            {"path": "src/cpp_core/native.cpp", "lang": "cpp", "purpose": "C-ABI math source"},
+            {"path": "tests/test_hybrid_cpp_rust.rs", "lang": "rust", "purpose": "Rust integration test"},
             {"path": "README.md", "lang": "markdown", "purpose": "Project README"},
         ]
     if architecture == INTENT_HYBRID_RUST_PYTHON:
@@ -225,6 +238,7 @@ def suggested_blueprint_template(architecture: str) -> str:
         INTENT_PURE_RUST: "pure_rust",
         INTENT_HYBRID_RUST_PYTHON: "hybrid_rust_python",
         INTENT_HYBRID_CPP_PYTHON: "hybrid_cpp_python",
+        INTENT_HYBRID_CPP_RUST: "hybrid_cpp_rust",
         INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON: "tri_polyglot_rust_cpp_python",
     }
     return mapping.get(architecture, "pure_python")

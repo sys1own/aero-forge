@@ -660,6 +660,7 @@ def classify(source: str, function_names: Optional[List[str]] = None) -> Dict[st
 
 from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_CPP_PYTHON,
+    INTENT_HYBRID_CPP_RUST,
     INTENT_HYBRID_RUST_PYTHON,
     INTENT_PURE_PYTHON,
     INTENT_PURE_RUST,
@@ -673,6 +674,7 @@ BUILD_INTENT_PURE_PYTHON = INTENT_PURE_PYTHON
 BUILD_INTENT_PURE_RUST = INTENT_PURE_RUST
 BUILD_INTENT_HYBRID_RUST_PYTHON = INTENT_HYBRID_RUST_PYTHON
 BUILD_INTENT_HYBRID_CPP_PYTHON = INTENT_HYBRID_CPP_PYTHON
+BUILD_INTENT_HYBRID_CPP_RUST = INTENT_HYBRID_CPP_RUST
 BUILD_INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON = INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON
 
 
@@ -685,6 +687,8 @@ def toolchains_for_intent(intent: str) -> List[str]:
     """Return the toolchains associated with a build intent."""
     if intent == BUILD_INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON:
         return ["python", "rust", "cpp", "cargo"]
+    if intent == BUILD_INTENT_HYBRID_CPP_RUST:
+        return ["rust", "cpp", "cargo"]
     if intent == BUILD_INTENT_HYBRID_RUST_PYTHON:
         return ["python", "rust", "cargo"]
     if intent == BUILD_INTENT_HYBRID_CPP_PYTHON:
@@ -720,6 +724,7 @@ __all__ = [
     "BUILD_INTENT_PURE_RUST",
     "BUILD_INTENT_HYBRID_RUST_PYTHON",
     "BUILD_INTENT_HYBRID_CPP_PYTHON",
+    "BUILD_INTENT_HYBRID_CPP_RUST",
     "BUILD_INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON",
     "CodeRouteClassifier",
 ]

@@ -353,7 +353,7 @@ class TriPolyglotMaterializer:
         cpp_contracts, rust_contracts, python_contracts = _partition_contracts(contracts)
 
         accel_log = self.workspace / ".aero_forge_accel.log"
-        os.environ.setdefault("AERO_FORGE_ACCEL_LOG", str(accel_log))
+        os.environ["AERO_FORGE_ACCEL_LOG"] = str(accel_log)
 
         pkg_dir = self.workspace / pkg_name
         pkg_dir.mkdir(exist_ok=True)

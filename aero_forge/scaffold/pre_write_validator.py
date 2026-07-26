@@ -99,7 +99,12 @@ def validate_blueprint_intent(prompt: str, blueprint: Any) -> None:
     manifest = getattr(blueprint, "manifest", [])
     manifest_paths = {getattr(entry, "path", "") for entry in manifest}
 
-    if architecture == "pure_python" and intent in ("hybrid_rust_python", "hybrid_cpp_python"):
+    if architecture == "pure_python" and intent in (
+        "hybrid_rust_python",
+        "hybrid_cpp_python",
+        "hybrid_cpp_rust",
+        "tri_polyglot_rust_cpp_python",
+    ):
         raise BlueprintValidationError(
             f"Prompt requests a {intent} build, but blueprint architecture is {architecture!r}",
             output=f"Set architecture to a hybrid/polyglot value such as '{intent}'.",
@@ -120,7 +125,19 @@ def validate_blueprint_intent(prompt: str, blueprint: Any) -> None:
                 output="Add a Cargo.toml entry to the blueprint manifest.",
             )
 
-    if intent == "hybrid_cpp_python" or _has_cpp_keywords(prompt, toolchains):
+    if intent == "hybrid_cpp_rust" or (intent == "hybrid_polyglot" and _has_cpp_keywords(prompt, toolchains) and ("rust" in toolchains or "cargo" in toolchains) and "python" not in toolchains):
+        has_rust = "rust" in toolchains or "cargo" in toolchains
+        has_cpp = "cpp" in toolchains or "cmake" in toolchains or "g++" in toolchains or "clang" in toolchains
+        if not has_rust or not has_cpp:
+            raise BlueprintValidationError(
+                f"Prompt requests a hybrid C++/Rust build, but toolchains {toolchains!r} are missing 'rust' or 'cpp'",
+                output="Include both 'rust' (or 'cargo') and 'cpp' (or 'cmake') in toolchains.",
+            )
+
+    if intent == "hybrid_cpp_python" or (
+        _has_cpp_keywords(prompt, toolchains)
+        and intent not in ("hybrid_cpp_rust", "tri_polyglot_rust_cpp_python")
+    ):
         has_cpp = "cpp" in toolchains or "cmake" in toolchains or "g++" in toolchains or "clang" in toolchains
         if "python" not in toolchains or not has_cpp:
             raise BlueprintValidationError(
