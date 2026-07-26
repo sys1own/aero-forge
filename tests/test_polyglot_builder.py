@@ -478,6 +478,93 @@ def test_cpp_pybind11_polyglot_materializer_builds_and_runs(tmp_path: Path) -> N
     assert any(f.name == "fast_vector_transform" for f in updated.functions)
 
 
+@pytest.mark.integration
+def test_tri_polyglot_materializer_builds_and_runs(tmp_path: Path) -> None:
+    """End-to-end: a Python + Rust + C++ tri-polyglot workspace is materialized, compiled, and executed."""
+    from aero_forge.blueprint import Blueprint, ContractEntry, ManifestEntry
+    from aero_forge.scaffold.tri_polyglot_materializer import TriPolyglotMaterializer
+
+    if not _find_cpp_compiler():
+        pytest.skip("No C++ compiler available")
+    if not shutil.which("cargo"):
+        pytest.skip("No Rust cargo available")
+
+    workspace = tmp_path / "tri_poly"
+    blueprint = Blueprint(
+        project="tri_demo",
+        architecture="tri_polyglot_rust_cpp_python",
+        toolchains=["python", "rust", "cpp", "cargo"],
+        manifest=[
+            ManifestEntry(path="Cargo.toml", lang="toml", purpose="workspace manifest"),
+            ManifestEntry(path="rust_core/Cargo.toml", lang="toml", purpose="PyO3 crate manifest"),
+            ManifestEntry(path="rust_core/src/lib.rs", lang="rust", purpose="Rust core"),
+            ManifestEntry(path="cpp_core/native.cpp", lang="cpp", purpose="C-ABI source"),
+            ManifestEntry(path="tri_demo/__init__.py", lang="python", purpose="package init"),
+            ManifestEntry(path="tri_demo/main.py", lang="python", purpose="CLI"),
+            ManifestEntry(path="pyproject.toml", lang="toml", purpose="project manifest"),
+            ManifestEntry(path="run_shell.py", lang="python", purpose="launcher"),
+            ManifestEntry(path="tests/test_tri.py", lang="python", purpose="tests"),
+            ManifestEntry(path="README.md", lang="markdown", purpose="docs"),
+        ],
+        contracts=[
+            ContractEntry(
+                name="fast_vector_transform",
+                signature="def fast_vector_transform(v: list[float], scalar: float) -> list[float]",
+            ),
+            ContractEntry(
+                name="validate_token",
+                signature="def validate_token(token: str) -> bool",
+            ),
+            ContractEntry(
+                name="get_engine_status",
+                signature="def get_engine_status() -> dict[str, str]",
+            ),
+        ],
+    )
+    updated = TriPolyglotMaterializer(workspace).materialize(blueprint, build=True)
+
+    assert (workspace / "cpp_core" / "native.cpp").is_file()
+    assert (workspace / "rust_core" / "Cargo.toml").is_file()
+    assert (workspace / "tri_demo" / "main.py").is_file()
+    assert updated.architecture == "tri_polyglot_rust_cpp_python"
+
+    cpp_so = next((p for p in (workspace / "cpp_core").glob("*.so")), None)
+    assert cpp_so, "Expected compiled C++ .so"
+
+    rust_candidates = list((workspace / "rust_core" / "target" / "release").glob("*.so")) + list((workspace / "target" / "release").glob("*.so"))
+    rust_so = next((p for p in rust_candidates), None)
+    assert rust_so, "Expected compiled Rust .so"
+
+    # Smoke test the package entrypoint.
+    smoke = workspace / "check_tri.py"
+    smoke.write_text(
+        "import sys\n"
+        'sys.path.insert(0, ".")\n'
+        "from tri_demo import fast_vector_transform, validate_token, get_engine_status\n"
+        "assert fast_vector_transform([1.0, 2.0, 3.0], 2.0) == [2.0, 4.0, 6.0]\n"
+        'assert validate_token("validtoken123") is True\n'
+        'assert validate_token("short") is False\n'
+        'assert get_engine_status().get("status") == "ok"\n'
+        'print("tri-polyglot smoke ok")\n'
+    )
+    result = subprocess.run(["python", str(smoke)], cwd=workspace, capture_output=True, text=True)
+    assert result.returncode == 0, f"Tri-polyglot smoke test failed: {result.stderr}"
+
+    pytest_result = subprocess.run(
+        ["python", "-m", "pytest", "tests/test_tri.py", "-q"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+    )
+    assert pytest_result.returncode == 0, f"Generated tri-polyglot tests failed:\n{pytest_result.stdout}\n{pytest_result.stderr}"
+
+    accel_log = workspace / ".aero_forge_accel.log"
+    if accel_log.is_file():
+        log_text = accel_log.read_text(encoding="utf-8")
+        assert "C++ dynamic shared" in log_text or "C-ABI" in log_text, "Expected C++ dispatch in accelerator log"
+        assert "Rust PyO3" in log_text or "tri-polyglot" in log_text, "Expected Rust dispatch in accelerator log"
+
+
 def _find_cpp_compiler() -> str | None:
     for name in ["g++", "clang++", "c++"]:
         if shutil.which(name):

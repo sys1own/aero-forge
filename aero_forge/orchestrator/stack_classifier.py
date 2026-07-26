@@ -54,6 +54,7 @@ INTENT_PURE_PYTHON = "pure_python"
 INTENT_PURE_RUST = "pure_rust"
 INTENT_HYBRID_RUST_PYTHON = "hybrid_rust_python"
 INTENT_HYBRID_CPP_PYTHON = "hybrid_cpp_python"
+INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON = "tri_polyglot_rust_cpp_python"
 INTENT_GENERIC = "generic"
 
 
@@ -110,7 +111,10 @@ def classify_stack(prompt: str) -> StackClassification:
     has_python_only = _has_any(tokens, ["pure python", "python only"])
     has_rust_only = _has_any(tokens, ["pure rust", "rust only", "cargo only"])
 
-    if has_python and has_rust:
+    if has_python and has_rust and has_cpp:
+        architecture = INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON
+        raw_toolchains.update(["python", "rust", "cpp", "cargo"])
+    elif has_python and has_rust:
         architecture = INTENT_HYBRID_RUST_PYTHON
         raw_toolchains.update(["python", "rust", "cargo"])
     elif has_python and has_cpp:
@@ -153,6 +157,20 @@ def default_manifest_for_architecture(
 ) -> List[Dict[str, str]]:
     """Return a generic manifest for an architecture when the LLM omits one."""
     pkg = _sanitize_name(project_name)
+    if architecture == INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON:
+        python_package = pkg
+        return [
+            {"path": "Cargo.toml", "lang": "toml", "purpose": "Rust workspace manifest"},
+            {"path": "rust_core/Cargo.toml", "lang": "toml", "purpose": "PyO3 crate manifest"},
+            {"path": "rust_core/src/lib.rs", "lang": "rust", "purpose": "Rust native core"},
+            {"path": "cpp_core/native.cpp", "lang": "cpp", "purpose": "C-ABI dynamic shared library source"},
+            {"path": "pyproject.toml", "lang": "toml", "purpose": "Python package manifest"},
+            {"path": f"{python_package}/__init__.py", "lang": "python", "purpose": "Python driver package"},
+            {"path": f"{python_package}/main.py", "lang": "python", "purpose": "Python CLI / REPL entrypoint"},
+            {"path": "run_shell.py", "lang": "python", "purpose": "Headless launcher"},
+            {"path": "tests/test_tri.py", "lang": "python", "purpose": "pytest tests"},
+            {"path": "README.md", "lang": "markdown", "purpose": "Project README"},
+        ]
     if architecture == INTENT_HYBRID_RUST_PYTHON:
         python_package = pkg
         return [
@@ -207,5 +225,6 @@ def suggested_blueprint_template(architecture: str) -> str:
         INTENT_PURE_RUST: "pure_rust",
         INTENT_HYBRID_RUST_PYTHON: "hybrid_rust_python",
         INTENT_HYBRID_CPP_PYTHON: "hybrid_cpp_python",
+        INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON: "tri_polyglot_rust_cpp_python",
     }
     return mapping.get(architecture, "pure_python")

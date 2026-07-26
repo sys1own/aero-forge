@@ -15,6 +15,7 @@ from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_RUST_PYTHON,
     INTENT_PURE_PYTHON,
     INTENT_PURE_RUST,
+    INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON,
     classify_stack,
     default_manifest_for_architecture,
     suggested_blueprint_template,
@@ -309,6 +310,18 @@ def generate_blueprint(
         manifest_entries = [
             ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust crate manifest"),
             ManifestEntry(path="src/lib.rs", lang="rust", purpose="Rust core library"),
+        ]
+    elif intent == INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON:
+        manifest_entries = [
+            ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust workspace manifest"),
+            ManifestEntry(path="rust_core/Cargo.toml", lang="toml", purpose="PyO3 crate manifest"),
+            ManifestEntry(path="rust_core/src/lib.rs", lang="rust", purpose="Rust native core"),
+            ManifestEntry(path="cpp_core/native.cpp", lang="cpp", purpose="C-ABI dynamic shared library source"),
+            ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python package manifest"),
+            ManifestEntry(path="src/python/__init__.py", lang="python", purpose="Python driver package"),
+            ManifestEntry(path="src/python/main.py", lang="python", purpose="Python CLI / REPL entrypoint"),
+            ManifestEntry(path="tests/test_tri.py", lang="python", purpose="pytest tests"),
+            ManifestEntry(path="README.md", lang="markdown", purpose="Project README"),
         ]
     else:
         manifest_entries = []
