@@ -1,14 +1,58 @@
-# Aero-Forge: Universal Prompt-Driven Polyglot Build Engine
+# Aero-Forge: Natively Accelerated Polyglot Build Engine
 
-Aero-Forge turns a natural language prompt into a complete, tested, polyglot software project. While it retains high-speed deterministic Python-to-Rust transpilation for heavy numerical code, it is now a universal build orchestrator that can generate, scaffold, compile, and verify pure Python, pure Rust, and hybrid Rust/Python applications from a single prompt.
+Aero-Forge turns a plain-English prompt or an existing source file into a complete, tested, **natively accelerated** software project. It is a universal build orchestrator for **natively accelerated Python**, **pure Rust**, and **Python/Rust polyglot** applications, with automatic PyO3/Maturin extension generation, in-memory HIN JIT compilation, and a zero-copy native bridge.
 
 ## What is Aero-Forge?
 
-Aero-Forge is a prompt-driven build system for software projects. You describe what you want in plain English, or point it at an existing `.py` file, and it produces working source, native extensions, packaging manifests, tests, and a downloadable project bundle.
+Aero-Forge is a prompt-driven build system for high-performance software. You describe what you want, point it at a `.py` file, or upload a ZIP, and it produces working source, native extensions, packaging manifests, tests, and a downloadable project bundle.
 
-The engine is built around a declarative contract called `blueprint.aero`. For every request, Aero-Forge first classifies the prompt to infer the target architecture (for example `pure_python`, `pure_rust`, or `hybrid_rust_python`), the required toolchains (such as `python`, `cargo`, `maturin`, or `cmake`), the file manifest, and the exported contracts. It then materializes every declared file and invokes the appropriate native toolchains. When compilation or tests fail, it applies deterministic AST and pattern-based repairs first and reports precise diagnostics. LLM calls are strictly confined to intent interpretation, high-level strategy selection, and human-facing summaries.
+The engine is built around a declarative contract called `blueprint.aero`. For every request, Aero-Forge first classifies the prompt to infer the target architecture (`pure_python`, `pure_rust`, `hybrid_rust_python`, `hybrid_cpp_python`, etc.), the required toolchains (`python`, `cargo`, `maturin`, `cmake`), the file manifest, and the exported contracts. It then materializes every declared file and invokes the appropriate native toolchains. When compilation or tests fail, it applies deterministic AST and pattern-based repairs first and surfaces precise diagnostics. LLM calls are strictly confined to intent interpretation, high-level strategy selection, and human-facing summaries.
 
-Supported outputs include:
+Core value propositions:
+
+- **Zero-boilerplate native acceleration** - No `Cargo.toml`, `#[pyfunction]`, or linker flags required.
+- **Sub-millisecond execution pathways** - Numeric Python functions compile to Rust and are cached at the AST node level for instant re-execution.
+- **Fall-forward safety** - Unsupported Python constructs gracefully fall back to CPython without panics.
+- **Universal polyglot builds** - One prompt can yield pure Python, pure Rust, or a PyO3/C-ABI hybrid extension.
+
+## Core Supported Build Targets
+
+Aero-Forge natively supports three primary acceleration tiers:
+
+### 1. Natively Accelerated Python
+
+Python functions are transpiled to Rust, compiled into a PyO3 or C-ABI shared library, and exposed through a Pythonic wrapper. The `@accelerate` decorator lets you mark any numeric function for native compilation:
+
+```python
+from aero_forge import accelerate
+
+@accelerate(target="rust_hin")
+def weighted_sum(scores: list[float], weights: list[float]) -> float:
+    total = 0.0
+    for s, w in zip(scores, weights):
+        total += s * w
+    return total
+```
+
+The first call compiles; subsequent calls reuse the cached UAST node hash and execute in the native HIN VM or the compiled `.so` with sub-millisecond latency.
+
+### 2. Pure Rust Crates & Monorepos
+
+Aero-Forge generates standalone Rust binaries, library crates, and multi-crate Cargo workspaces from prompts or blueprints:
+
+```bash
+aero-forge generate --prompt "Build a pure Rust command-line prime sieve" --build
+```
+
+### 3. Python/Rust Polyglot Extensions
+
+High-performance PyO3/Maturin hybrid extension modules with zero-copy buffer handoffs for numeric matrices and arrays:
+
+```bash
+aero-forge generate --prompt "Scaffold a PyO3 extension for batch matrix multiplication with Python bindings" --build
+```
+
+Supported outputs also include:
 
 - Pure Python packages and libraries.
 - Pure Rust crates and Cargo workspaces.
@@ -19,12 +63,15 @@ Supported outputs include:
 
 ## Key Features
 
+- **Native HIN Acceleration Core** - A Rust-based execution backend (`hin_vm`) lowers numeric Python into a High-level Interaction Net (HIN) for fast, safe reduction.
+- **Fine-Grained AST Node Hash Caching** - Compilation artifacts are keyed by the hash of individual UAST nodes. Identical functions bypass `cargo build` entirely and load the cached native snippet instantly.
+- **Fall-Forward Precision Shield** - If the transpiler encounters an unsupported Python construct, the function is transparently routed back to native CPython execution. No panics, no crashes.
 - **Universal Intent Detection** - Parses any high-level prompt to infer languages, build tools, module boundaries, and concurrency patterns. Hybrid stacks are never silently downgraded to a fallback.
 - **Declarative Blueprinting (`blueprint.aero`)** - Every build starts with a generated contract that declares `architecture`, `toolchains`, `manifest`, `contracts`, `functions`, and verification steps.
 - **Strict Blueprint Materialization** - Every manifest file, source module, native backend library, compiler config, and target binding declared in `blueprint.aero` is physically emitted and built.
 - **Natural Language Prompts** - Describe what you want and Aero-Forge generates Python code, tests, and a build blueprint.
 - **Zero Manual Rust Boilerplate** - No `Cargo.toml`, `#[pyfunction]` annotations, or linker flags are required from the user for standard Python/Rust hybrid builds.
-- **Interactive Web Dashboard** - Start a local web server to prompt, build, test, monitor real-time build logs, browse generated files in a multi-tab editor, and download compiled ZIP project artifacts from any modern browser.
+- **Interactive Web Dashboard & Terminal REPL** - Start a local web server (`aero-forge web`) to prompt, build, test, monitor real-time build logs, browse generated files in a multi-tab editor, and download compiled ZIP artifacts. An embedded xterm.js terminal supports copy/paste and live command execution.
 - **Symbolic & AST Static Healing Core** - If `cargo build` or tests fail, Aero-Forge applies deterministic AST/pattern-based repairs first. Failures surface precise exception type, file, and line diagnostics. Optional LLM-generated summaries are generated only for human viewing after the build.
 - **Algorithm Library** - Pick from a curated library of reference implementations (sorting, matrix, FFT, math) or let the LLM select one automatically.
 - **Multi-Variant Testing** - Generate several implementations, compile them in parallel, benchmark each, and select the fastest variant that passes.
@@ -40,7 +87,7 @@ Supported outputs include:
 
 ## Installation
 
-Requires Python 3.10+ and a working Rust toolchain with `cargo` and `rustup`.
+Requires Python 3.10+ and a working Rust toolchain with `cargo` and `rustup`. Aero-Forge will auto-bootstrap a minimal Rust toolchain if one is missing.
 
 ```bash
 pip install aero-forge
@@ -81,7 +128,24 @@ Blueprint: .../blueprint.aero
 Build: 1/1 succeeded (.../dist)
 ```
 
-### 2. Build an existing Python file
+### 2. Accelerate a Python function with `@accelerate`
+
+```python
+from aero_forge import accelerate
+
+@accelerate(target="rust_hin")
+def dot_product(a: list[float], b: list[float]) -> float:
+    total = 0.0
+    for x, y in zip(a, b):
+        total += x * y
+    return total
+
+print(dot_product([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]))
+```
+
+The first call compiles the function to a native Rust `.so`. The second call reuses the cached node key and executes in under a millisecond.
+
+### 3. Build an existing Python file
 
 ```bash
 aero-forge fix src/my_function.py --function my_function
@@ -95,7 +159,7 @@ aero-forge fix src/my_function.py --function my_function --json
 
 With `--json`, `fix` prints a structured result with `status`, `rust_extensions`, `execution_time_ms`, and `error`.
 
-### 3. Build from a blueprint
+### 4. Build from a blueprint
 
 Create `blueprint.aero`:
 
@@ -122,7 +186,7 @@ Then run:
 aero-forge build
 ```
 
-### 4. Build Deterministically
+### 5. Build Deterministically
 
 The transpile/build/test path is always deterministic. For existing, well-typed code you can skip LLM-driven code generation entirely:
 
@@ -131,7 +195,7 @@ aero-forge fix src/my_function.py --function my_function --no-llm
 aero-forge build blueprint.aero --no-llm
 ```
 
-### 5. Interactive Chat Mode
+### 6. Interactive Chat Mode
 
 Start a conversational session. Aero-Forge remembers your previous prompts, generated code, and build results, so you can iterate naturally:
 
@@ -188,7 +252,7 @@ Useful chat phrases:
 - `Explain` - explain the last build error
 - `help` - list available commands
 
-### 6. Post-Build Summaries
+### 7. Post-Build Summaries
 
 After every successful `aero-forge generate --build` or `aero-forge build`, Aero-Forge prints a short, friendly summary of what was built, whether tests passed, and where the compiled library is. In chat mode the summary is part of the assistant's reply.
 
@@ -330,16 +394,16 @@ manifest:
   - path: rust_core/src/lib.rs
     lang: rust
     purpose: Native core exposing the primary function
-  - path: python_engine/pyproject.toml
+  - path: pyproject.toml
     lang: toml
-    purpose: Python package and Maturin configuration
-  - path: python_engine/src/my_engine/__init__.py
+    purpose: Python package configuration
+  - path: my_engine/__init__.py
     lang: python
     purpose: Python driver package exports
-  - path: python_engine/src/my_engine/core.py
+  - path: my_engine/core.py
     lang: python
     purpose: Python wrapper importing rust_core
-  - path: python_engine/tests/test_core.py
+  - path: tests/test_core.py
     lang: python
     purpose: pytest tests
 
@@ -465,6 +529,8 @@ This boundary makes builds reproducible, auditable, and safe to run unattended o
 
 Aero-Forge targets 10-100x speedups for hot numerical loops. Actual speedup depends on the function and the quality of the generated Rust. The benchmark loop in `aero-forge generate --optimize` compares the native extension against the original Python and reports the relative improvement.
 
+Once a function is compiled, the AST node cache lets subsequent invocations skip `cargo build` entirely and load the cached native artifact in under a millisecond.
+
 ## Supported Python Constructs
 
 The transpiler handles common numerical and algorithmic Python patterns:
@@ -519,10 +585,10 @@ See `BLUEPRINT.md` and `stress_tests/README.md` for the full supported-construct
 5. **Transpile** - A deterministic Python-to-Rust transpiler lowers the AST through a UAST/HIN intermediate and emits PyO3 `#[pyfunction]`/`#[pyclass]` code.
 6. **Scaffold** - A temporary Cargo crate or full workspace is generated automatically, with `.cargo/config.toml` network resilience settings.
 7. **Compile** - `cargo build --release` (or `maturin build`) produces a shared library.
-8. **Test** - `pytest` and `cargo test` run against the generated code in an isolated sandbox.
-9. **Heal** - On failure, the orchestrator applies deterministic, static AST/pattern-based repairs from the router and fix cache. Failures are reported with the exact exception type, file, and line.
-10. **Explain** - Optional LLM-generated summaries are produced for human viewing after the build.
-11. **Cache** - Compilation and fix results are cached so unchanged files rebuild instantly.
+8. **Cache** - The compiled native artifact is keyed by the hash of the UAST node so identical functions re-execute without recompiling.
+9. **Test** - `pytest` and `cargo test` run against the generated code in an isolated sandbox.
+10. **Heal** - On failure, the orchestrator applies deterministic, static AST/pattern-based repairs from the router and fix cache. Failures are reported with the exact exception type, file, and line.
+11. **Explain** - Optional LLM-generated summaries are produced for human viewing after the build.
 
 ## Web Integration and Session Isolation
 
@@ -557,7 +623,7 @@ pip install -e ".[dev]"
 rustup target add wasm32-unknown-unknown  # optional, for WASM builds
 ```
 
-The first build may take a few minutes while PyO3 compiles.
+The first build may take a few minutes while PyO3 compiles. If `cargo` is not present, Aero-Forge will attempt to auto-bootstrap a minimal stable toolchain.
 
 ## Further Reading
 
@@ -567,4 +633,3 @@ The first build may take a few minutes while PyO3 compiles.
 
 ## License
 
-MIT
