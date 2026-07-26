@@ -35,9 +35,13 @@ from aero_forge.blueprint import generate_blueprint_from_uploaded_repo
 from aero_forge.chat import ChatSession
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
+from aero_forge.orchestrator.router import toolchains_for_intent
 from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_CPP_PYTHON,
     INTENT_HYBRID_RUST_PYTHON,
+    INTENT_PURE_PYTHON,
+    INTENT_PURE_RUST,
+    StackClassification,
     classify_stack,
 )
 from aero_forge.sandbox.manager import SandboxManager
@@ -68,7 +72,29 @@ _CORS_HEADERS = {
 
 _manager = SandboxManager()
 _static_dir = Path(__file__).parent / "static"
+_blueprint_templates_dir = Path(__file__).parent / "blueprint_templates"
 _active_websockets: Dict[str, Any] = {}
+
+
+def _classification_for_target(
+    classification: StackClassification, target_language: str
+) -> StackClassification:
+    """Override the inferred stack classification when the user picks a target."""
+    target = target_language.lower()
+    if target == "cpp":
+        architecture = INTENT_HYBRID_CPP_PYTHON
+    elif target == "rust":
+        architecture = INTENT_HYBRID_RUST_PYTHON
+    elif target == "python":
+        architecture = INTENT_PURE_PYTHON
+    else:
+        return classification
+    return StackClassification(
+        architecture=architecture,
+        toolchains=toolchains_for_intent(architecture),
+        languages=classification.languages,
+        features=classification.features,
+    )
 _active_ws_lock = threading.Lock()
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -164,6 +190,8 @@ async def _handle_build_async(request: web.Request) -> web.Response:
     session_id = body.get("session_id") or str(uuid.uuid4())
     session_dir = _session_dir(session_id)
     variants = 3 if body.get("variants") else 1
+    target_language = body.get("target_language", "auto")
+    acceleration_policy = body.get("acceleration_policy", "selective")
     config = ConfigOverride(
         llm_provider=body.get("provider"),
         api_key=_api_key_from_request(request, body),
@@ -189,7 +217,9 @@ async def _handle_build_async(request: web.Request) -> web.Response:
 
     heartbeat_task: asyncio.Task = asyncio.create_task(heartbeat())
     try:
-        classification = classify_stack(prompt)
+        classification = _classification_for_target(
+            classify_stack(prompt), target_language
+        )
         if classification.architecture in (
             INTENT_HYBRID_RUST_PYTHON,
             INTENT_HYBRID_CPP_PYTHON,
@@ -205,6 +235,8 @@ async def _handle_build_async(request: web.Request) -> web.Response:
                 max_retries=3,
                 config_override=config,
                 progress_callback=progress_callback,
+                architecture=classification.architecture,
+                acceleration_policy=acceleration_policy,
             )
             result: Dict[str, Any] = {
                 "build": universal_result,
@@ -222,6 +254,8 @@ async def _handle_build_async(request: web.Request) -> web.Response:
                 build_kwargs={"max_workers": 1, "cache_enabled": False},
                 config_override=config,
                 progress_callback=progress_callback,
+                target_language=target_language,
+                acceleration_policy=acceleration_policy,
             )
         _notify_tree_changed(session_id)
         return web.json_response(
@@ -573,6 +607,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_files_download(query)
             if path == "/api/download-zip":
                 return self._handle_download_zip(query)
+            if path == "/api/blueprint-templates":
+                return self._handle_blueprint_templates()
             if path in ("/favicon.ico", "/static/logo.png"):
                 return self._serve_static("/logo.png")
 
@@ -608,6 +644,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_run()
             if path == "/api/workspace/clean":
                 return self._handle_workspace_clean()
+            if path == "/api/load-blueprint-template":
+                return self._handle_load_blueprint_template()
 
             return _send_json(self, 404, {"error": "Not found"})
         except Exception as exc:
@@ -645,6 +683,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             session_dir = _session_dir(session_id)
 
             variants = 3 if body.get("variants") else 1
+            target_language = body.get("target_language", "auto")
+            acceleration_policy = body.get("acceleration_policy", "selective")
             config = ConfigOverride(
                 llm_provider=body.get("provider"),
                 api_key=self._api_key(body),
@@ -652,7 +692,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 max_retries=3,
             )
 
-            classification = classify_stack(prompt)
+            classification = _classification_for_target(
+                classify_stack(prompt), target_language
+            )
             if classification.architecture in (
                 INTENT_HYBRID_RUST_PYTHON,
                 INTENT_HYBRID_CPP_PYTHON,
@@ -666,6 +708,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     model=config.model,
                     max_retries=3,
                     config_override=config,
+                    architecture=classification.architecture,
+                    acceleration_policy=acceleration_policy,
                 )
                 result: Dict[str, Any] = {
                     "build": universal_result,
@@ -683,6 +727,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     variants=variants,
                     build_kwargs={"max_workers": 1, "cache_enabled": False},
                     config_override=config,
+                    target_language=target_language,
+                    acceleration_policy=acceleration_policy,
                 )
 
             _notify_tree_changed(session_id)
@@ -1172,6 +1218,51 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             logger.exception("Workspace clean endpoint failed")
             return _send_json(self, 500, {"error": str(exc)})
 
+    def _handle_blueprint_templates(self) -> None:
+        """List available blueprint template names."""
+        try:
+            templates = sorted(
+                p.name for p in _blueprint_templates_dir.iterdir() if p.is_file() and p.suffix == ".aero"
+            )
+            return _send_json(self, 200, {"templates": templates})
+        except Exception as exc:
+            logger.exception("Blueprint templates endpoint failed")
+            return _send_json(self, 500, {"error": str(exc)})
+
+    def _handle_load_blueprint_template(self) -> None:
+        """Copy a blueprint template into the session workspace."""
+        try:
+            body = _parse_json_body(self)
+            session_id = body.get("session_id", "").strip()
+            name = body.get("name", "").strip()
+            if not session_id:
+                return _send_json(self, 400, {"error": "Missing 'session_id'"})
+            if not name or "/" in name or "\\" in name or ".." in name:
+                return _send_json(self, 400, {"error": "Invalid template name"})
+
+            template = _blueprint_templates_dir / name
+            if not template.is_file() or not str(template.resolve()).startswith(
+                str(_blueprint_templates_dir.resolve())
+            ):
+                return _send_json(self, 404, {"error": "Template not found"})
+
+            session_dir = _manager.create_session_sandbox(session_id)
+            dest = session_dir / name
+            dest.write_text(template.read_text(encoding="utf-8"), encoding="utf-8")
+            _notify_tree_changed(session_id)
+            return _send_json(
+                self,
+                200,
+                {
+                    "session_id": session_id,
+                    "path": str(dest.relative_to(session_dir)),
+                    "tree": _build_tree(session_dir),
+                },
+            )
+        except Exception as exc:
+            logger.exception("Load blueprint template endpoint failed")
+            return _send_json(self, 500, {"error": str(exc)})
+
     def _handle_run(self) -> None:
         """Run a Python entry file in the session sandbox and stream NDJSON output."""
         try:
@@ -1209,6 +1300,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             env = os.environ.copy()
             env["AERO_FORGE_SESSION"] = session_id
             env["AERO_FORGE_SESSION_DIR"] = str(session_dir)
+            env["AERO_FORGE_ACCEL_LOG"] = str(session_dir / ".aero_forge_accel.log")
             existing_pythonpath = env.get("PYTHONPATH", "")
             env["PYTHONPATH"] = (
                 f"{session_dir}{':' + existing_pythonpath if existing_pythonpath else ''}"
@@ -1248,15 +1340,35 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 self.wfile.write(b"\r\n")
                 self.wfile.flush()
 
+            accel_log_path = Path(env["AERO_FORGE_ACCEL_LOG"])
+            accel_offset: int = 0
+
+            def _emit_accel_lines() -> None:
+                nonlocal accel_offset
+                if not accel_log_path.is_file():
+                    return
+                with accel_log_path.open("r", encoding="utf-8", errors="replace") as f:
+                    f.seek(accel_offset)
+                    for line in f:
+                        line = line.rstrip("\n")
+                        if not line:
+                            continue
+                        level = "info"
+                        if line.startswith("[") and "]" in line:
+                            level = line[1:line.index("]")].lower() or "info"
+                        _write_chunk({"type": "accel", "data": line, "level": level})
+                    accel_offset = f.tell()
+
             finished = False
             while True:
                 try:
                     tag, line = q.get(timeout=0.1)
                     _write_chunk({"type": tag, "data": line})
                 except queue.Empty:
-                    if finished:
-                        break
                     if proc.poll() is not None:
+                        _emit_accel_lines()
+                        if finished:
+                            break
                         finished = True
 
             duration = (time.time() - start) * 1000

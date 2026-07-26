@@ -14,11 +14,13 @@ import functools
 import importlib.util
 import inspect
 import logging
+import os
 import re
 import shutil
 import subprocess
 import tempfile
 import textwrap
+import time
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -33,6 +35,19 @@ from aero_forge.errors import UnsupportedError
 from aero_forge.translator import TargetMode, python_source_to_uast
 
 logger = logging.getLogger("aero_forge.native_bridge")
+
+
+def _accel_log(level: str, message: str) -> None:
+    """Append a structured line to the per-session accelerator log if set."""
+    log_path = os.environ.get("AERO_FORGE_ACCEL_LOG")
+    if not log_path:
+        return
+    try:
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"{timestamp} [{level}] {message}\n")
+    except Exception:
+        pass
 
 
 def _original_function(func: Callable[..., Any]) -> Callable[..., Any]:
@@ -256,33 +271,48 @@ class NativeAccelerator:
         self._native_loaded = False
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        _accel_log("info", f"Executing {self.func.__name__} with target={self.target}")
         if not self._native_loaded:
+            _accel_log("info", "AST parsing: initiated")
             self._native = self._compile()
             self._native_loaded = True
         if self._native is not None:
+            _accel_log("success", f"ACCELERATED: {self.func.__name__} bound to native shared library")
+            start = time.perf_counter()
             try:
-                return self._native(*args, **kwargs)
+                result = self._native(*args, **kwargs)
+                _accel_log("info", f"Native execution completed in {(time.perf_counter() - start) * 1000:.3f} ms")
+                return result
             except Exception as exc:
-                logger.warning("Native call failed for %s: %s; falling back to Python", self.func.__name__, exc)
+                _accel_log("error", f"Native call failed for {self.func.__name__}: {exc}; falling back to Python")
+        else:
+            _accel_log("info", f"PASSTHROUGH: {self.func.__name__} executed in standard Python")
         return self.func(*args, **kwargs)
 
     def _compile(self) -> Optional[Callable[..., Any]]:
         try:
             source, name = _source_for_function(self.func)
         except Exception as exc:
-            logger.warning("Native acceleration unavailable for %s: %s", self.func.__name__, exc)
+            _accel_log("error", f"Native acceleration unavailable for {self.func.__name__}: {exc}")
             return None
 
         uast_node = _extract_function_uast(source, name)
         if uast_node is None:
-            logger.warning("Could not lower %s to UAST; using Python fallback", name)
+            _accel_log("error", f"Could not lower {name} to UAST; using Python fallback")
             return None
 
+        _accel_log("success", "AST parsing: success")
         effective_target = language_router.select_native_backend(source, self.target)
+        _accel_log("info", f"Target language selected: {effective_target.upper()}")
+        cpp_friendly = language_router.is_cpp_friendly(source)
+        should_accel = language_router.should_accelerate_with_native(source)
+        _accel_log("info", f"Acceleration heuristic verdict: cpp_friendly={cpp_friendly}, should_accelerate={should_accel}")
         if effective_target == "cpp":
+            _accel_log("success", "ACCELERATED: function routed to C++ shared library")
             return self._compile_cpp(source, name, uast_node)
 
         # Default Rust/PyO3 path.
+        _accel_log("info", "Compiling to Rust (cdylib / PyO3)")
         target = "native"
         mode = TargetMode.PYO3
         cached = self.cache.get_node(
@@ -315,35 +345,39 @@ class NativeAccelerator:
             try:
                 result = runner.build()
             except Exception as exc:
-                logger.warning("Build failed for %s: %s", name, exc)
+                _accel_log("error", f"Rust build failed for {name}: {exc}")
                 return None
 
             if not result.get("success"):
-                logger.warning("Build did not succeed for %s: %s", name, result.get("logs"))
+                _accel_log("error", f"Rust build did not succeed for {name}: {result.get('logs')}")
                 return None
+
+            _accel_log("success", f"Rust compilation succeeded for {name}")
 
             artifacts = [r for r in result.get("results", []) if r.get("artifact")]
             if not artifacts:
-                logger.warning("No artifact produced for %s", name)
+                _accel_log("error", f"No artifact produced for {name}")
                 return None
 
             artifact = Path(artifacts[0]["artifact"])
             if not artifact.is_file():
-                logger.warning("Artifact missing for %s: %s", name, artifact)
+                _accel_log("error", f"Artifact missing for {name}: {artifact}")
                 return None
 
             cached = self.cache.put_node(
                 uast_node, name, artifact, self.compiler_flags, target=target, target_mode=mode
             )
+            _accel_log("success", f"Loaded Rust shared library for {name}: {cached}")
             return _load_function_from_so(cached, name)
 
     def _compile_cpp(self, source: str, name: str, uast_node: Dict[str, Any]) -> Optional[Callable[..., Any]]:
         """Compile *source* to a C++ shared library and return a ctypes callable."""
         compiler = _find_cpp_compiler()
         if compiler is None:
-            logger.warning("No C++ compiler found for %s; falling back to Python", name)
+            _accel_log("error", f"No C++ compiler found for {name}; falling back to Python")
             return None
 
+        _accel_log("info", f"C++ compilation: using {compiler}")
         cached = self.cache.get_node(
             uast_node, name, self.compiler_flags, target="cpp", target_mode=TargetMode.C_ABI
         )
@@ -375,14 +409,10 @@ class NativeAccelerator:
                 ]
                 proc = subprocess.run(cmd, capture_output=True, text=True)
                 if proc.returncode != 0:
-                    logger.warning(
-                        "C++ compilation failed for %s:\nstdout:\n%s\nstderr:\n%s",
-                        name,
-                        proc.stdout,
-                        proc.stderr,
-                    )
+                    _accel_log("error", f"C++ compilation failed for {name}:\n{proc.stderr}")
                     return None
 
+                _accel_log("success", f"C++ compilation succeeded: {so_path}")
                 cached = self.cache.put_node(
                     uast_node, name, so_path, self.compiler_flags, target="cpp", target_mode=TargetMode.C_ABI
                 )
@@ -398,9 +428,10 @@ class NativeAccelerator:
                 return None
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
+            _accel_log("success", f"Loaded C++ shared library for {name}: {so_path}")
             return getattr(mod, name, None)
         except Exception as exc:
-            logger.warning("Could not load C++ shared library for %s: %s", name, exc)
+            _accel_log("error", f"Could not load C++ shared library for {name}: {exc}")
             return None
 
 

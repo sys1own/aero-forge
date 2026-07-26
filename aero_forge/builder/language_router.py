@@ -3,9 +3,24 @@
 from __future__ import annotations
 
 import ast
+import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+
+def _accel_log(level: str, message: str) -> None:
+    """Append a structured line to the per-session accelerator log if set."""
+    log_path = os.environ.get("AERO_FORGE_ACCEL_LOG")
+    if not log_path:
+        return
+    try:
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"{timestamp} [{level}] {message}\n")
+    except Exception:
+        pass
 
 SUPPORTED_LANGUAGES = frozenset({"rust", "python", "cpp"})
 DEFAULT_LANGUAGE = "rust"
@@ -80,9 +95,11 @@ def is_cpp_friendly(source: str) -> bool:
     heuristic to return ``False`` so the function stays in Python or falls back to
     the standard runtime.
     """
+    _accel_log("info", "Running cpp-friendly heuristic")
     try:
         tree = ast.parse(source)
     except SyntaxError:
+        _accel_log("error", "cpp-friendly heuristic failed: source parse error")
         return False
 
     local_functions = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
@@ -128,9 +145,15 @@ def is_cpp_friendly(source: str) -> bool:
             pass
 
     if has_io or has_numpy or has_unsupported_list:
+        _accel_log("info", "PASSTHROUGH: lightweight or I/O-heavy function; not C++ friendly")
         return False
 
-    return has_loop or numeric_ops >= 2 or recursive_calls >= 1
+    verdict = has_loop or numeric_ops >= 2 or recursive_calls >= 1
+    if verdict:
+        _accel_log("info", f"ACCELERATED: numeric workload detected (loops={has_loop}, numeric_ops={numeric_ops}, recursive_calls={recursive_calls})")
+    else:
+        _accel_log("info", "PASSTHROUGH: insufficient numeric workload for C++ acceleration")
+    return verdict
 
 
 def _cpp_compiler_available() -> bool:
@@ -145,13 +168,18 @@ def select_native_backend(source: str, hint: Optional[str] = None) -> str:
       - ``"rust"`` / ``"rust_hin"`` / ``"pyo3"`` -> Rust
       - ``"auto"`` or unset -> use :func:`is_cpp_friendly` and toolchain availability.
     """
+    _accel_log("info", f"Selecting native backend (hint={hint})")
     hint = (hint or "rust_hin").lower()
     if hint in ("cpp", "c_abi"):
+        _accel_log("success", "Target compilation language: C++ (extern \"C\" shared dynamic lib)")
         return "cpp"
     if hint in ("rust", "rust_hin", "pyo3"):
+        _accel_log("success", "Target compilation language: Rust (cdylib / PyO3)")
         return "rust_hin"
     if is_cpp_friendly(source) and _cpp_compiler_available():
+        _accel_log("success", "Target compilation language: C++ (auto-selected)")
         return "cpp"
+    _accel_log("success", "Target compilation language: Rust (auto-selected)")
     return "rust_hin"
 
 
@@ -162,9 +190,11 @@ def should_accelerate_with_native(source: str, *, min_numeric_ops: int = 3) -> b
     generated contract should be backed by a compiled native extension or left as
     pure Python.
     """
+    _accel_log("info", f"Evaluating native acceleration gate (min_numeric_ops={min_numeric_ops})")
     try:
         tree = ast.parse(source)
     except SyntaxError:
+        _accel_log("error", "Native acceleration gate failed: source parse error")
         return False
 
     has_loop = any(isinstance(n, (ast.For, ast.While, ast.ListComp, ast.GeneratorExp)) for n in ast.walk(tree))
@@ -187,4 +217,9 @@ def should_accelerate_with_native(source: str, *, min_numeric_ops: int = 3) -> b
             ast.RShift,
         )
     )
-    return has_loop or numeric_ops >= min_numeric_ops
+    verdict = has_loop or numeric_ops >= min_numeric_ops
+    if verdict:
+        _accel_log("success", f"ACCELERATED: heavy compute detected (loops={has_loop}, numeric_ops={numeric_ops})")
+    else:
+        _accel_log("info", f"PASSTHROUGH: light workload (loops={has_loop}, numeric_ops={numeric_ops})")
+    return verdict

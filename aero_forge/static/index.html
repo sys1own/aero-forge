@@ -275,6 +275,16 @@
     .log-line.info { color: var(--terminal-info); }
     .log-line.success { color: var(--terminal-success); }
     .log-line.error { color: var(--terminal-error); }
+    .deck-control-group { display: flex; align-items: center; gap: 0.35rem; font-size: 0.75rem; color: var(--muted); }
+    .deck-control-group select { background: var(--editor); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 0.25rem 0.4rem; font-size: 0.75rem; }
+    .template-bar { padding: 0.5rem; border-bottom: 1px solid var(--border); display: flex; gap: 0.4rem; align-items: center; background: var(--panel); }
+    .template-bar select { flex: 1; background: var(--editor); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 0.35rem 0.4rem; font-size: 0.75rem; }
+    .template-bar button { font-size: 0.75rem; padding: 0.35rem 0.6rem; }
+    #accelerator-log { flex: 1; overflow: auto; padding: 0.5rem 0.75rem; font-size: 0.8rem; color: var(--terminal-text); height: 100%; }
+    .accel-line { border-bottom: 1px solid rgba(255,255,255,0.03); padding: 0.15rem 0; }
+    .accel-line.info { color: var(--terminal-info); }
+    .accel-line.success { color: var(--terminal-success); }
+    .accel-line.error { color: var(--terminal-error); }
 
     /* Modal */
     .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 100; }
@@ -304,14 +314,13 @@
       <img src="/logo.png" alt="Aero Forge" class="logo-img" aria-hidden="true" />
       <div>
         <h1>Aero Forge</h1>
-        <small>Prompt &rarr; Python &rarr; Rust</small>
+        <small>Universal AST &amp; Polyglot Accelerator (Python &#183; Rust &#183; C++)</small>
       </div>
     </div>
     <div class="header-actions">
       <button id="run-btn" class="run-btn" title="Run current file (Ctrl+Enter)" aria-label="Run">
         <span>&#9654;</span> Run
       </button>
-      <span id="tier-badge" class="tier-badge">Free</span>
       <button id="settings-btn" class="icon-btn" title="Settings" aria-label="Settings">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       </button>
@@ -340,6 +349,16 @@
           </button>
           <input id="upload-input" type="file" multiple accept=".zip,.py,.txt,.md,.json,.toml,.yaml,.yml,.sh,.rs,.c,.cpp,.h,.hpp,.cc,.html,.css,.js,.ts" class="sr-only">
         </div>
+      </div>
+      <div class="template-bar">
+        <select id="template-select" title="Load a preset blueprint">
+          <option value="" disabled selected>Load Template Blueprint</option>
+          <option value="hybrid_cpp_python.aero">Hybrid C++ / Python</option>
+          <option value="hybrid_rust_python.aero">Hybrid Rust / Python</option>
+          <option value="pure_rust.aero">Pure Rust</option>
+          <option value="pure_python.aero">Pure Python</option>
+        </select>
+        <button id="load-template" class="secondary" title="Load blueprint template">Load</button>
       </div>
       <div id="file-tree" class="file-tree tree">
         <div class="placeholder" style="padding:1rem;color:var(--muted)">Create or select a session to explore files.</div>
@@ -390,6 +409,23 @@
                   <input id="variant-toggle" type="checkbox">
                   <span>Generate 3 variants &amp; benchmark</span>
                 </label>
+                <div class="deck-control-group">
+                  <label for="target-language">Target</label>
+                  <select id="target-language">
+                    <option value="auto">Auto-Detect / Polyglot</option>
+                    <option value="python">Python</option>
+                    <option value="rust">Rust (cdylib / PyO3)</option>
+                    <option value="cpp">C++ (extern "C" Shared Dynamic Lib)</option>
+                  </select>
+                </div>
+                <div class="deck-control-group">
+                  <label for="acceleration-policy">Acceleration</label>
+                  <select id="acceleration-policy">
+                    <option value="selective">Selective Acceleration (Auto-Detect Heavy Compute)</option>
+                    <option value="force">Force Native Bridge</option>
+                    <option value="bypass">Standard Runtime (Bypass Bridge)</option>
+                  </select>
+                </div>
                 <div class="status-bar">
                   <span id="status-dot" class="dot"></span>
                   <span id="status-text">Ready</span>
@@ -417,6 +453,7 @@
           <button class="bottom-tab active" data-bottom="terminal">Terminal</button>
           <button class="bottom-tab" data-bottom="build-log">Build Log</button>
           <button class="bottom-tab" data-bottom="run">Run Output</button>
+          <button class="bottom-tab" data-bottom="accelerator">Accelerator Log</button>
         </div>
         <div class="bottom-body">
           <div id="terminal-panel" class="bottom-panel active"></div>
@@ -425,6 +462,9 @@
           </div>
           <div id="run-panel" class="bottom-panel">
             <div id="run-output"><div class="placeholder" style="color:var(--muted);padding:0.5rem 0">Click Run or press Ctrl+Enter to execute the active file.</div></div>
+          </div>
+          <div id="accelerator-panel" class="bottom-panel">
+            <div id="accelerator-log"><div class="placeholder" style="color:var(--muted);padding:0.5rem 0">Accelerator events appear here when native code is executed.</div></div>
           </div>
         </div>
       </section>
@@ -542,7 +582,11 @@
       logLines: document.getElementById('log-lines'),
       statusDot: document.getElementById('status-dot'),
       statusText: document.getElementById('status-text'),
-      tierBadge: document.getElementById('tier-badge'),
+      targetLanguage: document.getElementById('target-language'),
+      accelerationPolicy: document.getElementById('acceleration-policy'),
+      templateSelect: document.getElementById('template-select'),
+      loadTemplate: document.getElementById('load-template'),
+      acceleratorLog: document.getElementById('accelerator-log'),
       settingsBtn: document.getElementById('settings-btn'),
       settingsModal: document.getElementById('settings-modal'),
       saveSettings: document.getElementById('save-settings'),
@@ -637,8 +681,6 @@
       ui.settingProvider.value = state.provider;
       ui.settingApiKey.value = state.apiKey;
       ui.settingSession.value = state.sessionId;
-      ui.tierBadge.textContent = state.tier === 'lifetime' ? 'Lifetime' : 'Free';
-      ui.tierBadge.classList.toggle('lifetime', state.tier === 'lifetime');
       if (state.tier === 'lifetime') {
         ui.keyGroup.classList.add('hidden');
         ui.settingProvider.value = 'deepseek';
@@ -1125,11 +1167,20 @@
       ui.runOutput.scrollTop = ui.runOutput.scrollHeight;
     }
 
+    function appendAccelLog(html, cls='') {
+      const div = document.createElement('div');
+      div.className = `accel-line ${cls}`;
+      div.innerHTML = html;
+      ui.acceleratorLog.appendChild(div);
+      ui.acceleratorLog.scrollTop = ui.acceleratorLog.scrollHeight;
+    }
+
     async function runCurrentFile() {
       if (state.busy) return;
       if (!state.sessionId) { log('No session; save settings first', 'error'); return; }
       const file = state.activeTab ? state.activeTab.path : null;
       ui.runOutput.innerHTML = '';
+      ui.acceleratorLog.innerHTML = '';
       appendRunOutput(`Running ${file || 'entry file'}...`, 'info');
       switchBottomTab('run');
       setBusy(true);
@@ -1159,6 +1210,7 @@
               const msg = JSON.parse(line);
               if (msg.type === 'stdout') appendRunOutput(escapeHtml(msg.data), '');
               else if (msg.type === 'stderr') appendRunOutput(escapeHtml(msg.data), 'stderr');
+              else if (msg.type === 'accel') appendAccelLog(escapeHtml(msg.data), msg.level || '');
               else if (msg.type === 'summary') appendRunOutput(`Process finished with exit code ${msg.exit_code} in ${msg.duration_ms}ms (${msg.file})`, 'run-summary');
             } catch (e) { appendRunOutput(escapeHtml(line), ''); }
           }
@@ -1230,6 +1282,18 @@
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
       log(`Downloaded ${fileName(path)}`, 'success');
+    }
+
+    async function loadBlueprintTemplate() {
+      const name = ui.templateSelect.value;
+      if (!name) return;
+      setBusy(true);
+      try {
+        await api('POST', '/api/load-blueprint-template', buildBody({ name }));
+        log(`Loaded blueprint template ${name}`, 'success');
+        await loadTree();
+      } catch (e) { log(`Load template failed: ${e.message}`, 'error'); }
+      finally { setBusy(false); }
     }
 
     async function cleanWorkspace() {
@@ -1328,7 +1392,7 @@
       log(`Building: ${prompt}`);
       addChat('system', `Building: ${prompt}`);
       try {
-        const data = await api('POST', '/api/build', buildBody({ prompt, variants: ui.variantToggle.checked, model: state.provider === 'deepseek' ? 'deepseek-v4-flash' : undefined }));
+        const data = await api('POST', '/api/build', buildBody({ prompt, variants: ui.variantToggle.checked, target_language: ui.targetLanguage.value, acceleration_policy: ui.accelerationPolicy.value, model: state.provider === 'deepseek' ? 'deepseek-v4-flash' : undefined }));
         state.sessionId = data.session_id;
         try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
         ui.settingSession.value = state.sessionId;
@@ -1510,6 +1574,9 @@
       });
     });
     document.addEventListener('click', e => { if (!ui.contextMenu.contains(e.target)) hideContextMenu(); });
+
+    // Blueprint templates
+    ui.loadTemplate.addEventListener('click', loadBlueprintTemplate);
 
     // Prompts
     ui.buildBtn.addEventListener('click', runBuild);
