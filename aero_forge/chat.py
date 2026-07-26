@@ -364,7 +364,11 @@ class ChatSession:
         self.project_context = None
         if not self.output_dir.is_dir():
             return
-        bundle = bundle_workspace(self.output_dir, max_file_size_kb=50)
+        try:
+            bundle = bundle_workspace(self.output_dir, max_file_size_kb=50)
+        except Exception as exc:
+            logger.warning("Could not bundle workspace %s: %s", self.output_dir, exc)
+            return
         if bundle["files"] or bundle["blueprint"]:
             context = format_context_block(bundle, fmt="xml")
             self.project_context = context
@@ -744,7 +748,11 @@ class ChatSession:
             if tests_passed or cargo_result is None or cargo_result.returncode != 0:
                 break
             self._progress(f"Healing test failures (attempt {heal_iter + 1}/{max_heals})...")
-            bundle = bundle_workspace(self.output_dir, max_file_size_kb=50)
+            try:
+                bundle = bundle_workspace(self.output_dir, max_file_size_kb=50)
+            except Exception as exc:
+                logger.warning("Could not bundle workspace for healing: %s", exc)
+                bundle = {"files": {}, "blueprint": None}
             context = format_context_block(bundle, fmt="xml") if bundle["files"] or bundle["blueprint"] else ""
             heal_system = (
                 "You are repairing a generated Rust/Python workspace. "
