@@ -23,6 +23,26 @@ timeout = 60
 multiplexing = false
 """
 
+def _cargo_bin_dirs() -> List[Path]:
+    """Return candidate Rustup cargo bin directories that exist on disk."""
+    candidates = [Path.home() / ".cargo" / "bin", Path("/root/.cargo/bin")]
+    return [p for p in candidates if p.is_dir()]
+
+
+def _env_with_cargo(env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Return an environment dict with ``~/.cargo/bin`` on PATH if cargo is missing."""
+    merged = dict(os.environ)
+    if env:
+        merged.update(env)
+    if shutil.which("cargo", path=merged.get("PATH")):
+        return merged
+    extra = [str(p) for p in _cargo_bin_dirs()]
+    if extra:
+        merged["PATH"] = os.pathsep.join([*extra, merged.get("PATH", "")])
+        logger.debug("Prepending Rust toolchain directories to PATH: %s", extra)
+    return merged
+
+
 # Network / IO failure patterns that warrant a retry or offline fallback.
 _NETWORK_FAILURE_PATTERNS = [
     re.compile(r"failed to download", re.I),
@@ -80,9 +100,7 @@ def run_cargo(
     workdir = Path(cwd).resolve()
     write_cargo_config(workdir)
 
-    base_env = dict(os.environ)
-    if env:
-        base_env.update(env)
+    base_env = _env_with_cargo(env)
 
     str_command = [str(arg) for arg in command]
     if not str_command or str_command[0] != "cargo":

@@ -1018,7 +1018,44 @@
         }
         state.term.open(ui.terminalPanel);
         if (state.fitAddon) state.fitAddon.fit();
-        state.term.onData(data => { if (state.socket && state.socket.readyState === WebSocket.OPEN) state.socket.send(data); });
+
+        function sendTerminalInput(text) {
+          if (!text) return;
+          if (state.socket && state.socket.readyState === WebSocket.OPEN) {
+            state.socket.send(text);
+          } else {
+            state.term.write(text);
+          }
+        }
+
+        function sanitizeTerminalInput(text) {
+          if (typeof text !== 'string') return '';
+          // Normalize CRLF to LF and drop NULs, but preserve bare CR so Enter still works.
+          return text.replace(/\r\n/g, '\n').replace(/\x00/g, '');
+        }
+
+        state.term.attachCustomKeyEventHandler((e) => {
+          if (e.type !== 'keydown') return true;
+          const isCtrlV = (e.ctrlKey || e.metaKey) && (e.key === 'v' || e.key === 'V');
+          const isCtrlShiftV = e.ctrlKey && e.shiftKey && (e.key === 'v' || e.key === 'V');
+          if (isCtrlV || isCtrlShiftV) {
+            e.preventDefault();
+            if (navigator.clipboard && navigator.clipboard.readText) {
+              navigator.clipboard.readText().then((text) => {
+                sendTerminalInput(sanitizeTerminalInput(text));
+              }).catch((err) => {
+                console.warn('Clipboard read failed:', err);
+              });
+            }
+            return false;
+          }
+          return true;
+        });
+
+        state.term.onData(data => {
+          const text = sanitizeTerminalInput(data);
+          if (state.socket && state.socket.readyState === WebSocket.OPEN) state.socket.send(text);
+        });
         state.term.onResize(({ cols, rows }) => { if (state.socket && state.socket.readyState === WebSocket.OPEN) state.socket.send(JSON.stringify({cols, rows})); });
         window.addEventListener('resize', () => { if (state.fitAddon) state.fitAddon.fit(); });
         state.term.writeln('\r\nAero Forge terminal. Connecting to session...\r\n');

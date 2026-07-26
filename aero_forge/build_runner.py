@@ -668,6 +668,8 @@ class BuildRunner:
 
 
 def _host_target() -> str:
+    from aero_forge.scaffold.cargo_runner import _env_with_cargo
+
     try:
         result = subprocess.run(
             ["rustc", "-vV"],
@@ -675,6 +677,7 @@ def _host_target() -> str:
             text=True,
             timeout=30,
             check=False,
+            env=_env_with_cargo(),
         )
         for line in result.stdout.splitlines():
             if line.startswith("host:"):
