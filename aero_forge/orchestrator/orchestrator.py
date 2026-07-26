@@ -308,8 +308,9 @@ class Orchestrator:
             ) as sandbox:
                 sandbox.source_in_sandbox.write_text(source, encoding="utf-8")
 
+                compile_logs = ""
                 try:
-                    artifact = self._compile_to_native(source, sandbox.root)
+                    artifact, compile_logs = self._compile_to_native(source, sandbox.root)
                 except _BuildFailure as exc:
                     error_log = exc.log
                     if is_fatal(error_log):
@@ -353,6 +354,7 @@ class Orchestrator:
                     self._install_native_module(sandbox, artifact)
 
                 result = sandbox.run_tests()
+                full_logs = f"{compile_logs}\n\n--- Test output ---\n{result['logs']}".strip()
                 if result["passed"]:
                     self._merge_back(sandbox, artifact)
                     self.overlay_manager.record_generated(self.source_path)
@@ -361,22 +363,24 @@ class Orchestrator:
                         "success": True,
                         "iterations": iteration,
                         "artifact": str(artifact),
-                        "logs": result["logs"],
+                        "logs": full_logs,
+                        "test_total": result.get("test_total", 0),
+                        "test_passed": result.get("test_passed", 0),
+                        "test_failed": result.get("test_failed", 0),
                     }
 
-                error_log = result["logs"]
-                if is_fatal(error_log):
-                    raise UserError(f"Fatal test error: {error_log}")
+                if is_fatal(result["logs"]):
+                    raise UserError(f"Fatal test error: {result['logs']}")
 
-                self.prompt_builder.add_error(error_log)
-                fixed = self._attempt_fix(source, error_log)
+                self.prompt_builder.add_error(result["logs"])
+                fixed = self._attempt_fix(source, result["logs"])
                 if fixed is None:
-                    reason = f"Tests failed and could not be fixed: {error_log[:500]}"
+                    reason = f"Tests failed and could not be fixed: {result['logs'][:500]}"
                     return self._partial_result(
                         iteration,
                         last_working_artifact,
                         reason,
-                        error_log,
+                        full_logs,
                     )
                 source = fixed
 
@@ -725,7 +729,8 @@ class Orchestrator:
             pyi_path = self.output_dir / f"{self.source_path.stem}.pyi"
             pyi_path.parent.mkdir(parents=True, exist_ok=True)
             _generate_pyi(source, self.function_names, pyi_path)
-            return artifact
+            build_logs = f"{build.stdout}\n{build.stderr}".strip()
+            return artifact, build_logs
         finally:
             try:
                 if crate_root.exists():

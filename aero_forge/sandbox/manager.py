@@ -6,6 +6,7 @@ import difflib
 import io
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -20,6 +21,50 @@ from aero_forge.errors import SemanticRegressionError
 
 CARGO_BIN_DIR = Path(os.path.expanduser("~/.cargo/bin"))
 logger = logging.getLogger("aero_forge.sandbox")
+
+
+def _parse_pytest_counts(output: str) -> tuple[int, int, int]:
+    """Extract (total, passed, failed) from pytest summary text."""
+    passed = 0
+    failed = 0
+    skipped = 0
+    m_passed = re.search(r"(\d+) passed", output, re.IGNORECASE)
+    if m_passed:
+        passed = int(m_passed.group(1))
+    m_failed = re.search(r"(\d+) failed", output, re.IGNORECASE)
+    if m_failed:
+        failed = int(m_failed.group(1))
+    m_error = re.search(r"(\d+) error", output, re.IGNORECASE)
+    if m_error:
+        failed += int(m_error.group(1))
+    m_skipped = re.search(r"(\d+) skipped", output, re.IGNORECASE)
+    if m_skipped:
+        skipped = int(m_skipped.group(1))
+    total = passed + failed + skipped
+    if total == 0 and "no tests ran" in output.lower():
+        return 0, 0, 0
+    return total, passed, failed
+
+
+def _parse_unittest_counts(output: str) -> tuple[int, int, int]:
+    """Extract (total, passed, failed) from unittest verbose output."""
+    total = 0
+    passed = 0
+    failed = 0
+    m_ran = re.search(r"Ran (\d+) tests?", output, re.IGNORECASE)
+    if m_ran:
+        total = int(m_ran.group(1))
+    m_fail = re.search(r"FAILED \(failures=(\d+)", output, re.IGNORECASE)
+    if m_fail:
+        failed += int(m_fail.group(1))
+    m_err = re.search(r"FAILED.*errors=(\d+)", output, re.IGNORECASE)
+    if m_err:
+        failed += int(m_err.group(1))
+    if "OK" in output:
+        passed = total
+    else:
+        passed = max(0, total - failed)
+    return total, passed, failed
 
 
 @dataclass
@@ -249,6 +294,9 @@ class Sandbox:
                 "passed": True,
                 "returncode": 0,
                 "logs": "No test file found; skipping.",
+                "test_total": 0,
+                "test_passed": 0,
+                "test_failed": 0,
             }
 
         cmd = [sys.executable, "-m", "pytest", str(self.root), "-v"]
@@ -265,15 +313,23 @@ class Sandbox:
                 "passed": False,
                 "returncode": -1,
                 "logs": f"Test execution timed out after {timeout}s.\n{exc}",
+                "test_total": 0,
+                "test_passed": 0,
+                "test_failed": 0,
             }
         except FileNotFoundError:
             # pytest not installed; fall back to unittest discovery
             return self._run_unittest(timeout)
 
+        all_output = result.stdout + result.stderr
+        total, passed, failed = _parse_pytest_counts(all_output)
         return {
             "passed": result.returncode == 0,
             "returncode": result.returncode,
-            "logs": result.stdout + result.stderr,
+            "logs": all_output,
+            "test_total": total,
+            "test_passed": passed,
+            "test_failed": failed,
         }
 
     def _run_unittest(self, timeout: int) -> Dict[str, Any]:
@@ -295,10 +351,15 @@ class Sandbox:
             text=True,
             timeout=timeout,
         )
+        all_output = result.stdout + result.stderr
+        total, passed, failed = _parse_unittest_counts(all_output)
         return {
             "passed": result.returncode == 0,
             "returncode": result.returncode,
-            "logs": result.stdout + result.stderr,
+            "logs": all_output,
+            "test_total": total,
+            "test_passed": passed,
+            "test_failed": failed,
         }
 
     def cleanup(self) -> None:

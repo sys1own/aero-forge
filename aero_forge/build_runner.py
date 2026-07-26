@@ -56,6 +56,9 @@ class BuildResult:
         logs: str = "",
         iterations: int = 0,
         explanation: str = "",
+        test_total: int = 0,
+        test_passed: int = 0,
+        test_failed: int = 0,
     ):
         self.source = source
         self.function_names = function_names
@@ -64,6 +67,9 @@ class BuildResult:
         self.logs = logs
         self.iterations = iterations
         self.explanation = explanation
+        self.test_total = test_total
+        self.test_passed = test_passed
+        self.test_failed = test_failed
 
 
 class BuildTaskDAG:
@@ -172,6 +178,9 @@ class BuildTaskDAG:
             "logs": result.logs,
             "iterations": result.iterations,
             "explanation": result.explanation,
+            "test_total": result.test_total,
+            "test_passed": result.test_passed,
+            "test_failed": result.test_failed,
         }
 
     @staticmethod
@@ -184,6 +193,9 @@ class BuildTaskDAG:
             logs="DAG cache hit",
             iterations=0,
             explanation=cached.get("explanation", ""),
+            test_total=cached.get("test_total", 0),
+            test_passed=cached.get("test_passed", 0),
+            test_failed=cached.get("test_failed", 0),
         )
 
 
@@ -560,6 +572,9 @@ class BuildRunner:
             logs=logs,
             iterations=result.get("iterations", 0),
             explanation=explanation,
+            test_total=result.get("test_total", 0),
+            test_passed=result.get("test_passed", 0),
+            test_failed=result.get("test_failed", 0),
         )
 
     def _combined_flags(self, specs: List[FunctionSpec]) -> List[str]:
@@ -600,6 +615,9 @@ class BuildRunner:
         total_functions = sum(len(r.function_names) for r in results)
         passed_functions = sum(len(r.function_names) for r in results if r.success)
         failed_functions = total_functions - passed_functions
+        test_total = sum(r.test_total for r in results)
+        test_passed = sum(r.test_passed for r in results)
+        test_failed = sum(r.test_failed for r in results)
 
         for r in results:
             status = "OK" if r.success else "FAIL"
@@ -650,6 +668,9 @@ class BuildRunner:
             "total": total_functions,
             "passed": passed_functions,
             "failed": failed_functions,
+            "test_total": test_total,
+            "test_passed": test_passed,
+            "test_failed": test_failed,
             "error": first_error,
             "logs": first_logs,
             "results": [
@@ -661,6 +682,9 @@ class BuildRunner:
                     "iterations": r.iterations,
                     "logs": r.logs,
                     "explanation": r.explanation,
+                    "test_total": r.test_total,
+                    "test_passed": r.test_passed,
+                    "test_failed": r.test_failed,
                 }
                 for r in results
             ],

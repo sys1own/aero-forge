@@ -476,6 +476,7 @@ class PolyglotMaterializer:
     def __init__(self, workspace_root: Path) -> None:
         self.workspace = Path(workspace_root)
         self.workspace.mkdir(parents=True, exist_ok=True)
+        self.build_logs = ""
 
     def materialize(
         self,
@@ -593,13 +594,25 @@ class PolyglotMaterializer:
         root_cargo = next((p for p in cargo_tomls if p.parent == self.workspace), None)
         build_dirs = [root_cargo.parent] if root_cargo else [p.parent for p in cargo_tomls]
 
+        combined_logs: List[str] = []
         for build_dir in build_dirs:
             if not (build_dir / "src" / "lib.rs").is_file() and not any(
                 (build_dir / member / "Cargo.toml").is_file() for member in ("rust_core",)
             ):
                 continue
             logger.info("Building Rust crate in %s", build_dir)
-            cargo_build(build_dir, release=True, timeout=600)
+            result = cargo_build(build_dir, release=True, timeout=600)
+            output = f"{result.stdout}\n{result.stderr}".strip()
+            if output:
+                combined_logs.append(f"--- cargo build in {build_dir} ---\n{output}")
+            if result.returncode != 0:
+                self.build_logs = "\n\n".join(combined_logs)
+                raise RuntimeError(
+                    f"Rust compilation failed in {build_dir} (exit {result.returncode}):\n"
+                    f"{output}"
+                )
+
+        self.build_logs = "\n\n".join(combined_logs)
 
         dist = self.workspace / "dist"
         dist.mkdir(parents=True, exist_ok=True)
