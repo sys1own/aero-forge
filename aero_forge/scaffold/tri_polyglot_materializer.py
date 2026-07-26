@@ -218,7 +218,26 @@ def _generate_fallback_body(name: str, args: List[Tuple[str, str]], return_type:
     return "    return None"
 
 
-def _generate_main_py(pkg_name: str, function_names: List[str]) -> str:
+def _sample_arg(t: str) -> str:
+    t = (t or "").lower().replace(" ", "")
+    if t in ("int", "i64", "i32"):
+        return "5"
+    if t in ("float", "f64", "f32"):
+        return "2.0"
+    if t == "bool":
+        return "True"
+    if t in ("str", "string"):
+        return '"validtoken123"'
+    if t == "list[float]":
+        return "[1.0, 2.0, 3.0]"
+    if t in ("list[list[float]]", "list[ list[float] ]"):
+        return "[[1.0, 2.0], [3.0, 4.0]]"
+    if t == "dict[str,str]" or t.startswith("dict["):
+        return '{}'
+    return "None"
+
+
+def _generate_main_py(pkg_name: str, function_names: List[str], contracts: Optional[List[ContractEntry]] = None) -> str:
     lines = [
         '"""Tri-polyglot REPL CLI entrypoint."""',
         "",
@@ -233,12 +252,26 @@ def _generate_main_py(pkg_name: str, function_names: List[str]) -> str:
         "def run_all() -> None:",
         '    """Run the automated tri-polyglot verification commands."""',
     ]
-    if "fast_vector_transform" in function_names:
-        lines.append('    print("C++ transform:", fast_vector_transform([1.0, 2.0, 3.0], 2.0))')
-    if "validate_token" in function_names:
-        lines.append('    print("Rust validate:", validate_token("validtoken123"))')
-    if "get_engine_status" in function_names:
-        lines.append('    print("Python status:", get_engine_status())')
+    contracts = contracts or []
+    sigs: Dict[str, str] = {}
+    for c in contracts:
+        if c.signature:
+            try:
+                name, _, _ = _parse_signature(c.signature)
+                sigs[name] = c.signature
+            except Exception:
+                pass
+    for name in function_names:
+        sig = sigs.get(name, "")
+        if not sig:
+            continue
+        try:
+            _, args, _ = _parse_signature(sig)
+        except Exception:
+            continue
+        call_args = ", ".join(_sample_arg(t) for _, t in args)
+        label = "C++" if _is_c_abi_contract(ContractEntry(name=name, signature=sig)) else ("Rust" if any(t.lower() in ("str", "string") for _, t in args) else "Python")
+        lines.append(f'    print("{label} {name}:", {name}({call_args}))')
     lines.extend([
         "",
         "",
@@ -389,7 +422,7 @@ class TriPolyglotMaterializer:
             ),
             encoding="utf-8",
         )
-        (pkg_dir / "main.py").write_text(_generate_main_py(pkg_name, all_names), encoding="utf-8")
+        (pkg_dir / "main.py").write_text(_generate_main_py(pkg_name, all_names, contracts=contracts), encoding="utf-8")
         (self.workspace / "pyproject.toml").write_text(
             _render_pyproject(pkg_name, package_dir="."), encoding="utf-8"
         )
