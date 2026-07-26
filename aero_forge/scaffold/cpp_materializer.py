@@ -67,11 +67,11 @@ def _is_c_abi_scalar(type_hint: str) -> bool:
 
 def _is_c_abi_list(type_hint: str) -> bool:
     th = (type_hint or "").strip()
+    if th == "list":
+        return True
     if th.startswith("list[") and th.endswith("]"):
         inner = th[5:-1].strip()
         return _is_c_abi_scalar(inner)
-    if th == "list":
-        return True
     return False
 
 
@@ -109,6 +109,8 @@ def _telemetry_source_for_contract(contract: ContractEntry) -> str:
         name, args, return_type = _parse_signature(contract.signature)
     except Exception:
         return stub
+    list_args = [(a, t) for a, t in args if _is_c_abi_list(t)]
+    scalar_args = [(a, t) for a, t in args if _is_c_abi_scalar(t)]
     # Provide a loop body for the canonical vector transform contract so the
     # AST heuristic logs a heavy numerical matrix loop verdict.
     if name == "fast_vector_transform" and len(args) == 2:
@@ -118,6 +120,25 @@ def _telemetry_source_for_contract(contract: ContractEntry) -> str:
             "    for x in v:\n"
             "        out.append(x * scalar)\n"
             "    return out\n"
+        )
+    if len(list_args) == 2 and return_type in ("float", "f64", "double"):
+        a_name = list_args[0][0]
+        b_name = list_args[1][0]
+        return (
+            f"def {name}({a_name}: list[float], {b_name}: list[float]) -> float:\n"
+            "    total = 0.0\n"
+            f"    for i in range(len({a_name})):\n"
+            f"        total += {a_name}[i] * {b_name}[i]\n"
+            "    return total\n"
+        )
+    if len(list_args) == 1 and not scalar_args and return_type in ("float", "f64", "double", "int", "i64"):
+        a_name = list_args[0][0]
+        return (
+            f"def {name}({a_name}: list[float]) -> {return_type}:\n"
+            "    total = 0\n"
+            f"    for x in {a_name}:\n"
+            "        total += x\n"
+            f"    return total\n"
         )
     return stub
 
@@ -171,6 +192,11 @@ def _known_contract_spec(pkg_name: str, contract: ContractEntry) -> Optional[Eng
     return None
 
 
+def _is_nested_list_type(type_hint: str) -> bool:
+    th = (type_hint or "").strip()
+    return th.startswith("list[") and th.endswith("]") and _is_c_abi_list(th[5:-1].strip())
+
+
 def _generic_c_abi_contract_spec(pkg_name: str, contract: ContractEntry) -> Optional[EngineSpec]:
     """Build a default numeric EngineSpec for any C-ABI-compatible contract."""
     if not contract.signature:
@@ -183,31 +209,148 @@ def _generic_c_abi_contract_spec(pkg_name: str, contract: ContractEntry) -> Opti
         return None
     if not all(_is_c_abi_list(t) or _is_c_abi_scalar(t) for _, t in args):
         return None
+    if _is_nested_list_type(return_type) or any(_is_nested_list_type(t) for _, t in args):
+        return None
     list_args = [(a, t) for a, t in args if _is_c_abi_list(t)]
     scalar_args = [(a, t) for a, t in args if _is_c_abi_scalar(t)]
-    if len(list_args) != 1 or len(scalar_args) > 1:
-        return None
-    list_name, list_type = list_args[0]
-    inner = _map_py_type(list_type[5:-1].strip()) if list_type.startswith("list[") and list_type.endswith("]") else "float"
-    scalar_name = scalar_args[0][0] if scalar_args else None
 
-    out = binding("out", list_literal([]), type_hint=return_type)
-    if scalar_name:
-        loop_expr = binary_op(reference("x"), "*", reference(scalar_name))
-    elif inner == "int":
-        loop_expr = binary_op(reference("x"), "*", literal(2))
-    else:
-        loop_expr = binary_op(reference("x"), "*", literal(2.0))
-    loop_body = block(children=[call("out.push_back", [loop_expr])])
-    loop = ASTNode(kind="for", name="x", children=[reference(list_name), loop_body])
-    ret = return_node(reference("out"))
-    func = function(
-        name,
-        params=[param(a, t) for a, t in args],
-        return_type=return_type,
-        body=[out, loop, ret],
-    )
-    return EngineSpec(name=pkg_name, root=module(name=pkg_name, children=[func]))
+    if not list_args:
+        return None
+
+    def is_float_list(at: str) -> bool:
+        return at.startswith("list[") and _map_py_type(at[5:-1].strip()) == "float"
+
+    def is_int_list(at: str) -> bool:
+        return at.startswith("list[") and _map_py_type(at[5:-1].strip()) == "int"
+
+    def scalar_literal(value: Any) -> Any:
+        if is_int_list(list_args[0][1]):
+            return literal(int(value))
+        return literal(float(value))
+
+    # Case 1: scalar return
+    if _is_c_abi_scalar(return_type):
+        total = binding("total", scalar_literal(0), type_hint=return_type)
+
+        # Two float lists -> dot product
+        if len(list_args) == 2 and all(is_float_list(t) for _, t in list_args):
+            a_name, _ = list_args[0]
+            b_name, _ = list_args[1]
+            idx = "i"
+            loop = ASTNode(
+                kind="for",
+                name=idx,
+                children=[
+                    call("range", [call(f"{a_name}.size", [])]),
+                    block(children=[
+                        ASTNode(
+                            kind="aug_assign",
+                            name="total",
+                            value="+",
+                            children=[
+                                binary_op(
+                                    ASTNode(kind="subscript", children=[reference(a_name), reference(idx)]),
+                                    "*",
+                                    ASTNode(kind="subscript", children=[reference(b_name), reference(idx)]),
+                                )
+                            ],
+                        )
+                    ]),
+                ],
+            )
+            ret = return_node(reference("total"))
+            func = function(
+                name,
+                params=[param(a, t) for a, t in args],
+                return_type=return_type,
+                body=[total, loop, ret],
+            )
+            return EngineSpec(name=pkg_name, root=module(name=pkg_name, children=[func]))
+
+        # Single list -> sum
+        if len(list_args) == 1 and not scalar_args:
+            list_name, _ = list_args[0]
+            loop = ASTNode(
+                kind="for",
+                name="x",
+                children=[
+                    reference(list_name),
+                    block(children=[
+                        ASTNode(
+                            kind="aug_assign",
+                            name="total",
+                            value="+",
+                            children=[reference("x")],
+                        )
+                    ]),
+                ],
+            )
+            ret = return_node(reference("total"))
+            func = function(
+                name,
+                params=[param(a, t) for a, t in args],
+                return_type=return_type,
+                body=[total, loop, ret],
+            )
+            return EngineSpec(name=pkg_name, root=module(name=pkg_name, children=[func]))
+
+        # Single list + scalar -> weighted sum (x * scalar)
+        if len(list_args) == 1 and len(scalar_args) == 1:
+            list_name, _ = list_args[0]
+            scalar_name, _ = scalar_args[0]
+            loop = ASTNode(
+                kind="for",
+                name="x",
+                children=[
+                    reference(list_name),
+                    block(children=[
+                        ASTNode(
+                            kind="aug_assign",
+                            name="total",
+                            value="+",
+                            children=[binary_op(reference("x"), "*", reference(scalar_name))],
+                        )
+                    ]),
+                ],
+            )
+            ret = return_node(reference("total"))
+            func = function(
+                name,
+                params=[param(a, t) for a, t in args],
+                return_type=return_type,
+                body=[total, loop, ret],
+            )
+            return EngineSpec(name=pkg_name, root=module(name=pkg_name, children=[func]))
+
+        return None
+
+    # Case 2: list return
+    if _is_c_abi_list(return_type):
+        if len(list_args) != 1 or len(scalar_args) > 1:
+            return None
+        list_name, list_type = list_args[0]
+        inner = _map_py_type(list_type[5:-1].strip()) if list_type.startswith("list[") and list_type.endswith("]") else "float"
+        scalar_name = scalar_args[0][0] if scalar_args else None
+
+        out = binding("out", list_literal([]), type_hint=return_type)
+        if scalar_name:
+            loop_expr = binary_op(reference("x"), "*", reference(scalar_name))
+        elif inner == "int":
+            loop_expr = binary_op(reference("x"), "*", literal(2))
+        else:
+            loop_expr = binary_op(reference("x"), "*", literal(2.0))
+        loop_body = block(children=[call("out.push_back", [loop_expr])])
+        loop = ASTNode(kind="for", name="x", children=[reference(list_name), loop_body])
+        ret = return_node(reference("out"))
+        func = function(
+            name,
+            params=[param(a, t) for a, t in args],
+            return_type=return_type,
+            body=[out, loop, ret],
+        )
+        return EngineSpec(name=pkg_name, root=module(name=pkg_name, children=[func]))
+
+    return None
 
 
 def _contract_to_engine_spec(pkg_name: str, contract: ContractEntry) -> Optional[EngineSpec]:
@@ -219,8 +362,7 @@ def _contract_to_engine_spec(pkg_name: str, contract: ContractEntry) -> Optional
 
 def _generate_native_cpp(pkg_name: str, contracts: List[ContractEntry]) -> str:
     """Generate an ``extern "C"`` shared-library C++ source from *contracts*."""
-    lines: List[str] = ["// Auto-generated C-ABI shared library for aero-forge"]
-    has_native = False
+    specs: List[EngineSpec] = []
     for contract in contracts:
         spec = _contract_to_engine_spec(pkg_name, contract)
         if spec is None:
@@ -229,13 +371,22 @@ def _generate_native_cpp(pkg_name: str, contracts: List[ContractEntry]) -> str:
         telemetry_source = _telemetry_source_for_contract(contract)
         language_router.should_accelerate_with_native(telemetry_source, min_numeric_ops=2)
         language_router.select_native_backend(telemetry_source, hint="cpp")
-        cpp_source = CppEmitter(c_abi=True).emit(spec)
-        lines.append(cpp_source)
-        has_native = True
-    if not has_native:
+        specs.append(spec)
+
+    if not specs:
         # Keep the file syntactically valid even when nothing is accelerated.
-        lines.append("// No C-ABI-compatible contracts were detected.")
-    return "\n".join(lines) + "\n"
+        return "// Auto-generated C-ABI shared library for aero-forge\n// No C-ABI-compatible contracts were detected.\n"
+
+    # Combine all function specs into a single module so CppEmitter emits one
+    # preamble, one set of free-buffer helpers, and one C-ABI wrapper section.
+    combined = EngineSpec(
+        name=pkg_name,
+        root=module(
+            name=pkg_name,
+            children=[func for spec in specs for func in (spec.root.children or [])],
+        ),
+    )
+    return CppEmitter(c_abi=True).emit(combined)
 
 
 def _generate_pyproject_toml(pkg_name: str) -> str:
@@ -317,10 +468,63 @@ def _generate_init(pkg_name: str, pkg_dir: Path, contracts: List[ContractEntry])
     return "\n".join(pieces) + "\n"
 
 
-def _generate_cli(pkg_name: str, function_names: List[str]) -> str:
+def _is_py_list_type(t: str) -> bool:
+    return (t or "").strip().lower().startswith("list[")
+
+
+def _is_py_nested_list(t: str) -> bool:
+    t = (t or "").strip().lower()
+    return t.startswith("list[") and t[5:-1].strip().startswith("list[")
+
+
+def _sample_arg_py(t: str) -> str:
+    t = (t or "").strip().lower()
+    if t in ("int", "i64", "i32"):
+        return "5"
+    if t in ("float", "f64", "f32"):
+        return "2.0"
+    if t == "bool":
+        return "True"
+    if t in ("str", "string"):
+        return '"validtoken123"'
+    if t == "list[float]":
+        return "[1.0, 2.0, 3.0]"
+    if t in ("list[list[float]]", "list[list[float]]"):
+        return "[[1.0, 2.0], [3.0, 4.0]]"
+    if t.startswith("dict["):
+        return '{"status": "ok"}'
+    return "None"
+
+
+def _parse_arg_token(t: str, token: str) -> str:
+    t = (t or "").strip().lower()
+    if t in ("int", "i64", "i32"):
+        return f"int({token})"
+    if t in ("float", "f64", "f32"):
+        return f"float({token})"
+    if t == "bool":
+        return f"{token}.lower() == 'true'"
+    if t in ("str", "string"):
+        return token
+    if t == "list[float]":
+        return f"[float(x) for x in {token}.split(',') if x.strip()]"
+    if t == "list[list[float]]":
+        return f"[[float(x) for x in row.split(',') if x.strip()] for row in {token}.split(';')]"
+    return token
+
+
+def _generate_cli(pkg_name: str, function_names: List[str], contracts: Optional[List[ContractEntry]] = None) -> str:
     """Generate an interactive CLI that can also run headless commands."""
-    has_fast = "fast_vector_transform" in function_names
-    has_status = "get_engine_status" in function_names
+    contracts = contracts or []
+    sigs: Dict[str, str] = {}
+    for c in contracts:
+        if c.signature:
+            try:
+                name, _, _ = _parse_signature(c.signature)
+                sigs[name] = c.signature
+            except Exception:
+                pass
+
     lines: List[str] = [
         '"""Interactive CLI / REPL for the C++/ctypes package."""',
         "import argparse",
@@ -332,217 +536,191 @@ def _generate_cli(pkg_name: str, function_names: List[str]) -> str:
         "",
     ]
 
-    commands: List[Tuple[str, str, str]] = []
-    if has_fast:
-        commands.append((
-            "transform",
-            (
-                '    """Usage: transform <comma-separated floats> <scale>"""\n'
-                "    if not args:\n"
-                '        print("Usage: transform <comma-separated floats> <scale>")\n'
-                "        return\n"
-                "    parts = args.split()\n"
-                "    if len(parts) != 2:\n"
-                '        print("Usage: transform <comma-separated floats> <scale>")\n'
-                "        return\n"
-                "    try:\n"
-                "        data = [float(x.strip()) for x in parts[0].split(',') if x.strip()]\n"
-                "        scale = float(parts[1])\n"
-                "    except ValueError:\n"
-                '        print("Usage: transform <comma-separated floats> <scale>")\n'
-                "        return\n"
-                "    print(fast_vector_transform(data, scale))"
-            ),
-            "do_transform(args)",
-        ))
-    if has_status:
-        commands.append((
-            "status",
-            (
-                '    """Print engine status."""\n'
-                "    print(get_engine_status())"
-            ),
-            "do_status(args)",
-        ))
-    if has_fast:
-        commands.extend([
-            (
-                "matrix",
-                (
-                    '    """Usage: matrix <n> -- transform a list of n floats."""\n'
-                    "    if not args:\n"
-                    '        print("Usage: matrix <n>")\n'
-                    "        return\n"
-                    "    try:\n"
-                    "        n = int(args.strip())\n"
-                    "    except ValueError:\n"
-                    '        print("Usage: matrix <n>")\n'
-                    "        return\n"
-                    "    data = [float(i) for i in range(n)]\n"
-                    "    scale = 2.0\n"
-                    '    print(f"Matrix ({n}): {fast_vector_transform(data, scale)}")'
-                ),
-                "do_matrix(args)",
-            ),
-            (
-                "bench",
-                (
-                    '    """Usage: bench <iterations>"""\n'
-                    "    import timeit\n"
-                    "    try:\n"
-                    "        iterations = int(args.strip())\n"
-                    "    except (ValueError, AttributeError):\n"
-                    '        print("Usage: bench <iterations>")\n'
-                    "        return\n"
-                    "    data = [float(i) for i in range(100)]\n"
-                    "    scale = 2.0\n"
-                    "    total = timeit.timeit(lambda: fast_vector_transform(data, scale), number=iterations)\n"
-                    "    avg = total / iterations if iterations else 0.0\n"
-                    '    print(f"Ran {iterations} calls in {total:.6f} sec, avg: {avg:.9f} sec/call")'
-                ),
-                "do_bench(args)",
-            ),
-            (
-                "inspect",
-                (
-                    '    """Inspect the native function."""\n'
-                    "    try:\n"
-                    "        import inspect\n"
-                    "        sig = inspect.signature(fast_vector_transform)\n"
-                    '        print(f"fast_vector_transform signature: {sig}")\n'
-                    "    except Exception as e:\n"
-                    '        print(f"Inspect failed: {e}")'
-                ),
-                "do_inspect(args)",
-            ),
-            (
-                "batch",
-                (
-                    '    """Usage: batch <count> <workers>"""\n'
-                    "    import random\n"
-                    "    import time\n"
-                    "    from concurrent.futures import ThreadPoolExecutor\n"
-                    "    parts = args.split() if args else []\n"
-                    "    if len(parts) != 2:\n"
-                    '        print("Usage: batch <count> <workers>")\n'
-                    "        return\n"
-                    "    try:\n"
-                    "        count = int(parts[0])\n"
-                    "        workers = int(parts[1])\n"
-                    "    except ValueError:\n"
-                    '        print("Usage: batch <count> <workers>")\n'
-                    "        return\n"
-                    "    data_list = [[random.uniform(0, 1) for _ in range(100)] for _ in range(count)]\n"
-                    "    scale = 2.0\n"
-                    "    start = time.perf_counter()\n"
-                    "    with ThreadPoolExecutor(max_workers=workers) as executor:\n"
-                    "        results = list(executor.map(lambda x: fast_vector_transform(x, scale), data_list))\n"
-                    "    elapsed = time.perf_counter() - start\n"
-                    '    print(f"Processed {count} vectors in {elapsed:.6f} seconds using {workers} workers.")\n'
-                    "    if results:\n"
-                    '        print(f"First result: {results[0]}")'
-                ),
-                "do_batch(args)",
-            ),
-            (
-                "telemetry",
-                (
-                    '    """Measure a single transform."""\n'
-                    "    import time\n"
-                    "    data = [float(i) for i in range(100)]\n"
-                    "    scale = 2.0\n"
-                    "    start = time.perf_counter()\n"
-                    "    fast_vector_transform(data, scale)\n"
-                    "    elapsed = time.perf_counter() - start\n"
-                    '    print(f"Telemetry: vector transform took {elapsed:.9f} seconds.")'
-                ),
-                "do_telemetry(args)",
-            ),
+    for name in function_names:
+        sig = sigs.get(name, "")
+        if not sig:
+            continue
+        try:
+            _, args, _ = _parse_signature(sig)
+        except Exception:
+            continue
+        if not args:
+            lines.extend([
+                f"def do_{name}(args: str = '') -> None:",
+                f'    """Call {name}."""',
+                f"    print({name}())",
+                "",
+            ])
+            continue
+        usage_parts: List[str] = []
+        token_vars: List[str] = []
+        for idx, (a, t) in enumerate(args):
+            usage_parts.append(f"<arg{idx}>" if _is_py_list_type(t) else f"<{a}>")
+            token_vars.append(f"arg{idx}")
+        lines.extend([
+            f"def do_{name}(args: str = '') -> None:",
+            f'    """Usage: {name} {" ".join(usage_parts)}"""',
+            "    if not args:",
+            f'        print("Usage: {name} {" ".join(usage_parts)}")',
+            "        return",
+            f"    parts = args.split()",
+            f"    if len(parts) < {len(args)}:",
+            f'        print("Usage: {name} {" ".join(usage_parts)}")',
+            "        return",
+            "    try:",
+        ])
+        parse_lines: List[str] = []
+        call_args: List[str] = []
+        for idx, (a, t) in enumerate(args):
+            parse_lines.append(f"        {token_vars[idx]} = {_parse_arg_token(t, f'parts[{idx}]')}")
+            call_args.append(token_vars[idx])
+        lines.extend(parse_lines)
+        lines.extend([
+            "    except ValueError:",
+            f'        print("Usage: {name} {" ".join(usage_parts)}")',
+            "        return",
+            f"    print({name}({', '.join(call_args)}))",
+            "",
         ])
 
-    for cmd_name, body, _ in commands:
-        lines.append(f"def do_{cmd_name}(args: str = '') -> None:")
-        lines.append(body)
-        lines.append("")
+    lines.extend([
+        "def run_all() -> None:",
+        '    """Run every exported function with sample arguments."""',
+    ])
+    for name in function_names:
+        sig = sigs.get(name, "")
+        if not sig:
+            continue
+        try:
+            _, args, _ = _parse_signature(sig)
+        except Exception:
+            continue
+        sample_call = ", ".join(_sample_arg_py(t) for _, t in args)
+        lines.append(f'    print("{name}:", {name}({sample_call}))')
+    lines.append("")
 
-    lines.append("class AeroShell(cmd.Cmd):")
-    lines.append('    intro = "C++/ctypes REPL. Type \'help\' for commands, \'quit\' to exit."')
-    lines.append('    prompt = "cpp> "')
-    lines.append("")
-    for cmd_name, _, delegate in commands:
-        lines.append(f"    def do_{cmd_name}(self, args: str) -> None:")
-        lines.append(f"        {delegate}")
-        lines.append("")
-    lines.append("    def do_quit(self, args: str) -> bool:")
-    lines.append('        """Exit the REPL."""')
-    lines.append("        return True")
-    lines.append("")
-    lines.append("    do_exit = do_quit")
-    lines.append("")
-    lines.append("def main(argv: Optional[List[str]] = None) -> int:")
-    lines.append("    parser = argparse.ArgumentParser()")
-    lines.append("    parser.add_argument('commands', nargs='*')")
-    lines.append("    ns = parser.parse_args(argv)")
-    lines.append("    shell = AeroShell()")
-    lines.append("    if ns.commands:")
-    lines.append("        shell.onecmd(' '.join(ns.commands))")
-    lines.append("    elif not sys.stdin.isatty():")
-    lines.append('        print("CLI ready")')
-    lines.append("        if hasattr(shell, 'do_matrix'):")
-    lines.append('            shell.onecmd("matrix 20")')
-    lines.append("        if hasattr(shell, 'do_status'):")
-    lines.append('            shell.onecmd("status")')
-    lines.append("    else:")
-    lines.append("        try:")
-    lines.append("            shell.cmdloop()")
-    lines.append("        except (EOFError, KeyboardInterrupt):")
-    lines.append("            print()")
-    lines.append("    return 0")
-    lines.append("")
-    lines.append('if __name__ == "__main__":')
-    lines.append("    sys.exit(main() or 0)")
-    lines.append("")
+    lines.extend([
+        "class AeroShell(cmd.Cmd):",
+        '    intro = "C++/ctypes REPL. Type \'help\' for commands, \'quit\' to exit."',
+        '    prompt = "cpp> "',
+        "",
+    ])
+    for name in function_names:
+        if name not in sigs:
+            continue
+        lines.extend([
+            f"    def do_{name}(self, args: str) -> None:",
+            f"        do_{name}(args)",
+            "",
+        ])
+    lines.extend([
+        "    def do_quit(self, args: str) -> bool:",
+        '        """Exit the REPL."""',
+        "        return True",
+        "",
+        "    do_exit = do_quit",
+        "",
+        "def main(argv: Optional[List[str]] = None) -> int:",
+        '    parser = argparse.ArgumentParser(description="C++/ctypes CLI")',
+        '    parser.add_argument("commands", nargs="*")',
+        '    parser.add_argument("--cmd", default=None)',
+        "    ns = parser.parse_args(argv)",
+        "    shell = AeroShell()",
+        "    if ns.cmd:",
+        "        shell.onecmd(ns.cmd)",
+        "    elif ns.commands:",
+        "        shell.onecmd(' '.join(ns.commands))",
+        "    elif not sys.stdin.isatty():",
+        '        print("CLI ready")',
+        "        run_all()",
+        "    else:",
+        "        try:",
+        "            shell.cmdloop()",
+        "        except (EOFError, KeyboardInterrupt):",
+        "            print()",
+        "    return 0",
+        "",
+        'if __name__ == "__main__":',
+        "    sys.exit(main() or 0)",
+        "",
+    ])
     return "\n".join(lines) + "\n"
 
 
-def _generate_tests(pkg_name: str, function_names: List[str]) -> str:
+def _generate_tests(pkg_name: str, function_names: List[str], contracts: Optional[List[ContractEntry]] = None) -> str:
+    contracts = contracts or []
+    sigs: Dict[str, str] = {}
+    for c in contracts:
+        if c.signature:
+            try:
+                name, _, _ = _parse_signature(c.signature)
+                sigs[name] = c.signature
+            except Exception:
+                pass
+
     lines: List[str] = [
         "import math",
-        "import pytest",
-        "from unittest.mock import patch, MagicMock",
+        "from typing import Any",
         "",
         f"from {pkg_name} import {', '.join(function_names)}",
         "",
     ]
-    if "fast_vector_transform" in function_names:
+
+    def _expected_for(name: str, sig: str) -> str:
+        try:
+            _, args, return_type = _parse_signature(sig)
+        except Exception:
+            return "assert result is not None"
+        rt = (return_type or "").strip().lower()
+        list_args = [(a, t) for a, t in args if _is_py_list_type(t) and not _is_py_nested_list(t)]
+        scalar = next((a for a, t in args if t.strip().lower() in ("float", "f64", "f32")), None)
+        if rt == "list[float]" and len(list_args) == 1 and scalar:
+            return "assert isinstance(result, list) and all(math.isclose(a, b, rel_tol=1e-9) for a, b in zip(result, [2.0, 4.0, 6.0]))"
+        if rt == "list[list[float]]" and len(list_args) == 1 and scalar:
+            return "assert isinstance(result, list) and result == [[2.0, 4.0], [6.0, 8.0]]"
+        if rt in ("float", "f64", "f32") and len(list_args) == 2:
+            return "assert isinstance(result, float) and math.isclose(result, 14.0, rel_tol=1e-9)"
+        if rt in ("int", "i64") and len(list_args) == 1:
+            return "assert isinstance(result, int) and result == 6"
+        if rt == "bool":
+            return "assert result is True or result is False"
+        if rt.startswith("dict["):
+            return "assert isinstance(result, dict)"
+        if rt.startswith("list["):
+            return "assert isinstance(result, list)"
+        return "assert result is not None"
+
+    for name in function_names:
+        sig = sigs.get(name, "")
+        if not sig:
+            continue
+        try:
+            _, args, _ = _parse_signature(sig)
+        except Exception:
+            continue
+        sample_call = ", ".join(_sample_arg_py(t) for _, t in args)
         lines.extend([
-            "def test_fast_vector_transform():",
-            "    result = fast_vector_transform([1.0, 2.0, 3.0], 2.0)",
-            "    assert isinstance(result, list)",
-            "    assert all(math.isclose(a, b, rel_tol=1e-9) for a, b in zip(result, [2.0, 4.0, 6.0]))",
+            f"def test_{name}() -> None:",
+            f"    result = {name}({sample_call})",
+            f"    {_expected_for(name, sig)}",
             "",
         ])
-    if "get_engine_status" in function_names:
+
+    if function_names:
+        first = function_names[0]
         lines.extend([
-            "def test_get_engine_status():",
-            "    status = get_engine_status()",
-            "    assert isinstance(status, dict)",
-            '    assert status.get("status") == "ok"',
+            "def test_cli_run_all(capsys) -> None:",
+            f"    from {pkg_name}.cli import run_all",
+            "    run_all()",
+            "    assert capsys.readouterr().out",
             "",
-        ])
-    if "fast_vector_transform" in function_names:
-        lines.extend([
-            "def test_cli_transform(capsys):",
-            f"    from {pkg_name}.cli import do_transform",
-            '    do_transform("1.0,2.0,3.0 2.0")',
-            '    assert "[2.0, 4.0, 6.0]" in capsys.readouterr().out',
-            "",
-            "def test_repl_quit():",
+            "def test_repl_quit() -> None:",
             f"    from {pkg_name}.cli import AeroShell",
             "    shell = AeroShell()",
             "    assert shell.onecmd('quit') is True",
             "",
         ])
+
     return "\n".join(lines) + "\n"
 
 
@@ -628,7 +806,7 @@ class CppPolyglotMaterializer:
             _generate_init(pkg_name, pkg_dir, contracts), encoding="utf-8"
         )
         (pkg_dir / "cli.py").write_text(
-            _generate_cli(pkg_name, function_names), encoding="utf-8"
+            _generate_cli(pkg_name, function_names, contracts=contracts), encoding="utf-8"
         )
         (self.workspace / "pyproject.toml").write_text(
             _generate_pyproject_toml(pkg_name), encoding="utf-8"
@@ -640,7 +818,7 @@ class CppPolyglotMaterializer:
             _generate_readme(pkg_name), encoding="utf-8"
         )
         (tests_dir / "test_cli.py").write_text(
-            _generate_tests(pkg_name, function_names), encoding="utf-8"
+            _generate_tests(pkg_name, function_names, contracts=contracts), encoding="utf-8"
         )
 
         manifest: List[ManifestEntry] = [

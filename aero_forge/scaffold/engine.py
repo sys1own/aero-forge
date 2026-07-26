@@ -1575,7 +1575,7 @@ class RustGenerator:
     # ------------------------------------------------------------------
     def _emit_function(self) -> str:
         def _needs_mut_binding(typ: str) -> bool:
-            return typ.startswith("Vec<") or typ.startswith("BTreeMap<") or typ == "String"
+            return typ.startswith("Vec<") or typ.startswith("BTreeMap<")
 
         args = ", ".join(
             f"mut {name}: {typ}" if _needs_mut_binding(typ) else f"{name}: {typ}"
@@ -3726,7 +3726,7 @@ class ClassMethodGenerator(RustGenerator):
 
     def _emit_function(self) -> str:
         def _needs_mut_binding(typ: str) -> bool:
-            return typ.startswith("Vec<") or typ.startswith("BTreeMap<") or typ == "String"
+            return typ.startswith("Vec<") or typ.startswith("BTreeMap<")
 
         args = ", ".join(
             f"mut {name}: {typ}" if _needs_mut_binding(typ) else f"{name}: {typ}"
