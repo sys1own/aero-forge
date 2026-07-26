@@ -82,13 +82,21 @@ def _first_error_line(error_log: str) -> Optional[str]:
 
 def _local_explanation(error_log: str) -> str:
     """Fallback explanation when no LLM is available."""
-    cargo = classify_cargo_error(error_log)
     unsupported_match = re.search(r"UnsupportedError: (.+?)(?:\n|$)", error_log)
     if unsupported_match:
         reason = unsupported_match.group(1)
         return (
             f"Unsupported Python construct: {reason}\n"
             f"Suggestion: rewrite the code to avoid this construct, or use a supported equivalent."
+        )
+    # Pytest failures are distinct from Cargo/Rust compile failures.
+    if re.search(r"test_.*::test_|\bPASSED\b|\bFAILED\b|\bERROR\b", error_log):
+        return (
+            "One or more generated tests failed.\n"
+            "Suggestions:\n"
+            "  - Check the traceback in the build log.\n"
+            "  - Verify input/output types and edge-case handling.\n"
+            "  - Use parity assertions or math.isclose for floating-point comparisons."
         )
     if "mismatched types" in error_log.lower():
         return (
@@ -105,7 +113,12 @@ def _local_explanation(error_log: str) -> str:
             "  - Check that all variables are assigned before use.\n"
             "  - Avoid underscore-prefixed names for values you need to reference."
         )
-    return f"Build error:\n{cargo}\nUse --verbose to see the full compiler output."
+    # Only invoke Cargo-specific classification when the log actually looks like
+    # compiler output; otherwise fall back to a generic build error message.
+    if re.search(r"(?:Compiling|Finished|error:|error\[|rustc|cargo)", error_log, re.I):
+        cargo = classify_cargo_error(error_log)
+        return f"Build error:\n{cargo}\nThe exact compiler output is included in the build log."
+    return "Build/test failed. The exact output is included in the build log."
 
 
 def explain_exception(exc: Exception, source: Optional[str] = None) -> str:

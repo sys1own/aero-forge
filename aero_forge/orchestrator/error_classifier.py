@@ -39,10 +39,26 @@ _FATAL_PATTERNS = [
     re.compile(r"AuthenticationError.*invalid.*api.*key", re.I),
 ]
 
+# Standard Cargo/Maturin status lines that appear in stderr even on success.
+_CARGO_STATUS_RE = re.compile(
+    r"^\s*(?:Compiling|Finished|Running|Documenting|Downloading|Updating|Fresh| Packaging|Verifying|Installing)\b",
+    re.MULTILINE | re.I,
+)
+
+# Real Cargo error markers; status logs with none of these are not fatal.
+_CARGO_ERROR_RE = re.compile(
+    r"(?:error\s*\[|error:|failed to|could not|process didn't exit successfully|exited with code|thread.*panicked|FAILED)",
+    re.I,
+)
+
 
 def classify(text: Optional[str]) -> ErrorClass:
     """Classify an error string."""
     if text is None:
+        return ErrorClass.RECOVERABLE
+    # Cargo writes status lines like "Compiling ..." and "Finished ..." to
+    # stderr as normal progress; they must not be flagged as errors.
+    if _CARGO_STATUS_RE.search(text) and not _CARGO_ERROR_RE.search(text):
         return ErrorClass.RECOVERABLE
     lowered = text.lower()
     for pattern in _FATAL_PATTERNS:

@@ -22,6 +22,12 @@ from aero_forge.orchestrator.error_classifier import (
         ("out of memory", ErrorClass.FATAL),
         ("expected i64, found f64", ErrorClass.RECOVERABLE),
         ("assert fibonacci(10) == 55", ErrorClass.RECOVERABLE),
+        # Cargo progress lines must not be flagged as errors.
+        (
+            "Compiling pyo3 v0.20.3\nFinished release [optimized] target(s)",
+            ErrorClass.RECOVERABLE,
+        ),
+        ("Updating crates.io index\nDownloading foo v1.0", ErrorClass.RECOVERABLE),
     ],
 )
 def test_classify(text, expected):
@@ -32,6 +38,10 @@ def test_fatal_and_transient_helpers():
     assert is_fatal("No linker found")
     assert is_transient("Rate limit exceeded")
     assert not is_fatal("expected i64")
+    # Cargo stderr progress should not be considered fatal or transient.
+    cargo_log = "Compiling pyo3 v0.20.3\nFinished release [optimized] target(s) in 1.2s"
+    assert not is_fatal(cargo_log)
+    assert not is_transient(cargo_log)
 
 
 class FakeTransient(Exception):

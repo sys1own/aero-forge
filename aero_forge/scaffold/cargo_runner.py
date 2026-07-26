@@ -205,7 +205,9 @@ def run_cargo(
     base_env = ensure_rust_toolchain(env)
 
     str_command = [str(arg) for arg in command]
-    if not str_command or str_command[0] != "cargo":
+    if not str_command:
+        str_command = ["cargo", "build"]
+    elif str_command[0] not in ("cargo", "maturin"):
         str_command = ["cargo", *str_command]
 
     def _run(cmd: List[str]) -> subprocess.CompletedProcess[str]:
@@ -266,7 +268,7 @@ def run_cargo(
 
     # Emit verbose diagnostics for the failing command so the UI can surface
     # the exact compiler output instead of a generic "use --verbose" message.
-    if str_command and str_command[0] == "cargo" and last_error is not None:
+    if str_command and str_command[0] in ("cargo", "maturin") and last_error is not None:
         verbose_command = [*str_command, "-v"]
         logger.info("Re-running with verbose output: %s", " ".join(verbose_command))
         verbose_result = _run(verbose_command)

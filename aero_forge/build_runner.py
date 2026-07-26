@@ -386,6 +386,24 @@ class BuildRunner:
         all_tests = sorted(
             {str(t.resolve()) for spec in specs for t in spec.tests if t.is_file()}
         )
+        # Recursively discover additional test files next to the source file and
+        # in the project root so nested src/**/tests/ suites are not missed.  Only
+        # include tests whose filename is clearly associated with this source to
+        # avoid importing modules compiled in another sandbox during distributed
+        # builds (e.g. test_a.py should not run while building b.py).
+        source_stem = source.stem.lower()
+        project_root = self.blueprint.output_dir.resolve()
+        search_roots = {project_root, source.parent.resolve()}
+        excluded = {"target", "dist", "build", ".cargo", "__pycache__", ".pytest_cache", ".git", ".aero_core"}
+        for search_root in search_roots:
+            for test_path in search_root.rglob("test_*.py"):
+                if any(part in excluded for part in test_path.parts):
+                    continue
+                parts = test_path.stem.lower().split("_")
+                if source_stem not in parts and source_stem not in test_path.name.lower():
+                    continue
+                all_tests.append(str(test_path.resolve()))
+        all_tests = sorted({str(Path(t).resolve()) for t in all_tests})
         # Skip running tests when cross-compiling to a different host.
         if self.target not in ("native", self._host_target):
             all_tests = []
@@ -657,7 +675,8 @@ class BuildRunner:
             if r.logs and not first_logs:
                 first_logs = r.logs
             if not r.success:
-                first_error = first_logs if first_logs else "Build failed"
+                first_error = r.logs if r.logs else "Build failed"
+                first_logs = r.logs if r.logs else first_logs
                 break
 
         return {
