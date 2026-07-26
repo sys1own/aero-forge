@@ -980,6 +980,17 @@ def _validate_blueprint_against_intent(
     return None
 
 
+def _strip_markdown_fences(text: str) -> str:
+    """Remove optional YAML/JSON code fences from an LLM response."""
+    text = text.strip()
+    if text.startswith("```"):
+        # Drop the opening fence line (e.g. ```yaml)
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+    if text.endswith("```"):
+        text = text[:-3].strip()
+    return text
+
+
 def _parse_llm_blueprint(
     raw: str,
     llm_provider: str,
@@ -989,7 +1000,7 @@ def _parse_llm_blueprint(
     if not raw:
         return None
     try:
-        data = yaml.safe_load(raw)
+        data = yaml.safe_load(_strip_markdown_fences(raw))
         if not isinstance(data, dict):
             return None
         if "llm" in data and isinstance(data["llm"], dict):

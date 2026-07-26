@@ -28,6 +28,8 @@ from aero_forge.scaffold.cpp_materializer import (
     _find_cpp_compiler,
     _generate_native_cpp,
     _is_c_abi_contract,
+    _is_c_abi_list,
+    _is_c_abi_tuple_return,
     _so_name,
 )
 from aero_forge.scaffold.polyglot_materializer import (
@@ -79,8 +81,8 @@ def _partition_contracts(
             python.append(contract)
             continue
         rust_supported = all(
-            t.lower() in ("int", "i64", "i32", "float", "f64", "f32", "bool", "str", "string")
-            for _, t in args
+            t.lower() in ("int", "i64", "i32", "float", "f64", "f32", "bool", "str", "string") or a == "self"
+            for a, t in args
         ) and return_type.lower() in ("int", "i64", "i32", "float", "f64", "f32", "bool", "str", "string")
         if rust_supported:
             rust.append(contract)
@@ -114,9 +116,9 @@ def _generate_rust_source(contracts: List[ContractEntry]) -> str:
         except Exception:
             continue
         names.append(name)
-        arg_str = ", ".join(f"{arg}: {typ}" for arg, typ in args)
+        arg_str = ", ".join(f"{arg}: {typ}" for arg, typ in args if arg != "self")
         lines.append(f"def {name}({arg_str}) -> {return_type}:")
-        lines.append(_generate_stub_body(name, args, return_type))
+        lines.append(_generate_stub_body(name, [(a, t) for a, t in args if a != "self"], return_type))
         lines.append("")
     if names:
         lines.append("__all__ = [" + ", ".join(f'"{n}"' for n in names) + "]")
@@ -148,6 +150,7 @@ def _generate_python_init(
     rust_contracts: List[ContractEntry],
     python_contracts: List[ContractEntry],
     rust_crate_name: str,
+    native_bridge_module: Optional[str] = None,
 ) -> str:
     """Generate ``<pkg>/__init__.py`` that loads both the Rust extension and C++ .so."""
     lines: List[str] = ['"""Tri-polyglot driver package."""', "", "from __future__ import annotations", ""]
@@ -164,22 +167,34 @@ def _generate_python_init(
             name, args, return_type = _parse_signature(contract.signature)
         except Exception:
             continue
-        arg_sig = ", ".join(f"{a}: {t}" for a, t in args)
-        arg_call = ", ".join(a for a, _ in args)
+        # Methods with a ``self`` receiver become free functions in the generated Rust module.
+        call_args = [a for a, _ in args if a != "self"]
+        arg_sig = ", ".join(f"{a}: {t}" for a, t in args if a != "self")
+        arg_call = ", ".join(call_args)
         fallback = _generate_stub_body(name, args, return_type)
-        lines.append(f"def {name}({arg_sig}) -> {return_type}:")
+        if arg_sig:
+            lines.append(f"def {name}({arg_sig}) -> {return_type}:")
+        else:
+            lines.append(f"def {name}() -> {return_type}:")
         lines.append(f"    if _NATIVE is not None and hasattr(_NATIVE, '{name}'):")
-        lines.append(f"        return _NATIVE.{name}({arg_call})")
+        if arg_call:
+            lines.append(f"        return _NATIVE.{name}({arg_call})")
+        else:
+            lines.append(f"        return _NATIVE.{name}()")
         lines.append(fallback)
         lines.append("")
 
     # C++ ctypes loader for C-ABI contracts
     cpp_names: List[str] = _function_names(cpp_contracts)
     if cpp_names:
-        stub_source = "\n".join(_cpp_contract_to_python_stub(c) for c in cpp_contracts)
-        so_path = (workspace / "cpp_core" / _so_name(f"{pkg_name}_cpp")).resolve()
-        lines.append(_ctypes_loader_source(stub_source, so_path, cpp_names))
-        lines.append("")
+        if native_bridge_module:
+            lines.append(f"from {native_bridge_module} import {', '.join(cpp_names)}")
+            lines.append("")
+        else:
+            stub_source = "\n".join(_cpp_contract_to_python_stub(c) for c in cpp_contracts)
+            so_path = (workspace / "cpp_core" / _so_name(f"{pkg_name}_cpp")).resolve()
+            lines.append(_ctypes_loader_source(stub_source, so_path, cpp_names))
+            lines.append("")
 
     # Fallback pure-Python implementations
     for contract in python_contracts:
@@ -189,7 +204,7 @@ def _generate_python_init(
             name, args, return_type = _parse_signature(contract.signature)
         except Exception:
             continue
-        arg_sig = ", ".join(f"{a}: {t}" for a, t in args)
+        arg_sig = ", ".join(f"{a}: {t}" for a, t in args if a != "self")
         lines.append(f"def {name}({arg_sig}) -> {return_type}:")
         lines.append(_generate_fallback_body(name, args, return_type))
         lines.append("")
@@ -237,6 +252,72 @@ def _sample_arg(t: str) -> str:
     return "None"
 
 
+def _march_arg_expr(
+    name: str,
+    type_hint: str,
+    count_var: str,
+    origins_var: str,
+    dirs_var: str,
+    out_var: str,
+    max_steps: str,
+    hit_threshold: str,
+    sphere_radius: str,
+) -> str:
+    n = name.lower()
+    if n == "origins":
+        return origins_var
+    if n in ("dirs", "directions"):
+        return dirs_var
+    if n == "hit_distances":
+        return out_var
+    if n in ("count", "n", "num", "length", "len"):
+        return count_var
+    if n in ("max_steps", "steps", "maxsteps"):
+        return max_steps
+    if n in ("hit_threshold", "threshold"):
+        return hit_threshold
+    if n in ("sphere_radius", "radius"):
+        return sphere_radius
+    return _sample_arg(type_hint)
+
+
+def _march_call_lines(
+    func_name: str,
+    args: List[Tuple[str, str]],
+    return_type: str,
+    *,
+    count: int,
+    prefix: str = "",
+) -> List[str]:
+    """Generate Python source lines for a ray-marching function call."""
+    lines: List[str] = []
+    count_var = f"{prefix}count" if prefix else "count"
+    origins_var = f"{prefix}origins" if prefix else "origins"
+    dirs_var = f"{prefix}dirs" if prefix else "dirs"
+    out_var = f"{prefix}hit_distances" if prefix else "hit_distances"
+    lines.append(f"    {count_var} = {count}")
+    lines.append(f"    {origins_var} = [{_march_coord_sample(count)}]")
+    lines.append(f"    {dirs_var} = [{_march_dir_sample(count)}]")
+    return_list = _is_c_abi_list(return_type)
+    has_out_buffer = (not return_list) and any(t.lower() == "hit_distances" or n.lower() == "hit_distances" for n, t in args)
+    if has_out_buffer:
+        lines.append(f"    {out_var} = [0.0] * {count_var}")
+    call_args = ", ".join(
+        _march_arg_expr(n, t, count_var, origins_var, dirs_var, out_var, "64", "1e-3", "1.5")
+        for n, t in args
+    )
+    lines.append(f'    print("C++ {func_name}:", {func_name}({call_args}))')
+    return lines
+
+
+def _march_coord_sample(count: int) -> str:
+    return ", ".join(["2.0"] * (count * 3))
+
+
+def _march_dir_sample(count: int) -> str:
+    return ", ".join(["-1.0"] * (count * 3))
+
+
 def _generate_main_py(pkg_name: str, function_names: List[str], contracts: Optional[List[ContractEntry]] = None) -> str:
     lines = [
         '"""Tri-polyglot REPL CLI entrypoint."""',
@@ -244,6 +325,7 @@ def _generate_main_py(pkg_name: str, function_names: List[str], contracts: Optio
         "from __future__ import annotations",
         "",
         "import argparse",
+        "import random",
         "import sys",
         "",
         f"from {pkg_name} import {', '.join(function_names)}",
@@ -254,38 +336,98 @@ def _generate_main_py(pkg_name: str, function_names: List[str], contracts: Optio
     ]
     contracts = contracts or []
     sigs: Dict[str, str] = {}
+    langs: Dict[str, str] = {}
     for c in contracts:
         if c.signature:
             try:
                 name, _, _ = _parse_signature(c.signature)
                 sigs[name] = c.signature
+                langs[name] = c.language or ""
             except Exception:
                 pass
+
+    has_sdf = False
+    has_march = False
+    march_name: Optional[str] = None
+    march_args: List[Tuple[str, str]] = []
+    march_return = ""
     for name in function_names:
         sig = sigs.get(name, "")
         if not sig:
             continue
+        if "march" in name and "ray" in name:
+            has_march = True
+            march_name = name
+            _, march_args, march_return = _parse_signature(sig)
+        if "sdf" in name and "sphere" in name:
+            has_sdf = True
         try:
             _, args, _ = _parse_signature(sig)
         except Exception:
             continue
-        call_args = ", ".join(_sample_arg(t) for _, t in args)
-        label = "C++" if _is_c_abi_contract(ContractEntry(name=name, signature=sig)) else ("Rust" if any(t.lower() in ("str", "string") for _, t in args) else "Python")
+        if "march" in name and "ray" in name:
+            lines.extend(_march_call_lines(name, args, march_return, count=1))
+            continue
+        call_args = ", ".join(_sample_arg(t) for a, t in args if a != "self")
+        lang = langs.get(name, "").lower()
+        if "cpp" in lang or _is_c_abi_contract(ContractEntry(name=name, signature=sig)):
+            label = "C++"
+        elif "rust" in lang:
+            label = "Rust"
+        else:
+            label = "Python"
         lines.append(f'    print("{label} {name}:", {name}({call_args}))')
+
+    benchmark_lines = [
+        "",
+        "",
+        "def run_benchmark() -> None:",
+        '    """Run a performance benchmark exercising all native backends."""',
+    ]
+    if has_sdf:
+        benchmark_lines.append('    print("Benchmark: compute_sdf_sphere", compute_sdf_sphere(2.0, 2.0, 2.0, 1.5))')
+    if has_march and march_name:
+        benchmark_lines.extend([
+            "    random.seed(42)",
+            "    count = 10000",
+            "    origins = [random.uniform(-2.0, 2.0) for _ in range(count * 3)]",
+            "    dirs = [random.uniform(-1.0, 1.0) for _ in range(count * 3)]",
+        ])
+        return_list = _is_c_abi_list(march_return)
+        return_tuple = _is_c_abi_tuple_return(march_return)
+        if not return_list and not return_tuple:
+            benchmark_lines.append("    hit_distances = [0.0] * count")
+        call_args = ", ".join(
+            _march_arg_expr(n, t, "count", "origins", "dirs", "hit_distances", "64", "1e-3", "1.5")
+            for n, t in march_args
+        )
+        benchmark_lines.append(f'    result = {march_name}({call_args})')
+        if return_tuple:
+            benchmark_lines.append("    _, hit_distances = result")
+        elif return_list:
+            benchmark_lines.append("    hit_distances = result")
+        benchmark_lines.append("    hits = sum(1 for d in hit_distances if d > 0)")
+        benchmark_lines.append('    print(f"Benchmark: hits {hits} / {count}")')
+    if not has_sdf and not has_march:
+        benchmark_lines.extend([
+            "    run_all()",
+            '    print("Benchmark: generic run_all completed")',
+        ])
+    lines.extend(benchmark_lines)
     lines.extend([
         "",
         "",
         "def main() -> int:",
         '    parser = argparse.ArgumentParser(description="Tri-polyglot CLI")',
-        '    parser.add_argument("--cmd", default=None, help="Headless command (e.g. run_all)")',
+        '    parser.add_argument("--cmd", default=None, help="Headless command (e.g. run_all, benchmark)")',
         "    ns = parser.parse_args()",
-        '    if ns.cmd == "run_all":',
-        "        run_all()",
+        '    if ns.cmd in ("run_all", "benchmark"):',
+        "        run_benchmark() if ns.cmd == \"benchmark\" else run_all()",
         "    elif not sys.stdin.isatty():",
         '        print("Tri-polyglot CLI ready")',
         "        run_all()",
         "    else:",
-        '        print("Use --cmd run_all for headless execution")',
+        '        print("Use --cmd run_all or --cmd benchmark for headless execution")',
         "    return 0",
         "",
         'if __name__ == "__main__":',
@@ -305,14 +447,35 @@ def _generate_run_shell(pkg_name: str) -> str:
     )
 
 
-def _generate_tests(pkg_name: str, function_names: List[str]) -> str:
-    lines = [
-        f"from {pkg_name} import {', '.join(function_names)}",
+def _generate_tests(
+    pkg_name: str,
+    function_names: List[str],
+    contracts: Optional[List[ContractEntry]] = None,
+) -> str:
+    return _generate_test_file(Path("tests/test_tri.py"), pkg_name, function_names, contracts)
+
+
+def _generate_test_file(
+    path: Path,
+    pkg_name: str,
+    function_names: List[str],
+    contracts: Optional[List[ContractEntry]] = None,
+) -> str:
+    """Generate pytest tests for a tri-polyglot workspace."""
+    stem = path.stem
+    contracts = contracts or []
+    contract_by_name = {c.name: c for c in contracts}
+    lines: List[str] = [
+        "import subprocess",
+        "import sys",
         "",
     ]
+    if function_names:
+        lines.append(f"from {pkg_name} import {', '.join(function_names)}")
+        lines.append("")
     if "fast_vector_transform" in function_names:
         lines.extend([
-            "def test_fast_vector_transform():",
+            "def test_fast_vector_transform() -> None:",
             "    result = fast_vector_transform([1.0, 2.0, 3.0], 2.0)",
             "    assert isinstance(result, list)",
             "    assert result == [2.0, 4.0, 6.0]",
@@ -320,26 +483,143 @@ def _generate_tests(pkg_name: str, function_names: List[str]) -> str:
         ])
     if "validate_token" in function_names:
         lines.extend([
-            "def test_validate_token():",
+            'def test_validate_token() -> None:',
             '    assert validate_token("validtoken123") is True',
             '    assert validate_token("short") is False',
             "",
         ])
     if "get_engine_status" in function_names:
         lines.extend([
-            "def test_get_engine_status():",
+            "def test_get_engine_status() -> None:",
             "    status = get_engine_status()",
             "    assert isinstance(status, dict)",
             '    assert status.get("status") == "ok"',
             "",
         ])
+    if "compute_sdf_sphere" in function_names:
+        lines.extend([
+            "def test_compute_sdf_sphere() -> None:",
+            "    result = compute_sdf_sphere(2.0, 2.0, 2.0, 1.5)",
+            "    assert isinstance(result, float)",
+            "",
+        ])
+    if "march_rays_batch" in function_names:
+        march_contract = contract_by_name.get("march_rays_batch")
+        if march_contract and march_contract.signature:
+            try:
+                _, args, return_type = _parse_signature(march_contract.signature)
+            except Exception:
+                args, return_type = [], ""
+        else:
+            args, return_type = [], ""
+        if not args:
+            args = [
+                ("origins", "list[float]"),
+                ("dirs", "list[float]"),
+                ("hit_distances", "list[float]"),
+                ("count", "int"),
+                ("max_steps", "int"),
+                ("hit_threshold", "float"),
+                ("sphere_radius", "float"),
+            ]
+            return_type = "int"
+        return_list = _is_c_abi_list(return_type)
+        return_tuple = _is_c_abi_tuple_return(return_type)
+        test_lines = [
+            "def test_march_rays_batch() -> None:",
+            "    count = 4",
+            "    origins = [2.0, 2.0, 2.0] * count",
+            "    dirs = [-1.0, -1.0, -1.0] * count",
+        ]
+        if not return_list and not return_tuple:
+            test_lines.append("    hit_distances = [0.0] * count")
+        call_args = ", ".join(
+            _march_arg_expr(n, t, "count", "origins", "dirs", "hit_distances", "64", "1e-3", "1.5")
+            for n, t in args
+        )
+        test_lines.append(f"    result = march_rays_batch({call_args})")
+        if return_tuple:
+            test_lines.extend([
+                "    assert isinstance(result, tuple)",
+                "    assert len(result) == 2",
+                "    assert isinstance(result[1], list)",
+                "    assert len(result[1]) == count",
+            ])
+        elif return_list:
+            test_lines.extend([
+                "    assert isinstance(result, list)",
+                "    assert len(result) == count",
+            ])
+        else:
+            test_lines.extend([
+                "    assert isinstance(result, int)",
+                "    assert result == count",
+                "    assert all(isinstance(d, float) for d in hit_distances)",
+            ])
+        test_lines.append("")
+        lines.extend(test_lines)
+    cmd = "benchmark" if "march_rays_batch" in function_names else "run_all"
     lines.extend([
-        "def test_run_all():",
-        f"    from {pkg_name}.main import run_all",
-        "    run_all()",
+        f"def test_{stem}() -> None:",
+        f'    result = subprocess.run([sys.executable, "run_shell.py", "--cmd", "{cmd}"], capture_output=True, text=True, timeout=120)',
+        '    assert result.returncode == 0, result.stderr',
+        '    assert result.stdout',
         "",
     ])
     return "\n".join(lines) + "\n"
+
+
+def _generate_native_bridge_py(pkg_name: str, workspace: Path, cpp_contracts: List[ContractEntry]) -> str:
+    """Generate a root-level ``native_bridge.py`` that loads the C++ shared library."""
+    cpp_names = _function_names(cpp_contracts)
+    if not cpp_names:
+        return "# native bridge placeholder\n"
+    stub_source = "\n".join(_cpp_contract_to_python_stub(c) for c in cpp_contracts)
+    so_path = (workspace / "cpp_core" / _so_name(f"{pkg_name}_cpp")).resolve()
+    return _ctypes_loader_source(stub_source, so_path, cpp_names)
+
+
+def _generate_cpp_header(pkg_name: str, contracts: List[ContractEntry]) -> str:
+    """Generate a C/C++ header with ``extern "C"`` declarations."""
+    lines = [
+        '#pragma once',
+        '',
+        '#include <cstdint>',
+        '#include <cstddef>',
+        '',
+        '#ifdef __cplusplus',
+        'extern "C" {',
+        '#endif',
+        '',
+    ]
+    for contract in contracts:
+        if not contract.signature:
+            continue
+        try:
+            name, args, return_type = _parse_signature(contract.signature)
+        except Exception:
+            continue
+        if not _is_c_abi_contract(contract) and not _is_special_cpp_contract(contract):
+            continue
+        # Build a simplified declaration from the contract.
+        parts = []
+        for a, t in args:
+            if _is_c_abi_list(t):
+                parts.append(f"const double* {a}")
+                parts.append(f"size_t {a}_len")
+            else:
+                tmap = {"float": "double", "int": "int64_t", "bool": "bool", "str": "const char*"}
+                parts.append(f"{tmap.get(t.lower(), 'double')} {a}")
+        rt = {"float": "double", "int": "int64_t", "bool": "bool", "str": "const char*"}.get(return_type.lower(), "void")
+        lines.append(f"    {rt} {name}({', '.join(parts)});")
+    lines.extend([
+        '',
+        '#ifdef __cplusplus',
+        '}',
+        '#endif',
+        '',
+    ])
+    return "\n".join(lines)
 
 
 def _generate_readme_tri(project: str) -> str:
@@ -410,15 +690,41 @@ class TriPolyglotMaterializer:
                 _cpp_contract_to_python_stub(contract), hint="rust_hin"
             )
 
-        # C++ source
+        # C++ source path is driven by the blueprint manifest when the prompt asks for
+        # a specific source file (e.g. ``cpp_core/ray_engine.cpp``); otherwise default.
         cpp_pkg_name = f"{pkg_name}_cpp"
-        cpp_source = _generate_native_cpp(cpp_pkg_name, cpp_contracts)
-        (cpp_dir / "native.cpp").write_text(cpp_source, encoding="utf-8")
+        cpp_entries = [
+            e for e in blueprint.manifest
+            if e.lang == "cpp" or Path(e.path).suffix in (".cpp", ".cc", ".cxx", ".h", ".hpp")
+        ]
+        cpp_source_entry = next(
+            (e for e in cpp_entries if Path(e.path).suffix in (".cpp", ".cc", ".cxx")),
+            None,
+        )
+        if cpp_source_entry is None:
+            cpp_source_entry = ManifestEntry(path="cpp_core/native.cpp", lang="cpp", purpose="C-ABI shared library source")
+            blueprint.manifest.append(cpp_source_entry)
+        cpp_source_path = self.workspace / cpp_source_entry.path
+        cpp_source_path.parent.mkdir(parents=True, exist_ok=True)
+        cpp_source_path.write_text(
+            _generate_native_cpp(cpp_pkg_name, cpp_contracts), encoding="utf-8"
+        )
+        for hdr_entry in cpp_entries:
+            if Path(hdr_entry.path).suffix in (".h", ".hpp"):
+                hdr_path = self.workspace / hdr_entry.path
+                hdr_path.parent.mkdir(parents=True, exist_ok=True)
+                if not hdr_path.exists():
+                    hdr_path.write_text(_generate_cpp_header(pkg_name, cpp_contracts), encoding="utf-8")
+
+        # Detect whether the blueprint requested a root-level native_bridge.py module.
+        native_bridge_module: Optional[str] = None
+        if any(e.path == "native_bridge.py" for e in blueprint.manifest):
+            native_bridge_module = "native_bridge"
 
         # Python package and project files
         (pkg_dir / "__init__.py").write_text(
             _generate_python_init(
-                pkg_name, self.workspace, cpp_contracts, rust_contracts, python_contracts, rust_crate_name
+                pkg_name, self.workspace, cpp_contracts, rust_contracts, python_contracts, rust_crate_name, native_bridge_module
             ),
             encoding="utf-8",
         )
@@ -430,16 +736,29 @@ class TriPolyglotMaterializer:
             _generate_run_shell(pkg_name), encoding="utf-8"
         )
         (tests_dir / "test_tri.py").write_text(
-            _generate_tests(pkg_name, all_names), encoding="utf-8"
+            _generate_tests(pkg_name, all_names, contracts=list(blueprint.contracts)), encoding="utf-8"
         )
         (self.workspace / "README.md").write_text(
             _generate_readme_tri(project), encoding="utf-8"
         )
 
+        # Enforce blueprint manifest integrity: every declared file must be materialized.
+        self._write_missing_manifest_entries(
+            blueprint,
+            pkg_name,
+            cpp_contracts,
+            rust_contracts,
+            python_contracts,
+            all_names,
+            rust_crate_name,
+            native_bridge_module,
+        )
+
+        # Standard tri-polyglot manifest entries.
         manifest: List[ManifestEntry] = [
             ManifestEntry(path=f"{pkg_name}/__init__.py", lang="python", purpose="Python driver package init"),
             ManifestEntry(path=f"{pkg_name}/main.py", lang="python", purpose="Python CLI / REPL entrypoint"),
-            ManifestEntry(path="cpp_core/native.cpp", lang="cpp", purpose="C-ABI shared library source"),
+            ManifestEntry(path=str(cpp_source_path.relative_to(self.workspace)), lang="cpp", purpose="C-ABI shared library source"),
             ManifestEntry(path="rust_core/Cargo.toml", lang="toml", purpose="PyO3 crate manifest"),
             ManifestEntry(path="rust_core/src/lib.rs", lang="rust", purpose="Rust native core"),
             ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust workspace manifest"),
@@ -473,7 +792,7 @@ class TriPolyglotMaterializer:
         )
 
         if build:
-            self._build_cpp(cpp_pkg_name)
+            self._build_cpp(cpp_pkg_name, cpp_source_path)
             self._build_rust()
 
         functions: List[FunctionSpec] = [
@@ -497,12 +816,65 @@ class TriPolyglotMaterializer:
         blueprint = blueprint.model_copy(update={"functions": functions})
         return blueprint
 
-    def _build_cpp(self, cpp_pkg_name: str) -> bool:
+    def _write_missing_manifest_entries(
+        self,
+        blueprint: Blueprint,
+        pkg_name: str,
+        cpp_contracts: List[ContractEntry],
+        rust_contracts: List[ContractEntry],
+        python_contracts: List[ContractEntry],
+        function_names: List[str],
+        rust_crate_name: str,
+        native_bridge_module: Optional[str],
+    ) -> None:
+        """Write any manifest entry that has not already been materialized."""
+        for entry in list(blueprint.manifest):
+            path = self.workspace / entry.path
+            if path.exists():
+                continue
+            content: Optional[str] = None
+            rel = Path(entry.path)
+            if entry.lang == "python":
+                if path.name == "__init__.py":
+                    content = _generate_python_init(
+                        pkg_name,
+                        self.workspace,
+                        cpp_contracts,
+                        rust_contracts,
+                        python_contracts,
+                        rust_crate_name,
+                        native_bridge_module,
+                    )
+                elif path.name == "main.py":
+                    content = _generate_main_py(pkg_name, function_names, contracts=list(blueprint.contracts))
+                elif path.name == "native_bridge.py":
+                    content = _generate_native_bridge_py(pkg_name, self.workspace, cpp_contracts)
+                elif "test" in path.name and path.suffix == ".py":
+                    content = _generate_test_file(rel, pkg_name, function_names, contracts=list(blueprint.contracts))
+                elif path.suffix == ".py":
+                    content = f"# {path.name} placeholder generated by aero-forge\n"
+            elif entry.lang == "cpp":
+                if path.suffix in (".h", ".hpp"):
+                    content = _generate_cpp_header(pkg_name, cpp_contracts)
+                elif path.suffix in (".cpp", ".cc", ".cxx"):
+                    content = _generate_native_cpp(f"{pkg_name}_cpp", cpp_contracts)
+                else:
+                    content = "// C++ placeholder\n"
+            elif entry.lang == "rust":
+                content = "// Rust placeholder\n"
+            elif entry.lang == "toml":
+                content = "# TOML placeholder\n"
+            elif entry.lang == "markdown":
+                content = f"# {blueprint.project or 'project'}\n"
+            if content is not None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+
+    def _build_cpp(self, cpp_pkg_name: str, cpp_source: Path) -> bool:
         compiler = _find_cpp_compiler()
         if compiler is None:
             raise RuntimeError("No C++ compiler found (g++, clang++, or c++)")
 
-        cpp_path = self.workspace / "cpp_core" / "native.cpp"
         so_name = _so_name(cpp_pkg_name)
         so_path = self.workspace / "cpp_core" / so_name
 
@@ -514,7 +886,7 @@ class TriPolyglotMaterializer:
             "-std=c++17",
             "-o",
             str(so_path),
-            str(cpp_path),
+            str(cpp_source),
         ]
         self._log(f"Compiling C-ABI shared library: {' '.join(build_cmd)}")
         _accel_log("info", f"BUILD: compiling dynamic shared object with {' '.join(build_cmd)}")

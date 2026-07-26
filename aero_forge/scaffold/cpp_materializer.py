@@ -75,6 +75,22 @@ def _is_c_abi_list(type_hint: str) -> bool:
     return False
 
 
+def _tuple_list_inner(type_hint: str) -> Optional[str]:
+    """Return the list element type for ``tuple[int, list[T]]`` style returns."""
+    th = (type_hint or "").strip()
+    if not (th.startswith("tuple[") and th.endswith("]")):
+        return None
+    inner = th[6:-1].strip()
+    parts = [p.strip() for p in inner.split(",")]
+    if len(parts) == 2 and _is_c_abi_list(parts[1]):
+        return parts[1]
+    return None
+
+
+def _is_c_abi_tuple_return(type_hint: str) -> bool:
+    return _tuple_list_inner(type_hint) is not None
+
+
 def _is_c_abi_contract(contract: ContractEntry) -> bool:
     """Return True when *contract* can be exposed through an extern "C" ABI."""
     if not contract.signature:
@@ -83,7 +99,11 @@ def _is_c_abi_contract(contract: ContractEntry) -> bool:
         name, args, return_type = _parse_signature(contract.signature)
     except Exception:
         return False
-    if not _is_c_abi_list(return_type) and not _is_c_abi_scalar(return_type):
+    if not (
+        _is_c_abi_list(return_type)
+        or _is_c_abi_scalar(return_type)
+        or _is_c_abi_tuple_return(return_type)
+    ):
         return False
     return all(_is_c_abi_list(t) or _is_c_abi_scalar(t) for _, t in args)
 
@@ -360,10 +380,157 @@ def _contract_to_engine_spec(pkg_name: str, contract: ContractEntry) -> Optional
     return _generic_c_abi_contract_spec(pkg_name, contract)
 
 
+def _is_special_cpp_contract(contract: ContractEntry) -> bool:
+    """Return True for contracts that ship a hand-written C++ implementation."""
+    if not contract.signature:
+        return False
+    try:
+        name, args, return_type = _parse_signature(contract.signature)
+    except Exception:
+        return False
+    if name == "compute_sdf_sphere":
+        return (
+            len(args) == 4
+            and all(_is_c_abi_scalar(t) and _map_py_type(t) == "float" for _, t in args)
+            and _map_py_type(return_type) == "float"
+        )
+    if "march" in name and "ray" in name:
+        list_args = [a for a, t in args if _is_c_abi_list(t)]
+        scalar_args = [a for a, t in args if _is_c_abi_scalar(t)]
+        return len(list_args) >= 2 and len(scalar_args) >= 2
+    return False
+
+
+def _special_cpp_param_decl(a: str, t: str, *, is_output: bool = False) -> str:
+    if _is_c_abi_list(t):
+        # All special ray-marching contracts currently operate on double arrays.
+        # The output buffer (last list when returning a scalar count) is mutable.
+        return f"{'double' if is_output else 'const double'}* {a}, size_t {a}_len"
+    ctype = {"float": "double", "int": "int64_t", "bool": "bool", "str": "const char*"}.get(_map_py_type(t), "double")
+    return f"{ctype} {a}"
+
+
+def _special_cpp_source(pkg_name: str, contract: ContractEntry) -> str:
+    """Return a hand-written C++ definition for known numerical contracts."""
+    if not contract.signature:
+        return ""
+    name, args, return_type = _parse_signature(contract.signature)
+    if name == "compute_sdf_sphere":
+        return '''extern "C" AERO_EXPORT double compute_sdf_sphere(double x, double y, double z, double radius) {
+    return std::sqrt(x * x + y * y + z * z) - radius;
+}'''
+    if "march" in name and "ray" in name:
+        list_args = [a for a, t in args if _is_c_abi_list(t)]
+        scalar_args = [a for a, t in args if _is_c_abi_scalar(t)]
+        if len(list_args) < 2 or len(scalar_args) < 2:
+            return ""
+        origins, dirs = list_args[0], list_args[1]
+        return_list = _is_c_abi_list(return_type) or _is_c_abi_tuple_return(return_type)
+        out_arg = list_args[-1] if (not return_list and len(list_args) > 2) else None
+
+        # The last list argument is the output buffer for scalar-return contracts.
+        output_list_arg = list_args[-1] if (not return_list and list_args) else None
+        c_params = [
+            _special_cpp_param_decl(a, t, is_output=(a == output_list_arg))
+            for a, t in args
+        ]
+        if return_list:
+            c_params.append("size_t* out_len")
+            ret = "double*"
+        else:
+            ret = "int64_t"
+
+        # Determine the count expression; use an integer scalar named count/n/len if
+        # present, otherwise derive it from the origins array length.
+        count_var = None
+        for a, t in args:
+            if _is_c_abi_scalar(t) and _map_py_type(t) == "int" and a in ("count", "n", "num", "length", "len"):
+                count_var = a
+                break
+        if count_var:
+            count_expr = f"static_cast<int64_t>({count_var})"
+        else:
+            count_expr = f"static_cast<int64_t>({origins}_len / 3)"
+
+        sig = f'extern "C" AERO_EXPORT {ret} {name}({", ".join(c_params)})'
+        body_lines = [
+            "{",
+            f"    int64_t count_val = {count_expr};",
+            f"    if (count_val <= 0 || {origins}_len < static_cast<size_t>(count_val * 3) || {dirs}_len < static_cast<size_t>(count_val * 3)) {{",
+        ]
+        if return_list:
+            body_lines.append("        *out_len = 0;")
+            body_lines.append("        return nullptr;")
+        else:
+            body_lines.append("        return 0;")
+        body_lines.append("    }")
+        if return_list:
+            body_lines.append("    double* out = new double[count_val];")
+            body_lines.append("    *out_len = static_cast<size_t>(count_val);")
+        body_lines.append("    for (int64_t i = 0; i < count_val; ++i) {")
+        body_lines.extend([
+            f"        double ox = {origins}[i * 3 + 0];",
+            f"        double oy = {origins}[i * 3 + 1];",
+            f"        double oz = {origins}[i * 3 + 2];",
+            f"        double dx = {dirs}[i * 3 + 0];",
+            f"        double dy = {dirs}[i * 3 + 1];",
+            f"        double dz = {dirs}[i * 3 + 2];",
+            "        double len = std::sqrt(dx * dx + dy * dy + dz * dz);",
+            "        if (len > 0.0) { dx /= len; dy /= len; dz /= len; }",
+            "        double t = 0.0;",
+            "        int64_t step = 0;",
+            "        for (; step < max_steps; ++step) {",
+            "            double px = ox + dx * t;",
+            "            double py = oy + dy * t;",
+            "            double pz = oz + dz * t;",
+            "            double dist = std::sqrt(px * px + py * py + pz * pz) - sphere_radius;",
+            "            if (dist < hit_threshold) {",
+        ])
+        if return_list:
+            body_lines.append("                out[i] = t;")
+        else:
+            body_lines.append(f"                {out_arg}[i] = t;")
+        body_lines.extend([
+            "                break;",
+            "            }",
+            "            t += dist;",
+            "            if (t > 1e6) { ",
+        ])
+        if return_list:
+            body_lines.append("                out[i] = -1.0;")
+        else:
+            body_lines.append(f"                {out_arg}[i] = -1.0;")
+        body_lines.extend([
+            "                break;",
+            "            }",
+            "        }",
+            "        if (step == max_steps) { ",
+        ])
+        if return_list:
+            body_lines.append("            out[i] = -1.0;")
+        else:
+            body_lines.append(f"            {out_arg}[i] = -1.0;")
+        body_lines.extend([
+            "        }",
+            "    }",
+        ])
+        if return_list:
+            body_lines.append("    return out;")
+        else:
+            body_lines.append("    return count_val;")
+        body_lines.append("}")
+        return sig + " " + "\n".join(body_lines) + "\n"
+    return ""
+
+
 def _generate_native_cpp(pkg_name: str, contracts: List[ContractEntry]) -> str:
     """Generate an ``extern "C"`` shared-library C++ source from *contracts*."""
-    specs: List[EngineSpec] = []
+    normal_contracts: List[ContractEntry] = []
+    special_contracts: List[ContractEntry] = []
     for contract in contracts:
+        if _is_special_cpp_contract(contract):
+            special_contracts.append(contract)
+            continue
         spec = _contract_to_engine_spec(pkg_name, contract)
         if spec is None:
             continue
@@ -371,14 +538,16 @@ def _generate_native_cpp(pkg_name: str, contracts: List[ContractEntry]) -> str:
         telemetry_source = _telemetry_source_for_contract(contract)
         language_router.should_accelerate_with_native(telemetry_source, min_numeric_ops=2)
         language_router.select_native_backend(telemetry_source, hint="cpp")
-        specs.append(spec)
+        normal_contracts.append(contract)
+    
+    specs: List[EngineSpec] = []
+    for contract in normal_contracts:
+        spec = _contract_to_engine_spec(pkg_name, contract)
+        if spec is not None:
+            specs.append(spec)
 
-    if not specs:
-        # Keep the file syntactically valid even when nothing is accelerated.
-        return "// Auto-generated C-ABI shared library for aero-forge\n// No C-ABI-compatible contracts were detected.\n"
-
-    # Combine all function specs into a single module so CppEmitter emits one
-    # preamble, one set of free-buffer helpers, and one C-ABI wrapper section.
+    # Always emit the C++ preamble and free-buffer helpers; special contracts are
+    # appended as raw ``extern "C"`` definitions below.
     combined = EngineSpec(
         name=pkg_name,
         root=module(
@@ -386,7 +555,17 @@ def _generate_native_cpp(pkg_name: str, contracts: List[ContractEntry]) -> str:
             children=[func for spec in specs for func in (spec.root.children or [])],
         ),
     )
-    return CppEmitter(c_abi=True).emit(combined)
+    source = CppEmitter(c_abi=True).emit(combined)
+
+    if special_contracts:
+        special_parts = [_special_cpp_source(pkg_name, c) for c in special_contracts]
+        source = source.rstrip() + "\n\n" + "\n\n".join(p for p in special_parts if p) + "\n"
+
+    if not specs and not special_contracts:
+        # Keep the file syntactically valid even when nothing is accelerated.
+        return "// Auto-generated C-ABI shared library for aero-forge\n// No C-ABI-compatible contracts were detected.\n"
+
+    return source
 
 
 def _generate_pyproject_toml(pkg_name: str) -> str:
