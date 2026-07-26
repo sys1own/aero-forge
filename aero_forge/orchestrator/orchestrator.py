@@ -72,7 +72,14 @@ from aero_forge.orchestrator.router import (
     required_manifest_for_intent,
     toolchains_for_intent,
 )
-from aero_forge.orchestrator.stack_classifier import classify_stack as classify_build_stack
+from aero_forge.orchestrator.stack_classifier import (
+    INTENT_HYBRID_CPP_PYTHON,
+    INTENT_HYBRID_RUST_PYTHON,
+    INTENT_PURE_PYTHON,
+    INTENT_PURE_RUST,
+    StackClassification,
+    classify_stack as classify_build_stack,
+)
 from aero_forge.precision_shield.shield import Shield
 from aero_forge.sandbox.manager import Sandbox, ensure_cargo_in_path
 from aero_forge.scaffold.cargo_runner import cargo_build
@@ -1035,6 +1042,24 @@ def _llm_plan_blueprint(
     return _parse_llm_blueprint(raw, llm_provider, model)
 
 
+def _classification_for_architecture(
+    architecture: str, features: List[str]
+) -> StackClassification:
+    """Create a StackClassification for an explicitly chosen architecture."""
+    languages_map = {
+        INTENT_PURE_PYTHON: ["python"],
+        INTENT_PURE_RUST: ["rust"],
+        INTENT_HYBRID_RUST_PYTHON: ["python", "rust"],
+        INTENT_HYBRID_CPP_PYTHON: ["python", "cpp"],
+    }
+    return StackClassification(
+        architecture=architecture,
+        toolchains=toolchains_for_intent(architecture),
+        languages=languages_map.get(architecture, []),
+        features=features,
+    )
+
+
 def plan_workspace(
     prompt: str,
     output_dir: Path | str,
@@ -1046,6 +1071,7 @@ def plan_workspace(
     max_retries: int = 3,
     max_tokens: Optional[int] = None,
     config_override: Optional[ConfigOverride] = None,
+    architecture: Optional[str] = None,
 ) -> Blueprint:
     """Pass 1: plan the workspace and emit ``blueprint.aero``.
 
@@ -1059,6 +1085,10 @@ def plan_workspace(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     classification = classify_build_stack(prompt)
+    if architecture:
+        classification = _classification_for_architecture(
+            architecture, classification.features
+        )
     intent = classification.architecture
     toolchains = classification.toolchains or toolchains_for_intent(intent)
     manifest_entries = [

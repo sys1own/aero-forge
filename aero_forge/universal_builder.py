@@ -26,9 +26,13 @@ from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
 from aero_forge.monorepo import generate_monorepo
 from aero_forge.orchestrator.orchestrator import plan_workspace
+from aero_forge.orchestrator.router import toolchains_for_intent
 from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_CPP_PYTHON,
     INTENT_HYBRID_RUST_PYTHON,
+    INTENT_PURE_PYTHON,
+    INTENT_PURE_RUST,
+    StackClassification,
     classify_stack,
 )
 from aero_forge.scaffold.cpp_materializer import CppPolyglotMaterializer
@@ -332,6 +336,24 @@ def _run_polyglot_materializer(
     }
 
 
+def _classification_for_architecture(
+    architecture: str, features: List[str]
+) -> StackClassification:
+    """Create a StackClassification for an explicitly chosen architecture."""
+    languages_map = {
+        INTENT_PURE_PYTHON: ["python"],
+        INTENT_PURE_RUST: ["rust"],
+        INTENT_HYBRID_RUST_PYTHON: ["python", "rust"],
+        INTENT_HYBRID_CPP_PYTHON: ["python", "cpp"],
+    }
+    return StackClassification(
+        architecture=architecture,
+        toolchains=toolchains_for_intent(architecture),
+        languages=languages_map.get(architecture, []),
+        features=features,
+    )
+
+
 def build_universal_project(
     prompt: str,
     output_dir: Path | str,
@@ -344,6 +366,8 @@ def build_universal_project(
     max_tokens: Optional[int] = None,
     config_override: Optional[ConfigOverride] = None,
     progress_callback: Optional[Any] = None,
+    architecture: Optional[str] = None,
+    acceleration_policy: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Classify *prompt*, write ``blueprint.aero``, and build the workspace.
 
@@ -358,16 +382,26 @@ def build_universal_project(
 
     # Pass 1: classify and write blueprint.aero.
     classification = classify_stack(prompt)
+    if architecture:
+        classification = _classification_for_architecture(
+            architecture, classification.features
+        )
+    effective_constraints = constraints or ""
+    if acceleration_policy and acceleration_policy != "selective":
+        effective_constraints = (
+            f"{effective_constraints}\n\nAcceleration policy: {acceleration_policy}"
+        ).strip()
     blueprint = plan_workspace(
         prompt,
         output_dir,
         project_name=project_name,
-        constraints=constraints,
+        constraints=effective_constraints or None,
         llm_provider=llm_provider,
         model=model,
         max_retries=max_retries,
         max_tokens=max_tokens,
         config_override=config_override,
+        architecture=architecture,
     )
 
     if progress_callback:

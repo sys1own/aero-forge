@@ -768,6 +768,8 @@ def generate_and_build(
     review: bool = False,
     progress_callback: Optional[Callable[[str], None]] = None,
     config_override: Optional[ConfigOverride] = None,
+    target_language: Optional[str] = None,
+    acceleration_policy: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Generate code from a prompt and optionally build/optimize it.
 
@@ -848,6 +850,8 @@ def generate_and_build(
         "explanation": explanation,
         "build": None,
         "iterations": [],
+        "target_language": target_language or "auto",
+        "acceleration_policy": acceleration_policy or "selective",
     }
 
     if progress_callback:
