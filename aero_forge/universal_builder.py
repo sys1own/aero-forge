@@ -13,11 +13,13 @@ pure-language requests it delegates to ``generate_and_build``.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from aero_forge.blueprint import Blueprint, ContractEntry, ManifestEntry, write_blueprint
 from aero_forge.config import ConfigOverride
@@ -82,8 +84,26 @@ def _build_pure_python(
     return result
 
 
-def _hybrid_fallback_blueprint(project_name: str, features: list[str]) -> Blueprint:
-    """Return a deterministic hybrid blueprint for use when LLM monorepo generation fails."""
+def _sanitize_module_name(name: str) -> str:
+    """Return a Python-package-safe identifier."""
+    sanitized = "".join(c if c.isalnum() or c == "_" else "_" for c in name.lower())
+    sanitized = sanitized.strip("_")
+    if not sanitized or sanitized[0].isdigit():
+        sanitized = "engine"
+    return sanitized
+
+
+def _extract_explicit_paths(prompt: str) -> list[str]:
+    """Find Python file paths explicitly named in *prompt*."""
+    return re.findall(r"\b[A-Za-z_][\w/]*\.py\b", prompt)
+
+
+def _hybrid_fallback_blueprint(
+    project_name: str,
+    features: list[str],
+    prompt: str = "",
+) -> Blueprint:
+    """Return a deterministic hybrid blueprint that respects explicit file requests."""
     if any(f in features for f in ("data_pipeline", "stream", "batch", "math")):
         contracts = [
             ContractEntry(
@@ -106,21 +126,79 @@ def _hybrid_fallback_blueprint(project_name: str, features: list[str]) -> Bluepr
                 signature="def get_engine_status() -> dict[str, str]",
             ),
         ]
+
+    explicit = _extract_explicit_paths(prompt)
+    pkg_name = _sanitize_module_name(project_name)
+    non_package_dirs = {"tests", "src", "scripts", "examples", "docs"}
+    explicit_packages: set[str] = set()
+    for p in explicit:
+        parts = Path(p).parts
+        if len(parts) > 1 and parts[0] not in non_package_dirs:
+            explicit_packages.add(parts[0])
+    if explicit_packages:
+        pkg_name = _sanitize_module_name(sorted(explicit_packages)[0])
+
+    manifest: list[ManifestEntry] = [
+        ManifestEntry(path="Cargo.toml", lang="toml", purpose="workspace manifest"),
+        ManifestEntry(path="rust_core/Cargo.toml", lang="toml", purpose="crate manifest"),
+        ManifestEntry(path="rust_core/src/lib.rs", lang="rust", purpose="Rust core"),
+        ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python packaging"),
+        ManifestEntry(path="README.md", lang="markdown", purpose="docs"),
+    ]
+
+    # Collect requested files per package and decide whether a default package is needed.
+    requested_root_files = {Path(p).name for p in explicit if len(Path(p).parts) == 1}
+    requested_package_files: Dict[str, List[str]] = {}
+    for p in explicit:
+        parts = Path(p).parts
+        if len(parts) > 1 and parts[0] not in non_package_dirs:
+            requested_package_files.setdefault(parts[0], []).append(Path(p).name)
+
+    packages = explicit_packages
+    if not packages and (explicit or not explicit):
+        # Always provide a project-named package so there is a place to put the
+        # native wrapper and a CLI entry point.
+        packages = {pkg_name}
+
+    for pkg_dir in sorted(packages):
+        manifest.append(
+            ManifestEntry(path=f"{pkg_dir}/__init__.py", lang="python", purpose="package init")
+        )
+        if "native.py" not in requested_package_files.get(pkg_dir, []):
+            manifest.append(
+                ManifestEntry(path=f"{pkg_dir}/native.py", lang="python", purpose="native wrapper")
+            )
+        if "cli.py" not in requested_package_files.get(pkg_dir, []):
+            manifest.append(
+                ManifestEntry(path=f"{pkg_dir}/cli.py", lang="python", purpose="CLI module")
+            )
+
+    # Launcher and entry point requested or defaulted.
+    if "run_shell.py" not in requested_root_files:
+        manifest.append(ManifestEntry(path="run_shell.py", lang="python", purpose="demo"))
+
+    # Add the exact files requested by the user, skipping ones already covered.
+    covered = {Path(e.path).name for e in manifest}
+    for p in explicit:
+        if Path(p).name in covered or Path(p).name == "__init__.py":
+            continue
+        manifest.append(ManifestEntry(path=p, lang="python", purpose="user requested"))
+
+    # Provide native test coverage.
+    if "test_native.py" not in requested_root_files:
+        manifest.append(
+            ManifestEntry(path="tests/test_native.py", lang="python", purpose="native tests")
+        )
+
+    python_prefix = f"{pkg_name}.native." if packages else ""
+    for contract in contracts:
+        contract.python_name = f"{python_prefix}{contract.name}"
+
     return Blueprint(
         project=project_name,
         architecture=INTENT_HYBRID_RUST_PYTHON,
         toolchains=["python", "rust", "cargo"],
-        manifest=[
-            ManifestEntry(path="Cargo.toml", lang="toml", purpose="workspace manifest"),
-            ManifestEntry(path="rust_core/Cargo.toml", lang="toml", purpose="crate manifest"),
-            ManifestEntry(path="rust_core/src/lib.rs", lang="rust", purpose="Rust core"),
-            ManifestEntry(path="aero_polyglot_runner/__init__.py", lang="python", purpose="package init"),
-            ManifestEntry(path="aero_polyglot_runner/orchestrator.py", lang="python", purpose="Python orchestrator"),
-            ManifestEntry(path="run_demo.py", lang="python", purpose="demo"),
-            ManifestEntry(path="tests/test_polyglot.py", lang="python", purpose="tests"),
-            ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python packaging"),
-            ManifestEntry(path="README.md", lang="markdown", purpose="docs"),
-        ],
+        manifest=manifest,
         contracts=contracts,
         output_dir=Path("./dist"),
     )
@@ -150,6 +228,7 @@ def _run_polyglot_materializer(
     project_name: str,
     features: list[str],
     output_dir: Path,
+    prompt: str = "",
 ) -> Dict[str, Any]:
     """Materialize a guaranteed hybrid workspace using the polyglot materializer."""
     output_dir = Path(output_dir).resolve()
@@ -157,7 +236,7 @@ def _run_polyglot_materializer(
     aero_core = output_dir / ".aero_core"
     if aero_core.is_dir():
         shutil.rmtree(aero_core, ignore_errors=True)
-    blueprint = _hybrid_fallback_blueprint(project_name, features)
+    blueprint = _hybrid_fallback_blueprint(project_name, features, prompt=prompt)
     materializer = PolyglotMaterializer(output_dir)
     try:
         updated = materializer.materialize(blueprint, build=True)
@@ -172,10 +251,14 @@ def _run_polyglot_materializer(
         }
     write_blueprint(updated, output_dir / "blueprint.aero")
 
-    test_file = output_dir / "tests" / "test_polyglot.py"
+    test_env = dict(os.environ)
+    test_env["PYTHONPATH"] = (
+        f"{output_dir}{os.pathsep}{test_env.get('PYTHONPATH', '')}"
+    ).strip(os.pathsep)
     pytest_result = subprocess.run(
-        ["python", "-m", "pytest", str(test_file), "-q"],
+        [sys.executable, "-m", "pytest", str(output_dir), "-q"],
         cwd=output_dir,
+        env=test_env,
         capture_output=True,
         text=True,
     )
@@ -272,6 +355,7 @@ def build_universal_project(
                 project_name or blueprint.project or "generated",
                 classification.features,
                 output_dir,
+                prompt=prompt,
             )
     else:
         result = _build_pure_python(

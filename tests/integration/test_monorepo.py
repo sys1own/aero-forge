@@ -51,5 +51,7 @@ def test_monorepo_builds_and_tests(tmp_path: Path) -> None:
         f"pytest stderr: {result.get('pytest_error', '')}"
     )
     assert (output_dir / "rust_core" / "Cargo.toml").is_file()
-    assert (output_dir / "python_engine" / "pyproject.toml").is_file()
+    assert (output_dir / "pyproject.toml").is_file()
     assert (output_dir / "Cargo.toml").is_file()
+    pkg_name = result.get("package_name") or "decision_matrix_monorepo"
+    assert (output_dir / pkg_name / "__init__.py").is_file()
