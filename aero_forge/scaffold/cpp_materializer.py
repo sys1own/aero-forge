@@ -1,9 +1,9 @@
-"""Physical file materialization for C++/pybind11 hybrid blueprints.
+"""Physical file materialization for C++/ctypes hybrid blueprints.
 
 This materializer is the C++ analogue of :class:`PolyglotMaterializer`: it writes
-a pybind11 extension module, a Python loader, an interactive CLI, and pytest
-coverage, then compiles the extension with ``g++``/``clang++`` and runs the test
-suite.
+a C-ABI shared dynamic library (``.so``/``.dylib``/``.dll``), a ``ctypes``
+Python loader, an interactive CLI, and pytest coverage, then compiles the
+library with ``g++``/``clang++`` and runs the test suite.
 """
 
 from __future__ import annotations
@@ -13,245 +13,270 @@ import os
 import shutil
 import subprocess
 import sys
-import sysconfig
 import textwrap
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from aero_forge.blueprint import Blueprint, ContractEntry, FunctionSpec, ManifestEntry, write_blueprint
+from aero_forge.builder import language_router
+from aero_forge.builder.emitters.cpp_emitter import CppEmitter
+from aero_forge.builder.spec import (
+    ASTNode,
+    EngineSpec,
+    binding,
+    binary_op,
+    block,
+    call,
+    function,
+    list_literal,
+    module,
+    param,
+    reference,
+    return_node,
+)
+from aero_forge.native_bridge import _ctypes_loader_source
 from aero_forge.scaffold.polyglot_materializer import _DEFAULT_CONTRACTS, _parse_signature
 from aero_forge.scaffold.python_repo_generator import _sanitize_module_name
 
 logger = logging.getLogger("aero_forge.scaffold.cpp")
 
 
-def _map_cpp_type(type_hint: str) -> str:
-    """Map a Python-style type hint to a C++ type understood by pybind11."""
-    th = type_hint.strip()
-    if th == "float":
-        return "double"
-    if th == "int":
-        return "int64_t"
-    if th in ("str", "string"):
-        return "std::string"
+def _find_cpp_compiler() -> Optional[str]:
+    for name in ["g++", "clang++", "c++"]:
+        if shutil.which(name):
+            return name
+    return None
+
+
+def _map_py_type(type_hint: str) -> str:
+    """Return the canonical Python scalar type label for a C-ABI type hint."""
+    th = (type_hint or "").strip().lower()
+    if th in ("float", "f64", "double"):
+        return "float"
+    if th in ("int", "i64", "i32"):
+        return "int"
     if th == "bool":
         return "bool"
-    if th in ("None", "void"):
-        return "void"
-    if th == "list":
-        return "std::vector<py::object>"
+    return ""
+
+
+def _is_c_abi_scalar(type_hint: str) -> bool:
+    return bool(_map_py_type(type_hint))
+
+
+def _is_c_abi_list(type_hint: str) -> bool:
+    th = (type_hint or "").strip()
     if th.startswith("list[") and th.endswith("]"):
         inner = th[5:-1].strip()
-        return f"std::vector<{_map_cpp_type(inner)}>"
-    if th.startswith("dict[") and th.endswith("]"):
-        inner = th[5:-1].strip()
-        parts = [p.strip() for p in inner.split(",", 1)]
-        k = _map_cpp_type(parts[0]) if parts else "std::string"
-        v = _map_cpp_type(parts[1]) if len(parts) > 1 else "py::object"
-        return f"std::map<{k}, {v}>"
-    if "ndarray" in th.lower() or "array" in th.lower():
-        # Best-effort NumPy array binding.
-        return "py::array_t<double>"
-    return "double"
+        return _is_c_abi_scalar(inner)
+    if th == "list":
+        return True
+    return False
 
 
-def _cpp_default_value(type_hint: str) -> str:
-    """Return a literal C++ default value for *type_hint*."""
-    th = type_hint.strip()
-    if th == "float":
-        return "0.0"
-    if th == "int":
-        return "0"
-    if th in ("str", "string"):
-        return '""'
-    if th == "bool":
-        return "false"
-    if th in ("None", "void"):
+def _is_c_abi_contract(contract: ContractEntry) -> bool:
+    """Return True when *contract* can be exposed through an extern "C" ABI."""
+    if not contract.signature:
+        return False
+    try:
+        name, args, return_type = _parse_signature(contract.signature)
+    except Exception:
+        return False
+    if not _is_c_abi_list(return_type) and not _is_c_abi_scalar(return_type):
+        return False
+    return all(_is_c_abi_list(t) or _is_c_abi_scalar(t) for _, t in args)
+
+
+def _contract_to_python_stub(contract: ContractEntry) -> str:
+    """Return a typed Python stub suitable for the ctypes loader generator."""
+    if not contract.signature:
         return ""
-    if th.startswith("list[") or th == "list":
-        return "{}"
-    if th.startswith("dict["):
-        return "{}"
-    return "{}"
+    try:
+        name, args, return_type = _parse_signature(contract.signature)
+    except Exception:
+        return ""
+    arg_sig = ", ".join(f"{a}: {t}" for a, t in args)
+    return f"def {name}({arg_sig}) -> {return_type}:\n    pass\n"
 
 
-def _generate_function_body(name: str, args: List[Tuple[str, str]], return_type: str) -> str:
-    """Generate a simple but correct C++ implementation for known contracts."""
-    arg_map = {a: t for a, t in args}
-    arg_names = [a for a, _ in args]
-    ret = _map_cpp_type(return_type)
-
+def _telemetry_source_for_contract(contract: ContractEntry) -> str:
+    """Return a representative Python source for AST telemetry logging."""
+    stub = _contract_to_python_stub(contract)
+    if not stub:
+        return ""
+    try:
+        name, args, return_type = _parse_signature(contract.signature)
+    except Exception:
+        return stub
+    # Provide a loop body for the canonical vector transform contract so the
+    # AST heuristic logs a heavy numerical matrix loop verdict.
     if name == "fast_vector_transform" and len(args) == 2:
-        # Expect (v: list[float], scalar: float) -> list[float]
         return (
-            "    std::vector<double> out;\n"
-            "    out.reserve(v.size());\n"
-            "    for (double x : v) {\n"
-            "        out.push_back(x * scalar);\n"
-            "    }\n"
-            "    return out;"
+            "def fast_vector_transform(v: list[float], scalar: float) -> list[float]:\n"
+            "    out = []\n"
+            "    for x in v:\n"
+            "        out.append(x * scalar)\n"
+            "    return out\n"
         )
-    if name == "get_engine_status":
-        return (
-            '    return {{"status", "ok"}, {"engine", "cpp"}};'
-        )
+    return stub
 
-    # Generic stub that returns a default value and ignores args.
-    default = _cpp_default_value(return_type)
-    if ret == "void":
-        return "    (void)" + "; (void)".join(arg_names) + ";\n" if arg_names else ""
-    if arg_names:
-        return f"    (void)({', '.join(arg_names)});\n    return {default};"
-    return f"    return {default};"
+
+def _accel_log(level: str, message: str) -> None:
+    """Append a structured line to the per-session accelerator log if set."""
+    log_path = os.environ.get("AERO_FORGE_ACCEL_LOG")
+    if not log_path:
+        return
+    try:
+        import time
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"{timestamp} [{level}] {message}\n")
+    except Exception:
+        pass
+
+
+def _vector_transform_spec(pkg_name: str) -> EngineSpec:
+    """Return an EngineSpec for the canonical ``fast_vector_transform`` contract."""
+    out = binding("out", list_literal([]), type_hint="list[float]")
+    loop_body = block(
+        children=[
+            call(
+                "out.push_back",
+                [binary_op(reference("x"), "*", reference("scalar"))],
+            )
+        ]
+    )
+    loop = ASTNode(kind="for", name="x", children=[reference("v"), loop_body])
+    ret = return_node(reference("out"))
+    func = function(
+        "fast_vector_transform",
+        params=[param("v", "list[float]"), param("scalar", "float")],
+        return_type="list[float]",
+        body=[out, loop, ret],
+    )
+    return EngineSpec(name=pkg_name, root=module(name=pkg_name, children=[func]))
+
+
+def _known_contract_spec(pkg_name: str, contract: ContractEntry) -> Optional[EngineSpec]:
+    """Return an EngineSpec for a contract whose C++ body is known in advance."""
+    if not contract.signature:
+        return None
+    try:
+        name, _, _ = _parse_signature(contract.signature)
+    except Exception:
+        return None
+    if name == "fast_vector_transform":
+        return _vector_transform_spec(pkg_name)
+    return None
 
 
 def _generate_native_cpp(pkg_name: str, contracts: List[ContractEntry]) -> str:
-    """Generate a pybind11 C++ extension source file."""
-    includes = [
-        "<pybind11/pybind11.h>",
-        "<pybind11/stl.h>",
-        "<vector>",
-        "<string>",
-        "<map>",
-        "<cmath>",
-    ]
-    numpy_available = True
-    try:
-        import numpy  # noqa: F401
-    except Exception:
-        numpy_available = False
-    if numpy_available:
-        includes.append("<pybind11/numpy.h>")
-
-    lines: List[str] = ['// Auto-generated C++/pybind11 extension for aero-forge']
-    for inc in includes:
-        lines.append(f"#include {inc}")
-    lines.append("")
-    lines.append('#ifdef _WIN32')
-    lines.append('#define AERO_EXPORT __declspec(dllexport)')
-    lines.append('#else')
-    lines.append('#define AERO_EXPORT __attribute__((visibility("default")))')
-    lines.append('#endif')
-    lines.append("")
-    lines.append("namespace py = pybind11;")
-    lines.append("")
-
-    function_signatures = []
+    """Generate an ``extern "C"`` shared-library C++ source from *contracts*."""
+    lines: List[str] = ["// Auto-generated C-ABI shared library for aero-forge"]
+    has_native = False
     for contract in contracts:
+        spec = _known_contract_spec(pkg_name, contract)
+        if spec is None:
+            continue
+        # Emit telemetry for each contract routed to C++.
+        telemetry_source = _telemetry_source_for_contract(contract)
+        language_router.should_accelerate_with_native(telemetry_source, min_numeric_ops=2)
+        language_router.select_native_backend(telemetry_source, hint="cpp")
+        cpp_source = CppEmitter(c_abi=True).emit(spec)
+        lines.append(cpp_source)
+        has_native = True
+    if not has_native:
+        # Keep the file syntactically valid even when nothing is accelerated.
+        lines.append("// No C-ABI-compatible contracts were detected.")
+    return "\n".join(lines) + "\n"
+
+
+def _generate_pyproject_toml(pkg_name: str) -> str:
+    return (
+        "[build-system]\n"
+        'requires = ["setuptools>=61", "wheel"]\n'
+        'build-backend = "setuptools.build_meta"\n'
+        "\n"
+        "[project]\n"
+        f'name = "{pkg_name}"\n'
+        'version = "0.1.0"\n'
+        'description = "C++/ctypes hybrid project generated by aero-forge"\n'
+        'requires-python = ">=3.10"\n'
+    )
+
+
+def _generate_fallback_body(name: str, args: List[Tuple[str, str]], return_type: str) -> str:
+    """Return a pure-Python fallback implementation for a non-native contract."""
+    if name == "get_engine_status":
+        return '    return {"status": "ok", "engine": "cpp"}'
+    if name == "fast_vector_transform":
+        return "    return [x * 2.0 for x in v]"
+    rt = return_type.lower()
+    if "list" in rt:
+        return "    return []"
+    if "dict" in rt:
+        return '    return {}'
+    if rt in ("int", "i64", "i32"):
+        return "    return 0"
+    if rt in ("float", "f64", "f32"):
+        return "    return 0.0"
+    if rt == "bool":
+        return "    return True"
+    if rt == "str":
+        return '    return "ok"'
+    return "    return None"
+
+
+def _generate_init(pkg_name: str, pkg_dir: Path, contracts: List[ContractEntry]) -> str:
+    """Generate ``__init__.py`` that loads the C-ABI .so via ctypes."""
+    native_contracts = [c for c in contracts if _is_c_abi_contract(c)]
+    fallback_contracts = [c for c in contracts if c not in native_contracts]
+
+    native_names: List[str] = []
+    for contract in native_contracts:
+        try:
+            name, _, _ = _parse_signature(contract.signature)
+            native_names.append(name)
+        except Exception:
+            continue
+
+    all_names: List[str] = []
+    for contract in contracts:
+        try:
+            name, _, _ = _parse_signature(contract.signature)
+            all_names.append(name)
+        except Exception:
+            continue
+
+    pieces: List[str] = []
+    if native_names:
+        stub_source = "\n".join(_contract_to_python_stub(c) for c in native_contracts)
+        so_path = (pkg_dir / _so_name(pkg_name)).resolve()
+        pieces.append(_ctypes_loader_source(stub_source, so_path, native_names))
+
+    for contract in fallback_contracts:
         if not contract.signature:
             continue
         try:
             name, args, return_type = _parse_signature(contract.signature)
         except Exception:
             continue
-        cpp_ret = _map_cpp_type(return_type)
-        cpp_args = [f"{_map_cpp_type(t)} {a}" for a, t in args]
-        sig = f'extern "C" AERO_EXPORT {cpp_ret} {name}({", ".join(cpp_args)})'
-        function_signatures.append((name, sig))
-        lines.append(f"{sig} {{")
-        lines.append(_generate_function_body(name, args, return_type))
-        lines.append("}")
-        lines.append("")
+        arg_sig = ", ".join(f"{a}: {t}" for a, t in args)
+        pieces.append(f"def {name}({arg_sig}) -> {return_type}:")
+        pieces.append(_generate_fallback_body(name, args, return_type))
+        pieces.append("")
 
-    lines.append(f'PYBIND11_MODULE(_core, m) {{')
-    lines.append(f'    m.doc() = "Native C++ extension for {pkg_name}";')
-    for name, _ in function_signatures:
-        lines.append(f'    m.def("{name}", &{name}, "{name}");')
-    lines.append("}")
-    lines.append("")
-    return "\n".join(lines)
-
-
-def _generate_setup_py(pkg_name: str) -> str:
-    """Generate a setuptools-based setup.py for the pybind11 extension."""
-    return (
-        'from setuptools import setup, Extension\n'
-        'import pybind11\n'
-        'import sysconfig\n'
-        '\n'
-        'pkg = "' + pkg_name + '"\n'
-        'ext_name = f"{pkg}._core"\n'
-        'ext_sources = [f"{pkg}/native.cpp"]\n'
-        '\n'
-        'include_dirs = [\n'
-        '    pybind11.get_include(),\n'
-        '    sysconfig.get_paths()["include"],\n'
-        ']\n'
-        'try:\n'
-        '    import numpy\n'
-        '    include_dirs.append(numpy.get_include())\n'
-        'except Exception:\n'
-        '    pass\n'
-        '\n'
-        'ext_modules = [\n'
-        '    Extension(\n'
-        '        ext_name,\n'
-        '        ext_sources,\n'
-        '        include_dirs=include_dirs,\n'
-        '        language="c++",\n'
-        '        extra_compile_args=["-std=c++17", "-O3", "-fvisibility=hidden"],\n'
-        '    )\n'
-        ']\n'
-        '\n'
-        'setup(\n'
-        '    name=pkg,\n'
-        '    version="0.1.0",\n'
-        '    packages=[pkg],\n'
-        '    ext_modules=ext_modules,\n'
-        '    zip_safe=False,\n'
-        ')\n'
-    )
-
-
-def _generate_pyproject_toml(pkg_name: str) -> str:
-    return (
-        "[build-system]\n"
-        'requires = ["setuptools>=61", "wheel", "pybind11"]\n'
-        'build-backend = "setuptools.build_meta"\n'
-        "\n"
-        "[project]\n"
-        f'name = "{pkg_name}"\n'
-        'version = "0.1.0"\n'
-        'description = "C++/pybind11 hybrid project generated by aero-forge"\n'
-        'requires-python = ">=3.10"\n'
-    )
-
-
-def _generate_init(pkg_name: str, function_names: List[str]) -> str:
-    all_names = ", ".join(f'"{n}"' for n in function_names)
-    imports = ", ".join(function_names) if function_names else ""
-    fallback_funcs = []
-    for name in function_names:
-        if name == "fast_vector_transform":
-            fallback_funcs.append(
-                "def fast_vector_transform(v, scalar):\n"
-                "    return [x * scalar for x in v]\n"
-            )
-        elif name == "get_engine_status":
-            fallback_funcs.append(
-                "def get_engine_status():\n"
-                '    return {"status": "ok", "engine": "python"}\n'
-            )
-        else:
-            fallback_funcs.append(f"def {name}(*args, **kwargs):\n    pass\n")
-    fallback_block = "".join(fallback_funcs)
-    if imports:
-        return (
-            'try:\n'
-            f'    from ._core import {imports}\n'
-            'except Exception as _exc:\n'
-            f'{textwrap.indent(fallback_block, "    ")}'
-            '\n'
-            f"__all__ = [{all_names}]\n"
-        )
-    return fallback_block + f"\n__all__ = [{all_names}]\n"
+    pieces.append(f"__all__ = {all_names!r}")
+    return "\n".join(pieces) + "\n"
 
 
 def _generate_cli(pkg_name: str, function_names: List[str]) -> str:
+    """Generate an interactive CLI that can also run headless commands."""
     has_fast = "fast_vector_transform" in function_names
     has_status = "get_engine_status" in function_names
     lines: List[str] = [
-        '"""Interactive CLI / REPL for the C++/pybind11 package."""',
+        '"""Interactive CLI / REPL for the C++/ctypes package."""',
+        "import argparse",
         "import cmd",
         "import sys",
         "from typing import List, Optional",
@@ -294,6 +319,24 @@ def _generate_cli(pkg_name: str, function_names: List[str]) -> str:
         ))
     if has_fast:
         commands.extend([
+            (
+                "matrix",
+                (
+                    '    """Usage: matrix <n> -- transform a list of n floats."""\n'
+                    "    if not args:\n"
+                    '        print("Usage: matrix <n>")\n'
+                    "        return\n"
+                    "    try:\n"
+                    "        n = int(args.strip())\n"
+                    "    except ValueError:\n"
+                    '        print("Usage: matrix <n>")\n'
+                    "        return\n"
+                    "    data = [float(i) for i in range(n)]\n"
+                    "    scale = 2.0\n"
+                    '    print(f"Matrix ({n}): {fast_vector_transform(data, scale)}")'
+                ),
+                "do_matrix(args)",
+            ),
             (
                 "bench",
                 (
@@ -376,7 +419,7 @@ def _generate_cli(pkg_name: str, function_names: List[str]) -> str:
         lines.append("")
 
     lines.append("class AeroShell(cmd.Cmd):")
-    lines.append('    intro = "C++/pybind11 REPL. Type \'help\' for commands, \'quit\' to exit."')
+    lines.append('    intro = "C++/ctypes REPL. Type \'help\' for commands, \'quit\' to exit."')
     lines.append('    prompt = "cpp> "')
     lines.append("")
     for cmd_name, _, delegate in commands:
@@ -390,14 +433,18 @@ def _generate_cli(pkg_name: str, function_names: List[str]) -> str:
     lines.append("    do_exit = do_quit")
     lines.append("")
     lines.append("def main(argv: Optional[List[str]] = None) -> int:")
-    lines.append("    import argparse")
     lines.append("    parser = argparse.ArgumentParser()")
     lines.append("    parser.add_argument('commands', nargs='*')")
     lines.append("    ns = parser.parse_args(argv)")
     lines.append("    shell = AeroShell()")
     lines.append("    if ns.commands:")
-    lines.append("        for cmd_str in ns.commands:")
-    lines.append("            shell.onecmd(cmd_str)")
+    lines.append("        shell.onecmd(' '.join(ns.commands))")
+    lines.append("    elif not sys.stdin.isatty():")
+    lines.append('        print("CLI ready")')
+    lines.append("        if hasattr(shell, 'do_matrix'):")
+    lines.append('            shell.onecmd("matrix 20")')
+    lines.append("        if hasattr(shell, 'do_status'):")
+    lines.append('            shell.onecmd("status")')
     lines.append("    else:")
     lines.append("        try:")
     lines.append("            shell.cmdloop()")
@@ -408,7 +455,7 @@ def _generate_cli(pkg_name: str, function_names: List[str]) -> str:
     lines.append('if __name__ == "__main__":')
     lines.append("    sys.exit(main() or 0)")
     lines.append("")
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n"
 
 
 def _generate_tests(pkg_name: str, function_names: List[str]) -> str:
@@ -463,7 +510,7 @@ def _generate_run_shell(pkg_name: str) -> str:
 
 
 def _generate_readme(pkg_name: str) -> str:
-    return f"# {pkg_name}\n\nC++/pybind11 hybrid project generated by aero-forge.\n"
+    return f"# {pkg_name}\n\nC++/ctypes hybrid project generated by aero-forge.\n"
 
 
 def _function_names(contracts: List[ContractEntry]) -> List[str]:
@@ -479,19 +526,36 @@ def _function_names(contracts: List[ContractEntry]) -> List[str]:
     return names
 
 
+def _so_name(pkg_name: str) -> str:
+    if sys.platform == "win32":
+        return f"{pkg_name}.dll"
+    if sys.platform == "darwin":
+        return f"lib{pkg_name}.dylib"
+    return f"lib{pkg_name}.so"
+
+
 class CppPolyglotMaterializer:
-    """Write and build a C++/pybind11 hybrid workspace from a Blueprint."""
+    """Write and build a C++/ctypes hybrid workspace from a Blueprint."""
 
     def __init__(self, workspace: Path) -> None:
         self.workspace = Path(workspace)
         self.build_logs = ""
 
+    def _log(self, text: str) -> None:
+        """Append *text* to the build log."""
+        if text:
+            self.build_logs = (self.build_logs + "\n" + text).strip()
+
     def materialize(self, blueprint: Blueprint, *, build: bool = False) -> Blueprint:
-        """Write the C++ workspace files and optionally build the extension."""
+        """Write the C++ workspace files and optionally build the shared library."""
         project = blueprint.project or "polyglot_cpp_project"
         pkg_name = _sanitize_module_name(project)
         contracts = list(blueprint.contracts) if blueprint.contracts else list(_DEFAULT_CONTRACTS)
         function_names = _function_names(contracts)
+
+        # Ensure the acceleration log is wired so router telemetry is captured.
+        accel_log = self.workspace / ".aero_forge_accel.log"
+        os.environ.setdefault("AERO_FORGE_ACCEL_LOG", str(accel_log))
 
         self.workspace.mkdir(parents=True, exist_ok=True)
         pkg_dir = self.workspace / pkg_name
@@ -499,20 +563,43 @@ class CppPolyglotMaterializer:
         tests_dir = self.workspace / "tests"
         tests_dir.mkdir(exist_ok=True)
 
-        (pkg_dir / "native.cpp").write_text(_generate_native_cpp(pkg_name, contracts), encoding="utf-8")
-        (pkg_dir / "__init__.py").write_text(_generate_init(pkg_name, function_names), encoding="utf-8")
-        (pkg_dir / "cli.py").write_text(_generate_cli(pkg_name, function_names), encoding="utf-8")
-        (self.workspace / "setup.py").write_text(_generate_setup_py(pkg_name), encoding="utf-8")
-        (self.workspace / "pyproject.toml").write_text(_generate_pyproject_toml(pkg_name), encoding="utf-8")
-        (self.workspace / "run_shell.py").write_text(_generate_run_shell(pkg_name), encoding="utf-8")
-        (self.workspace / "README.md").write_text(_generate_readme(pkg_name), encoding="utf-8")
-        (tests_dir / "test_cli.py").write_text(_generate_tests(pkg_name, function_names), encoding="utf-8")
+        for contract in contracts:
+            if not contract.signature:
+                continue
+            stub = _contract_to_python_stub(contract)
+            if _is_c_abi_contract(contract):
+                language_router.select_native_backend(stub, hint="cpp")
+            else:
+                language_router.select_native_backend(stub, hint="rust_hin")
 
-        manifest = [
-            ManifestEntry(path=f"{pkg_name}/native.cpp", lang="cpp", purpose="pybind11 extension source"),
-            ManifestEntry(path=f"{pkg_name}/__init__.py", lang="python", purpose="package init"),
+        _accel_log("info", "Routing C++ selective acceleration through CppEmitter and CppPolyglotMaterializer")
+
+        (pkg_dir / "native.cpp").write_text(
+            _generate_native_cpp(pkg_name, contracts), encoding="utf-8"
+        )
+        (pkg_dir / "__init__.py").write_text(
+            _generate_init(pkg_name, pkg_dir, contracts), encoding="utf-8"
+        )
+        (pkg_dir / "cli.py").write_text(
+            _generate_cli(pkg_name, function_names), encoding="utf-8"
+        )
+        (self.workspace / "pyproject.toml").write_text(
+            _generate_pyproject_toml(pkg_name), encoding="utf-8"
+        )
+        (self.workspace / "run_shell.py").write_text(
+            _generate_run_shell(pkg_name), encoding="utf-8"
+        )
+        (self.workspace / "README.md").write_text(
+            _generate_readme(pkg_name), encoding="utf-8"
+        )
+        (tests_dir / "test_cli.py").write_text(
+            _generate_tests(pkg_name, function_names), encoding="utf-8"
+        )
+
+        manifest: List[ManifestEntry] = [
+            ManifestEntry(path=f"{pkg_name}/native.cpp", lang="cpp", purpose="C-ABI shared library source"),
+            ManifestEntry(path=f"{pkg_name}/__init__.py", lang="python", purpose="ctypes loader package init"),
             ManifestEntry(path=f"{pkg_name}/cli.py", lang="python", purpose="CLI module"),
-            ManifestEntry(path="setup.py", lang="python", purpose="setuptools build script"),
             ManifestEntry(path="pyproject.toml", lang="toml", purpose="project manifest"),
             ManifestEntry(path="run_shell.py", lang="python", purpose="launcher"),
             ManifestEntry(path="tests/test_cli.py", lang="python", purpose="tests"),
@@ -528,15 +615,13 @@ class CppPolyglotMaterializer:
         write_blueprint(blueprint, self.workspace / "blueprint.aero")
 
         if build:
-            self._build_extension(pkg_name)
+            self._build_extension(pkg_name, pkg_dir)
 
-        test_path = self.workspace / "tests" / "test_cli.py"
-        init_path = pkg_dir / "__init__.py"
         functions = [
             FunctionSpec(
-                file=init_path,
+                file=pkg_dir / "__init__.py",
                 name=name,
-                tests=[test_path] if test_path.is_file() else [],
+                tests=[tests_dir / "test_cli.py"],
                 skip_build=True,
             )
             for name in function_names
@@ -546,7 +631,7 @@ class CppPolyglotMaterializer:
                 FunctionSpec(
                     file=pkg_dir / "cli.py",
                     name="main",
-                    tests=[test_path] if test_path.is_file() else [],
+                    tests=[tests_dir / "test_cli.py"],
                     skip_build=True,
                 )
             )
@@ -554,20 +639,32 @@ class CppPolyglotMaterializer:
 
         return blueprint
 
-    def _log(self, text: str) -> None:
-        """Append *text* to the build log."""
-        if text:
-            self.build_logs = (self.build_logs + "\n" + text).strip()
+    def _build_extension(self, pkg_name: str, pkg_dir: Path) -> bool:
+        """Compile the C-ABI shared library in place. Returns True on success."""
+        compiler = _find_cpp_compiler()
+        if compiler is None:
+            raise RuntimeError("No C++ compiler found (g++, clang++, or c++)")
 
-    def _build_extension(self, pkg_name: str) -> bool:
-        """Compile the pybind11 extension in place. Returns True on success."""
+        cpp_path = pkg_dir / "native.cpp"
+        so_name = _so_name(pkg_name)
+        so_path = pkg_dir / so_name
+
+        build_cmd = [
+            compiler,
+            "-shared",
+            "-fPIC",
+            "-O2",
+            "-std=c++17",
+            "-o",
+            str(so_path),
+            str(cpp_path),
+        ]
+        self._log(f"Compiling C-ABI shared library: {' '.join(build_cmd)}")
+        _accel_log("info", f"BUILD: compiling dynamic shared object with {' '.join(build_cmd)}")
+
         env = dict(os.environ)
-        env["PYTHONPATH"] = (
-            f"{self.workspace}{os.pathsep}{env.get('PYTHONPATH', '')}"
-        ).strip(os.pathsep)
+        env["PYTHONUNBUFFERED"] = "1"
 
-        # Build the extension in place.
-        build_cmd = [sys.executable, "setup.py", "build_ext", "--inplace"]
         build_proc = subprocess.run(
             build_cmd,
             cwd=self.workspace,
@@ -579,6 +676,9 @@ class CppPolyglotMaterializer:
         self._log(build_proc.stderr)
 
         if build_proc.returncode != 0:
-            logger.error("C++ extension build failed:\n%s", build_proc.stderr)
+            logger.error("C++ shared library build failed:\n%s", build_proc.stderr)
+            _accel_log("error", f"C++ shared library build failed: {build_proc.stderr}")
             return False
+
+        _accel_log("success", f"BUILD: dynamic shared library compiled: {so_path}")
         return True

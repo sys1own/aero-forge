@@ -55,6 +55,14 @@ class CppEmitter(BaseEmitter):
 
     def _func_name(self, name: str) -> str:
         """Reference to a function (internal name in C-ABI mode)."""
+        if not name:
+            return ""
+        # Method calls on vector/list objects should not be prefixed; map Python
+        # ``append`` to the C++ vector equivalent ``push_back``.
+        if "." in name:
+            if name.endswith(".append"):
+                name = name[: -len(".append")] + ".push_back"
+            return name
         return self._internal_name(name)
 
     def _emit_function(self, node: ASTNode, indent_level: int) -> None:
@@ -120,6 +128,10 @@ class CppEmitter(BaseEmitter):
     def _emit_return(self, node: ASTNode, indent_level: int) -> None:
         value_str = self._expr(node.children[0]) if node.children else self._literal(node.value)
         self._write(f"return {value_str};", indent_level)
+
+    def _emit_call(self, node: ASTNode, indent_level: int) -> None:
+        """Emit a call node used as a standalone statement."""
+        self._write(f"{self._expr(node)};", indent_level)
 
     def _emit_import(self, node: ASTNode, indent_level: int) -> None:
         value = str(node.value or "")

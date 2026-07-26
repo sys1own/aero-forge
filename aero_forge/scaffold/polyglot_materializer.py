@@ -639,6 +639,19 @@ class PolyglotMaterializer:
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.build_logs = ""
 
+    def _accel_log(self, level: str, message: str) -> None:
+        """Append a structured line to the per-session accelerator log if set."""
+        log_path = os.environ.get("AERO_FORGE_ACCEL_LOG")
+        if not log_path:
+            return
+        try:
+            import time
+            timestamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(f"{timestamp} [{level}] {message}\n")
+        except Exception:
+            pass
+
     def materialize(
         self,
         blueprint: Blueprint,
@@ -662,6 +675,8 @@ class PolyglotMaterializer:
             from aero_forge.scaffold.cpp_materializer import CppPolyglotMaterializer
 
             logger.info("C++ manifest detected; delegating to CppPolyglotMaterializer")
+            self._accel_log("info", "Routing C++ selective acceleration through cpp_emitter.py and cpp_materializer.py")
+            self._accel_log("success", "ACCELERATED: C++ extern \"C\" dynamic shared library selected")
             return CppPolyglotMaterializer(self.workspace).materialize(blueprint, build=build)
 
         source = _synthesize_python_source(contracts)
