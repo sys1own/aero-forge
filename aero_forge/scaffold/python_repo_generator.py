@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
+from aero_forge.scaffold.cli_normalizer import normalize_workspace
+
 _STDLIB_ROOTS = {
     "abc", "aifc", "argparse", "array", "ast", "asyncio", "base64", "binascii",
     "bisect", "builtins", "calendar", "collections", "compileall", "concurrent",
@@ -278,5 +280,8 @@ def generate_python_repo(spec: PythonRepoSpec, dest_dir: Path) -> PythonGenerate
     else:
         init_lines = ["# Generated Aero-Forge module"]
     _write("src/__init__.py", "\n".join(init_lines) + "\n")
+
+    # Ensure package __init__.py re-exports public functions from any native/cli modules.
+    normalize_workspace(root)
 
     return PythonGeneratedRepo(root=root, files=written, spec=spec)

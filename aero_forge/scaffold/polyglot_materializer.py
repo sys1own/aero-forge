@@ -24,6 +24,7 @@ from aero_forge.blueprint import (
 )
 from aero_forge.scaffold.cargo_manifest import sanitize_crate_name
 from aero_forge.scaffold.cargo_runner import cargo_build
+from aero_forge.scaffold.cli_normalizer import normalize_workspace
 from aero_forge.scaffold.engine import Engine
 from aero_forge.scaffold.python_repo_generator import _sanitize_module_name
 from aero_forge.translator import TargetMode, UASTToHINTranslator, python_source_to_uast
@@ -646,6 +647,10 @@ class PolyglotMaterializer:
         # 1. Write Python / packaging files from the manifest first so the Rust
         #    generator's manifest validation sees a complete workspace.
         self._write_python_files(blueprint, project, crate_name, pkg_name, contracts)
+
+        # 1b. Normalize CLI/native module exports so __init__.py and cli.py are
+        # consistent regardless of how the LLM or fallback templates wrote them.
+        normalize_workspace(self.workspace)
 
         # 2. Persist the blueprint so Engine.generate can find it.
         blueprint_path = self.workspace / "blueprint.aero"

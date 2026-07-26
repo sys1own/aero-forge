@@ -41,6 +41,7 @@ from aero_forge.orchestrator.stack_classifier import (
     classify_stack,
 )
 from aero_forge.scaffold.cargo_runner import run_cargo
+from aero_forge.scaffold.cli_normalizer import normalize_workspace
 from aero_forge.scaffold.rust_merge import fix_rust_core_impls
 from aero_forge.scaffold.syntax_guard import repair_workspace
 
@@ -594,6 +595,11 @@ class ChatSession:
         # the [workspace] / [package] section.
         if _ensure_root_cargo_workspace(self.output_dir):
             self._progress("Fixed workspace root Cargo.toml")
+
+        # Ensure LLM-generated CLI modules re-export native functions and that
+        # __init__.py exposes public names from native.py / cli.py.
+        for modified in normalize_workspace(self.output_dir):
+            self._progress(f"Normalized exports in {modified}")
 
         # Build the Rust crate if present.
         cargo_result: Optional[subprocess.CompletedProcess[str]] = None

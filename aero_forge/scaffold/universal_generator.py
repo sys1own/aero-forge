@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Union
 from aero_forge.builder import BuildOutput, build_engine, spec_from_python
 from aero_forge.overlay import OverlayManager
 from aero_forge.scaffold.cargo_manifest import sanitize_crate_name
+from aero_forge.scaffold.cli_normalizer import normalize_workspace
 from aero_forge.scaffold.python_repo_generator import (
     PythonRepoSpec,
     build_python_spec,
@@ -120,6 +121,8 @@ class UniversalRepoGenerator:
             generated = generate_repo(repo_spec, dest)
         else:
             generated = generate_python_repo(repo_spec, dest)
+            # Ensure Python package __init__.py and any cli.py re-export public functions.
+            normalize_workspace(dest)
 
         manager = OverlayManager(dest)
         if source_file.is_file():
@@ -185,6 +188,7 @@ class UniversalRepoGenerator:
             generated = generate_repo(repo_spec, dest)
         else:
             generated = generate_python_repo(repo_spec, dest)
+            normalize_workspace(dest)
 
         return UniversalGenerationResult(
             language=target_language,
