@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_CPP_PYTHON,
+    INTENT_HYBRID_CPP_RUST,
     INTENT_HYBRID_RUST_PYTHON,
     INTENT_PURE_PYTHON,
     INTENT_PURE_RUST,
@@ -310,6 +311,15 @@ def generate_blueprint(
         manifest_entries = [
             ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust crate manifest"),
             ManifestEntry(path="src/lib.rs", lang="rust", purpose="Rust core library"),
+        ]
+    elif intent == INTENT_HYBRID_CPP_RUST:
+        manifest_entries = [
+            ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust package manifest"),
+            ManifestEntry(path="build.rs", lang="rust", purpose="C++ build and link script"),
+            ManifestEntry(path="src/main.rs", lang="rust", purpose="Rust CLI binary"),
+            ManifestEntry(path="src/cpp_core/native.cpp", lang="cpp", purpose="C-ABI math source"),
+            ManifestEntry(path="tests/test_hybrid_cpp_rust.rs", lang="rust", purpose="Rust integration test"),
+            ManifestEntry(path="README.md", lang="markdown", purpose="Project README"),
         ]
     elif intent == INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON:
         manifest_entries = [

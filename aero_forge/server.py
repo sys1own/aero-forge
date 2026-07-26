@@ -39,6 +39,7 @@ from aero_forge.generate import generate_and_build
 from aero_forge.orchestrator.router import toolchains_for_intent
 from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_CPP_PYTHON,
+    INTENT_HYBRID_CPP_RUST,
     INTENT_HYBRID_RUST_PYTHON,
     INTENT_PURE_PYTHON,
     INTENT_PURE_RUST,
@@ -83,10 +84,12 @@ def _classification_for_target(
 ) -> StackClassification:
     """Override the inferred stack classification when the user picks a target."""
     target = target_language.lower()
-    if target == "cpp":
+    if target in ("cpp", "hybrid_cpp_python"):
         architecture = INTENT_HYBRID_CPP_PYTHON
-    elif target == "rust":
+    elif target in ("rust", "hybrid_rust_python"):
         architecture = INTENT_HYBRID_RUST_PYTHON
+    elif target in ("cpp_rust", "hybrid_cpp_rust"):
+        architecture = INTENT_HYBRID_CPP_RUST
     elif target in ("python", "py"):
         architecture = INTENT_PURE_PYTHON
     elif target in ("tri_polyglot", "tri_polyglot_rust_cpp_python", "rust_cpp_python"):
@@ -227,6 +230,7 @@ async def _handle_build_async(request: web.Request) -> web.Response:
         if classification.architecture in (
             INTENT_HYBRID_RUST_PYTHON,
             INTENT_HYBRID_CPP_PYTHON,
+            INTENT_HYBRID_CPP_RUST,
             INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON,
         ):
             universal_result = await asyncio.to_thread(
@@ -703,6 +707,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             if classification.architecture in (
                 INTENT_HYBRID_RUST_PYTHON,
                 INTENT_HYBRID_CPP_PYTHON,
+                INTENT_HYBRID_CPP_RUST,
             ):
                 universal_result = build_universal_project(
                     prompt,

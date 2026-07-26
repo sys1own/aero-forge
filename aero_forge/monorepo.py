@@ -241,18 +241,39 @@ def module_name_from_tests(tests: str) -> str:
     return "generated"
 
 
-def _rewrite_test_imports(tests: str, package_name: str) -> str:
-    """Point generated tests at the packaged module."""
-    expected = {"generated", module_name_from_tests(tests)}
-    lines = tests.splitlines(keepends=True)
+def _rewrite_test_imports(tests: str, package_name: str, primary: str) -> str:
+    """Point generated tests at the packaged module and fix typing imports."""
+    typing_names = {
+        "List", "Dict", "Tuple", "Any", "Optional", "Union", "Set",
+        "FrozenSet", "Callable", "Mapping", "Sequence", "Iterator",
+    }
     result: List[str] = []
-    for line in lines:
-        if line.startswith("from ") and " import " in line:
-            parts = line.split(" import ", 1)
-            mod = parts[0].split()[1]
-            if mod in expected:
-                line = f"from {package_name} import {parts[1].lstrip()}"
-        result.append(line)
+    for line in tests.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith("from ") and " import " in stripped:
+            parts = stripped.split(" import ", 1)
+            module = parts[0].split()[1]
+            names = [n.strip() for n in parts[1].split(",")]
+            package_names: List[str] = []
+            typing_imports: List[str] = []
+            other: List[str] = []
+            for n in names:
+                if n == primary:
+                    package_names.append(n)
+                elif n in typing_names:
+                    typing_imports.append(n)
+                elif module in (package_name, primary, "generated"):
+                    package_names.append(n)
+                else:
+                    other.append(n)
+            if package_names:
+                result.append(f"from {package_name} import {', '.join(package_names)}\n")
+            if typing_imports:
+                result.append(f"from typing import {', '.join(typing_imports)}\n")
+            if other:
+                result.append(f"from {module} import {', '.join(other)}\n")
+        else:
+            result.append(line)
     return "".join(result)
 
 
@@ -452,7 +473,7 @@ def generate_monorepo(
 
     # Tests rewritten to import from the package.
     (tests_dir / f"test_{primary}.py").write_text(
-        _rewrite_test_imports(tests, package_name),
+        _rewrite_test_imports(tests, package_name, primary),
         encoding="utf-8",
     )
 

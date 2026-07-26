@@ -64,6 +64,7 @@ from aero_forge.orchestrator.prompt_builder import (
 )
 from aero_forge.orchestrator.router import (
     BUILD_INTENT_HYBRID_CPP_PYTHON,
+    BUILD_INTENT_HYBRID_CPP_RUST,
     BUILD_INTENT_HYBRID_RUST_PYTHON,
     BUILD_INTENT_PURE_RUST,
     HIN_COMPUTE,
@@ -74,11 +75,14 @@ from aero_forge.orchestrator.router import (
 )
 from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_CPP_PYTHON,
+    INTENT_HYBRID_CPP_RUST,
     INTENT_HYBRID_RUST_PYTHON,
     INTENT_PURE_PYTHON,
     INTENT_PURE_RUST,
+    INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON,
     StackClassification,
     classify_stack as classify_build_stack,
+    default_manifest_for_architecture,
 )
 from aero_forge.precision_shield.shield import Shield
 from aero_forge.sandbox.manager import Sandbox, ensure_cargo_in_path
@@ -1051,6 +1055,8 @@ def _classification_for_architecture(
         INTENT_PURE_RUST: ["rust"],
         INTENT_HYBRID_RUST_PYTHON: ["python", "rust"],
         INTENT_HYBRID_CPP_PYTHON: ["python", "cpp"],
+        INTENT_HYBRID_CPP_RUST: ["rust", "cpp"],
+        INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON: ["python", "rust", "cpp"],
     }
     return StackClassification(
         architecture=architecture,
@@ -1140,17 +1146,35 @@ def plan_workspace(
     prompt_lower = prompt.lower() if prompt else ""
     is_cpp = (
         intent == BUILD_INTENT_HYBRID_CPP_PYTHON
+        or intent == BUILD_INTENT_HYBRID_CPP_RUST
         or "c++" in prompt_lower
         or "cpp" in prompt_lower
         or "pybind11" in prompt_lower
         or "cmake" in prompt_lower
     )
+    is_rust = (
+        intent == BUILD_INTENT_HYBRID_CPP_RUST
+        or intent == BUILD_INTENT_HYBRID_RUST_PYTHON
+        or intent == BUILD_INTENT_PURE_RUST
+        or "rust" in prompt_lower
+        or "cargo" in prompt_lower
+        or "pyo3" in prompt_lower
+    )
+    has_python = "python" in prompt_lower or "python" in classification.languages
+    is_hybrid_cpp_rust = is_cpp and is_rust and not has_python
     if blueprint is None:
+        chosen_intent = (
+            BUILD_INTENT_HYBRID_CPP_RUST if is_hybrid_cpp_rust else
+            BUILD_INTENT_HYBRID_CPP_PYTHON if is_cpp else intent
+        )
         blueprint = Blueprint(
             project=project_name,
-            architecture=BUILD_INTENT_HYBRID_CPP_PYTHON if is_cpp else intent,
-            toolchains=toolchains_for_intent(BUILD_INTENT_HYBRID_CPP_PYTHON) if is_cpp else toolchains,
-            manifest=manifest_entries,
+            architecture=chosen_intent,
+            toolchains=toolchains_for_intent(chosen_intent),
+            manifest=[
+                ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
+                for e in default_manifest_for_architecture(chosen_intent, project_name)
+            ],
             contracts=[],
             output_dir=output_dir / "dist",
             llm=LLMConfig(provider=llm_provider or "none", model=model),
@@ -1167,7 +1191,10 @@ def plan_workspace(
             update["languages"] = classification.languages
         if not blueprint.features:
             update["features"] = classification.features
-        if blueprint.architecture == "hybrid_polyglot" and is_cpp:
+        if blueprint.architecture == "hybrid_polyglot" and is_hybrid_cpp_rust:
+            update["architecture"] = BUILD_INTENT_HYBRID_CPP_RUST
+            update["toolchains"] = toolchains_for_intent(BUILD_INTENT_HYBRID_CPP_RUST)
+        elif blueprint.architecture == "hybrid_polyglot" and is_cpp:
             update["architecture"] = BUILD_INTENT_HYBRID_CPP_PYTHON
             update["toolchains"] = toolchains_for_intent(BUILD_INTENT_HYBRID_CPP_PYTHON)
         elif blueprint.architecture == "hybrid_polyglot":
@@ -1175,14 +1202,41 @@ def plan_workspace(
             update["toolchains"] = toolchains_for_intent(BUILD_INTENT_HYBRID_RUST_PYTHON)
         if intent == BUILD_INTENT_HYBRID_RUST_PYTHON and not blueprint.manifest:
             update["manifest"] = manifest_entries
-        if is_cpp and not blueprint.manifest:
-            from aero_forge.orchestrator.stack_classifier import default_manifest_for_architecture
+        if is_hybrid_cpp_rust and not blueprint.manifest:
+            update["manifest"] = [
+                ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
+                for e in default_manifest_for_architecture(BUILD_INTENT_HYBRID_CPP_RUST, project_name)
+            ]
+        elif is_cpp and not blueprint.manifest:
             update["manifest"] = [
                 ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
                 for e in default_manifest_for_architecture(BUILD_INTENT_HYBRID_CPP_PYTHON, project_name)
             ]
         if update:
             blueprint = blueprint.model_copy(update=update)
+
+    # If the caller explicitly requested an architecture, force the final
+    # blueprint to a deterministic manifest for that intent. This prevents
+    # the LLM from inventing files (e.g. native_bridge.py) that the materializer
+    # does not generate, while preserving the LLM-derived contracts.
+    if architecture:
+        if blueprint.architecture != architecture:
+            logger.warning(
+                "Overriding LLM architecture %s to requested %s",
+                blueprint.architecture,
+                architecture,
+            )
+        blueprint = blueprint.model_copy(
+            update={
+                "project": project_name,
+                "architecture": architecture,
+                "toolchains": toolchains_for_intent(architecture),
+                "manifest": [
+                    ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
+                    for e in default_manifest_for_architecture(architecture, project_name)
+                ],
+            }
+        )
 
     blueprint_path = output_dir / "blueprint.aero"
     write_blueprint(blueprint, blueprint_path)

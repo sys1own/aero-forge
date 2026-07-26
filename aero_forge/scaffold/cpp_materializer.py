@@ -29,6 +29,7 @@ from aero_forge.builder.spec import (
     call,
     function,
     list_literal,
+    literal,
     module,
     param,
     reference,
@@ -170,12 +171,58 @@ def _known_contract_spec(pkg_name: str, contract: ContractEntry) -> Optional[Eng
     return None
 
 
+def _generic_c_abi_contract_spec(pkg_name: str, contract: ContractEntry) -> Optional[EngineSpec]:
+    """Build a default numeric EngineSpec for any C-ABI-compatible contract."""
+    if not contract.signature:
+        return None
+    try:
+        name, args, return_type = _parse_signature(contract.signature)
+    except Exception:
+        return None
+    if not _is_c_abi_list(return_type) and not _is_c_abi_scalar(return_type):
+        return None
+    if not all(_is_c_abi_list(t) or _is_c_abi_scalar(t) for _, t in args):
+        return None
+    list_args = [(a, t) for a, t in args if _is_c_abi_list(t)]
+    scalar_args = [(a, t) for a, t in args if _is_c_abi_scalar(t)]
+    if len(list_args) != 1 or len(scalar_args) > 1:
+        return None
+    list_name, list_type = list_args[0]
+    inner = _map_py_type(list_type[5:-1].strip()) if list_type.startswith("list[") and list_type.endswith("]") else "float"
+    scalar_name = scalar_args[0][0] if scalar_args else None
+
+    out = binding("out", list_literal([]), type_hint=return_type)
+    if scalar_name:
+        loop_expr = binary_op(reference("x"), "*", reference(scalar_name))
+    elif inner == "int":
+        loop_expr = binary_op(reference("x"), "*", literal(2))
+    else:
+        loop_expr = binary_op(reference("x"), "*", literal(2.0))
+    loop_body = block(children=[call("out.push_back", [loop_expr])])
+    loop = ASTNode(kind="for", name="x", children=[reference(list_name), loop_body])
+    ret = return_node(reference("out"))
+    func = function(
+        name,
+        params=[param(a, t) for a, t in args],
+        return_type=return_type,
+        body=[out, loop, ret],
+    )
+    return EngineSpec(name=pkg_name, root=module(name=pkg_name, children=[func]))
+
+
+def _contract_to_engine_spec(pkg_name: str, contract: ContractEntry) -> Optional[EngineSpec]:
+    spec = _known_contract_spec(pkg_name, contract)
+    if spec is not None:
+        return spec
+    return _generic_c_abi_contract_spec(pkg_name, contract)
+
+
 def _generate_native_cpp(pkg_name: str, contracts: List[ContractEntry]) -> str:
     """Generate an ``extern "C"`` shared-library C++ source from *contracts*."""
     lines: List[str] = ["// Auto-generated C-ABI shared library for aero-forge"]
     has_native = False
     for contract in contracts:
-        spec = _known_contract_spec(pkg_name, contract)
+        spec = _contract_to_engine_spec(pkg_name, contract)
         if spec is None:
             continue
         # Emit telemetry for each contract routed to C++.
@@ -555,7 +602,7 @@ class CppPolyglotMaterializer:
 
         # Ensure the acceleration log is wired so router telemetry is captured.
         accel_log = self.workspace / ".aero_forge_accel.log"
-        os.environ.setdefault("AERO_FORGE_ACCEL_LOG", str(accel_log))
+        os.environ["AERO_FORGE_ACCEL_LOG"] = str(accel_log)
 
         self.workspace.mkdir(parents=True, exist_ok=True)
         pkg_dir = self.workspace / pkg_name

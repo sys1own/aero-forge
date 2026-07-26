@@ -29,6 +29,7 @@ from aero_forge.orchestrator.orchestrator import plan_workspace
 from aero_forge.orchestrator.router import toolchains_for_intent
 from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_CPP_PYTHON,
+    INTENT_HYBRID_CPP_RUST,
     INTENT_HYBRID_RUST_PYTHON,
     INTENT_PURE_PYTHON,
     INTENT_PURE_RUST,
@@ -37,6 +38,7 @@ from aero_forge.orchestrator.stack_classifier import (
     classify_stack,
 )
 from aero_forge.scaffold.cpp_materializer import CppPolyglotMaterializer
+from aero_forge.scaffold.hybrid_cpp_rust_materializer import HybridCppRustMaterializer
 from aero_forge.scaffold.polyglot_materializer import PolyglotMaterializer
 from aero_forge.scaffold.tri_polyglot_materializer import TriPolyglotMaterializer
 
@@ -67,6 +69,10 @@ def _build_pure_python(
         max_tokens=max_tokens,
         build_kwargs={"max_workers": 1, "cache_enabled": True},
         config_override=config_override,
+    )
+    # normalize legacy generate_and_build result to include top-level success
+    result.setdefault(
+        "success", result.get("build", {}).get("success", False) if isinstance(result.get("build"), dict) else False
     )
     # Ensure the authoritative blueprint carries the language/feature tags.
     if (output_dir / "blueprint.aero").is_file():
@@ -105,6 +111,50 @@ def _extract_explicit_paths(prompt: str) -> list[str]:
     return re.findall(r"\b[A-Za-z_][\w/]*\.py\b", prompt)
 
 
+def _augment_blueprint_with_explicit_paths(
+    blueprint: Blueprint,
+    prompt: str,
+    project_name: str,
+    features: list[str],
+) -> Blueprint:
+    """Add Python file paths explicitly requested in *prompt* to the manifest.
+
+    Filters out bare file names (e.g. ``main.py`` mentioned in a ``python main.py``
+    command) when the materializer already emits the same file inside a package.
+    """
+    explicit = _extract_explicit_paths(prompt)
+    if not explicit:
+        return blueprint
+    existing = {e.path for e in blueprint.manifest}
+    existing_names = {Path(e.path).name for e in blueprint.manifest}
+    existing_package_names = {
+        Path(e.path).parts[0]
+        for e in blueprint.manifest
+        if len(Path(e.path).parts) > 1 and Path(e.path).parts[0] not in {"tests", "src", "scripts", "examples", "docs"}
+    }
+
+    additions: List[ManifestEntry] = []
+    for p in explicit:
+        if p in existing:
+            continue
+        parts = Path(p).parts
+        # If the user wrote ``python main.py`` but the package already emits
+        # ``<pkg>/main.py``, don't add a conflicting top-level main.py.
+        if len(parts) == 1 and parts[0] in existing_names and existing_package_names:
+            continue
+        additions.append(ManifestEntry(path=p, lang="python", purpose="user requested"))
+
+    if additions:
+        fallback = _hybrid_fallback_blueprint(project_name, features, prompt=prompt)
+        # Also pull in default package scaffolding (e.g. __init__.py, cli.py)
+        # if the caller asked for a file inside a package that doesn't exist yet.
+        for entry in fallback.manifest:
+            if entry.path not in existing:
+                additions.append(entry)
+        blueprint = blueprint.model_copy(update={"manifest": list(blueprint.manifest) + additions})
+    return blueprint
+
+
 def _hybrid_fallback_blueprint(
     project_name: str,
     features: list[str],
@@ -129,7 +179,9 @@ def _hybrid_fallback_blueprint(
         or "cargo" in prompt_lower
         or "pyo3" in prompt_lower
     )
-    is_tri = is_cpp and is_rust
+    has_python = "python" in prompt_lower or "python" in features
+    is_tri = is_cpp and is_rust and has_python
+    is_hybrid_cpp_rust = is_cpp and is_rust and not has_python
 
     if is_tri:
         contracts = [
@@ -318,6 +370,7 @@ def _run_polyglot_materializer(
     features: list[str],
     output_dir: Path,
     prompt: str = "",
+    blueprint: Optional[Blueprint] = None,
 ) -> Dict[str, Any]:
     """Materialize a guaranteed hybrid workspace using the polyglot materializer."""
     output_dir = Path(output_dir).resolve()
@@ -325,7 +378,12 @@ def _run_polyglot_materializer(
     aero_core = output_dir / ".aero_core"
     if aero_core.is_dir():
         shutil.rmtree(aero_core, ignore_errors=True)
-    blueprint = _hybrid_fallback_blueprint(project_name, features, prompt=prompt)
+    if blueprint is None:
+        blueprint = _hybrid_fallback_blueprint(project_name, features, prompt=prompt)
+    else:
+        blueprint = _augment_blueprint_with_explicit_paths(
+            blueprint, prompt, project_name, features
+        )
     if blueprint.architecture == INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON:
         materializer: Any = TriPolyglotMaterializer(output_dir)
         materializer_name = "TriPolyglotMaterializer"
@@ -382,6 +440,45 @@ def _run_polyglot_materializer(
     }
 
 
+def _run_hybrid_cpp_rust_materializer(
+    project_name: str,
+    blueprint: Blueprint,
+    output_dir: Path,
+) -> Dict[str, Any]:
+    """Materialize and build a Rust binary that statically links a C++ C-ABI library."""
+    from aero_forge.scaffold.hybrid_cpp_rust_materializer import (
+        HybridCppRustMaterializer,
+    )
+
+    output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    materializer = HybridCppRustMaterializer(output_dir)
+    try:
+        updated = materializer.materialize(blueprint, build=True)
+    except Exception as exc:
+        return {
+            "success": False,
+            "project_name": project_name,
+            "error": str(exc),
+            "logs": materializer.build_logs,
+            "files": [],
+            "materializer": "HybridCppRustMaterializer",
+        }
+    write_blueprint(updated, output_dir / "blueprint.aero")
+    files = sorted(str(p.relative_to(output_dir)) for p in output_dir.rglob("*") if p.is_file())
+    return {
+        "success": "BUILD: hybrid C++/Rust binary compiled successfully" in materializer.build_logs
+        or (
+            (output_dir / "target" / "release" / project_name).is_file()
+            or (output_dir / "target" / "release" / project_name.replace("-", "_")).is_file()
+        ),
+        "project_name": project_name,
+        "files": files,
+        "logs": materializer.build_logs,
+        "materializer": "HybridCppRustMaterializer",
+    }
+
+
 def _classification_for_architecture(
     architecture: str, features: List[str]
 ) -> StackClassification:
@@ -391,6 +488,7 @@ def _classification_for_architecture(
         INTENT_PURE_RUST: ["rust"],
         INTENT_HYBRID_RUST_PYTHON: ["python", "rust"],
         INTENT_HYBRID_CPP_PYTHON: ["python", "cpp"],
+        INTENT_HYBRID_CPP_RUST: ["rust", "cpp"],
         INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON: ["python", "rust", "cpp"],
     }
     return StackClassification(
@@ -461,6 +559,13 @@ def build_universal_project(
             classification.features,
             output_dir,
             prompt=prompt,
+            blueprint=blueprint,
+        )
+    elif blueprint.architecture == INTENT_HYBRID_CPP_RUST:
+        result = _run_hybrid_cpp_rust_materializer(
+            project_name or blueprint.project or "generated",
+            blueprint,
+            output_dir,
         )
     elif blueprint.architecture == INTENT_HYBRID_CPP_PYTHON:
         # C++/pybind11 builds go straight to the polyglot materializer because
@@ -470,6 +575,7 @@ def build_universal_project(
             classification.features,
             output_dir,
             prompt=prompt,
+            blueprint=blueprint,
         )
     elif blueprint.architecture == INTENT_HYBRID_RUST_PYTHON:
         try:
@@ -500,6 +606,7 @@ def build_universal_project(
                 classification.features,
                 output_dir,
                 prompt=prompt,
+                blueprint=blueprint,
             )
     else:
         result = _build_pure_python(
@@ -521,6 +628,12 @@ def build_universal_project(
         "languages": classification.languages,
         "features": classification.features,
     }
+    if not result.get("files"):
+        result["files"] = sorted(
+            str(p.relative_to(output_dir))
+            for p in output_dir.rglob("*")
+            if p.is_file()
+        )
     return result
 
 

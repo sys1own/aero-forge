@@ -570,3 +570,76 @@ def _find_cpp_compiler() -> str | None:
         if shutil.which(name):
             return name
     return None
+
+
+@pytest.mark.integration
+def test_hybrid_cpp_rust_materializer_builds_and_runs(tmp_path: Path) -> None:
+    """End-to-end: a C++/Rust (no Python runtime) hybrid workspace is materialized, compiled, and run."""
+    from aero_forge.blueprint import Blueprint, ContractEntry, ManifestEntry
+    from aero_forge.scaffold.hybrid_cpp_rust_materializer import HybridCppRustMaterializer
+
+    if not _find_cpp_compiler():
+        pytest.skip("No C++ compiler available")
+    if not shutil.which("cargo"):
+        pytest.skip("No Rust cargo available")
+
+    workspace = tmp_path / "hybrid_cpp_rust"
+    blueprint = Blueprint(
+        project="hybrid_demo",
+        architecture="hybrid_cpp_rust",
+        toolchains=["rust", "cpp", "cargo"],
+        manifest=[
+            ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust package manifest"),
+            ManifestEntry(path="build.rs", lang="rust", purpose="C++ build and link script"),
+            ManifestEntry(path="src/lib.rs", lang="rust", purpose="Rust library wrappers"),
+            ManifestEntry(path="src/main.rs", lang="rust", purpose="Rust CLI binary"),
+            ManifestEntry(path="src/cpp_core/native.cpp", lang="cpp", purpose="C-ABI math source"),
+            ManifestEntry(path="tests/test_hybrid_cpp_rust.rs", lang="rust", purpose="Rust integration test"),
+            ManifestEntry(path="README.md", lang="markdown", purpose="Project README"),
+        ],
+        contracts=[
+            ContractEntry(
+                name="fast_vector_transform",
+                signature="def fast_vector_transform(v: list[float], scalar: float) -> list[float]",
+            ),
+        ],
+    )
+    updated = HybridCppRustMaterializer(workspace).materialize(blueprint, build=True)
+
+    assert (workspace / "src" / "cpp_core" / "native.cpp").is_file()
+    assert (workspace / "src" / "main.rs").is_file()
+    assert (workspace / "src" / "lib.rs").is_file()
+    assert (workspace / "build.rs").is_file()
+    assert updated.architecture == "hybrid_cpp_rust"
+
+    binary = workspace / "target" / "release" / updated.project
+    if not binary.is_file():
+        binary = workspace / "target" / "release" / updated.project.replace("-", "_")
+    assert binary.is_file(), "Expected compiled Rust binary"
+
+    run_result = subprocess.run(
+        [str(binary), "--benchmark", "100"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+    )
+    assert run_result.returncode == 0, f"Binary run failed:\n{run_result.stdout}\n{run_result.stderr}"
+    assert "Benchmark:" in run_result.stdout, "Expected benchmark output"
+
+    test_result = subprocess.run(
+        ["cargo", "test", "--release"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+    )
+    assert test_result.returncode == 0, f"Rust integration test failed:\n{test_result.stdout}\n{test_result.stderr}"
+    assert (
+        "test_hybrid_cpp_rust_fast_vector_transform ... ok" in test_result.stdout
+        or "test_hybrid_cpp_rust_vector_transform ... ok" in test_result.stdout
+    ), "Expected test to pass"
+
+    accel_log = workspace / ".aero_forge_accel.log"
+    if accel_log.is_file():
+        log_text = accel_log.read_text(encoding="utf-8")
+        assert "C++ selected for extern \"C\"" in log_text, "Expected C++ dispatch in accelerator log"
+        assert "hybrid C++/Rust binary compiled successfully" in log_text, "Expected build success in accelerator log"
