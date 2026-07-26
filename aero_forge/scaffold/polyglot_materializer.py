@@ -22,6 +22,7 @@ from aero_forge.blueprint import (
     ManifestEntry,
     write_blueprint,
 )
+from aero_forge.builder.language_router import should_accelerate_with_native
 from aero_forge.scaffold.cargo_manifest import sanitize_crate_name
 from aero_forge.scaffold.cargo_runner import cargo_build
 from aero_forge.scaffold.cli_normalizer import normalize_workspace
@@ -745,11 +746,31 @@ class PolyglotMaterializer:
                 path.write_text(content, encoding="utf-8")
                 logger.info("Synthesised %s", path.relative_to(self.workspace))
 
+    def _has_accelerable_contract(self, blueprint: Blueprint) -> bool:
+        """Return ``True`` if any contract justifies a native (Rust) build."""
+        for contract in blueprint.contracts:
+            if not contract.signature:
+                continue
+            try:
+                name, args, return_type = _parse_signature(contract.signature)
+            except Exception:
+                continue
+            stub_body = _generate_stub_body(name, args, return_type)
+            source = f"def {name}({', '.join(f'{a}: {t}' for a, t in args)}) -> {return_type}:\n{stub_body}"
+            if should_accelerate_with_native(source):
+                return True
+        return False
+
     def _build_crates(self) -> None:
         """Run ``cargo build --release`` and copy ``.so`` artefacts to ``dist/``."""
+        blueprint = self._read_blueprint()
+        if not self._has_accelerable_contract(blueprint):
+            logger.info("No accelerable contracts found; skipping Rust crate build")
+            return
+
         cargo_tomls = [
             self.workspace / e.path
-            for e in self._read_blueprint().manifest
+            for e in blueprint.manifest
             if Path(e.path).name == "Cargo.toml"
         ]
         if not cargo_tomls:

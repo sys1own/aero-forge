@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -69,3 +71,120 @@ def is_python(language: str) -> bool:
 
 def is_cpp(language: str) -> bool:
     return language == "cpp"
+
+
+def is_cpp_friendly(source: str) -> bool:
+    """Return ``True`` when *source* is a numeric, loop-heavy function suitable for C++ acceleration.
+
+    Lightweight control flow, string manipulation, I/O, or NumPy usage cause the
+    heuristic to return ``False`` so the function stays in Python or falls back to
+    the standard runtime.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+
+    local_functions = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    has_io = False
+    has_numpy = False
+    has_unsupported_list = False
+    has_loop = False
+    numeric_ops = 0
+    recursive_calls = 0
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.For, ast.While, ast.ListComp, ast.GeneratorExp)):
+            has_loop = True
+        if isinstance(node, ast.BinOp) and type(node.op) in (
+            ast.Add,
+            ast.Sub,
+            ast.Mult,
+            ast.Div,
+            ast.Mod,
+            ast.Pow,
+            ast.BitOr,
+            ast.BitXor,
+            ast.BitAnd,
+            ast.LShift,
+            ast.RShift,
+        ):
+            numeric_ops += 1
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                if node.func.id in ("print", "input", "open"):
+                    has_io = True
+                if node.func.id in local_functions:
+                    recursive_calls += 1
+            if isinstance(node.func, ast.Attribute) and node.func.attr in ("print",):
+                has_io = True
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            names = [alias.name for alias in node.names]
+            module = getattr(node, "module", "") or ""
+            if "numpy" in names or "np" in names or "numpy" in module:
+                has_numpy = True
+        if isinstance(node, ast.Subscript):
+            # Subscript can indicate array indexing, which is fine; handled by emitter.
+            pass
+
+    if has_io or has_numpy or has_unsupported_list:
+        return False
+
+    return has_loop or numeric_ops >= 2 or recursive_calls >= 1
+
+
+def _cpp_compiler_available() -> bool:
+    return any(shutil.which(name) for name in ["g++", "clang++", "c++"])
+
+
+def select_native_backend(source: str, hint: Optional[str] = None) -> str:
+    """Select the native backend for *source*.
+
+    Hints:
+      - ``"cpp"`` / ``"c_abi"`` -> C++
+      - ``"rust"`` / ``"rust_hin"`` / ``"pyo3"`` -> Rust
+      - ``"auto"`` or unset -> use :func:`is_cpp_friendly` and toolchain availability.
+    """
+    hint = (hint or "rust_hin").lower()
+    if hint in ("cpp", "c_abi"):
+        return "cpp"
+    if hint in ("rust", "rust_hin", "pyo3"):
+        return "rust_hin"
+    if is_cpp_friendly(source) and _cpp_compiler_available():
+        return "cpp"
+    return "rust_hin"
+
+
+def should_accelerate_with_native(source: str, *, min_numeric_ops: int = 3) -> bool:
+    """Return ``True`` when *source* has enough numeric work to justify native acceleration.
+
+    This is a coarser gate used by the polyglot materializer to decide whether a
+    generated contract should be backed by a compiled native extension or left as
+    pure Python.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+
+    has_loop = any(isinstance(n, (ast.For, ast.While, ast.ListComp, ast.GeneratorExp)) for n in ast.walk(tree))
+    numeric_ops = sum(
+        1
+        for n in ast.walk(tree)
+        if isinstance(n, ast.BinOp)
+        and type(n.op)
+        in (
+            ast.Add,
+            ast.Sub,
+            ast.Mult,
+            ast.Div,
+            ast.Mod,
+            ast.Pow,
+            ast.BitOr,
+            ast.BitXor,
+            ast.BitAnd,
+            ast.LShift,
+            ast.RShift,
+        )
+    )
+    return has_loop or numeric_ops >= min_numeric_ops

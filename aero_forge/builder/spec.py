@@ -217,10 +217,22 @@ def _convert_stmt(stmt: ast.stmt) -> Optional[ASTNode]:
                 _convert_expr(stmt.value) if stmt.value else literal(None),
                 type_hint=type_hint,
             )
+    if isinstance(stmt, ast.AugAssign):
+        target = stmt.target
+        if isinstance(target, ast.Name):
+            op = _aug_op_name(stmt.op)
+            return ASTNode(
+                kind="aug_assign",
+                name=target.id,
+                value=op,
+                children=[_convert_expr(stmt.value)],
+            )
     if isinstance(stmt, ast.Return):
         return return_node(_convert_expr(stmt.value) if stmt.value else literal(None))
     if isinstance(stmt, ast.If):
         return _convert_if(stmt)
+    if isinstance(stmt, (ast.For, ast.While)):
+        return _convert_loop(stmt)
     if isinstance(stmt, ast.Expr):
         expr = _convert_expr(stmt.value)
         if expr.kind == "call":
@@ -236,6 +248,27 @@ def _convert_if(stmt: ast.If) -> ASTNode:
         else_body = ASTNode(kind="block", children=[b for b in (_convert_stmt(s) for s in stmt.orelse) if b is not None])
         children.append(else_body)
     return ASTNode(kind="if", children=children)
+
+
+def _convert_loop(stmt: ast.For | ast.While) -> ASTNode:
+    if isinstance(stmt, ast.While):
+        return ASTNode(
+            kind="while",
+            children=[
+                _convert_expr(stmt.test),
+                ASTNode(kind="block", children=[b for b in (_convert_stmt(s) for s in stmt.body) if b is not None]),
+            ],
+        )
+    # For loop: best-effort conversion of `for x in iterable`.
+    target_name = stmt.target.id if isinstance(stmt.target, ast.Name) else "i"
+    return ASTNode(
+        kind="for",
+        name=target_name,
+        children=[
+            _convert_expr(stmt.iter),
+            ASTNode(kind="block", children=[b for b in (_convert_stmt(s) for s in stmt.body) if b is not None]),
+        ],
+    )
 
 
 def _type_name(node: Optional[ast.expr]) -> Optional[str]:
@@ -261,6 +294,16 @@ def _convert_expr(expr: Optional[ast.expr]) -> ASTNode:
     if isinstance(expr, ast.BinOp):
         op = _bin_op_name(expr.op)
         return binary_op(_convert_expr(expr.left), op, _convert_expr(expr.right))
+    if isinstance(expr, ast.UnaryOp):
+        op = _unary_op_name(expr.op)
+        return ASTNode(kind="unary_op", name=op, children=[_convert_expr(expr.operand)])
+    if isinstance(expr, ast.Compare):
+        return _convert_compare(expr)
+    if isinstance(expr, ast.Subscript):
+        return ASTNode(
+            kind="subscript",
+            children=[_convert_expr(expr.value), _convert_expr(expr.slice)],
+        )
     if isinstance(expr, ast.Call):
         name = _call_name(expr.func)
         args = [_convert_expr(a) for a in expr.args]
@@ -273,6 +316,14 @@ def _convert_expr(expr: Optional[ast.expr]) -> ASTNode:
             pairs[_expr_key(k)] = _convert_expr(v)
         return dict_literal(pairs)
     return literal(None)
+
+
+def _convert_compare(expr: ast.Compare) -> ASTNode:
+    """Flatten a chain of comparisons into a left-associative binary tree."""
+    left = _convert_expr(expr.left)
+    for op, comparator in zip(expr.ops, expr.comparators):
+        left = binary_op(left, _cmp_op_name(op), _convert_expr(comparator))
+    return left
 
 
 def _bin_op_name(op: ast.operator) -> str:
@@ -290,6 +341,39 @@ def _bin_op_name(op: ast.operator) -> str:
         ast.BitAnd: "&",
     }
     return mapping.get(type(op), "+")
+
+
+def _aug_op_name(op: ast.AugAssign) -> str:
+    mapping = {
+        ast.Add: "+",
+        ast.Sub: "-",
+        ast.Mult: "*",
+        ast.Div: "/",
+        ast.Mod: "%",
+    }
+    return mapping.get(type(op), "+")
+
+
+def _unary_op_name(op: ast.unaryop) -> str:
+    mapping = {
+        ast.Invert: "~",
+        ast.Not: "!",
+        ast.UAdd: "+",
+        ast.USub: "-",
+    }
+    return mapping.get(type(op), "+")
+
+
+def _cmp_op_name(op: ast.cmpop) -> str:
+    mapping = {
+        ast.Eq: "==",
+        ast.NotEq: "!=",
+        ast.Lt: "<",
+        ast.LtE: "<=",
+        ast.Gt: ">",
+        ast.GtE: ">=",
+    }
+    return mapping.get(type(op), "==")
 
 
 def _call_name(func: ast.expr) -> str:

@@ -127,6 +127,12 @@ def _generate_native_cpp(pkg_name: str, contracts: List[ContractEntry]) -> str:
     for inc in includes:
         lines.append(f"#include {inc}")
     lines.append("")
+    lines.append('#ifdef _WIN32')
+    lines.append('#define AERO_EXPORT __declspec(dllexport)')
+    lines.append('#else')
+    lines.append('#define AERO_EXPORT __attribute__((visibility("default")))')
+    lines.append('#endif')
+    lines.append("")
     lines.append("namespace py = pybind11;")
     lines.append("")
 
@@ -140,7 +146,7 @@ def _generate_native_cpp(pkg_name: str, contracts: List[ContractEntry]) -> str:
             continue
         cpp_ret = _map_cpp_type(return_type)
         cpp_args = [f"{_map_cpp_type(t)} {a}" for a, t in args]
-        sig = f"{cpp_ret} {name}({', '.join(cpp_args)})"
+        sig = f'extern "C" AERO_EXPORT {cpp_ret} {name}({", ".join(cpp_args)})'
         function_signatures.append((name, sig))
         lines.append(f"{sig} {{")
         lines.append(_generate_function_body(name, args, return_type))
