@@ -16,12 +16,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from aero_forge.blueprint import (
+    ABIContract,
     Blueprint,
     ContractEntry,
     FunctionSpec,
     ManifestEntry,
     write_blueprint,
 )
+from aero_forge.scaffold.entrypoint_adapter import EntrypointAdapterEngine
 from aero_forge.builder.language_router import should_accelerate_with_native
 from aero_forge.scaffold.cargo_manifest import sanitize_crate_name
 from aero_forge.scaffold.cargo_runner import cargo_build
@@ -117,6 +119,76 @@ def _generate_stub_body(name: str, args: List[Tuple[str, str]], return_type: str
         return "    return None"
 
     return "    return None"
+
+
+def _abi_type_to_py(c_type: str) -> str:
+    """Map a C ABI type to a Python type annotation."""
+    t = (c_type or "").strip()
+    lowered = t.lower()
+    scalar_ints = {"u32", "i32", "usize", "int32_t", "i64", "u64", "int"}
+    scalar_floats = {"f64", "f32", "double", "float"}
+    if lowered in scalar_ints:
+        return "int"
+    if lowered in scalar_floats:
+        return "float"
+    if lowered in {"bool"}:
+        return "bool"
+    # Pointer types become lists of the pointed-to element type.
+    if lowered.endswith("*"):
+        inner = lowered.rstrip("*").strip()
+        if inner in {"float", "f32", "f64", "double"}:
+            return "list[float]"
+        if inner in {"int", "i32", "i64", "u32", "usize", "int32_t"}:
+            return "list[int]"
+        return "list"
+    if lowered.startswith("*const ") or lowered.startswith("*mut "):
+        inner = lowered.split(None, 1)[1]
+        if inner in {"float", "f32", "f64", "double"}:
+            return "list[float]"
+        if inner in {"int", "i32", "i64", "u32", "usize", "int32_t"}:
+            return "list[int]"
+        return "list"
+    return "Any"
+
+
+def _abi_io_to_py(io_list: List[Dict[str, str]]) -> List[Tuple[str, str]]:
+    return [(entry["name"], _abi_type_to_py(entry["type"])) for entry in io_list]
+
+
+def _abi_contract_to_contract_entry(abi: ABIContract) -> Optional[ContractEntry]:
+    """Convert an ABIContract into a Python-style ContractEntry signature."""
+    sig = abi.signature
+    inputs = sig.get("inputs", []) if isinstance(sig, dict) else []
+    outputs = sig.get("outputs", []) if isinstance(sig, dict) else []
+    if not inputs:
+        return None
+    args = _abi_io_to_py(inputs)
+    if not outputs:
+        return_type = "None"
+    elif len(outputs) == 1:
+        return_type = _abi_type_to_py(outputs[0]["type"])
+    else:
+        py_types = [_abi_type_to_py(o["type"]) for o in outputs]
+        return_type = f"tuple[{', '.join(py_types)}]"
+    arg_str = ", ".join(f"{name}: {typ}" for name, typ in args)
+    signature = f"def {abi.export_symbol}({arg_str}) -> {return_type}"
+    return ContractEntry(
+        name=abi.export_symbol,
+        signature=signature,
+        language=abi.target_language,
+        python_name=abi.export_symbol,
+        purpose=f"ABI contract for {abi.contract_id}",
+    )
+
+
+def _contracts_from_abi(abi_contracts: List[ABIContract]) -> List[ContractEntry]:
+    """Convert ABI contracts into synthesisable Python-style contract entries."""
+    entries: List[ContractEntry] = []
+    for abi in abi_contracts:
+        entry = _abi_contract_to_contract_entry(abi)
+        if entry:
+            entries.append(entry)
+    return entries
 
 
 def _synthesize_python_source(contracts: List[ContractEntry]) -> str:
@@ -664,6 +736,11 @@ class PolyglotMaterializer:
         pkg_name = _sanitize_module_name(project)
 
         contracts = list(blueprint.contracts) if blueprint.contracts else list(_DEFAULT_CONTRACTS)
+        if blueprint.abi_contracts:
+            abi_entries = _contracts_from_abi(blueprint.abi_contracts)
+            # Preserve explicit Python contracts while appending ABI-derived ones.
+            existing_names = {c.name for c in contracts}
+            contracts.extend(c for c in abi_entries if c.name not in existing_names)
 
         # If the blueprint includes C++ files, delegate to the C++ materializer so
         # header inclusion and shared-library linking are handled consistently.
@@ -740,7 +817,19 @@ class PolyglotMaterializer:
             rel = Path(entry.path)
             module_name = _module_for_rel(rel, packages)
 
-            if entry.lang == "python" and path.name == "orchestrator.py":
+            if entry.lang == "python" and path.name == "main.py":
+                if blueprint.execution_strategy is not None:
+                    strategy = blueprint.execution_strategy.model_dump()
+                    primary = strategy.get("primary_entrypoint", {})
+                    if primary.get("runtime") == "python3":
+                        strategy["primary_entrypoint"]["path"] = path.name
+                        EntrypointAdapterEngine(strategy, str(path.parent)).synthesize_root_entrypoint()
+                        content = path.read_text(encoding="utf-8")
+                    else:
+                        content = f"# {path.name} placeholder generated by aero-forge\n"
+                else:
+                    content = _render_python_module(contracts, crate_name, is_cli=True)
+            elif entry.lang == "python" and path.name == "orchestrator.py":
                 content = _render_orchestrator(contracts, crate_name)
             elif entry.lang == "python" and path.name == "__init__.py":
                 sibling = _sibling_module_for_init(entry, blueprint)

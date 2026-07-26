@@ -952,9 +952,15 @@ class CppPolyglotMaterializer:
 
     def materialize(self, blueprint: Blueprint, *, build: bool = False) -> Blueprint:
         """Write the C++ workspace files and optionally build the shared library."""
+        from aero_forge.scaffold.polyglot_materializer import _contracts_from_abi
+
         project = blueprint.project or "polyglot_cpp_project"
         pkg_name = _sanitize_module_name(project)
         contracts = list(blueprint.contracts) if blueprint.contracts else list(_DEFAULT_CONTRACTS)
+        if blueprint.abi_contracts:
+            abi_entries = _contracts_from_abi(blueprint.abi_contracts)
+            existing_names = {c.name for c in contracts}
+            contracts.extend(c for c in abi_entries if c.name not in existing_names)
         function_names = _function_names(contracts)
 
         # Ensure the acceleration log is wired so router telemetry is captured.

@@ -271,6 +271,8 @@ class Blueprint(BaseModel):
     constraints: Optional[str] = None
     languages: List[str] = Field(default_factory=list)
     features: List[str] = Field(default_factory=list)
+    execution_strategy: Optional[ExecutionStrategy] = None
+    abi_contracts: List[ABIContract] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_files(self) -> "Blueprint":
