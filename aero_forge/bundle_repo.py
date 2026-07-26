@@ -86,7 +86,8 @@ def _is_source_file(path: Path) -> bool:
         # Allow shebang scripts without an extension.
         if path.suffix == "":
             try:
-                first = path.read_bytes(16)
+                with open(path, "rb") as f:
+                    first = f.read(16)
             except OSError:
                 return False
             return first.startswith(b"#!")
