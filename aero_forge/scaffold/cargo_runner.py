@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Union
@@ -29,18 +30,119 @@ def _cargo_bin_dirs() -> List[Path]:
     return [p for p in candidates if p.is_dir()]
 
 
+def _toolchain_bin_dirs() -> List[Path]:
+    """Return candidate per-user toolchain bin directories that exist on disk."""
+    candidates = [Path.home() / ".cargo" / "bin", Path("/root/.cargo/bin"), Path("/usr/local/cargo/bin")]
+    return [p for p in candidates if p.is_dir()]
+
+
+def _is_rustup_cargo(cargo_path: Path) -> bool:
+    """Detect whether ``cargo`` is the Rustup shim installed under ``$CARGO_HOME/bin``."""
+    try:
+        return cargo_path.name == "cargo" and cargo_path.parent.name == "bin"
+    except Exception:
+        return False
+
+
 def _env_with_cargo(env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-    """Return an environment dict with ``~/.cargo/bin`` on PATH if cargo is missing."""
+    """Return an environment dict with Rust toolchain on PATH and rustup env set."""
     merged = dict(os.environ)
     if env:
         merged.update(env)
-    if shutil.which("cargo", path=merged.get("PATH")):
-        return merged
-    extra = [str(p) for p in _cargo_bin_dirs()]
-    if extra:
-        merged["PATH"] = os.pathsep.join([*extra, merged.get("PATH", "")])
-        logger.debug("Prepending Rust toolchain directories to PATH: %s", extra)
+    if not shutil.which("cargo", path=merged.get("PATH")):
+        extra = [str(p) for p in _toolchain_bin_dirs()]
+        if extra:
+            merged["PATH"] = os.pathsep.join([*extra, merged.get("PATH", "")])
+            logger.debug("Prepending Rust toolchain directories to PATH: %s", extra)
+
+    cargo = shutil.which("cargo", path=merged.get("PATH"))
+    if cargo and _is_rustup_cargo(Path(cargo)):
+        cargo_home = Path(cargo).parent.parent
+        if not merged.get("CARGO_HOME"):
+            merged["CARGO_HOME"] = str(cargo_home)
+        if not merged.get("RUSTUP_HOME"):
+            rustup_home = cargo_home.parent / ".rustup"
+            if rustup_home.is_dir():
+                merged["RUSTUP_HOME"] = str(rustup_home)
     return merged
+
+
+def _bootstrap_rust(env: Dict[str, str]) -> Dict[str, str]:
+    """Install a minimal stable Rust toolchain into an isolated directory."""
+    if os.environ.get("AERO_FORGE_NO_RUST_BOOTSTRAP"):
+        return env
+    rust_dir = Path.home() / ".aero_forge" / "toolchains" / "rust"
+    rust_dir.mkdir(parents=True, exist_ok=True)
+    cargo_home = rust_dir / "cargo"
+    rustup_home = rust_dir / "rustup"
+    bin_dir = cargo_home / "bin"
+
+    env = dict(env)
+    env["CARGO_HOME"] = str(cargo_home)
+    env["RUSTUP_HOME"] = str(rustup_home)
+    env["PATH"] = os.pathsep.join([str(bin_dir), env.get("PATH", "")])
+
+    if (bin_dir / "cargo").is_file():
+        logger.debug("Using previously bootstrapped Rust toolchain at %s", rust_dir)
+        return env
+
+    logger.warning("Rust toolchain not found; bootstrapping rustup into %s", rust_dir)
+    with tempfile.NamedTemporaryFile(mode="wb", suffix=".sh", delete=False) as f:
+        script_path = Path(f.name)
+        try:
+            subprocess.run(
+                ["curl", "--proto", "=https", "--tlsv1.2", "-sSf", "https://sh.rustup.rs"],
+                stdout=f,
+                check=True,
+                timeout=120,
+            )
+        except Exception:
+            f.close()
+            import urllib.request
+            with urllib.request.urlopen("https://sh.rustup.rs", timeout=120) as resp:
+                script_path.write_bytes(resp.read())
+
+    install_env = dict(env)
+    install_env.pop("CARGO_TARGET_DIR", None)
+    result = subprocess.run(
+        ["sh", str(script_path), "-y", "--default-toolchain", "stable", "--profile", "minimal"],
+        env=install_env,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+    script_path.unlink(missing_ok=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Rust toolchain bootstrap failed (exit {result.returncode}):\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+
+    if not (bin_dir / "cargo").is_file():
+        subprocess.run(
+            [str(bin_dir / "rustup"), "toolchain", "install", "stable"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+    return env
+
+
+def ensure_rust_toolchain(env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Return an env dict with cargo/rustc available, bootstrapping if necessary."""
+    env = _env_with_cargo(env)
+    if shutil.which("cargo", path=env.get("PATH")) and shutil.which("rustc", path=env.get("PATH")):
+        return env
+    if os.environ.get("AERO_FORGE_NO_RUST_BOOTSTRAP"):
+        return env
+    try:
+        return _bootstrap_rust(env)
+    except Exception:
+        logger.exception("Rust toolchain bootstrap failed")
+        return env
 
 
 # Network / IO failure patterns that warrant a retry or offline fallback.
@@ -100,32 +202,47 @@ def run_cargo(
     workdir = Path(cwd).resolve()
     write_cargo_config(workdir)
 
-    base_env = _env_with_cargo(env)
+    base_env = ensure_rust_toolchain(env)
 
     str_command = [str(arg) for arg in command]
     if not str_command or str_command[0] != "cargo":
         str_command = ["cargo", *str_command]
 
-    last_error: Optional[str] = None
-    for attempt in range(1, retries + 1):
-        logger.info("Running %s (attempt %d/%d) in %s", " ".join(str_command), attempt, retries, workdir)
+    def _run(cmd: List[str]) -> subprocess.CompletedProcess[str]:
         try:
-            result = subprocess.run(
-                str_command,
+            return subprocess.run(
+                cmd,
                 cwd=workdir,
                 env=base_env,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
             )
+        except FileNotFoundError as exc:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=127,
+                stdout="",
+                stderr=f"Cargo command not found: {exc}",
+            )
+
+    last_error: Optional[str] = None
+    for attempt in range(1, retries + 1):
+        logger.info("Running %s (attempt %d/%d) in %s", " ".join(str_command), attempt, retries, workdir)
+        try:
+            result = _run(str_command)
         except subprocess.TimeoutExpired as exc:
             last_error = f"Cargo command timed out after {exc.timeout}s"
             logger.warning("%s; retrying...", last_error)
-            time.sleep(retry_delay)
+            if attempt < retries:
+                time.sleep(retry_delay)
             continue
 
+        if result.returncode == 0:
+            return result
+
         combined = f"{result.stdout}\n{result.stderr}".strip()
-        if result.returncode == 0 or not _looks_like_network_failure(combined):
+        if not _looks_like_network_failure(combined):
             return result
 
         last_error = combined
@@ -139,21 +256,22 @@ def run_cargo(
         if cache_registry.is_dir() and any(cache_registry.rglob("*.crate")):
             offline_command = [*str_command, "--offline"]
             logger.info("Retrying with --offline: %s", " ".join(offline_command))
-            offline_result = subprocess.run(
-                offline_command,
-                cwd=workdir,
-                env=base_env,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
+            offline_result = _run(offline_command)
             offline_combined = f"{offline_result.stdout}\n{offline_result.stderr}".strip()
             if offline_result.returncode == 0:
                 return offline_result
             if not _looks_like_network_failure(offline_combined):
-                # Offline attempt failed for a non-network reason; preserve that log.
                 return offline_result
             logger.warning("Offline fallback also failed: %s", offline_combined[:500])
+
+    # Emit verbose diagnostics for the failing command so the UI can surface
+    # the exact compiler output instead of a generic "use --verbose" message.
+    if str_command and str_command[0] == "cargo" and last_error is not None:
+        verbose_command = [*str_command, "-v"]
+        logger.info("Re-running with verbose output: %s", " ".join(verbose_command))
+        verbose_result = _run(verbose_command)
+        if verbose_result.returncode != 0:
+            return verbose_result
 
     assert last_error is not None
     logger.error("Cargo command failed after %d attempts: %s", retries, last_error[:500])
