@@ -281,7 +281,18 @@ class Sandbox:
             shutil.copy(self.source, self.source_in_sandbox)
         for test_path in self.test_paths:
             if test_path and test_path.is_file():
-                shutil.copy(test_path, self.root / test_path.name)
+                # Preserve the directory layout when the test is inside a known
+                # project root so nested src/**/tests/ suites stay importable.
+                if (
+                    self.project_root
+                    and test_path.is_relative_to(self.project_root)
+                ):
+                    rel = test_path.relative_to(self.project_root)
+                    dest = self.root / rel
+                else:
+                    dest = self.root / test_path.name
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(test_path, dest)
         for extra in self.extra_files:
             if extra.is_file():
                 shutil.copy(extra, self.root / extra.name)
@@ -300,10 +311,15 @@ class Sandbox:
             }
 
         cmd = [sys.executable, "-m", "pytest", str(self.root), "-v"]
+        test_env = os.environ.copy()
+        test_env["PYTHONPATH"] = (
+            f"{self.root}{os.pathsep}{test_env.get('PYTHONPATH', '')}"
+        ).strip(os.pathsep)
         try:
             result = subprocess.run(
                 cmd,
                 cwd=self.root,
+                env=test_env,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
@@ -344,9 +360,14 @@ class Sandbox:
             "test_*.py",
             "-v",
         ]
+        test_env = os.environ.copy()
+        test_env["PYTHONPATH"] = (
+            f"{self.root}{os.pathsep}{test_env.get('PYTHONPATH', '')}"
+        ).strip(os.pathsep)
         result = subprocess.run(
             cmd,
             cwd=self.root,
+            env=test_env,
             capture_output=True,
             text=True,
             timeout=timeout,

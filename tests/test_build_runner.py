@@ -439,6 +439,46 @@ def test_build_task_dag_topological_order(tmp_path: Path):
     not shutil.which("cargo") or not shutil.which("rustc"),
     reason="Rust toolchain not installed",
 )
+def test_build_runner_discovers_nested_tests(tmp_path):
+    """Nested src/**/tests/ files are discovered and executed."""
+    source = tmp_path / "src" / "accelerator" / "core.py"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    nested_test = tmp_path / "src" / "accelerator" / "tests" / "test_core.py"
+    nested_test.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "def square(n: int) -> int:\n"
+        "    return n * n\n"
+    )
+    nested_test.write_text(
+        "from core import square\n"
+        "def test_square():\n"
+        "    assert square(3) == 9\n"
+    )
+    blueprint_path = tmp_path / "blueprint.aero"
+    blueprint_path.write_text(
+        "project: nested_test\n"
+        "functions:\n"
+        "  - file: src/accelerator/core.py\n"
+        "    name: square\n"
+        "llm:\n"
+        "  provider: none\n"
+        "output_dir: ./dist\n"
+    )
+
+    bp = parse_blueprint(blueprint_path)
+    runner = BuildRunner(bp, max_workers=1, cache_enabled=False)
+    result = runner.build()
+
+    assert result["success"] is True
+    # One function compiled and one nested test passed.
+    assert result["passed"] == 1
+    assert result["results"][0]["test_passed"] >= 1
+
+
+@pytest.mark.skipif(
+    not shutil.which("cargo") or not shutil.which("rustc"),
+    reason="Rust toolchain not installed",
+)
 def test_build_runner_dag_skips_unchanged_files(tmp_path: Path):
     """The DAG runner should bypass recompilation when source inputs are unchanged."""
     source = tmp_path / "calc.py"
