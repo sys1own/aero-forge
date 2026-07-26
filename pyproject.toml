@@ -33,6 +33,7 @@ aero-forge = "aero_forge.cli:main"
 testpaths = ["tests", "stress_tests/test_stress.py", "stress_tests/test_llm_rate_limits.py"]
 markers = [
     "integration: marks tests that compile or run external tooling",
+    "slow: marks tests that may be slow to run",
 ]
 
 [tool.setuptools.packages.find]

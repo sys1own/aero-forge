@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -33,6 +34,7 @@ from aero_forge.builder import (
     struct,
 )
 from aero_forge.builder.emitters.base import EmitterError
+from aero_forge.builder.language_router import is_cpp_friendly, should_accelerate_with_native
 
 
 @pytest.fixture
@@ -353,3 +355,70 @@ def test_polyglot_materializer_builds_shared_object(tmp_path: Path) -> None:
     assert any(f.name == "fast_vector_transform" for f in updated.functions)
     assert any(f.name == "get_engine_status" for f in updated.functions)
     assert any(f.name == "PolyglotEngine" for f in updated.functions)
+
+
+def test_language_router_cpp_heuristic() -> None:
+    numeric_loop = "def sum_even(n: int) -> int:\n    total = 0\n    for i in range(n + 1):\n        if i % 2 == 0:\n            total += i\n    return total\n"
+    assert should_accelerate_with_native(numeric_loop)
+    assert is_cpp_friendly(numeric_loop)
+
+    io_code = "def greet(name: str) -> str:\n    return 'hello ' + name\n"
+    assert not is_cpp_friendly(io_code)
+    assert not should_accelerate_with_native(io_code)
+
+    numpy_code = "import numpy as np\ndef vector_dot(a, b):\n    return float(np.dot(a, b))\n"
+    assert not is_cpp_friendly(numpy_code)
+
+
+@pytest.mark.integration
+def test_cpp_c_abi_shared_object(tmp_path: Path) -> None:
+    """End-to-end: generate C-ABI source, compile it, and call the .so via ctypes."""
+    import shutil
+    import subprocess
+
+    from aero_forge.builder.emitters.cpp_emitter import CppEmitter
+    from aero_forge.native_bridge import _ctypes_loader_source
+
+    source = """
+def sum_even(n: int) -> int:
+    total = 0
+    for i in range(n + 1):
+        if i % 2 == 0:
+            total += i
+    return total
+"""
+    spec = spec_from_python(source, name="sum_even")
+    cpp = CppEmitter(c_abi=True).emit(spec)
+    assert 'extern "C"' in cpp
+    assert "AERO_EXPORT" in cpp
+
+    cpp_path = tmp_path / "native.cpp"
+    so_path = tmp_path / "libsum_even.so"
+    cpp_path.write_text(cpp, encoding="utf-8")
+
+    compiler = _find_cpp_compiler() or "g++"
+    result = subprocess.run(
+        [compiler, "-shared", "-fPIC", "-O2", "-std=c++17", "-o", str(so_path), str(cpp_path)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert so_path.is_file()
+
+    loader_source = _ctypes_loader_source(source, so_path, ["sum_even"])
+    loader_path = tmp_path / "loader.py"
+    loader_path.write_text(loader_source, encoding="utf-8")
+    import importlib.util
+    spec_loader = importlib.util.spec_from_file_location("cpp_loader", loader_path)
+    assert spec_loader is not None
+    mod = importlib.util.module_from_spec(spec_loader)
+    spec_loader.loader.exec_module(mod)
+    assert mod.sum_even(10) == 30
+    assert mod.sum_even(100) == 2550
+
+
+def _find_cpp_compiler() -> str | None:
+    for name in ["g++", "clang++", "c++"]:
+        if shutil.which(name):
+            return name
+    return None
