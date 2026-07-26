@@ -363,6 +363,28 @@ def _assertion_for_call(call: str, returns: Optional[ast.AST]) -> str:
     return f"    result = {call}\n    assert result is not None"
 
 
+def _find_repl_commands(tree: ast.AST) -> List[Tuple[str, str]]:
+    """Return [(class_name, do_command_name)] for cmd.Cmd subclasses in *tree*."""
+    repls: List[Tuple[str, str]] = []
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        is_cmd = False
+        for base in node.bases:
+            if isinstance(base, ast.Name) and base.id == "Cmd":
+                is_cmd = True
+            elif isinstance(base, ast.Attribute) and base.attr == "Cmd":
+                is_cmd = True
+            elif isinstance(base, ast.Name) and base.id == "cmd":
+                is_cmd = True
+        if not is_cmd:
+            continue
+        for member in node.body:
+            if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name.startswith("do_"):
+                repls.append((node.name, member.name[3:]))
+    return repls
+
+
 def generate_smoke_tests(implementation: str, module_name: str = "generated") -> str:
     """Generate pytest smoke tests from the implementation when none were provided.
 
@@ -371,6 +393,9 @@ def generate_smoke_tests(implementation: str, module_name: str = "generated") ->
     For statistical / anomaly-detection functions, the generated tests use
     outlier-rich fixtures, soft ``math.isclose`` assertions, and deterministic
     parity checks instead of fragile exact scalar comparisons.
+
+    If the source contains a ``cmd.Cmd`` REPL class, also generate tests that
+    instantiate the shell and call ``onecmd(...)`` programmatically.
     """
     try:
         tree = ast.parse(implementation)
@@ -378,6 +403,22 @@ def generate_smoke_tests(implementation: str, module_name: str = "generated") ->
         return ""
 
     test_lines: List[str] = []
+
+    repl_commands = _find_repl_commands(tree)
+    if repl_commands:
+        classes = sorted({cls for cls, _ in repl_commands})
+        class_name = classes[0]
+        commands = [cmd for cls, cmd in repl_commands if cls == class_name]
+        test_lines.append("import io")
+        test_lines.append("import sys")
+        test_lines.append("")
+        test_lines.append(f"from {module_name} import {class_name}")
+        test_lines.append("")
+        for cmd in commands:
+            test_lines.append(f"def test_repl_{cmd}():\n    shell = {class_name}()\n    shell.onecmd('{cmd}')\n")
+        test_lines.append(f"def test_repl_quit():\n    shell = {class_name}()\n    assert shell.onecmd('quit') is True\n")
+        test_lines.append("")
+
     for item in tree.body:
         if not isinstance(item, ast.FunctionDef):
             continue
