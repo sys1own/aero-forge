@@ -69,18 +69,19 @@ def test_blueprint_orchestrator_emits_hybrid_workspace(tmp_path):
         "Cargo.toml",
         "rust_core/Cargo.toml",
         "rust_core/src/lib.rs",
-        "python_engine/pyproject.toml",
-        "python_engine/src/python_engine/__init__.py",
-        "python_engine/service.py",
-        "python_engine/bench.py",
+        "pyproject.toml",
+        "service.py",
+        "bench.py",
     ]:
         assert (tmp_path / declared).is_file(), f"missing {declared}"
 
     # The exported Python wrapper should exist and re-export the primary function.
-    primary_file = tmp_path / "python_engine" / "src" / "python_engine" / f"{result['primary_function']}.py"
+    pkg_dir = tmp_path / "add_engine"
+    assert pkg_dir.is_dir(), f"missing package directory {pkg_dir}"
+    primary_file = pkg_dir / f"{result['primary_function']}.py"
     assert primary_file.is_file()
 
-    init_file = tmp_path / "python_engine" / "src" / "python_engine" / "__init__.py"
+    init_file = pkg_dir / "__init__.py"
     init_text = init_file.read_text(encoding="utf-8")
     assert result["primary_function"] in init_text
 
@@ -100,8 +101,8 @@ def test_plan_workspace_detects_hybrid_rust_python(tmp_path: Path) -> None:
     assert "Cargo.toml" in paths
     assert "rust_core/Cargo.toml" in paths
     assert "rust_core/src/lib.rs" in paths
-    assert "python_engine/pyproject.toml" in paths
-    assert "python_engine/src/python_engine/__init__.py" in paths
+    assert "pyproject.toml" in paths
+    assert "aero_test/__init__.py" in paths
 
 
 def test_plan_workspace_rejects_pure_python_for_polyglot_prompt(tmp_path: Path) -> None:
@@ -147,7 +148,7 @@ def test_plan_workspace_detects_batch_processing_polyglot(tmp_path: Path) -> Non
     assert "cargo" in blueprint.toolchains
     paths = {entry.path for entry in blueprint.manifest}
     assert "rust_core/src/lib.rs" in paths
-    assert "python_engine/src/python_engine/__init__.py" in paths
+    assert "batch_processor/__init__.py" in paths
 
 
 def test_orchestrate_hybrid_rust_python_builds(tmp_path: Path) -> None:

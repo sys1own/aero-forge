@@ -200,7 +200,12 @@ def _function_impl(name: str, args: List[Tuple[str, str]], return_type: str) -> 
     )
 
 
-def _render_python_module(contracts: List[ContractEntry], module_name: str) -> str:
+def _render_python_module(
+    contracts: List[ContractEntry],
+    module_name: str,
+    *,
+    is_cli: bool = False,
+) -> str:
     """Render a Python module that delegates to a compiled Rust extension."""
     lines: List[str] = [
         "from __future__ import annotations",
@@ -221,6 +226,11 @@ def _render_python_module(contracts: List[ContractEntry], module_name: str) -> s
         lines.append("__all__ = [" + ", ".join(f'"{n}"' for n in names) + "]")
     else:
         lines.append('__all__: list[str] = []')
+    if is_cli:
+        lines.append("")
+        lines.append('def main() -> int:')
+        lines.append(f'    print("{module_name} CLI ready")')
+        lines.append('    return 0')
     return "\n".join(lines) + "\n"
 
 
@@ -305,13 +315,19 @@ def _render_init(module: str, exports: List[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _module_uses_engine(exports_module: str) -> bool:
+    """Return True if *exports_module* points to an orchestrator class module."""
+    return exports_module.endswith(".orchestrator") or exports_module == "orchestrator"
+
+
 def _render_demo(exports_module: str, contracts: List[ContractEntry]) -> str:
     names = [c.name for c in contracts if c.signature]
     if not names:
         return "if __name__ == \"__main__\":\n    pass\n"
-    if exports_module == "aero_polyglot_runner.orchestrator":
+    uses_engine = _module_uses_engine(exports_module)
+    if uses_engine:
         lines = [
-            "from aero_polyglot_runner.orchestrator import PolyglotEngine",
+            f"from {exports_module} import PolyglotEngine",
             "",
             "def main() -> None:",
             "    engine = PolyglotEngine()",
@@ -342,14 +358,68 @@ def _render_demo(exports_module: str, contracts: List[ContractEntry]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _render_run_shell(cli_module: str) -> str:
+    """Render a launch script that calls the package CLI main()."""
+    return (
+        "import sys\n"
+        f"from {cli_module} import main\n"
+        "\n"
+        'if __name__ == "__main__":\n'
+        "    sys.exit(main() or 0)\n"
+    )
+
+
+def _render_cli(exports_module: str, contracts: List[ContractEntry]) -> str:
+    """Render a lightweight CLI module importing functions from *exports_module*."""
+    names = [c.name for c in contracts if c.signature]
+    if not names:
+        return "def main():\n    print('No CLI commands defined')\n    return 0\n"
+    lines = [f"from {exports_module} import {', '.join(names)}", ""]
+    for contract in contracts:
+        if not contract.signature:
+            continue
+        try:
+            name, args, return_type = _parse_signature(contract.signature)
+        except Exception:
+            continue
+        arg_values = []
+        for _, t in args:
+            if "list" in t.lower():
+                arg_values.append("[1.0, 2.0]")
+            elif t.lower() in ("float", "f64"):
+                arg_values.append("1.0")
+            elif t.lower() in ("int", "i64"):
+                arg_values.append("1")
+            elif t.lower() == "str":
+                arg_values.append('"x"')
+            else:
+                arg_values.append("None")
+        lines.append(f"def {name}_cmd() -> None:")
+        if name == "fast_vector_transform":
+            lines.append(f"    print({name}([1.0, 2.0, 3.0], 2.0))")
+        elif name == "get_engine_status":
+            lines.append(f"    print({name}())")
+        else:
+            lines.append(f"    print({name}({', '.join(arg_values)}))")
+        lines.append("")
+    lines.append("def main() -> int:")
+    lines.append('    print("CLI ready")')
+    for name in names:
+        lines.append(f"    {name}_cmd()")
+    lines.append("    return 0")
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
 def _render_tests(exports_module: str, contracts: List[ContractEntry]) -> str:
     names = [c.name for c in contracts if c.signature]
     if not names:
         return "def test_placeholder():\n    pass\n"
 
-    if exports_module == "aero_polyglot_runner.orchestrator":
+    uses_engine = _module_uses_engine(exports_module)
+    if uses_engine:
         lines = [
-            "from aero_polyglot_runner.orchestrator import PolyglotEngine",
+            f"from {exports_module} import PolyglotEngine",
             "",
             "def test_engine_instantiates():",
             "    assert PolyglotEngine() is not None",
@@ -369,7 +439,6 @@ def _render_tests(exports_module: str, contracts: List[ContractEntry]) -> str:
         except Exception:
             continue
 
-        uses_engine = exports_module == "aero_polyglot_runner.orchestrator"
         prefix = "engine." if uses_engine else ""
         setup = "engine = PolyglotEngine()" if uses_engine else ""
 
@@ -455,9 +524,10 @@ def _find_manifest_entries(blueprint: Blueprint) -> Dict[str, ManifestEntry]:
     return {Path(e.path).name.lower(): e for e in blueprint.manifest}
 
 
-def _sibling_module_for_init(init_entry: ManifestEntry, blueprint: Blueprint) -> Optional[str]:
-    """Return a sibling .py module name that the package ``__init__.py`` can re-export."""
+def _sibling_module_for_init(init_entry: ManifestEntry, blueprint: Blueprint) -> Optional[Tuple[str, List[str]]]:
+    """Return a sibling .py module name and exports for a package ``__init__.py``."""
     init_dir = Path(init_entry.path).parent
+    candidates = []
     for e in blueprint.manifest:
         p = Path(e.path)
         if (
@@ -466,7 +536,88 @@ def _sibling_module_for_init(init_entry: ManifestEntry, blueprint: Blueprint) ->
             and p.name != "__init__.py"
             and not p.name.startswith("test_")
         ):
-            return p.stem
+            candidates.append(p)
+    if not candidates:
+        return None
+    names = [c.name for c in blueprint.contracts if c.signature]
+    # Prefer a native/orchestrator wrapper, then any implementation module.
+    for p in candidates:
+        if p.name == "orchestrator.py":
+            return (p.stem, ["PolyglotEngine"])
+        if p.name == "native.py":
+            return (p.stem, names)
+    return (candidates[0].stem, names)
+
+
+def _package_modules(blueprint: Blueprint) -> Dict[Path, str]:
+    """Map package directories to their dotted Python module names."""
+    packages: Dict[Path, str] = {}
+    for e in blueprint.manifest:
+        p = Path(e.path)
+        if p.name == "__init__.py":
+            packages[p.parent] = ".".join(p.parent.parts)
+    return packages
+
+
+def _module_for_rel(rel: Path, packages: Dict[Path, str]) -> str:
+    """Return the dotted module name for a manifest file path."""
+    for pkg_dir, module in packages.items():
+        try:
+            sub = rel.relative_to(pkg_dir)
+        except ValueError:
+            continue
+        parts = list(sub.parts[:-1]) + [rel.stem]
+        if parts == [rel.stem]:
+            return f"{module}.{rel.stem}"
+        return ".".join([module] + parts)
+    return rel.stem
+
+
+def _resolve_test_target(
+    rel: Path,
+    blueprint: Blueprint,
+    packages: Dict[Path, str],
+    pkg_name: str,
+) -> str:
+    """Return the module a test file should import from."""
+    stem = rel.stem
+    target_stem = stem[5:] if stem.startswith("test_") else stem
+    # Look for an implementation module with the same name inside any package.
+    for e in blueprint.manifest:
+        p = Path(e.path)
+        if p.suffix == ".py" and p.stem == target_stem and not p.name.startswith("test_"):
+            return _module_for_rel(p, packages)
+    # Fall back to the package's orchestrator or root module.
+    for e in blueprint.manifest:
+        if Path(e.path).name == "orchestrator.py":
+            return _module_for_rel(Path(e.path), packages)
+    return pkg_name
+
+
+def _resolve_cli_module(
+    blueprint: Blueprint,
+    packages: Dict[Path, str],
+    pkg_name: str,
+) -> str:
+    """Return the module a launcher script should import ``main`` from."""
+    for e in blueprint.manifest:
+        if Path(e.path).name == "cli.py":
+            return _module_for_rel(Path(e.path), packages)
+    for e in blueprint.manifest:
+        if Path(e.path).name == "orchestrator.py":
+            return _module_for_rel(Path(e.path), packages)
+    return pkg_name
+
+
+def _has_native_module(
+    blueprint: Blueprint,
+    packages: Dict[Path, str],
+    pkg_name: str,
+) -> Optional[str]:
+    """Return the dotted module name of a native wrapper if one exists."""
+    for e in blueprint.manifest:
+        if Path(e.path).name == "native.py":
+            return _module_for_rel(Path(e.path), packages)
     return None
 
 
@@ -486,7 +637,7 @@ class PolyglotMaterializer:
     ) -> Blueprint:
         """Create every missing file declared in *blueprint* and return the updated blueprint."""
         project = blueprint.project or "polyglot_project"
-        crate_name = sanitize_crate_name(project)
+        crate_name = f"aero_forge_native_{sanitize_crate_name(project)}"
         pkg_name = _sanitize_module_name(project)
 
         contracts = list(blueprint.contracts) if blueprint.contracts else list(_DEFAULT_CONTRACTS)
@@ -535,6 +686,9 @@ class PolyglotMaterializer:
         contracts: List[ContractEntry],
     ) -> None:
         """Generate missing Python, TOML, and README files declared in the manifest."""
+        packages = _package_modules(blueprint)
+        native_module = _has_native_module(blueprint, packages, pkg_name)
+
         for entry in blueprint.manifest:
             path = self.workspace / entry.path
             if path.exists():
@@ -542,35 +696,40 @@ class PolyglotMaterializer:
 
             content: Optional[str] = None
             rel = Path(entry.path)
+            module_name = _module_for_rel(rel, packages)
 
             if entry.lang == "python" and path.name == "orchestrator.py":
                 content = _render_orchestrator(contracts, crate_name)
             elif entry.lang == "python" and path.name == "__init__.py":
-                if rel.parts[0] == "aero_polyglot_runner":
-                    content = _render_init("orchestrator", ["PolyglotEngine"])
+                sibling = _sibling_module_for_init(entry, blueprint)
+                if sibling:
+                    module, exports = sibling
                 else:
-                    module = _sibling_module_for_init(entry, blueprint) or pkg_name
-                    content = _render_init(module, [c.name for c in contracts])
+                    module, exports = pkg_name, [c.name for c in contracts]
+                content = _render_init(module, exports)
             elif entry.lang == "python" and path.name.endswith(".py"):
                 if "test" in path.name:
-                    if "aero_polyglot_runner" in rel.parts or rel.parts[0] == "tests":
-                        content = _render_tests("aero_polyglot_runner.orchestrator", contracts)
+                    exports = _resolve_test_target(rel, blueprint, packages, pkg_name)
+                    content = _render_tests(exports, contracts)
+                elif path.name.startswith("run_"):
+                    cli_module = _resolve_cli_module(blueprint, packages, pkg_name)
+                    if _module_uses_engine(cli_module):
+                        content = _render_demo(cli_module, contracts)
                     else:
-                        content = _render_tests(pkg_name, contracts)
-                elif path.name == "run_demo.py":
-                    if "aero_polyglot_runner" in rel.parts:
-                        content = _render_demo("aero_polyglot_runner.orchestrator", contracts)
+                        content = _render_run_shell(cli_module)
+                elif path.name == "cli.py":
+                    if native_module:
+                        content = _render_cli(native_module, contracts)
                     else:
-                        content = _render_demo(pkg_name, contracts)
+                        content = _render_python_module(contracts, crate_name, is_cli=True)
                 elif path.name in ("service.py", "bench.py"):
                     content = f"# {path.name} placeholder generated by aero-forge\n"
+                elif path.name == "native.py":
+                    content = _render_python_module(contracts, crate_name)
                 else:
                     content = _render_python_module(contracts, crate_name)
             elif entry.lang == "toml" and path.name == "pyproject.toml":
-                if rel.parts[0] == "python_engine":
-                    content = _render_pyproject(pkg_name, package_dir="src")
-                else:
-                    content = _render_pyproject(pkg_name, package_dir=".")
+                content = _render_pyproject(pkg_name, package_dir=".")
             elif entry.lang == "toml" and path.name == "Cargo.toml":
                 continue
             elif entry.lang == "markdown":
@@ -648,27 +807,29 @@ class PolyglotMaterializer:
         by_name = _find_manifest_entries(blueprint)
 
         lib_entry = by_name.get("lib.rs")
-        test_entry = next(
-            (e for e in blueprint.manifest if e.path.endswith(".py") and "test" in e.path),
-            None,
-        )
+        native_entry = by_name.get("native.py")
         orchestrator_entry = next(
-            (e for e in blueprint.manifest if "orchestrator" in e.path and e.path.endswith(".py")),
+            (e for e in blueprint.manifest if e.path.endswith("orchestrator.py")),
             None,
         )
+        test_entries = [
+            e for e in blueprint.manifest if e.path.endswith(".py") and "test" in e.path
+        ]
+        test_paths = [self.workspace / e.path for e in test_entries]
+
+        # Each contract is implemented by the Rust core; the Python wrapper is a
+        # thin native loader. Prefer native.py / orchestrator.py over lib.rs when
+        # the manifest declares a Python entry point.
+        impl_entry = native_entry or orchestrator_entry or lib_entry
 
         functions: List[FunctionSpec] = []
-
-        if lib_entry:
+        if impl_entry:
             for contract in contracts:
-                tests: List[Path] = []
-                if test_entry:
-                    tests.append(self.workspace / test_entry.path)
                 functions.append(
                     FunctionSpec(
-                        file=self.workspace / lib_entry.path,
+                        file=self.workspace / impl_entry.path,
                         name=contract.name,
-                        tests=tests,
+                        tests=list(test_paths),
                         skip_build=True,
                     )
                 )
@@ -678,7 +839,18 @@ class PolyglotMaterializer:
                 FunctionSpec(
                     file=self.workspace / orchestrator_entry.path,
                     name="PolyglotEngine",
-                    tests=[self.workspace / test_entry.path] if test_entry else [],
+                    tests=list(test_paths),
+                    skip_build=True,
+                )
+            )
+
+        cli_entry = by_name.get("cli.py")
+        if cli_entry:
+            functions.append(
+                FunctionSpec(
+                    file=self.workspace / cli_entry.path,
+                    name="main",
+                    tests=list(test_paths),
                     skip_build=True,
                 )
             )

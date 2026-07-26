@@ -74,6 +74,16 @@ def build_blueprint_plan_prompt(
     ``hybrid_rust_python`` blueprint whenever the user intent involves both
     Python and Rust/PyO3/Maturin/FFI, and includes a concrete few-shot example.
     """
+    import re
+
+    explicit_files = re.findall(r"\b[A-Za-z_][\w/]*\.py\b", prompt)
+    explicit_files_section = (
+        "\n".join(["Explicitly requested files (include these exact paths in the manifest):"]
+                   + [f"  - {f}" for f in explicit_files])
+        if explicit_files
+        else ""
+    )
+
     parts = [
         BLUEPRINT_PLAN_INSTRUCTIONS,
         "",
@@ -88,9 +98,10 @@ def build_blueprint_plan_prompt(
         f"Project: {project_name}",
         f"Prompt: {prompt}",
         f"Constraints: {constraints or 'none'}",
-        "",
-        "Return ONLY the YAML blueprint.aero. No markdown fences, no explanation.",
     ]
+    if explicit_files_section:
+        parts.extend(["", explicit_files_section])
+    parts.extend(["", "Return ONLY the YAML blueprint.aero. No markdown fences, no explanation."])
     if correction_context:
         parts.extend(
             [

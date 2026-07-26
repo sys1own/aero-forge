@@ -99,12 +99,10 @@ def _default_pyproject(
         'requires-python = ">=3.9"\n'
         f"{deps_block}\n"
         "[tool.setuptools]\n"
-        'package-dir = {"" = "src"}\n'
         f'packages = ["{package_name}"]\n\n'
         "[tool.setuptools.package-data]\n"
         f'{package_name} = ["*.so"]\n\n'
         "[tool.pytest.ini_options]\n"
-        'pythonpath = ["src"]\n'
         'testpaths = ["tests"]\n'
     )
 
@@ -263,11 +261,17 @@ def _run_cargo_build(crate_dir: Path) -> subprocess.CompletedProcess:
     return cargo_build(crate_dir, release=True, timeout=600)
 
 
-def _run_pytest(python_engine_dir: Path) -> subprocess.CompletedProcess:
-    logger.info("Running Python tests in %s", python_engine_dir)
+def _run_pytest(project_root: Path) -> subprocess.CompletedProcess:
+    """Run the generated pytest suite from the project root."""
+    logger.info("Running Python tests in %s", project_root)
+    env = dict(os.environ)
+    env["PYTHONPATH"] = (
+        f"{project_root}{os.pathsep}{env.get('PYTHONPATH', '')}"
+    ).strip(os.pathsep)
     return subprocess.run(
-        ["python", "-m", "pytest", "tests", "-q"],
-        cwd=python_engine_dir,
+        ["python", "-m", "pytest", str(project_root), "-q"],
+        cwd=project_root,
+        env=env,
         capture_output=True,
         text=True,
         timeout=300,
@@ -404,18 +408,20 @@ def generate_monorepo(
     if progress_callback:
         progress_callback("Packaging monorepo...")
 
-    package_name = "python_engine"
     safe_project = _sanitize_name(project_name)
+    package_name = safe_project
 
     rust_dir = output_dir / "rust_core"
-    python_dir = output_dir / "python_engine"
-    pkg_dir = python_dir / "src" / package_name
+    python_dir = output_dir
+    pkg_dir = python_dir / package_name
     tests_dir = python_dir / "tests"
 
     if rust_dir.exists():
         shutil.rmtree(rust_dir)
-    if python_dir.exists():
-        shutil.rmtree(python_dir)
+    if pkg_dir.exists():
+        shutil.rmtree(pkg_dir)
+    if tests_dir.exists():
+        shutil.rmtree(tests_dir)
 
     shutil.copytree(crate_dir, rust_dir)
     pkg_dir.mkdir(parents=True, exist_ok=True)
@@ -476,7 +482,7 @@ def generate_monorepo(
         "## Build\n\n"
         "```bash\n"
         "cd rust_core && cargo build --release\n"
-        "cd ../python_engine && python -m pytest tests -q\n"
+        "python -m pytest tests -q\n"
         "```\n",
         encoding="utf-8",
     )
@@ -531,13 +537,13 @@ def generate_monorepo(
         ManifestEntry(path="README.md", lang="markdown", purpose="Project README"),
         ManifestEntry(path="rust_core/Cargo.toml", lang="toml", purpose="PyO3 crate manifest"),
         ManifestEntry(path="rust_core/src/lib.rs", lang="rust", purpose="PyO3 native extension"),
-        ManifestEntry(path="python_engine/pyproject.toml", lang="toml", purpose="Python package manifest"),
-        ManifestEntry(path=f"python_engine/src/{package_name}/__init__.py", lang="python", purpose="Package exports"),
-        ManifestEntry(path=f"python_engine/src/{package_name}/{primary}.py", lang="python", purpose="Native loader"),
-        ManifestEntry(path=f"python_engine/src/{package_name}/_pure.py", lang="python", purpose="Pure-Python fallback"),
-        ManifestEntry(path=f"python_engine/tests/test_{primary}.py", lang="python", purpose="Pytest tests"),
-        ManifestEntry(path="python_engine/service.py", lang="python", purpose="Async HTTP service"),
-        ManifestEntry(path="python_engine/bench.py", lang="python", purpose="Benchmark script"),
+        ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python package manifest"),
+        ManifestEntry(path=f"{package_name}/__init__.py", lang="python", purpose="Package exports"),
+        ManifestEntry(path=f"{package_name}/{primary}.py", lang="python", purpose="Native loader"),
+        ManifestEntry(path=f"{package_name}/_pure.py", lang="python", purpose="Pure-Python fallback"),
+        ManifestEntry(path=f"tests/test_{primary}.py", lang="python", purpose="Pytest tests"),
+        ManifestEntry(path="service.py", lang="python", purpose="Async HTTP service"),
+        ManifestEntry(path="bench.py", lang="python", purpose="Benchmark script"),
     ]
     contracts = [
         ContractEntry(

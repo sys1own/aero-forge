@@ -402,6 +402,7 @@ project, architecture, toolchains, manifest, contracts, output_dir, prompt, cons
 - Quote all signature strings with double quotes so colons in Python type annotations do not break YAML parsing.
 - output_dir should be "dist".
 - llm should be an object with provider and model keys, or null.
+- If the user prompt explicitly lists file paths or module names (e.g. "aero_orchestrator/cli.py", "run_shell.py", "tests/test_cli.py"), you MUST include those EXACT paths in the manifest and derive the project/package name from them. Do not substitute template defaults like "aero_polyglot_runner", "run_demo.py", or "tests/test_polyglot.py" unless the user asks for them.
 
 Keep the blueprint minimal and accurate."""
 

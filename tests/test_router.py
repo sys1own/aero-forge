@@ -43,8 +43,8 @@ def test_required_manifest_for_hybrid() -> None:
     assert "Cargo.toml" in paths
     assert "rust_core/Cargo.toml" in paths
     assert "rust_core/src/lib.rs" in paths
-    assert "python_engine/pyproject.toml" in paths
-    assert "python_engine/src/python_engine/__init__.py" in paths
+    assert "pyproject.toml" in paths
+    assert "batch_processor/__init__.py" in paths
 
 
 def test_required_manifest_for_pure_python_has_files() -> None:

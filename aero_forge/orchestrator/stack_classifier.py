@@ -150,15 +150,16 @@ def default_manifest_for_architecture(
     """Return a generic manifest for an architecture when the LLM omits one."""
     pkg = _sanitize_name(project_name)
     if architecture == INTENT_HYBRID_RUST_PYTHON:
-        python_package = "python_engine"
+        python_package = pkg
         return [
             {"path": "Cargo.toml", "lang": "toml", "purpose": "Rust workspace manifest"},
             {"path": "rust_core/Cargo.toml", "lang": "toml", "purpose": "PyO3 crate manifest"},
             {"path": "rust_core/src/lib.rs", "lang": "rust", "purpose": "Rust native core"},
-            {"path": "python_engine/pyproject.toml", "lang": "toml", "purpose": "Python package manifest"},
-            {"path": f"python_engine/src/{python_package}/__init__.py", "lang": "python", "purpose": "Python driver package"},
-            {"path": f"python_engine/src/{python_package}/core.py", "lang": "python", "purpose": "Python wrapper"},
-            {"path": "python_engine/tests/test_core.py", "lang": "python", "purpose": "pytest tests"},
+            {"path": "pyproject.toml", "lang": "toml", "purpose": "Python package manifest"},
+            {"path": f"{python_package}/__init__.py", "lang": "python", "purpose": "Python driver package"},
+            {"path": f"{python_package}/core.py", "lang": "python", "purpose": "Python wrapper"},
+            {"path": f"{python_package}/native.py", "lang": "python", "purpose": "native loader"},
+            {"path": "tests/test_core.py", "lang": "python", "purpose": "pytest tests"},
             {"path": "README.md", "lang": "markdown", "purpose": "Project README"},
         ]
     if architecture == INTENT_PURE_RUST:
