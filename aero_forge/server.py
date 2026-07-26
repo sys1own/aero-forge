@@ -42,6 +42,7 @@ from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_RUST_PYTHON,
     INTENT_PURE_PYTHON,
     INTENT_PURE_RUST,
+    INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON,
     StackClassification,
     classify_stack,
 )
@@ -86,8 +87,10 @@ def _classification_for_target(
         architecture = INTENT_HYBRID_CPP_PYTHON
     elif target == "rust":
         architecture = INTENT_HYBRID_RUST_PYTHON
-    elif target == "python":
+    elif target in ("python", "py"):
         architecture = INTENT_PURE_PYTHON
+    elif target in ("tri_polyglot", "tri_polyglot_rust_cpp_python", "rust_cpp_python"):
+        architecture = INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON
     else:
         return classification
     return StackClassification(
@@ -224,6 +227,7 @@ async def _handle_build_async(request: web.Request) -> web.Response:
         if classification.architecture in (
             INTENT_HYBRID_RUST_PYTHON,
             INTENT_HYBRID_CPP_PYTHON,
+            INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON,
         ):
             universal_result = await asyncio.to_thread(
                 build_universal_project,

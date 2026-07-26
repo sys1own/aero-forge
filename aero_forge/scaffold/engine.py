@@ -1187,6 +1187,11 @@ class RustGenerator:
         Loop variables get their type from the iterator (e.g. ``range`` yields
         ``i64``), so type propagation should not promote them to ``f64`` just
         because they appear in a float expression.
+
+        A name that is also assigned elsewhere in the function (e.g. reused as a
+        mutable merge index after a ``for`` loop) is not a pure loop variable;
+        it needs a top-level ``let`` declaration so it remains in scope after the
+        loop body ends.
         """
         names: set[str] = set()
         for node in ast.walk(self.func):
@@ -1198,7 +1203,10 @@ class RustGenerator:
                     for elt in target.elts:
                         if isinstance(elt, ast.Name):
                             names.add(elt.id)
-        return names
+        # Names that are assigned anywhere via Assign/AnnAssign/AugAssign may be
+        # reused after their loop; they need an outer declaration instead of being
+        # scoped entirely by the for loop's binding.
+        return names - self._collect_assigned()
 
     @staticmethod
     def _name_in_expr(expr: ast.expr, name: str) -> bool:

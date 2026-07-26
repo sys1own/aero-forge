@@ -1,0 +1,60 @@
+project: <project>
+architecture: tri_polyglot_rust_cpp_python
+toolchains:
+  - python
+  - rust
+  - cpp
+  - cargo
+manifest:
+  - path: Cargo.toml
+    lang: toml
+    purpose: Rust workspace manifest
+  - path: rust_core/Cargo.toml
+    lang: toml
+    purpose: PyO3 crate manifest
+  - path: rust_core/src/lib.rs
+    lang: rust
+    purpose: Rust native core (safe concurrency / state)
+  - path: cpp_core/native.cpp
+    lang: cpp
+    purpose: C-ABI dynamic shared library source (heavy matrix operations)
+  - path: pyproject.toml
+    lang: toml
+    purpose: Python package manifest
+  - path: <project>/__init__.py
+    lang: python
+    purpose: Python driver package
+  - path: <project>/main.py
+    lang: python
+    purpose: Python CLI / REPL entrypoint
+  - path: run_shell.py
+    lang: python
+    purpose: Headless launcher
+  - path: tests/test_tri.py
+    lang: python
+    purpose: pytest tests
+  - path: README.md
+    lang: markdown
+    purpose: Project README
+contracts:
+  - name: fast_vector_transform
+    signature: "def fast_vector_transform(v: list[float], scalar: float) -> list[float]"
+    language: python/cpp
+    python_name: <project>.main.fast_vector_transform
+    purpose: Heavy numerical matrix operation exported via extern "C"
+  - name: validate_token
+    signature: "def validate_token(token: str) -> bool"
+    language: python/rust
+    python_name: <project>.main.validate_token
+    purpose: Safe token validation exported via PyO3
+  - name: get_engine_status
+    signature: "def get_engine_status() -> dict[str, str]"
+    language: python
+    python_name: <project>.main.get_engine_status
+    purpose: Cross-language engine health metadata
+output_dir: dist
+prompt: "Build a Python + Rust + C++ tri-polyglot REPL CLI. Rust manages safe concurrency and token validation via PyO3, C++ performs heavy matrix transformations via an extern \"C\" shared library, and Python orchestrates the terminal interface."
+constraints: "Use ctypes to load the C++ dynamic shared library compiled with -fPIC -shared. Use PyO3 for the Rust extension. Include headless automated commands such as `python main.py --cmd run_all`."
+llm:
+  provider: none
+  model: null
