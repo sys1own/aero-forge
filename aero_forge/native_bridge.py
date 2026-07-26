@@ -192,7 +192,21 @@ def _ctypes_loader_source(source: str, so_path: Path, function_names: List[str])
 
         ret_ann = _py_ann(func.returns)
         ret_array = ret_ann.startswith(("list[", "List["))
-        ret_elem = ret_ann.split("[", 1)[1].split("]", 1)[0] if ret_array else ret_ann
+        ret_tuple = False
+        ret_elem = ""
+        if ret_ann.startswith(("tuple[", "Tuple[")) and ret_ann.endswith("]"):
+            inner = ret_ann[6:-1] if ret_ann.startswith("tuple[") else ret_ann[6:-1]
+            parts = [p.strip() for p in inner.split(",")]
+            if len(parts) == 2 and (parts[1].startswith(("list[", "List[")) or parts[1] in ("list", "List")):
+                ret_tuple = True
+                ret_array = True
+                ret_elem = (
+                    parts[1][5:-1].strip()
+                    if parts[1].startswith(("list[", "List["))
+                    else "float"
+                )
+        if not ret_elem:
+            ret_elem = ret_ann.split("[", 1)[1].split("]", 1)[0] if ret_array else ret_ann
         ret_ctype = type_map.get(ret_elem, "ctypes.c_void_p")
 
         c_args: List[str] = []
@@ -215,6 +229,7 @@ def _ctypes_loader_source(source: str, so_path: Path, function_names: List[str])
         py_args = ", ".join(name for _, _, _, name in arg_info)
         body_lines: List[str] = []
         call_args: List[str] = []
+        list_arg_names = [name for kind, _, _, name in arg_info if kind == "array"]
         for kind, elem, ctype, name in arg_info:
             if kind == "scalar":
                 call_args.append(name)
@@ -235,11 +250,20 @@ def _ctypes_loader_source(source: str, so_path: Path, function_names: List[str])
             body_lines.append(f"    _result = [_ptr[i] for i in range(_out_len.value)]")
             free_name = free_map.get(ret_elem, "free_buffer_i64")
             body_lines.append(f"    _LIB.{free_name}(_ptr, _out_len.value)")
-            body_lines.append("    return _result")
+            if ret_tuple:
+                body_lines.append("    return (_out_len.value, _result)")
+            else:
+                body_lines.append("    return _result")
         else:
             body_lines.append(
-                f"    return _LIB.{func.name}({', '.join(call_args)})"
+                f"    _result = _LIB.{func.name}({', '.join(call_args)})"
             )
+            # Copy mutated output arrays back into the original Python list arguments.
+            if list_arg_names:
+                out_name = list_arg_names[-1]
+                body_lines.append(f"    for _i, _v in enumerate(_{out_name}_arr):")
+                body_lines.append(f"        {out_name}[_i] = _v")
+            body_lines.append("    return _result")
 
         lines.append(f"def {func.name}({py_args}):")
         lines.extend(body_lines)
