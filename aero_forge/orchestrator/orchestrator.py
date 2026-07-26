@@ -13,6 +13,8 @@ import ast
 import importlib.machinery
 import logging
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -25,6 +27,7 @@ import yaml
 from aero_forge.blueprint import (
     Blueprint,
     ContractEntry,
+    FunctionSpec,
     LLMConfig,
     ManifestEntry,
     write_blueprint,
@@ -151,6 +154,71 @@ def _strip_main_guard(source: str) -> str:
 
 class ForgeError(Exception):
     """Raised when the forge loop cannot produce a passing function."""
+
+
+class DeterministicVerificationRunner:
+    """Executes generated binaries and validates CLI behavior, stdout patterns, and numeric assertions."""
+
+    def __init__(self, project_root: str, verification_nodes: List[Dict[str, Any]]):
+        self.project_root = project_root
+        self.nodes = verification_nodes
+
+    def run_all_verifications(self) -> bool:
+        for node in self.nodes:
+            test_id = node["test_id"]
+            cmd = node["execution_cmd"]
+            expected_code = node.get("expected_exit_code", 0)
+
+            if isinstance(cmd, list):
+                cmd = shlex.join(str(x) for x in cmd)
+
+            proc = subprocess.run(
+                cmd,
+                shell=True,
+                cwd=self.project_root,
+                capture_output=True,
+                text=True,
+            )
+
+            if proc.returncode != expected_code:
+                print(f"[FAIL] Task {test_id} exited with code {proc.returncode}, expected {expected_code}")
+                print(f"[STDERR]: {proc.stderr}")
+                return False
+
+            for pattern in node.get("stdout_match_patterns", []):
+                if not re.search(pattern, proc.stdout):
+                    print(f"[FAIL] Task {test_id} missing stdout pattern: '{pattern}'")
+                    print(f"[STDOUT]: {proc.stdout}")
+                    return False
+
+            for pattern in node.get("stderr_prohibited_patterns", []):
+                if re.search(pattern, proc.stderr):
+                    print(f"[FAIL] Task {test_id} detected prohibited stderr pattern: '{pattern}'")
+                    return False
+
+            if "numerical_assertions" in node:
+                if not self._verify_numeric_metrics(proc.stdout, node["numerical_assertions"]):
+                    return False
+
+        return True
+
+    def _verify_numeric_metrics(self, stdout: str, assertions: List[Dict[str, Any]]) -> bool:
+        for assertion in assertions:
+            metric = assertion["target_metric"]
+            expected = float(assertion["expected_value"])
+            atol = float(assertion["absolute_tolerance"])
+
+            pattern = rf"{re.escape(metric)}=([-+]?\d*\.\d+|\d+)"
+            match = re.search(pattern, stdout)
+            if not match:
+                print(f"[FAIL] Metric key '{metric}' not found in runtime output.")
+                return False
+
+            val = float(match.group(1))
+            if abs(val - expected) > atol:
+                print(f"[FAIL] Metric '{metric}' tolerance breach: got {val}, expected {expected} ± {atol}")
+                return False
+        return True
 
 
 class Orchestrator:
@@ -419,6 +487,66 @@ class Orchestrator:
         }
         if artifact is not None:
             result["artifact"] = str(artifact)
+        return result
+
+    def build(
+        self,
+        blueprint: Optional[Blueprint] = None,
+        max_workers: int = 1,
+    ) -> Dict[str, Any]:
+        """Run the workspace build, then execute deterministic verification nodes.
+
+        If *blueprint* is not provided, one is synthesised from the configured
+        source path and function names. When verification fails, the static AST
+        healing pipeline is triggered via ``_attempt_fix`` before giving up.
+        """
+        if blueprint is None:
+            blueprint = Blueprint(
+                project=self.source_path.stem or "aero_forge_project",
+                functions=[
+                    FunctionSpec(
+                        file=self.source_path,
+                        name=name,
+                        tests=list(self.test_paths),
+                    )
+                    for name in self.function_names
+                ],
+                output_dir=self.output_dir,
+                llm=LLMConfig(provider="none"),
+            )
+
+        from aero_forge.build_runner import BuildRunner
+
+        runner = BuildRunner(
+            blueprint,
+            max_workers=max_workers,
+            cache_enabled=False,
+            target=self.target,
+            target_mode=self.target_mode,
+        )
+        result = runner.build()
+        if not result.get("success"):
+            return result
+
+        nodes = blueprint.verification_nodes
+        if nodes:
+            verifier = DeterministicVerificationRunner(
+                str(blueprint.output_dir.resolve()), nodes
+            )
+            if not verifier.run_all_verifications():
+                error_log = "Deterministic verification failed"
+                source = self.source_path.read_text(encoding="utf-8")
+                fixed = self._attempt_fix(source, error_log)
+                if fixed is not None:
+                    self.source_path.write_text(fixed, encoding="utf-8")
+                    return self.build(blueprint=blueprint, max_workers=max_workers)
+                failure: Dict[str, Any] = {
+                    "success": False,
+                    "error": error_log,
+                    "logs": error_log,
+                }
+                return failure
+
         return result
 
     def _package_general_purpose(self, source: str) -> Optional[Path]:
