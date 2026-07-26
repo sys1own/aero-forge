@@ -935,9 +935,13 @@ def _find_artifact(
         roots.append(cargo_target_dir / "release")
     for root in roots:
         if root.is_dir():
-            candidates.extend(root.rglob(f"lib{crate_name}.so"))
-            candidates.extend(root.rglob(f"{crate_name}.dll"))
-            candidates.extend(root.rglob(f"lib{crate_name}.dylib"))
+            try:
+                candidates.extend(root.rglob(f"lib{crate_name}.so"))
+                candidates.extend(root.rglob(f"{crate_name}.dll"))
+                candidates.extend(root.rglob(f"lib{crate_name}.dylib"))
+            except (FileNotFoundError, OSError):
+                # Concurrent builds may delete rmeta/deps directories mid-scan.
+                continue
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_mtime)

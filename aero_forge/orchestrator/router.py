@@ -35,6 +35,15 @@ _ALLOWED_BUILTINS = {
     "all",
     "any",
     "complex",
+    # Exception constructors are only meaningful inside raise statements; the
+    # transpiler emits them as panics.
+    "IndexError",
+    "ValueError",
+    "TypeError",
+    "KeyError",
+    "RuntimeError",
+    "Exception",
+    "AssertionError",
 }
 
 _ALLOWED_MATH_MODULES = {"math", "numpy", "np"}
@@ -114,6 +123,8 @@ def _annotation_name(node: ast.AST) -> Optional[str]:
         base = _annotation_name(node.value)
         if base is None:
             return None
+        if base in ("Optional", "Union"):
+            return _unwrap_optional_or_union_name(node.slice)
         if base in _TYPING_ALIASES:
             base = _TYPING_ALIASES[base]
         if isinstance(node.slice, ast.Name):
@@ -125,6 +136,29 @@ def _annotation_name(node: ast.AST) -> Optional[str]:
         if slice_name:
             return f"{base}[{slice_name}]"
     return None
+
+
+def _unwrap_optional_or_union_name(slice_node: ast.expr) -> Optional[str]:
+    """Strip ``None`` from ``Optional``/``Union`` and promote numeric unions."""
+    if isinstance(slice_node, ast.Tuple):
+        parts = [
+            p
+            for elt in slice_node.elts
+            if (p := _annotation_name(elt)) and p not in ("None", "NoneType")
+        ]
+        if not parts:
+            return None
+        if all(p in ("int", "float", "bool") for p in parts):
+            if "float" in parts:
+                return "float"
+            if "int" in parts:
+                return "int"
+            return "bool"
+        if len(parts) == 1:
+            return parts[0]
+        # Mixed non-numeric unions are not supported for HIN.
+        return None
+    return _annotation_name(slice_node)
 
 
 def _split_type_args(s: str) -> List[str]:

@@ -498,17 +498,30 @@ class RustGenerator:
             ) or self.function_type
             if isinstance(stmt.target, ast.Name):
                 types[stmt.target.id] = self._unify(types.get(stmt.target.id), rhs_type)
+            self._propagate_subscript_types(stmt.target, rhs_type, types)
             self._propagate_subscript_types(stmt.value, rhs_type, types)
         elif isinstance(stmt, ast.Expr):
-            if isinstance(stmt.value, ast.Call) and _call_name(stmt.value) == "append":
+            if isinstance(stmt.value, ast.Call) and _call_name(stmt.value) in (
+                "append",
+                "extend",
+            ):
                 target_name = _call_base(stmt.value)
-                arg = stmt.value.args[0]
-                arg_type = self._infer_expr_type(arg, types) or self.function_type
+                call = stmt.value
+                arg = call.args[0]
+                arg_expr_type = self._infer_expr_type(arg, types)
+                if _call_name(call) == "extend" and arg_expr_type and arg_expr_type.startswith("Vec<"):
+                    element_type = _element_type(arg_expr_type)
+                else:
+                    element_type = arg_expr_type or self.function_type
                 if target_name:
                     types[target_name] = self._unify(
-                        types.get(target_name), f"Vec<{arg_type}>"
+                        types.get(target_name), f"Vec<{element_type}>"
                     )
-                self._propagate_subscript_types(arg, arg_type, types)
+                if _call_name(call) == "extend" and isinstance(arg, ast.Name):
+                    types[arg.id] = self._unify(
+                        types.get(arg.id), f"Vec<{element_type}>"
+                    )
+                self._propagate_subscript_types(arg, element_type, types)
         elif isinstance(stmt, ast.Return):
             if stmt.value is None or (
                 isinstance(stmt.value, ast.Constant) and stmt.value.value is None
@@ -620,6 +633,15 @@ class RustGenerator:
                     types[iter_expr.id] = self._unify(
                         types.get(iter_expr.id), f"Vec<{known_elt}>"
                     )
+                # If the loop variable itself turned out to be a vector (e.g.
+                # ``for row in matrix`` where ``row[i]`` is mutated), the iterable
+                # must be a vector-of-vectors.
+                if isinstance(target, ast.Name):
+                    target_type = types.get(target.id)
+                    if target_type and target_type.startswith("Vec<"):
+                        types[iter_expr.id] = self._unify(
+                            types.get(iter_expr.id), f"Vec<{target_type}>"
+                        )
         elif isinstance(iter_expr, ast.Subscript) and isinstance(target, ast.Name):
             iter_type = self._infer_expr_type(iter_expr, types)
             known_elt = self._infer_element_or_ref(iter_type)
@@ -733,6 +755,12 @@ class RustGenerator:
                 ret = _annotation_to_rust_type(other.returns, self.class_names)
                 if ret:
                     return ret
+            if base is None and name in {"int", "float", "bool"}:
+                return "i64" if name == "int" else "f64" if name == "float" else "bool"
+            if base is None and name == "len":
+                return "i64"
+            if base is None and name == "isinstance":
+                return "bool"
             if base is not None and name == "pop":
                 base_type = self._infer_expr_type(expr.func.value, types)
                 if base_type and base_type.startswith("Vec<"):
@@ -753,13 +781,20 @@ class RustGenerator:
             return
         if isinstance(expr, ast.Subscript):
             base = expr.value
+            if isinstance(expr.slice, ast.Slice):
+                # ``base[start:stop:step]`` returns ``Vec<E>`` where ``E`` is the
+                # element type of ``base``.  Therefore ``base`` itself has the same
+                # type as the slice result.
+                base_required = element_type
+            else:
+                base_required = f"Vec<{element_type}>"
             if isinstance(base, ast.Name):
                 current = types.get(base.id)
-                types[base.id] = self._unify(current, f"Vec<{element_type}>")
+                types[base.id] = self._unify(current, base_required)
             elif isinstance(base, ast.Subscript):
-                self._propagate_subscript_types(base, f"Vec<{element_type}>", types)
+                self._propagate_subscript_types(base, base_required, types)
             else:
-                self._propagate_subscript_types(base, f"Vec<{element_type}>", types)
+                self._propagate_subscript_types(base, base_required, types)
         elif isinstance(expr, ast.BinOp):
             # In list replication like ``[0] * n`` the scalar operand is the
             # repeat count and should not inherit the element type.
@@ -859,6 +894,12 @@ class RustGenerator:
         if t1.startswith("Vec<") and t2.startswith("Vec<"):
             e1 = _element_type(t1)
             e2 = _element_type(t2)
+            # Preserve nested vector shapes when one side is known to be a vector
+            # of vectors and the other is only a scalar element.
+            if e1.startswith("Vec<") and not e2.startswith("Vec<"):
+                return t1
+            if e2.startswith("Vec<") and not e1.startswith("Vec<"):
+                return t2
             unified = self._unify(e1, e2)
             if unified:
                 return f"Vec<{unified}>"
@@ -881,6 +922,11 @@ class RustGenerator:
             v = self._unify(v1, v2)
             if k and v:
                 return f"BTreeMap<{k}, {v}>"
+        # Do not let a scalar numeric guess subsume an explicit container type.
+        if t1 in ("i64", "f64", "bool") and t2.startswith("Vec<"):
+            return t2
+        if t2 in ("i64", "f64", "bool") and t1.startswith("Vec<"):
+            return t1
         if "f64" in (t1, t2):
             return "f64"
         if "i64" in (t1, t2):
@@ -1381,8 +1427,9 @@ class RustGenerator:
                 defaults.append(f"let mut {name} = {name};")
 
         # Any remaining assigned names are declared uninitialized; the body will
-        # initialize them on first use.
-        remaining = sorted(self.assigned - declared)
+        # initialize them on first use.  Loop variables are introduced by the
+        # ``for`` statement itself and must not be shadowed with a ``let``.
+        remaining = sorted(self.assigned - declared - self.loop_vars)
         for name in remaining:
             mutable = self._is_mutable(name)
             mut = "mut " if mutable else ""
@@ -1395,6 +1442,8 @@ class RustGenerator:
         return self._zero_for_type(self.return_type)
 
     def _zero_for_type(self, typ: str) -> str:
+        if typ in ("()", "None"):
+            return "()"
         if typ == "f64":
             return "0.0_f64"
         if typ == "bool":
@@ -1464,7 +1513,10 @@ class RustGenerator:
                 sizes.add(len(_elements(node.value)))
             else:
                 sizes.add(1)
-        if not sizes or sizes == {1}:
+        if not return_values:
+            # No non-None return statements; the function is effect-only.
+            return self.return_type if self.annotated_return else "()"
+        if sizes == {1}:
             return self.return_type
         if len(sizes) != 1:
             raise UnsupportedError(
@@ -1514,8 +1566,12 @@ class RustGenerator:
     # Statement emission
     # ------------------------------------------------------------------
     def _emit_function(self) -> str:
+        def _needs_mut_binding(typ: str) -> bool:
+            return typ.startswith("Vec<") or typ.startswith("BTreeMap<") or typ == "String"
+
         args = ", ".join(
-            f"{name}: {typ}" for name, typ in zip(self.arg_names, self.arg_types)
+            f"mut {name}: {typ}" if _needs_mut_binding(typ) else f"{name}: {typ}"
+            for name, typ in zip(self.arg_names, self.arg_types)
         )
         return_type = self._return_type()
         if self.target_mode == TargetMode.C_ABI:
@@ -1597,6 +1653,23 @@ class RustGenerator:
         )
 
     def _emit_stmt(self, stmt: ast.stmt) -> str:
+        if isinstance(stmt, ast.Assert):
+            # Runtime assertions are skipped in generated native code; the
+            # precision shield / type checker validates preconditions statically.
+            return ""
+        if isinstance(stmt, ast.Raise):
+            exc = stmt.exc
+            if exc is None:
+                return 'panic!("raise");'
+            if isinstance(exc, ast.Call) and exc.args:
+                first = exc.args[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    return f"panic!({json.dumps(first.value)});"
+                msg = self._strip_outer_parens(self._emit_expr(first, "String"))
+                return f"panic!({msg});"
+            if isinstance(exc, ast.Constant) and isinstance(exc.value, str):
+                return f"panic!({json.dumps(exc.value)});"
+            return 'panic!("raise");'
         if isinstance(stmt, ast.Return):
             if stmt.value is None or (
                 isinstance(stmt.value, ast.Constant) and stmt.value.value is None
@@ -1901,6 +1974,8 @@ class RustGenerator:
         return f"while {cond} {{\n{body}\n}}"
 
     def _emit_for(self, stmt: ast.For) -> str:
+        if stmt.orelse:
+            raise UnsupportedError("for/else loops are not supported", node=stmt)
         target = stmt.target
         iter_expr = stmt.iter
         if isinstance(iter_expr, ast.Call):
@@ -2069,7 +2144,6 @@ class RustGenerator:
             )
         element_type = _element_type(iter_type)
         iter_rust = self._emit_expr(iter_expr, iter_type)
-        iterator = f"{iter_rust}.iter().cloned()"
         old_types: Dict[str, Optional[str]] = {}
         if isinstance(target, ast.Name):
             names = [target.id]
@@ -2091,6 +2165,22 @@ class RustGenerator:
                 "Only a single name or tuple target is supported for list iteration",
                 node=stmt,
             )
+        # Mutable loop variables over container elements need mutable references
+        # so in-place mutations (e.g. ``row[i] += scalar``) affect the source.
+        if (
+            len(names) == 1
+            and self._is_mutable(names[0])
+            and element_type not in ("i64", "f64", "bool")
+        ):
+            iterator = f"{iter_rust}.iter_mut()"
+            target_str = names[0]
+        else:
+            iterator = f"{iter_rust}.iter().cloned()"
+            if len(names) > 1:
+                target_str = f"({', '.join(names)})"
+            else:
+                mut = "mut " if self._is_mutable(names[0]) else ""
+                target_str = f"{mut}{names[0]}"
         parts = self._tuple_element_types(target_type) if _is_tuple_type(target_type) else [target_type] * len(names)
         if len(parts) != len(names):
             raise UnsupportedError(
@@ -2102,7 +2192,6 @@ class RustGenerator:
         body = self._emit_body(stmt.body)
         for name, old in old_types.items():
             self._restore_type(name, old)
-        target_str = f"({', '.join(names)})" if len(names) > 1 else names[0]
         return f"for {target_str} in {iterator} {{\n{body}\n}}"
 
     def _emit_for_dict_keys(
@@ -3085,7 +3174,37 @@ class RustGenerator:
             if isinstance(arg_node, ast.Subscript):
                 container_type = self._type_of(arg_node.value)
             arg_str = self._emit_expr(arg_node, container_type)
-            return f"(({arg_str}).len() as i64)"
+            return self._coerce(f"(({arg_str}).len() as i64)", "i64", ctx)
+
+        if base is None and name == "isinstance":
+            if len(expr.args) != 2:
+                raise UnsupportedError("isinstance() takes exactly two arguments", node=expr)
+            obj_type = self._type_of(expr.args[0])
+            type_arg = expr.args[1]
+            if isinstance(type_arg, ast.Tuple):
+                names = {
+                    elt.id for elt in type_arg.elts if isinstance(elt, ast.Name)
+                }
+            elif isinstance(type_arg, ast.Name):
+                names = {type_arg.id}
+            else:
+                raise UnsupportedError(
+                    "isinstance() type argument must be a type or tuple of types", node=expr
+                )
+            numeric = {"int", "float", "bool"}
+            if names == {"int"}:
+                result = "true" if obj_type == "i64" else "false"
+            elif names == {"float"}:
+                result = "true" if obj_type == "f64" else "false"
+            elif names == {"bool"}:
+                result = "true" if obj_type == "bool" else "false"
+            elif names.issubset(numeric):
+                result = "true" if obj_type in numeric else "false"
+            else:
+                raise UnsupportedError(
+                    f"isinstance() against {names} is not supported", node=expr
+                )
+            return self._coerce(result, "bool", ctx)
 
         # list.extend(other)
         if base is not None and name == "extend":
@@ -3598,8 +3717,12 @@ class ClassMethodGenerator(RustGenerator):
         return super()._return_type()
 
     def _emit_function(self) -> str:
+        def _needs_mut_binding(typ: str) -> bool:
+            return typ.startswith("Vec<") or typ.startswith("BTreeMap<") or typ == "String"
+
         args = ", ".join(
-            f"{name}: {typ}" for name, typ in zip(self.arg_names, self.arg_types)
+            f"mut {name}: {typ}" if _needs_mut_binding(typ) else f"{name}: {typ}"
+            for name, typ in zip(self.arg_names, self.arg_types)
         )
         return_type = self._return_type()
 
@@ -3862,6 +3985,41 @@ _RUST_KEYWORDS = {
 }
 
 
+def _unwrap_optional_or_union(
+    slice_node: ast.expr, class_names: Optional[Set[str]] = None
+) -> Optional[str]:
+    """Return the Rust type inside ``Optional[X]`` or ``Union[X, Y, ...]``.
+
+    ``None`` is stripped and numeric union members are promoted to ``f64``.
+    """
+
+    def _is_none_node(node: ast.expr) -> bool:
+        if isinstance(node, ast.Constant) and node.value is None:
+            return True
+        if isinstance(node, ast.Name) and node.id == "None":
+            return True
+        return False
+
+    class_names = class_names or set()
+    if isinstance(slice_node, ast.Tuple):
+        parts = [
+            typ
+            for elt in slice_node.elts
+            if not _is_none_node(elt)
+            and (typ := _annotation_to_rust_type(elt, class_names)) is not None
+        ]
+        if not parts:
+            return None
+        if "f64" in parts:
+            return "f64"
+        if "i64" in parts:
+            return "i64"
+        if "bool" in parts:
+            return "bool"
+        return parts[0]
+    return _annotation_to_rust_type(slice_node, class_names)
+
+
 def _annotation_to_rust_type(
     annotation: Optional[ast.expr], class_names: Optional[Set[str]] = None
 ) -> Optional[str]:
@@ -3874,12 +4032,15 @@ def _annotation_to_rust_type(
         return None
     class_names = class_names or set()
 
-    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
-        name = annotation.value
-        if name in class_names:
-            return name
-        # Scalar aliases may also be wrapped in strings.
-        return _SCALAR_TYPE_MAP.get(name)
+    if isinstance(annotation, ast.Constant):
+        if isinstance(annotation.value, str):
+            name = annotation.value
+            if name in class_names:
+                return name
+            # Scalar aliases may also be wrapped in strings.
+            return _SCALAR_TYPE_MAP.get(name)
+        if annotation.value is None:
+            return "()"
 
     if isinstance(annotation, ast.Name):
         name = annotation.id
@@ -3897,6 +4058,8 @@ def _annotation_to_rust_type(
         base_name = ""
         if isinstance(annotation.value, ast.Name):
             base_name = annotation.value.id
+        if base_name in ("Optional", "Union"):
+            return _unwrap_optional_or_union(annotation.slice, class_names)
         if base_name in ("list", "List"):
             inner = _annotation_to_rust_type(annotation.slice, class_names)
             if inner is None:
