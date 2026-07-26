@@ -660,6 +660,16 @@
       ui.logLines.scrollTop = ui.logLines.scrollHeight;
     }
 
+    function logRaw(message, type='info') {
+      const block = document.createElement('div');
+      block.className = `log-line ${type}`;
+      block.style.whiteSpace = 'pre-wrap';
+      block.style.fontFamily = 'Consolas, Monaco, "Courier New", monospace';
+      block.textContent = message;
+      ui.logLines.appendChild(block);
+      ui.logLines.scrollTop = ui.logLines.scrollHeight;
+    }
+
     function setBusy(busy) {
       state.busy = busy;
       ui.statusDot.classList.toggle('busy', busy);
@@ -1270,9 +1280,11 @@
       }
 
       lines.push('### Unit test status');
-      if (build.total !== undefined && build.total !== null) {
-        lines.push(`- **Passed:** ${build.passed || 0} / ${build.total}`);
-        if (build.failed) lines.push(`- **Failed:** ${build.failed}`);
+      const testTotal = (build.test_total !== undefined && build.test_total !== null) ? build.test_total : build.total;
+      const testPassed = (build.test_passed !== undefined && build.test_passed !== null) ? build.test_passed : build.passed;
+      if (testTotal !== undefined && testTotal !== null && testTotal > 0) {
+        lines.push(`- **Passed:** ${testPassed || 0} / ${testTotal}`);
+        if (build.test_failed) lines.push(`- **Failed:** ${build.test_failed}`);
       } else if (success) {
         lines.push('- All checks passed.');
       } else {
@@ -1298,10 +1310,10 @@
         });
       }
 
-      if (!success && build.logs) {
+      if (build.logs) {
         lines.push('### Build logs');
         lines.push('```');
-        lines.push(build.logs.slice(0, 1000));
+        lines.push(build.logs.slice(0, 4000));
         lines.push('```');
       }
 
@@ -1324,8 +1336,19 @@
         const summary = formatBuildSummary(data);
         if (data.result && data.result.build) {
           const b = data.result.build;
-          if (b.success) log(`Build succeeded: ${b.passed || 0}/${b.total || 0} tests`, 'success');
-          else log(`Build failed: ${b.error || 'unknown'}`, 'error');
+          const hasTests = (b.test_total !== undefined && b.test_total !== null && b.test_total > 0) || (b.total !== undefined && b.total !== null && b.total > 0);
+          if (b.success) {
+            if (hasTests) {
+              const total = (b.test_total !== undefined && b.test_total !== null) ? b.test_total : b.total;
+              const passed = (b.test_passed !== undefined && b.test_passed !== null) ? b.test_passed : b.passed;
+              log(`Build succeeded: ${passed || 0}/${total} tests`, 'success');
+            } else {
+              log('Build succeeded', 'success');
+            }
+          } else {
+            log(`Build failed: ${b.error || 'unknown'}`, 'error');
+          }
+          if (b.logs) logRaw(b.logs, b.success ? 'success' : 'error');
         } else {
           log('Build response received', 'success');
         }

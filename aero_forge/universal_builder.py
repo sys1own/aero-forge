@@ -13,10 +13,11 @@ pure-language requests it delegates to ``generate_and_build``.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from aero_forge.blueprint import Blueprint, ContractEntry, ManifestEntry, write_blueprint
 from aero_forge.config import ConfigOverride
@@ -125,6 +126,26 @@ def _hybrid_fallback_blueprint(project_name: str, features: list[str]) -> Bluepr
     )
 
 
+def _parse_pytest_summary(output: str) -> Tuple[int, int, int]:
+    """Return (total, passed, failed) parsed from pytest summary text."""
+    passed = 0
+    failed = 0
+    skipped = 0
+    m_passed = re.search(r"(\d+) passed", output, re.IGNORECASE)
+    if m_passed:
+        passed = int(m_passed.group(1))
+    m_failed = re.search(r"(\d+) failed", output, re.IGNORECASE)
+    if m_failed:
+        failed = int(m_failed.group(1))
+    m_error = re.search(r"(\d+) error", output, re.IGNORECASE)
+    if m_error:
+        failed += int(m_error.group(1))
+    m_skipped = re.search(r"(\d+) skipped", output, re.IGNORECASE)
+    if m_skipped:
+        skipped = int(m_skipped.group(1))
+    return passed + failed + skipped, passed, failed
+
+
 def _run_polyglot_materializer(
     project_name: str,
     features: list[str],
@@ -138,7 +159,17 @@ def _run_polyglot_materializer(
         shutil.rmtree(aero_core, ignore_errors=True)
     blueprint = _hybrid_fallback_blueprint(project_name, features)
     materializer = PolyglotMaterializer(output_dir)
-    updated = materializer.materialize(blueprint, build=True)
+    try:
+        updated = materializer.materialize(blueprint, build=True)
+    except Exception as exc:
+        return {
+            "success": False,
+            "project_name": project_name,
+            "error": str(exc),
+            "logs": materializer.build_logs,
+            "files": [],
+            "materializer": "PolyglotMaterializer",
+        }
     write_blueprint(updated, output_dir / "blueprint.aero")
 
     test_file = output_dir / "tests" / "test_polyglot.py"
@@ -148,11 +179,23 @@ def _run_polyglot_materializer(
         capture_output=True,
         text=True,
     )
+    test_total, test_passed, test_failed = _parse_pytest_summary(
+        pytest_result.stdout + pytest_result.stderr
+    )
+    logs = (
+        f"{materializer.build_logs}\n\n"
+        f"--- Python test output ---\n"
+        f"{pytest_result.stdout}\n{pytest_result.stderr}"
+    ).strip()
     files = sorted(str(p.relative_to(output_dir)) for p in output_dir.rglob("*") if p.is_file())
     return {
         "success": pytest_result.returncode == 0,
         "project_name": project_name,
         "files": files,
+        "test_total": test_total,
+        "test_passed": test_passed,
+        "test_failed": test_failed,
+        "logs": logs,
         "pytest_output": pytest_result.stdout,
         "pytest_error": pytest_result.stderr,
         "materializer": "PolyglotMaterializer",

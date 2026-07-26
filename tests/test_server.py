@@ -554,3 +554,49 @@ def test_api_workspace_clean(server):
     assert status == 200
     tree = json.loads(body.decode("utf-8"))
     assert "old.py" not in _collect_paths(tree["tree"])
+
+
+def test_api_build_passes_cargo_logs_and_test_counts(server, monkeypatch):
+    """The /api/build response surfaces native compile logs and parsed test counts."""
+
+    class FakeClassification:
+        architecture = "hybrid_rust_python"
+        toolchains = ["python", "rust", "cargo"]
+        languages = ["python", "rust"]
+        features = []
+
+    def fake_build_universal_project(prompt, session_dir, **kwargs):
+        return {
+            "success": True,
+            "project_name": "hybrid_demo",
+            "files": ["rust_core/Cargo.toml", "rust_core/src/lib.rs", "python_engine/tests/test_demo.py"],
+            "test_total": 3,
+            "test_passed": 3,
+            "test_failed": 0,
+            "logs": "--- cargo build in rust_core ---\n   Compiling aero_forge_hybrid_demo v0.1.0\n    Finished release [optimized] target(s)\n\n--- Python test output ---\n3 passed in 0.05s",
+            "cargo_output": "   Compiling aero_forge_hybrid_demo v0.1.0",
+            "cargo_error": "",
+            "pytest_output": "3 passed in 0.05s",
+            "pytest_error": "",
+        }
+
+    monkeypatch.setattr("aero_forge.server.classify_stack", lambda prompt: FakeClassification())
+    monkeypatch.setattr("aero_forge.server.build_universal_project", fake_build_universal_project)
+
+    status, data = _post_json(
+        server + "/api/build",
+        {
+            "prompt": "Build a hybrid Python/Rust add engine",
+            "provider": "deepseek",
+            "api_key": "sk-test",
+        },
+    )
+    assert status == 200
+    assert data["status"] == "success"
+    build = data["result"]["build"]
+    assert build["success"] is True
+    assert build["test_total"] == 3
+    assert build["test_passed"] == 3
+    assert build["test_failed"] == 0
+    assert "cargo build" in build["logs"]
+    assert "Python test output" in build["logs"]

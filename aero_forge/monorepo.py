@@ -275,6 +275,26 @@ def _run_pytest(python_engine_dir: Path) -> subprocess.CompletedProcess:
     )
 
 
+def _parse_pytest_summary(output: str) -> tuple[int, int, int]:
+    """Return (total, passed, failed) parsed from pytest summary text."""
+    passed = 0
+    failed = 0
+    skipped = 0
+    m_passed = re.search(r"(\d+) passed", output, re.IGNORECASE)
+    if m_passed:
+        passed = int(m_passed.group(1))
+    m_failed = re.search(r"(\d+) failed", output, re.IGNORECASE)
+    if m_failed:
+        failed = int(m_failed.group(1))
+    m_error = re.search(r"(\d+) error", output, re.IGNORECASE)
+    if m_error:
+        failed += int(m_error.group(1))
+    m_skipped = re.search(r"(\d+) skipped", output, re.IGNORECASE)
+    if m_skipped:
+        skipped = int(m_skipped.group(1))
+    return passed + failed + skipped, passed, failed
+
+
 def generate_monorepo(
     prompt: str,
     output_dir: Path,
@@ -465,12 +485,17 @@ def generate_monorepo(
         progress_callback("Building Rust core in monorepo...")
 
     cargo = _run_cargo_build(rust_dir)
+    cargo_logs = f"{cargo.stdout}\n{cargo.stderr}".strip()
     if cargo.returncode != 0:
         return {
             "success": False,
             "error": "Rust core failed to build in monorepo",
+            "logs": cargo_logs,
             "cargo_output": cargo.stdout,
             "cargo_error": cargo.stderr,
+            "test_total": 0,
+            "test_passed": 0,
+            "test_failed": 0,
         }
 
     # Prefer the freshly built shared library, but keep the original if absent.
@@ -483,6 +508,14 @@ def generate_monorepo(
 
     pytest = _run_pytest(python_dir)
     success = pytest.returncode == 0
+    test_total, test_passed, test_failed = _parse_pytest_summary(
+        pytest.stdout + pytest.stderr
+    )
+    full_logs = (
+        f"{cargo_logs}\n\n"
+        f"--- Python test output ---\n"
+        f"{pytest.stdout}\n{pytest.stderr}"
+    ).strip()
 
     files = sorted(
         str(p.relative_to(output_dir))
@@ -539,6 +572,10 @@ def generate_monorepo(
             "error": str(exc),
             "files": files,
             "core_build": build,
+            "test_total": test_total,
+            "test_passed": test_passed,
+            "test_failed": test_failed,
+            "logs": full_logs,
             "cargo_output": cargo.stdout,
             "cargo_error": cargo.stderr,
             "pytest_output": pytest.stdout,
@@ -553,6 +590,10 @@ def generate_monorepo(
         "files": files,
         "blueprint_path": str(output_dir / "blueprint.aero"),
         "core_build": build,
+        "test_total": test_total,
+        "test_passed": test_passed,
+        "test_failed": test_failed,
+        "logs": full_logs,
         "cargo_output": cargo.stdout,
         "cargo_error": cargo.stderr,
         "pytest_output": pytest.stdout,
