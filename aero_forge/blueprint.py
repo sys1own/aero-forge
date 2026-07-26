@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_CPP_PYTHON,
@@ -74,6 +74,185 @@ class ContractEntry(BaseModel):
     language: str = "python"
     python_name: str = ""
     purpose: str = ""
+
+
+class CLIContractFlag(BaseModel):
+    """A single CLI flag in the executable contract."""
+
+    name: str
+    short: str = ""
+    type: str = "string"
+    required: bool = False
+    default: Any = None
+    choices: List[str] = Field(default_factory=list)
+    help: str = ""
+    dest_var: str = ""
+
+    @field_validator("type")
+    @classmethod
+    def _valid_type(cls, value: str) -> str:
+        allowed = {"string", "int", "bool", "float"}
+        if value not in allowed:
+            raise ValueError(f"CLIContractFlag.type must be one of {allowed}, got {value!r}")
+        return value
+
+
+class CLIContract(BaseModel):
+    """CLI contract describing the command-line interface."""
+
+    parser_type: str = "argparse"
+    flags: List[CLIContractFlag] = Field(default_factory=list)
+
+
+class ExecutionStrategy(BaseModel):
+    """Execution plan for the generated project."""
+
+    primary_entrypoint: Dict[str, Any] = Field(default_factory=dict)
+    cli_contract: CLIContract = Field(default_factory=CLIContract)
+    run_spec: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ABIContract(BaseModel):
+    """Native ABI contract for cross-language symbol binding."""
+
+    contract_id: str
+    target_language: str
+    binding_framework: str
+    export_symbol: str
+    c_symbol_alias: str = ""
+    header_path: str = ""
+    memory_model: str
+    signature: Dict[str, List[Dict[str, str]]] = Field(default_factory=dict)
+
+    @field_validator("target_language")
+    @classmethod
+    def _valid_target_language(cls, value: str) -> str:
+        allowed = {"cpp", "rust", "python"}
+        if value not in allowed:
+            raise ValueError(f"target_language must be one of {allowed}, got {value!r}")
+        return value
+
+    @field_validator("binding_framework")
+    @classmethod
+    def _valid_binding_framework(cls, value: str) -> str:
+        allowed = {"c_abi", "pyo3", "ctypes"}
+        if value not in allowed:
+            raise ValueError(f"binding_framework must be one of {allowed}, got {value!r}")
+        return value
+
+    @field_validator("memory_model")
+    @classmethod
+    def _valid_memory_model(cls, value: str) -> str:
+        allowed = {"callee_allocates", "caller_allocates", "shared_pyo3"}
+        if value not in allowed:
+            raise ValueError(f"memory_model must be one of {allowed}, got {value!r}")
+        return value
+
+
+class BlueprintSchemaV2(BaseModel):
+    """Schema v2.0.0 blueprint: an executable task and contract graph."""
+
+    metadata: Dict[str, str] = Field(
+        default_factory=lambda: {"schema_version": "2.0.0"}
+    )
+    execution_strategy: ExecutionStrategy = Field(default_factory=ExecutionStrategy)
+    abi_contracts: List[ABIContract] = Field(default_factory=list)
+    module_graph: List[Dict[str, Any]] = Field(default_factory=list)
+    verification_nodes: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class BlueprintValidator:
+    """Validate a Schema v2.0.0 blueprint, with v1.x fallback/upgrade."""
+
+    SUPPORTED_TYPES = {
+        "u32",
+        "i32",
+        "usize",
+        "f64",
+        "double*",
+        "int32_t",
+        "*const u32",
+        "*mut f64",
+        "float*",
+        "int*",
+    }
+
+    def __init__(self, blueprint_path_or_dict: Any):
+        data: Dict[str, Any]
+        if isinstance(blueprint_path_or_dict, dict):
+            data = blueprint_path_or_dict
+        else:
+            path = Path(blueprint_path_or_dict)
+            text = path.read_text(encoding="utf-8")
+            suffix = path.suffix.lower()
+            if suffix == ".json":
+                data = json.loads(text)
+            else:
+                data = yaml.safe_load(text) or {}
+
+        if not isinstance(data, dict):
+            raise ValueError("Blueprint must be a mapping")
+
+        # Upgrade v1.x blueprints to v2.0.0 when the new metadata block is absent.
+        if self._is_v1_schema(data):
+            data = self._upgrade_v1(data)
+
+        self._raw = data
+        self.blueprint = BlueprintSchemaV2.model_validate(data)
+
+    @staticmethod
+    def _is_v1_schema(data: Dict[str, Any]) -> bool:
+        """Heuristic: v1 blueprints carry 'project' and 'architecture' without schema metadata."""
+        return (
+            "project" in data
+            or "architecture" in data
+            or "functions" in data
+        ) and ("metadata" not in data or data.get("metadata", {}).get("schema_version") is None)
+
+    @staticmethod
+    def _upgrade_v1(data: Dict[str, Any]) -> Dict[str, Any]:
+        """Build a minimal v2.0.0 blueprint from a v1.x blueprint."""
+        return {
+            "metadata": {
+                "schema_version": "2.0.0",
+                "project_name": data.get("project", "aero_forge_project"),
+                "domain_target": data.get("architecture", "pure_python"),
+            },
+            "execution_strategy": {
+                "primary_entrypoint": {},
+                "cli_contract": {"parser_type": "argparse", "flags": []},
+                "run_spec": {},
+            },
+            "abi_contracts": [],
+            "module_graph": [],
+            "verification_nodes": [],
+        }
+
+    def validate_abi_integrity(self) -> bool:
+        """Ensure every ABI input/output type is in the supported set."""
+        for contract in self.blueprint.abi_contracts:
+            for direction in ("inputs", "outputs"):
+                entries = contract.signature.get(direction, [])
+                for idx, entry in enumerate(entries):
+                    if not isinstance(entry, dict):
+                        raise TypeError(
+                            f"ABI {contract.contract_id} {direction}[{idx}] must be a name/type mapping"
+                        )
+                    t = entry.get("type", "")
+                    if t not in self.SUPPORTED_TYPES:
+                        raise TypeError(
+                            f"Unsupported ABI type {t!r} in {contract.contract_id} {direction}[{idx}]"
+                        )
+        return True
+
+    def validate_cli_contract(self) -> bool:
+        """Ensure CLI flag names and dest_var values are valid Python identifiers."""
+        for flag in self.blueprint.execution_strategy.cli_contract.flags:
+            if not flag.name.isidentifier():
+                raise ValueError(f"CLI flag name {flag.name!r} is not a valid Python identifier")
+            if flag.dest_var and not flag.dest_var.isidentifier():
+                raise ValueError(f"CLI dest_var {flag.dest_var!r} is not a valid Python identifier")
+        return True
 
 
 class Blueprint(BaseModel):
