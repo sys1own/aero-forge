@@ -150,6 +150,7 @@ def _native_loader_source(crate_names: List[str]) -> str:
     lines = [
         "import importlib.util",
         "import pathlib",
+        "import re",
         "from typing import Any, Optional",
         "",
         "_SO_CANDIDATES = [",
@@ -170,12 +171,15 @@ def _native_loader_source(crate_names: List[str]) -> str:
         "            stem = so.stem",
         '            if stem.startswith("lib"):',
         '                stem = stem[3:]',
+        '            stem = re.sub(r"\.cpython-.*$", "", stem)',
         "            for preferred in _PREFERRED_MODULE_NAMES:",
         "                if preferred in stem:",
         "                    stem = preferred",
         "                    break",
         "            try:",
         "                spec = importlib.util.spec_from_file_location(stem, so)",
+        "                if spec is None or spec.loader is None:",
+        "                    continue",
         "                mod = importlib.util.module_from_spec(spec)",
         "                spec.loader.exec_module(mod)",
         "            except Exception:",
@@ -239,12 +243,13 @@ def _render_python_module(
 def _render_orchestrator(contracts: List[ContractEntry], module_name: str) -> str:
     """Render ``aero_polyglot_runner/orchestrator.py`` with ``PolyglotEngine``."""
     lines: List[str] = [
-        '"""Polyglot runner that loads the Rust extension with a pure-Python fallback."""',
+        '"""Polyglot runner that loads the compiled extension with a pure-Python fallback."""',
         "",
         "from __future__ import annotations",
         "",
         "import importlib.util",
         "import pathlib",
+        "import re",
         "from typing import Any, Dict, List, Optional",
         "",
         "_SO_CANDIDATES = [",
@@ -275,12 +280,15 @@ def _render_orchestrator(contracts: List[ContractEntry], module_name: str) -> st
         "                stem = so.stem",
         '                if stem.startswith("lib"):',
         '                    stem = stem[3:]',
+        '                stem = re.sub(r"\.cpython-.*$", "", stem)',
         "                for preferred in _PREFERRED_MODULES:",
         "                    if preferred in stem:",
         "                        stem = preferred",
         "                        break",
         "                try:",
         "                    spec = importlib.util.spec_from_file_location(stem, so)",
+        "                    if spec is None or spec.loader is None:",
+        "                        continue",
         "                    mod = importlib.util.module_from_spec(spec)",
         "                    spec.loader.exec_module(mod)",
         "                except Exception:",
@@ -643,6 +651,19 @@ class PolyglotMaterializer:
         pkg_name = _sanitize_module_name(project)
 
         contracts = list(blueprint.contracts) if blueprint.contracts else list(_DEFAULT_CONTRACTS)
+
+        # If the blueprint includes C++ files, delegate to the C++ materializer so
+        # header inclusion and shared-library linking are handled consistently.
+        has_cpp_manifest = any(
+            entry.lang == "cpp" or str(entry.path).endswith((".cpp", ".hpp", ".h", ".cc", ".cxx"))
+            for entry in blueprint.manifest
+        )
+        if blueprint.architecture == "hybrid_cpp_python" or has_cpp_manifest:
+            from aero_forge.scaffold.cpp_materializer import CppPolyglotMaterializer
+
+            logger.info("C++ manifest detected; delegating to CppPolyglotMaterializer")
+            return CppPolyglotMaterializer(self.workspace).materialize(blueprint, build=build)
+
         source = _synthesize_python_source(contracts)
 
         # 1. Write Python / packaging files from the manifest first so the Rust

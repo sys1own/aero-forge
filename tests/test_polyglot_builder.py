@@ -417,6 +417,67 @@ def sum_even(n: int) -> int:
     assert mod.sum_even(100) == 2550
 
 
+@pytest.mark.integration
+def test_cpp_pybind11_polyglot_materializer_builds_and_runs(tmp_path: Path) -> None:
+    """End-to-end: a C++/Python hybrid blueprint is materialised, compiled, and executed."""
+    from aero_forge.blueprint import Blueprint, ContractEntry, ManifestEntry
+    from aero_forge.scaffold.cpp_materializer import CppPolyglotMaterializer
+
+    if not _find_cpp_compiler():
+        pytest.skip("No C++ compiler available")
+
+    workspace = tmp_path / "cpp_poly"
+    blueprint = Blueprint(
+        project="cpp_poly_demo",
+        architecture="hybrid_cpp_python",
+        toolchains=["python", "cpp", "setuptools"],
+        manifest=[
+            ManifestEntry(path="cpp_poly_demo/__init__.py", lang="python", purpose="package init"),
+            ManifestEntry(path="cpp_poly_demo/native.cpp", lang="cpp", purpose="pybind11 extension source"),
+            ManifestEntry(path="cpp_poly_demo/cli.py", lang="python", purpose="CLI module"),
+            ManifestEntry(path="setup.py", lang="python", purpose="setuptools build script"),
+            ManifestEntry(path="pyproject.toml", lang="toml", purpose="project manifest"),
+            ManifestEntry(path="run_shell.py", lang="python", purpose="launcher"),
+            ManifestEntry(path="tests/test_cli.py", lang="python", purpose="tests"),
+            ManifestEntry(path="README.md", lang="markdown", purpose="docs"),
+        ],
+        contracts=[
+            ContractEntry(
+                name="fast_vector_transform",
+                signature="def fast_vector_transform(v: list[float], scalar: float) -> list[float]",
+            ),
+            ContractEntry(
+                name="get_engine_status",
+                signature="def get_engine_status() -> dict[str, str]",
+            ),
+        ],
+    )
+    updated = CppPolyglotMaterializer(workspace).materialize(blueprint, build=True)
+    so_files = list(workspace.glob("*.so")) + list((workspace / "cpp_poly_demo").glob("*.so"))
+    assert so_files, "Expected a compiled .so"
+
+    script = workspace / "check_backend.py"
+    script.write_text(
+        'import sys\n'
+        'sys.path.insert(0, ".")\n'
+        'from cpp_poly_demo import fast_vector_transform, get_engine_status\n'
+        'assert fast_vector_transform([1.0, 2.0, 3.0], 2.0) == [2.0, 4.0, 6.0]\n'
+        'assert get_engine_status()["status"] == "ok"\n'
+    )
+    result = subprocess.run(["python", str(script)], cwd=workspace, capture_output=True, text=True)
+    assert result.returncode == 0, f"C++ hybrid smoke test failed: {result.stderr}"
+
+    pytest_result = subprocess.run(
+        ["python", "-m", "pytest", "tests/test_cli.py", "-q"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+    )
+    assert pytest_result.returncode == 0, f"Generated tests failed:\n{pytest_result.stdout}\n{pytest_result.stderr}"
+
+    assert any(f.name == "fast_vector_transform" for f in updated.functions)
+
+
 def _find_cpp_compiler() -> str | None:
     for name in ["g++", "clang++", "c++"]:
         if shutil.which(name):

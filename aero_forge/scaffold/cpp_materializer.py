@@ -18,7 +18,7 @@ import textwrap
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from aero_forge.blueprint import Blueprint, ContractEntry, ManifestEntry, write_blueprint
+from aero_forge.blueprint import Blueprint, ContractEntry, FunctionSpec, ManifestEntry, write_blueprint
 from aero_forge.scaffold.polyglot_materializer import _DEFAULT_CONTRACTS, _parse_signature
 from aero_forge.scaffold.python_repo_generator import _sanitize_module_name
 
@@ -529,6 +529,28 @@ class CppPolyglotMaterializer:
 
         if build:
             self._build_extension(pkg_name)
+
+        test_path = self.workspace / "tests" / "test_cli.py"
+        init_path = pkg_dir / "__init__.py"
+        functions = [
+            FunctionSpec(
+                file=init_path,
+                name=name,
+                tests=[test_path] if test_path.is_file() else [],
+                skip_build=True,
+            )
+            for name in function_names
+        ]
+        if (pkg_dir / "cli.py").is_file():
+            functions.append(
+                FunctionSpec(
+                    file=pkg_dir / "cli.py",
+                    name="main",
+                    tests=[test_path] if test_path.is_file() else [],
+                    skip_build=True,
+                )
+            )
+        blueprint = blueprint.model_copy(update={"functions": functions})
 
         return blueprint
 
