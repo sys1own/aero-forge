@@ -30,8 +30,8 @@ class ContractViolationError(Exception):
 SYSTEM_TOOLCHAINS: Dict[str, List[str]] = {
     "rust": ["rustc", "cargo"],
     "auto": ["rustc", "cargo"],
-    "c": ["cc"],
-    "cpp": ["c++"],
+    "c": ["cc", "gcc", "clang"],
+    "cpp": ["g++", "clang++", "c++"],
     "fortran": ["gfortran"],
     "python": ["python3"],
     "node": ["node"],
@@ -39,10 +39,12 @@ SYSTEM_TOOLCHAINS: Dict[str, List[str]] = {
 
 DEFAULT_PYTHON_PACKAGES: Dict[str, str] = {
     "numpy": "numpy",
+    "pybind11": "pybind11",
 }
 
 _PYTHON_PACKAGE_INSTALL_HINTS: Dict[str, str] = {
     "numpy": "pip install numpy",
+    "pybind11": "pip install pybind11",
     "tomli": "pip install tomli",
     "tomlkit": "pip install tomlkit",
 }
@@ -80,9 +82,18 @@ class VerifyDependencies:
 
     @staticmethod
     def missing_toolchain_binaries(language: str) -> List[str]:
-        """Return required binaries for *language* that are absent from PATH."""
+        """Return required binaries for *language* that are absent from PATH.
+
+        For C/C++ the list is treated as alternatives: any one compiler on PATH
+        satisfies the toolchain contract.
+        """
         required = SYSTEM_TOOLCHAINS.get(language, [])
+        if not required:
+            return []
         path = _rust_aware_path() if language in ("rust", "auto") else os.environ.get("PATH", "")
+        if language in ("c", "cpp"):
+            if any(shutil.which(binary, path=path) for binary in required):
+                return []
         return [binary for binary in required if shutil.which(binary, path=path) is None]
 
     @classmethod
@@ -163,7 +174,22 @@ class VerifyDependencies:
         """Return required tools that are not on PATH."""
         tools = self.required_tools()
         path = _rust_aware_path() if {"cargo", "rustc"} & set(tools) else os.environ.get("PATH", "")
-        return sorted(t for t in tools if shutil.which(t, path=path) is None)
+        missing = []
+        seen_languages: set = set()
+        for lang, binaries in SYSTEM_TOOLCHAINS.items():
+            if any(t in binaries for t in tools):
+                if lang in seen_languages:
+                    continue
+                seen_languages.add(lang)
+                if lang in ("c", "cpp"):
+                    if not any(shutil.which(b, path=path) for b in binaries):
+                        missing.extend(binaries)
+                else:
+                    missing.extend(b for b in binaries if shutil.which(b, path=path) is None)
+        # Also check any ad-hoc tools that are not part of a known toolchain.
+        known = {b for binaries in SYSTEM_TOOLCHAINS.values() for b in binaries}
+        missing.extend(t for t in tools if t not in known and shutil.which(t, path=path) is None)
+        return sorted(set(missing))
 
     def missing_python_packages(self) -> List[str]:
         """Return required Python packages that are not importable."""

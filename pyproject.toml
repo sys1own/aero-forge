@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aero-forge"
 version = "0.1.0"
-description = "LLM-integrated build tool that transpiles Python functions to native Rust extensions."
+description = "LLM-integrated build tool that transpiles Python functions to native Rust and C++ extensions."
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
@@ -15,6 +15,7 @@ dependencies = [
     "pydantic",
     "pyyaml>=5.0",
     "numpy",
+    "pybind11",
     "networkx",
     "z3-solver",
     "websockets>=10.0",

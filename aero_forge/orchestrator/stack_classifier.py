@@ -22,7 +22,7 @@ def _lower_tokens(prompt: str) -> Set[str]:
 # Language/tool markers. Keep these broad and domain-neutral; the classifier
 # should only infer *what build tools are implied*, not encode business logic.
 _LANGUAGE_MARKERS: Dict[str, List[str]] = {
-    "python": ["python", "py", "maturin", "pyo3", "cython"],
+    "python": ["python", "py", "maturin", "pyo3", "pybind11", "cython"],
     "rust": ["rust", "cargo", "crates", "rustc"],
     "cpp": ["c++", "cpp", "cplusplus", "cxx", "pybind11", "cffi", "cmake"],
     "go": ["go", "golang"],
@@ -110,12 +110,16 @@ def classify_stack(prompt: str) -> StackClassification:
     has_python_only = _has_any(tokens, ["pure python", "python only"])
     has_rust_only = _has_any(tokens, ["pure rust", "rust only", "cargo only"])
 
-    if (has_python and has_rust) or (has_hybrid_word and (has_python or has_rust)):
+    if has_python and has_rust:
         architecture = INTENT_HYBRID_RUST_PYTHON
         raw_toolchains.update(["python", "rust", "cargo"])
     elif has_python and has_cpp:
         architecture = INTENT_HYBRID_CPP_PYTHON
         raw_toolchains.update(["python", "cpp", "cmake"])
+    elif has_hybrid_word and (has_python or has_rust):
+        # Generic "hybrid" / "polyglot" with no explicit C++ defaults to Rust/Python.
+        architecture = INTENT_HYBRID_RUST_PYTHON
+        raw_toolchains.update(["python", "rust", "cargo"])
     elif has_rust or has_rust_only:
         architecture = INTENT_PURE_RUST
         raw_toolchains.update(["rust", "cargo"])

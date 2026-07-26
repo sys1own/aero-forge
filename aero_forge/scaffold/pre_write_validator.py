@@ -76,37 +76,57 @@ def validate_blueprint_manifest(
         )
 
 
+def _has_cpp_keywords(prompt: str, toolchains: List[str]) -> bool:
+    """Detect whether a prompt/toolchain set is C++ / pybind11 oriented."""
+    lower = prompt.lower()
+    cpp_terms = ("c++", "cpp", "pybind11", "g++", "clang++", "cmake")
+    return (
+        any(term in lower for term in cpp_terms)
+        or "cpp" in toolchains
+        or "cmake" in toolchains
+    )
+
+
 def validate_blueprint_intent(prompt: str, blueprint: Any) -> None:
     """Raise ``BlueprintValidationError`` if a polyglot prompt was downgraded.
 
-    When the prompt explicitly requests multi-language / Rust integration, the
-    resulting ``blueprint.aero`` must not silently fall back to ``pure_python``.
+    When the prompt explicitly requests multi-language / Rust or C++ integration,
+    the resulting ``blueprint.aero`` must not silently fall back to ``pure_python``.
     """
     intent = classify_build_intent(prompt)
-    if intent != "hybrid_rust_python":
-        return
-
     architecture = getattr(blueprint, "architecture", "pure_python")
     toolchains = getattr(blueprint, "toolchains", [])
     manifest = getattr(blueprint, "manifest", [])
     manifest_paths = {getattr(entry, "path", "") for entry in manifest}
 
-    if architecture == "pure_python":
+    if architecture == "pure_python" and intent in ("hybrid_rust_python", "hybrid_cpp_python"):
         raise BlueprintValidationError(
-            f"Prompt requests a hybrid Rust/Python build, but blueprint architecture is {architecture!r}",
-            output="Set architecture to a hybrid/polyglot value such as 'hybrid_rust_python'.",
+            f"Prompt requests a {intent} build, but blueprint architecture is {architecture!r}",
+            output=f"Set architecture to a hybrid/polyglot value such as '{intent}'.",
         )
-    has_rust = "rust" in toolchains or "cargo" in toolchains
-    if "python" not in toolchains or not has_rust:
-        raise BlueprintValidationError(
-            f"Prompt requests a hybrid Rust/Python build, but toolchains {toolchains!r} are missing 'python' or 'rust'",
-            output="Include both 'python' and 'rust' (or 'cargo') in toolchains.",
-        )
-    if "Cargo.toml" not in {Path(p).name for p in manifest_paths}:
-        raise BlueprintValidationError(
-            "Prompt requests a hybrid Rust/Python build, but manifest is missing Cargo.toml",
-            output="Add a Cargo.toml entry to the blueprint manifest.",
-        )
+
+    if intent == "hybrid_rust_python" or (
+        intent == "hybrid_polyglot" and not _has_cpp_keywords(prompt, toolchains)
+    ):
+        has_rust = "rust" in toolchains or "cargo" in toolchains
+        if "python" not in toolchains or not has_rust:
+            raise BlueprintValidationError(
+                f"Prompt requests a hybrid Rust/Python build, but toolchains {toolchains!r} are missing 'python' or 'rust'",
+                output="Include both 'python' and 'rust' (or 'cargo') in toolchains.",
+            )
+        if "Cargo.toml" not in {Path(p).name for p in manifest_paths}:
+            raise BlueprintValidationError(
+                "Prompt requests a hybrid Rust/Python build, but manifest is missing Cargo.toml",
+                output="Add a Cargo.toml entry to the blueprint manifest.",
+            )
+
+    if intent == "hybrid_cpp_python" or _has_cpp_keywords(prompt, toolchains):
+        has_cpp = "cpp" in toolchains or "cmake" in toolchains or "g++" in toolchains or "clang" in toolchains
+        if "python" not in toolchains or not has_cpp:
+            raise BlueprintValidationError(
+                f"Prompt requests a hybrid C++/Python build, but toolchains {toolchains!r} are missing 'python' or 'cpp'",
+                output="Include both 'python' and 'cpp' (or 'cmake') in toolchains.",
+            )
 
 
 def _default_validation_command(language: str, workspace_root: Path) -> Optional[List[str]]:
