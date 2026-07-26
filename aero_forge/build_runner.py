@@ -235,6 +235,12 @@ class BuildRunner:
         self.progress = progress and sys.stderr.isatty()
         self.config_override = config_override
         self._host_target = _host_target()
+
+        # Ensure Python child processes flush stdout/stderr immediately and that
+        # acceleration telemetry has a fallback destination.
+        os.environ.setdefault("PYTHONUNBUFFERED", "1")
+        os.environ.setdefault("AERO_FORGE_ACCEL_LOG", str((cache_dir or _cache_dir_from_env() or Path(".aero_cache")) / ".aero_forge_accel.log"))
+
         env_cache = os.getenv("AERO_FORGE_CACHE_ENABLED", "true").lower() not in (
             "0",
             "false",

@@ -150,7 +150,8 @@ def is_cpp_friendly(source: str) -> bool:
 
     verdict = has_loop or numeric_ops >= 2 or recursive_calls >= 1
     if verdict:
-        _accel_log("info", f"ACCELERATED: numeric workload detected (loops={has_loop}, numeric_ops={numeric_ops}, recursive_calls={recursive_calls})")
+        detail = "Heavy numerical matrix loop bound to C++ dynamic shared library" if has_loop else "numeric workload"
+        _accel_log("info", f"ACCELERATED: {detail} (loops={has_loop}, numeric_ops={numeric_ops}, recursive_calls={recursive_calls})")
     else:
         _accel_log("info", "PASSTHROUGH: insufficient numeric workload for C++ acceleration")
     return verdict
@@ -171,13 +172,13 @@ def select_native_backend(source: str, hint: Optional[str] = None) -> str:
     _accel_log("info", f"Selecting native backend (hint={hint})")
     hint = (hint or "rust_hin").lower()
     if hint in ("cpp", "c_abi"):
-        _accel_log("success", "Target compilation language: C++ (extern \"C\" shared dynamic lib)")
+        _accel_log("success", "ACCELERATED: C++ selected for extern \"C\" dynamic shared library")
         return "cpp"
     if hint in ("rust", "rust_hin", "pyo3"):
         _accel_log("success", "Target compilation language: Rust (cdylib / PyO3)")
         return "rust_hin"
     if is_cpp_friendly(source) and _cpp_compiler_available():
-        _accel_log("success", "Target compilation language: C++ (auto-selected)")
+        _accel_log("success", "ACCELERATED: C++ auto-selected for extern \"C\" dynamic shared library")
         return "cpp"
     _accel_log("success", "Target compilation language: Rust (auto-selected)")
     return "rust_hin"
@@ -219,7 +220,8 @@ def should_accelerate_with_native(source: str, *, min_numeric_ops: int = 3) -> b
     )
     verdict = has_loop or numeric_ops >= min_numeric_ops
     if verdict:
-        _accel_log("success", f"ACCELERATED: heavy compute detected (loops={has_loop}, numeric_ops={numeric_ops})")
+        detail = "Heavy numerical matrix loop bound to C++ dynamic shared library" if has_loop else "heavy compute"
+        _accel_log("success", f"ACCELERATED: {detail} (loops={has_loop}, numeric_ops={numeric_ops})")
     else:
         _accel_log("info", f"PASSTHROUGH: light workload (loops={has_loop}, numeric_ops={numeric_ops})")
     return verdict

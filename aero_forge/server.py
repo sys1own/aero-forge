@@ -1266,6 +1266,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
 
     def _handle_run(self) -> None:
         """Run a Python entry file in the session sandbox and stream NDJSON output."""
+        proc: Optional[subprocess.Popen] = None
         try:
             body = _parse_json_body(self)
             session_id = body.get("session_id", "").strip()
@@ -1302,28 +1303,50 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             env["AERO_FORGE_SESSION"] = session_id
             env["AERO_FORGE_SESSION_DIR"] = str(session_dir)
             env["AERO_FORGE_ACCEL_LOG"] = str(session_dir / ".aero_forge_accel.log")
+            env["PYTHONUNBUFFERED"] = "1"
             existing_pythonpath = env.get("PYTHONPATH", "")
             env["PYTHONPATH"] = (
                 f"{session_dir}{':' + existing_pythonpath if existing_pythonpath else ''}"
             )
 
             start = time.time()
+            max_duration = float(os.environ.get("AERO_FORGE_RUN_TIMEOUT", "120"))
+
             proc = subprocess.Popen(
-                [sys.executable, str(target)],
+                [sys.executable, "-u", str(target)],
                 cwd=str(session_dir),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
                 env=env,
+                start_new_session=True,
             )
 
+            # Set stdout and stderr to non-blocking so reader threads never hang.
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    fcntl.fcntl(pipe, fcntl.F_SETFL, fcntl.fcntl(pipe, fcntl.F_GETFL) | os.O_NONBLOCK)
+
             q: queue.Queue = queue.Queue()
+            buffers: Dict[str, bytes] = {"stdout": b"", "stderr": b""}
 
             def reader(pipe, tag):
-                try:
-                    for line in iter(pipe.readline, b""):
+                fd = pipe.fileno()
+                while True:
+                    try:
+                        data = os.read(fd, 4096)
+                    except (BlockingIOError, OSError):
+                        time.sleep(0.05)
+                        continue
+                    if not data:
+                        break
+                    buffers[tag] += data
+                    while b"\n" in buffers[tag]:
+                        line, _, buffers[tag] = buffers[tag].partition(b"\n")
                         q.put((tag, line.decode("utf-8", errors="replace")))
-                finally:
-                    pipe.close()
+                if buffers[tag]:
+                    q.put((tag, buffers[tag].decode("utf-8", errors="replace")))
+                pipe.close()
 
             threading.Thread(target=reader, args=(proc.stdout, "stdout"), daemon=True).start()
             threading.Thread(target=reader, args=(proc.stderr, "stderr"), daemon=True).start()
@@ -1371,6 +1394,10 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                         if finished:
                             break
                         finished = True
+                    elif time.time() - start > max_duration:
+                        logger.warning("Run for %s timed out after %ss", file_path, max_duration)
+                        proc.kill()
+                        _emit_accel_lines()
 
             duration = (time.time() - start) * 1000
             _write_chunk(
@@ -1386,6 +1413,13 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             logger.exception("Run endpoint failed")
             return _send_json(self, 500, {"error": str(exc)})
+        finally:
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                except Exception:
+                    pass
 
     def _handle_download_zip(self, query: Dict[str, List[str]]) -> None:
         session_id = _first(query, "session_id")
