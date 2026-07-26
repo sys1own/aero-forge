@@ -45,3 +45,24 @@ def test_blueprint_contract_combines_languages_and_packages() -> None:
     assert "python3" in tools
     # "sys" is a stdlib module and should already be importable, so no violation.
     assert "sys" not in verifier.missing_python_packages()
+
+
+def test_cpp_compiler_detected_and_compiles_shared_library() -> None:
+    if not shutil.which("g++") and not shutil.which("clang++"):
+        pytest.skip("No C++ compiler available")
+    compiler, so_path = VerifyDependencies.assert_cpp_shared_library()
+    assert compiler in ("g++", "clang++", "c++")
+    assert so_path.is_file()
+    assert so_path.suffix == ".so"
+
+
+def test_verify_language_cpp_fails_without_compiler(monkeypatch) -> None:
+    def _no_compiler():
+        return None
+
+    monkeypatch.setattr(
+        "aero_forge.environment.verify_dependencies._find_cpp_compiler", _no_compiler
+    )
+    with pytest.raises(ContractViolationError) as exc_info:
+        VerifyDependencies.verify_language("cpp")
+    assert "no c++ compiler" in str(exc_info.value).lower()

@@ -5,7 +5,10 @@ from __future__ import annotations
 import importlib.util
 import os
 import shutil
-from typing import Any, Dict, List, Optional, Set
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 def _rust_aware_path(env: Optional[Dict[str, str]] = None) -> str:
@@ -25,6 +28,50 @@ def _rust_aware_path(env: Optional[Dict[str, str]] = None) -> str:
 
 class ContractViolationError(Exception):
     """Raised when the host environment does not satisfy the active contract."""
+
+
+def _find_cpp_compiler() -> Optional[str]:
+    """Return the first available C++ compiler driver, preferring clang++ then g++."""
+    for name in ("clang++", "g++", "c++"):
+        if shutil.which(name):
+            return name
+    return None
+
+
+def _compile_test_shared_library(compiler: str) -> Optional[Path]:
+    """Compile a minimal C++ dynamic library to verify the toolchain works."""
+    tmp_dir = Path(tempfile.mkdtemp(prefix="aero_forge_cpp_check_"))
+    src_path = tmp_dir / "test.cpp"
+    so_path = tmp_dir / "libaero_forge_cpp_test.so"
+    src_path.write_text(
+        '#include <cstdint>\n'
+        '#ifdef _WIN32\n'
+        '#define AERO_EXPORT __declspec(dllexport)\n'
+        '#else\n'
+        '#define AERO_EXPORT __attribute__((visibility("default")))\n'
+        '#endif\n'
+        'extern "C" {\n'
+        'AERO_EXPORT int32_t aero_forge_cpp_test() { return 42; }\n'
+        '}\n',
+        encoding="utf-8",
+    )
+    cmd = [
+        compiler,
+        "-shared",
+        "-fPIC",
+        "-O2",
+        "-std=c++17",
+        "-o",
+        str(so_path),
+        str(src_path),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if proc.returncode != 0:
+            return None
+        return so_path
+    except Exception:
+        return None
 
 
 SYSTEM_TOOLCHAINS: Dict[str, List[str]] = {
@@ -214,10 +261,36 @@ class VerifyDependencies:
                 "Contract Violation: environment does not satisfy the active blueprint:\n  - "
                 + "\n  - ".join(violations)
             )
+        if "cpp" in self._languages() or self.blueprint.get("architecture") == "hybrid_cpp_python":
+            self.assert_cpp_shared_library()
+
+    @classmethod
+    def assert_cpp_shared_library(cls) -> Tuple[str, Path]:
+        """Find a C++ compiler and verify it can build a ``.so``/``.dylib``/``.dll``.
+
+        Returns a ``(compiler, so_path)`` tuple on success or raises
+        :class:`ContractViolationError`.
+        """
+        compiler = _find_cpp_compiler()
+        if compiler is None:
+            raise ContractViolationError(
+                "No C++ compiler found on PATH. "
+                "Install build-essential (g++) or clang (clang++) to build C++ extensions."
+            )
+        so_path = _compile_test_shared_library(compiler)
+        if so_path is None:
+            raise ContractViolationError(
+                f"'{compiler}' was found but failed to compile a test shared library. "
+                "Ensure a working C++ toolchain and standard library are installed."
+            )
+        return compiler, so_path
 
     @classmethod
     def verify_language(cls, language: str) -> None:
-        """Check only the toolchain binaries for a single language."""
+        """Check the toolchain binaries for a single language and, for C++, compile a test library."""
+        if language == "cpp":
+            cls.assert_cpp_shared_library()
+            return
         missing = cls.missing_toolchain_binaries(language)
         if missing:
             hints = [f"'{b}': {_TOOL_INSTALL_HINTS.get(b, f'Install {b}')}" for b in missing]
@@ -233,3 +306,21 @@ __all__ = [
     "SYSTEM_TOOLCHAINS",
     "DEFAULT_PYTHON_PACKAGES",
 ]
+
+
+def main() -> int:
+    """CLI entrypoint for a quick environment check."""
+    import sys
+
+    try:
+        VerifyDependencies().verify()
+        compiler, so_path = VerifyDependencies.assert_cpp_shared_library()
+        print(f"Environment OK. C++ compiler: {compiler}, test .so: {so_path}")
+        return 0
+    except ContractViolationError as exc:
+        print(f"Environment check failed: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
