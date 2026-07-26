@@ -35,6 +35,7 @@ from aero_forge.config import ConfigOverride, load_config, resolve_settings
 from aero_forge.overlay import OverlayManager, ReapplyStatus
 from aero_forge.precision_shield.rust_shield import RustSemanticShield
 from aero_forge.scaffold.active_merge import find_compiled_library, merge_active
+from aero_forge.scaffold.cargo_runner import _env_with_cargo
 from aero_forge.scaffold.import_pruner import prune_source
 from aero_forge.scaffold.pre_write_validator import (
     BlueprintValidationError,
@@ -668,16 +669,19 @@ class Orchestrator:
             ) from exc
 
         try:
+            fmt_env = _env_with_cargo()
             fmt = subprocess.run(
                 ["cargo", "fmt"],
                 cwd=crate_root,
                 capture_output=True,
                 text=True,
                 timeout=60,
+                env=fmt_env,
             )
             if fmt.returncode != 0:
                 raise _BuildFailure(
-                    f"Generated Rust code could not be formatted:\n{fmt.stdout}"
+                    f"Generated Rust code could not be formatted (exit {fmt.returncode}):\n"
+                    f"stdout:\n{fmt.stdout}\nstderr:\n{fmt.stderr}"
                 )
 
             self._cargo_target.mkdir(parents=True, exist_ok=True)

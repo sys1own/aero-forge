@@ -8,10 +8,19 @@ import shutil
 from typing import Any, Dict, List, Optional, Set
 
 
-def _cargo_path() -> str:
-    from aero_forge.scaffold.cargo_runner import _env_with_cargo
+def _rust_aware_path(env: Optional[Dict[str, str]] = None) -> str:
+    """Return PATH, bootstrapping Rust if cargo/rustc are missing and needed."""
+    from aero_forge.scaffold.cargo_runner import ensure_rust_toolchain
 
-    return _env_with_cargo().get("PATH", os.environ.get("PATH", ""))
+    merged = dict(os.environ)
+    if env:
+        merged.update(env)
+    result = ensure_rust_toolchain(merged)
+    # Persist discovered rustup locations so plain subprocess.run calls inherit them.
+    for key in ("PATH", "CARGO_HOME", "RUSTUP_HOME"):
+        if result.get(key) and not os.environ.get(key):
+            os.environ[key] = result[key]
+    return result.get("PATH", os.environ.get("PATH", ""))
 
 
 class ContractViolationError(Exception):
@@ -73,7 +82,7 @@ class VerifyDependencies:
     def missing_toolchain_binaries(language: str) -> List[str]:
         """Return required binaries for *language* that are absent from PATH."""
         required = SYSTEM_TOOLCHAINS.get(language, [])
-        path = _cargo_path()
+        path = _rust_aware_path() if language in ("rust", "auto") else os.environ.get("PATH", "")
         return [binary for binary in required if shutil.which(binary, path=path) is None]
 
     @classmethod
@@ -152,8 +161,9 @@ class VerifyDependencies:
 
     def missing_tools(self) -> List[str]:
         """Return required tools that are not on PATH."""
-        path = _cargo_path()
-        return sorted(t for t in self.required_tools() if shutil.which(t, path=path) is None)
+        tools = self.required_tools()
+        path = _rust_aware_path() if {"cargo", "rustc"} & set(tools) else os.environ.get("PATH", "")
+        return sorted(t for t in tools if shutil.which(t, path=path) is None)
 
     def missing_python_packages(self) -> List[str]:
         """Return required Python packages that are not importable."""

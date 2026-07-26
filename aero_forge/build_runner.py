@@ -639,7 +639,7 @@ class BuildRunner:
             if r.logs and not first_logs:
                 first_logs = r.logs
             if not r.success:
-                first_error = first_logs.splitlines()[0] if first_logs else "Build failed"
+                first_error = first_logs if first_logs else "Build failed"
                 break
 
         return {

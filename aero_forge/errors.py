@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import ast
 import os
+import shutil
 from pathlib import Path
 from typing import Optional
 
-from aero_forge.environment import ContractViolationError, VerifyDependencies
+
 
 IO_ERROR = "Unsupported I/O operation detected. Aborting."
 
@@ -22,16 +23,23 @@ class UnsupportedError(ValueError):
 
 
 def check_toolchain() -> None:
-    """Verify that the Rust toolchain is available before building."""
-    try:
-        VerifyDependencies.verify_language("rust")
-    except ContractViolationError as exc:
-        path_dirs = os.environ.get("PATH", "").split(os.pathsep)
-        raise UserError(
-            f"{exc} "
-            "Install Rust from https://rustup.rs/ and ensure cargo/rustc are on your PATH. "
-            f"Searched PATH directories: {', '.join(d for d in path_dirs if d)}"
-        ) from exc
+    """Verify that the Rust toolchain is available before building.
+
+    If the toolchain is missing, attempt an isolated rustup bootstrap before
+    failing.  The bootstrap respects ``AERO_FORGE_NO_RUST_BOOTSTRAP``.
+    """
+    from aero_forge.scaffold.cargo_runner import ensure_rust_toolchain
+
+    env = ensure_rust_toolchain()
+    if shutil.which("cargo", path=env.get("PATH")) and shutil.which("rustc", path=env.get("PATH")):
+        os.environ.update({k: v for k, v in env.items() if k in ("PATH", "CARGO_HOME", "RUSTUP_HOME") and k not in os.environ})
+        return
+    path_dirs = env.get("PATH", "").split(os.pathsep)
+    raise UserError(
+        "Rust toolchain not found. Install Rust from https://rustup.rs/ or set "
+        f"AERO_FORGE_NO_RUST_BOOTSTRAP=1 to disable auto-bootstrap. "
+        f"Searched PATH directories: {', '.join(d for d in path_dirs if d)}"
+    )
 
 
 def locate_unsupported_node(source: str, message: str) -> Optional[ast.AST]:
@@ -59,7 +67,11 @@ def locate_unsupported_node(source: str, message: str) -> Optional[ast.AST]:
 
 
 def classify_cargo_error(output: str) -> str:
-    """Map raw cargo output to a concise, actionable message."""
+    """Map raw cargo output to a concise, actionable message.
+
+    The full cargo stderr is preserved in the exception/log; this function only
+    adds a short classification so callers do not need to re-parse it.
+    """
     out = output.lower()
     if (
         "e0428" in out
@@ -73,9 +85,11 @@ def classify_cargo_error(output: str) -> str:
         )
     if "linker" in out and "not found" in out:
         return "No linker found. Install a C toolchain (gcc/clang) on your system."
+    if "could not choose a version" in out and "rustup" in out:
+        return "Rust toolchain not configured. Run 'rustup default stable' or allow aero-forge to bootstrap Rust."
     if "error" in out:
-        return "Rust compilation failed. Use --verbose to see the full compiler output."
-    return "Cargo build failed. Use --verbose to see the full output."
+        return "Rust compilation failed. The exact compiler output is included above."
+    return "Cargo build failed. The exact compiler output is included above."
 
 
 def format_unsupported_error(
