@@ -393,10 +393,12 @@ def get_default_template() -> PromptTemplate:
 BLUEPRINT_PLAN_INSTRUCTIONS = """You are a systems architect. Given the user prompt and constraints, produce a valid YAML blueprint.aero with exactly these top-level keys:
 project, architecture, toolchains, manifest, contracts, output_dir, prompt, constraints, llm.
 
-- architecture must be one of: pure_python, pure_rust, hybrid_rust_python, hybrid_polyglot.
+- architecture must be one of: pure_python, pure_rust, hybrid_rust_python, hybrid_cpp_python, hybrid_polyglot.
 - If the prompt mentions Python and Rust together, PyO3, Maturin, FFI, a native core, or polyglot/hybrid orchestration, architecture MUST be hybrid_rust_python and toolchains MUST be [python, cargo].
+- If the prompt mentions Python and C++, pybind11, CMake, g++, clang++, C extensions, or natively accelerated C++, architecture MUST be hybrid_cpp_python and toolchains MUST be [python, cpp, cmake, setuptools].
 - If the prompt is purely Rust/cargo, use pure_rust with toolchains [rust, cargo].
 - If the prompt is purely Python, use pure_python with toolchains [python].
+- If the prompt is generic polyglot or the language is mixed/unclear, use hybrid_polyglot with toolchains [python, cpp, rust, cargo].
 - manifest is a list of objects with keys: path, lang, purpose. Use relative paths.
 - contracts is a list of objects with keys: name, signature, language, python_name, purpose.
 - Quote all signature strings with double quotes so colons in Python type annotations do not break YAML parsing.

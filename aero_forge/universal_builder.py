@@ -31,6 +31,7 @@ from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_RUST_PYTHON,
     classify_stack,
 )
+from aero_forge.scaffold.cpp_materializer import CppPolyglotMaterializer
 from aero_forge.scaffold.polyglot_materializer import PolyglotMaterializer
 
 logger = logging.getLogger("aero_forge.universal_builder")
@@ -104,7 +105,32 @@ def _hybrid_fallback_blueprint(
     prompt: str = "",
 ) -> Blueprint:
     """Return a deterministic hybrid blueprint that respects explicit file requests."""
-    if any(f in features for f in ("data_pipeline", "stream", "batch", "math")):
+    prompt_lower = prompt.lower()
+    is_cpp = (
+        "cpp" in features
+        or "c++" in features
+        or "pybind11" in features
+        or "cmake" in features
+        or "c++" in prompt_lower
+        or "pybind11" in prompt_lower
+        or "cpp" in prompt_lower
+    )
+
+    if is_cpp:
+        # The C++ polyglot materializer currently emits implementations for the
+        # standard vector transform / status contracts. Use those as the stable
+        # fallback surface for any C++ request.
+        contracts = [
+            ContractEntry(
+                name="fast_vector_transform",
+                signature="def fast_vector_transform(v: list[float], scalar: float) -> list[float]",
+            ),
+            ContractEntry(
+                name="get_engine_status",
+                signature="def get_engine_status() -> dict[str, str]",
+            ),
+        ]
+    elif any(f in features for f in ("data_pipeline", "stream", "batch", "math")):
         contracts = [
             ContractEntry(
                 name="process_stream",
@@ -138,13 +164,24 @@ def _hybrid_fallback_blueprint(
     if explicit_packages:
         pkg_name = _sanitize_module_name(sorted(explicit_packages)[0])
 
-    manifest: list[ManifestEntry] = [
-        ManifestEntry(path="Cargo.toml", lang="toml", purpose="workspace manifest"),
-        ManifestEntry(path="rust_core/Cargo.toml", lang="toml", purpose="crate manifest"),
-        ManifestEntry(path="rust_core/src/lib.rs", lang="rust", purpose="Rust core"),
-        ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python packaging"),
-        ManifestEntry(path="README.md", lang="markdown", purpose="docs"),
-    ]
+    if is_cpp:
+        manifest: list[ManifestEntry] = [
+            ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python packaging"),
+            ManifestEntry(path="setup.py", lang="python", purpose="setuptools build script"),
+            ManifestEntry(path="README.md", lang="markdown", purpose="docs"),
+        ]
+        toolchains = ["python", "cpp"]
+        architecture = INTENT_HYBRID_CPP_PYTHON
+    else:
+        manifest = [
+            ManifestEntry(path="Cargo.toml", lang="toml", purpose="workspace manifest"),
+            ManifestEntry(path="rust_core/Cargo.toml", lang="toml", purpose="crate manifest"),
+            ManifestEntry(path="rust_core/src/lib.rs", lang="rust", purpose="Rust core"),
+            ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python packaging"),
+            ManifestEntry(path="README.md", lang="markdown", purpose="docs"),
+        ]
+        toolchains = ["python", "rust", "cargo"]
+        architecture = INTENT_HYBRID_RUST_PYTHON
 
     # Collect requested files per package and decide whether a default package is needed.
     requested_root_files = {Path(p).name for p in explicit if len(Path(p).parts) == 1}
@@ -164,10 +201,16 @@ def _hybrid_fallback_blueprint(
         manifest.append(
             ManifestEntry(path=f"{pkg_dir}/__init__.py", lang="python", purpose="package init")
         )
-        if "native.py" not in requested_package_files.get(pkg_dir, []):
-            manifest.append(
-                ManifestEntry(path=f"{pkg_dir}/native.py", lang="python", purpose="native wrapper")
-            )
+        if is_cpp:
+            if "native.cpp" not in requested_package_files.get(pkg_dir, []):
+                manifest.append(
+                    ManifestEntry(path=f"{pkg_dir}/native.cpp", lang="cpp", purpose="pybind11 extension source")
+                )
+        else:
+            if "native.py" not in requested_package_files.get(pkg_dir, []):
+                manifest.append(
+                    ManifestEntry(path=f"{pkg_dir}/native.py", lang="python", purpose="native wrapper")
+                )
         if "cli.py" not in requested_package_files.get(pkg_dir, []):
             manifest.append(
                 ManifestEntry(path=f"{pkg_dir}/cli.py", lang="python", purpose="CLI module")
@@ -185,19 +228,18 @@ def _hybrid_fallback_blueprint(
         manifest.append(ManifestEntry(path=p, lang="python", purpose="user requested"))
 
     # Provide native test coverage.
-    if "test_native.py" not in requested_root_files:
-        manifest.append(
-            ManifestEntry(path="tests/test_native.py", lang="python", purpose="native tests")
-        )
+    test_file = "tests/test_cli.py" if is_cpp else "tests/test_native.py"
+    if "test_native.py" not in requested_root_files and "test_cli.py" not in requested_root_files:
+        manifest.append(ManifestEntry(path=test_file, lang="python", purpose="native tests"))
 
-    python_prefix = f"{pkg_name}.native." if packages else ""
+    python_prefix = f"{pkg_name}.native." if packages and not is_cpp else ""
     for contract in contracts:
         contract.python_name = f"{python_prefix}{contract.name}"
 
     return Blueprint(
         project=project_name,
-        architecture=INTENT_HYBRID_RUST_PYTHON,
-        toolchains=["python", "rust", "cargo"],
+        architecture=architecture,
+        toolchains=toolchains,
         manifest=manifest,
         contracts=contracts,
         output_dir=Path("./dist"),
@@ -237,7 +279,12 @@ def _run_polyglot_materializer(
     if aero_core.is_dir():
         shutil.rmtree(aero_core, ignore_errors=True)
     blueprint = _hybrid_fallback_blueprint(project_name, features, prompt=prompt)
-    materializer = PolyglotMaterializer(output_dir)
+    if blueprint.architecture == INTENT_HYBRID_CPP_PYTHON:
+        materializer: Any = CppPolyglotMaterializer(output_dir)
+        materializer_name = "CppPolyglotMaterializer"
+    else:
+        materializer = PolyglotMaterializer(output_dir)
+        materializer_name = "PolyglotMaterializer"
     try:
         updated = materializer.materialize(blueprint, build=True)
     except Exception as exc:
@@ -247,7 +294,7 @@ def _run_polyglot_materializer(
             "error": str(exc),
             "logs": materializer.build_logs,
             "files": [],
-            "materializer": "PolyglotMaterializer",
+            "materializer": materializer_name,
         }
     write_blueprint(updated, output_dir / "blueprint.aero")
 
@@ -281,7 +328,7 @@ def _run_polyglot_materializer(
         "logs": logs,
         "pytest_output": pytest_result.stdout,
         "pytest_error": pytest_result.stderr,
-        "materializer": "PolyglotMaterializer",
+        "materializer": materializer_name,
     }
 
 
@@ -327,7 +374,16 @@ def build_universal_project(
         progress_callback(f"Architecture: {blueprint.architecture}; building...")
 
     # Pass 2: materialize and verify.
-    if blueprint.architecture in (INTENT_HYBRID_RUST_PYTHON, INTENT_HYBRID_CPP_PYTHON):
+    if blueprint.architecture == INTENT_HYBRID_CPP_PYTHON:
+        # C++/pybind11 builds go straight to the polyglot materializer because
+        # generate_monorepo is Rust/PyO3 specific.
+        result = _run_polyglot_materializer(
+            project_name or blueprint.project or "generated",
+            classification.features,
+            output_dir,
+            prompt=prompt,
+        )
+    elif blueprint.architecture == INTENT_HYBRID_RUST_PYTHON:
         try:
             result = generate_monorepo(
                 prompt,

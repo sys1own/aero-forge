@@ -63,6 +63,7 @@ from aero_forge.orchestrator.prompt_builder import (
     build_blueprint_plan_prompt,
 )
 from aero_forge.orchestrator.router import (
+    BUILD_INTENT_HYBRID_CPP_PYTHON,
     BUILD_INTENT_HYBRID_RUST_PYTHON,
     BUILD_INTENT_PURE_RUST,
     HIN_COMPUTE,
@@ -1104,11 +1105,21 @@ def plan_workspace(
         else:
             logger.warning("Blueprint intent correction exhausted; using deterministic fallback.")
 
+    # Normalize ambiguous "hybrid_polyglot" to the concrete C++ intent when the
+    # prompt or requested toolchains are C++ oriented.
+    prompt_lower = prompt.lower() if prompt else ""
+    is_cpp = (
+        intent == BUILD_INTENT_HYBRID_CPP_PYTHON
+        or "c++" in prompt_lower
+        or "cpp" in prompt_lower
+        or "pybind11" in prompt_lower
+        or "cmake" in prompt_lower
+    )
     if blueprint is None:
         blueprint = Blueprint(
             project=project_name,
-            architecture=intent,
-            toolchains=toolchains,
+            architecture=BUILD_INTENT_HYBRID_CPP_PYTHON if is_cpp else intent,
+            toolchains=toolchains_for_intent(BUILD_INTENT_HYBRID_CPP_PYTHON) if is_cpp else toolchains,
             manifest=manifest_entries,
             contracts=[],
             output_dir=output_dir / "dist",
@@ -1126,8 +1137,20 @@ def plan_workspace(
             update["languages"] = classification.languages
         if not blueprint.features:
             update["features"] = classification.features
+        if blueprint.architecture == "hybrid_polyglot" and is_cpp:
+            update["architecture"] = BUILD_INTENT_HYBRID_CPP_PYTHON
+            update["toolchains"] = toolchains_for_intent(BUILD_INTENT_HYBRID_CPP_PYTHON)
+        elif blueprint.architecture == "hybrid_polyglot":
+            update["architecture"] = BUILD_INTENT_HYBRID_RUST_PYTHON
+            update["toolchains"] = toolchains_for_intent(BUILD_INTENT_HYBRID_RUST_PYTHON)
         if intent == BUILD_INTENT_HYBRID_RUST_PYTHON and not blueprint.manifest:
             update["manifest"] = manifest_entries
+        if is_cpp and not blueprint.manifest:
+            from aero_forge.orchestrator.stack_classifier import default_manifest_for_architecture
+            update["manifest"] = [
+                ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
+                for e in default_manifest_for_architecture(BUILD_INTENT_HYBRID_CPP_PYTHON, project_name)
+            ]
         if update:
             blueprint = blueprint.model_copy(update=update)
 
