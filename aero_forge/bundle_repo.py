@@ -8,12 +8,15 @@ during multi-turn sessions.
 
 from __future__ import annotations
 
+import enum
+import io
 import json
 import re
 import xml.etree.ElementTree as ET
+import zipfile
 from html import escape as html_escape
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 SOURCE_SUFFIXES = {
     ".rs",
@@ -246,3 +249,138 @@ def format_context_block(bundle: Dict[str, Any], fmt: str = "xml") -> str:
     else:
         body = bundle_to_xml(bundle)
     return f"CURRENT_PROJECT_CONTEXT ({fmt.upper()} workspace bundle):\n{body}\n---END PROJECT CONTEXT---"
+
+
+class ExportProfile(str, enum.Enum):
+    """Bundle export profiles for generated project archives."""
+
+    STANDARD = "standard"
+    ACCELERATED_PYO3 = "accelerated_py03"
+
+
+# Source directory for the in-repo PyO3 native acceleration crate.
+_NATIVE_CRATE_SOURCE = Path(__file__).resolve().parent / "_native"
+
+
+def _zip_skip(rel: Path) -> bool:
+    """Return True when ``rel`` should be omitted from an exported zip archive."""
+    if not rel.parts:
+        return False
+    name = rel.name
+    if name.startswith("."):
+        return True
+    if name in SKIP_DIRS or any(part in SKIP_DIRS for part in rel.parts):
+        return True
+    if name.endswith(".egg-info"):
+        return True
+    ext = name.split(".")[-1].lower() if "." in name else ""
+    if ext and f".{ext}" in BINARY_SUFFIXES:
+        return True
+    return False
+
+
+def _pyproject_toml_for_maturin(
+    project_name: str = "generated-native",
+    module_name: str = "aero_forge_native",
+    manifest_path: str = "crates/native_core/Cargo.toml",
+) -> str:
+    """Return a root ``pyproject.toml`` configured to build the native core with maturin."""
+    return f"""[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "{project_name}"
+version = "0.1.0"
+description = "Aero-Forge generated project with optional PyO3 native acceleration."
+requires-python = ">=3.9"
+dependencies = ["blake3"]
+
+[tool.maturin]
+manifest-path = "{manifest_path}"
+module-name = "{module_name}"
+"""
+
+
+def _native_crate_source_files() -> List[Tuple[str, str]]:
+    """Return (arcname, content) pairs for the PyO3 native acceleration crate source.
+
+    Only textual source/configuration files are included; compiled artifacts and
+    build directories are ignored.
+    """
+    if not _NATIVE_CRATE_SOURCE.is_dir():
+        return []
+
+    files: List[Tuple[str, str]] = []
+    for path in sorted(_NATIVE_CRATE_SOURCE.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(_NATIVE_CRATE_SOURCE)
+        if _zip_skip(rel):
+            continue
+        try:
+            files.append((Path("crates") / "native_core" / rel, path.read_text(encoding="utf-8")))
+        except (UnicodeDecodeError, OSError):
+            continue
+    return files
+
+
+def create_project_zip(
+    workspace_dir: Path,
+    profile: ExportProfile = ExportProfile.STANDARD,
+    project_name: str = "generated-native",
+    native_crate_source: Optional[Path] = None,
+) -> bytes:
+    """Return a zip archive of ``workspace_dir`` according to ``profile``.
+
+    * ``STANDARD`` includes human-relevant source/config files only.
+    * ``ACCELERATED_PYO3`` additionally bundles ``crates/native_core/`` with the
+      PyO3 acceleration crate source and a root ``pyproject.toml`` configured for
+      ``maturin develop`` / ``pip install .``.
+    """
+    workspace_dir = Path(workspace_dir).resolve()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in sorted(workspace_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(workspace_dir)
+            if _zip_skip(rel):
+                continue
+            # Exclude the accelerator crate if it happens to be inside the workspace.
+            if rel.parts[:2] == ("crates", "native_core"):
+                continue
+            try:
+                content = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            zf.writestr(str(rel.as_posix()), content)
+
+        if profile == ExportProfile.ACCELERATED_PYO3:
+            crate_source = native_crate_source or _NATIVE_CRATE_SOURCE
+            source_files = _native_crate_source_files() if not native_crate_source else []
+            if native_crate_source:
+                for path in sorted(native_crate_source.rglob("*")):
+                    if not path.is_file():
+                        continue
+                    rel = path.relative_to(native_crate_source)
+                    if _zip_skip(rel):
+                        continue
+                    try:
+                        source_files.append(
+                            (Path("crates") / "native_core" / rel, path.read_text(encoding="utf-8"))
+                        )
+                    except (UnicodeDecodeError, OSError):
+                        continue
+            for arc, content in source_files:
+                zf.writestr(str(arc.as_posix()), content)
+            zf.writestr("pyproject.toml", _pyproject_toml_for_maturin(project_name))
+
+    return buf.getvalue()
+
+
+def zip_export_filename(profile: ExportProfile) -> str:
+    """Return the suggested download filename for an export profile."""
+    if profile == ExportProfile.ACCELERATED_PYO3:
+        return "project-accelerated.zip"
+    return "project-standard.zip"

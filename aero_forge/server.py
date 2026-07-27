@@ -34,6 +34,11 @@ import yaml
 from aiohttp import web
 
 from aero_forge.blueprint import generate_blueprint_from_uploaded_repo
+from aero_forge.bundle_repo import (
+    ExportProfile,
+    create_project_zip,
+    zip_export_filename,
+)
 from aero_forge.chat import ChatSession
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
@@ -1437,10 +1442,18 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             return _send_json(self, 400, {"error": "Missing 'session_id'"})
 
         session_dir = _session_dir(session_id)
-        try:
-            archive_bytes = _manager.archive_session_sandbox(session_id)
-        except ValueError as exc:
-            return _send_json(self, 404, {"error": str(exc)})
+        include_native = _first(query, "include_native_crate") or ""
+        profile = (
+            ExportProfile.ACCELERATED_PYO3
+            if include_native.lower() in ("1", "true", "yes", "on")
+            else ExportProfile.STANDARD
+        )
+
+        if not session_dir.is_dir():
+            return _send_json(self, 404, {"error": f"Sandbox for session '{session_id}' does not exist"})
+
+        archive_bytes = create_project_zip(session_dir, profile=profile)
+        filename = zip_export_filename(profile)
 
         return _send_bytes(
             self,
@@ -1448,7 +1461,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             archive_bytes,
             "application/zip",
             {
-                "Content-Disposition": f'attachment; filename="{session_id}.zip"'
+                "Content-Disposition": f'attachment; filename="{filename}"'
             },
         )
 
