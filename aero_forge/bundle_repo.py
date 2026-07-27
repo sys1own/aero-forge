@@ -18,6 +18,8 @@ from html import escape as html_escape
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from aero_forge.scaffold.cargo_config import CARGO_CONFIG_TOML
+
 SOURCE_SUFFIXES = {
     ".rs",
     ".py",
@@ -375,6 +377,7 @@ def create_project_zip(
             for arc, content in source_files:
                 zf.writestr(str(arc.as_posix()), content)
             zf.writestr("pyproject.toml", _pyproject_toml_for_maturin(project_name))
+            zf.writestr(".cargo/config.toml", CARGO_CONFIG_TOML)
 
     return buf.getvalue()
 
@@ -434,6 +437,8 @@ def scaffold_native_crate(
     if not pyproject.is_file():
         pyproject.write_text(_pyproject_toml_for_maturin(project_name), encoding="utf-8")
 
+    from aero_forge.scaffold.cargo_config import write_cargo_config
     from aero_forge.scaffold.cargo_manifest import ensure_workspace_cargo_toml
 
     ensure_workspace_cargo_toml(workspace_dir, crate_member="crates/native_core")
+    write_cargo_config(workspace_dir)
