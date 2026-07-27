@@ -146,8 +146,22 @@
       transition: all 0.15s ease; background: var(--panel-2);
     }
     .drop-zone.drag-over { border-color: var(--accent); background: rgba(0,122,204,0.1); color: var(--text); }
-    .export-options {
-      display: flex; flex-direction: column; gap: 0.4rem; font-size: 0.75rem; color: var(--text);
+    .export-popover {
+      position: relative; font-size: 0.75rem; color: var(--text);
+    }
+    .export-popover summary {
+      list-style: none; cursor: pointer; padding: 0.35rem 0.5rem; border-radius: 4px;
+      border: 1px solid var(--border); background: var(--panel-2); display: inline-flex;
+      align-items: center; gap: 0.3rem; user-select: none;
+    }
+    .export-popover summary::-webkit-details-marker { display: none; }
+    .export-popover summary::before { content: '\2699\FE0F'; }
+    .export-popover[open] summary { border-color: var(--accent); }
+    .export-popover .export-options {
+      position: absolute; bottom: calc(100% + 0.4rem); left: 0; right: 0;
+      display: flex; flex-direction: column; gap: 0.4rem;
+      padding: 0.5rem; border-radius: 4px; border: 1px solid var(--border);
+      background: var(--panel); z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,0.25);
     }
     .export-option {
       display: flex; align-items: flex-start; gap: 0.4rem; cursor: pointer;
@@ -420,19 +434,24 @@
         <div id="drop-zone" class="drop-zone">
           Drop files or a .zip here, or click to upload
         </div>
-        <div class="export-options" title="Choose what to include in the downloaded zip">
-          <label class="export-option">
-            <input type="radio" name="export-profile" value="standard" checked>
-            <span>Pure Target Code (Lightweight)</span>
-            <small>Only generated source files and tests.</small>
-          </label>
-          <label class="export-option">
-            <input type="radio" name="export-profile" value="accelerated">
-            <span>Include Accelerated Rust / PyO3 Crate Source</span>
-            <small>For local maturin / pip native builds.</small>
-          </label>
+        <div class="download-control" style="display:flex;align-items:center;gap:0.4rem;">
+          <button id="download-btn" class="secondary" style="flex:1">Download Session Zip</button>
+          <details id="export-options-popover" class="export-popover">
+            <summary title="Export options" aria-label="Export options">Options</summary>
+            <div class="export-options" title="Choose what to include in the downloaded zip">
+              <label class="export-option">
+                <input type="radio" name="export-profile" value="standard" checked>
+                <span>Pure Target Code (Lightweight)</span>
+                <small>Only generated source files and tests.</small>
+              </label>
+              <label class="export-option">
+                <input type="radio" name="export-profile" value="accelerated">
+                <span>Include Accelerated Rust / PyO3 Crate Source</span>
+                <small>For local maturin / pip native builds.</small>
+              </label>
+            </div>
+          </details>
         </div>
-        <button id="download-btn" class="secondary" style="width:100%">Download Session Zip</button>
       </div>
     </aside>
 
@@ -673,6 +692,7 @@
       uploadInput: document.getElementById('upload-input'),
       uploadRoot: document.getElementById('upload-root'),
       downloadBtn: document.getElementById('download-btn'),
+      exportPopover: document.getElementById('export-options-popover'),
       gutterLeft: document.getElementById('gutter-left'),
       gutterRight: document.getElementById('gutter-right'),
       gutterBottom: document.getElementById('gutter-bottom'),
@@ -1939,7 +1959,16 @@
       e.preventDefault();
       handleFiles(e.dataTransfer.files, '.');
     });
-    ui.downloadBtn.addEventListener('click', downloadZip);
+    ui.downloadBtn.addEventListener('click', () => {
+      if (ui.exportPopover) ui.exportPopover.removeAttribute('open');
+      downloadZip();
+    });
+    // Collapse the export options popover when clicking outside it.
+    document.addEventListener('click', (e) => {
+      if (ui.exportPopover && !ui.exportPopover.contains(e.target)) {
+        ui.exportPopover.removeAttribute('open');
+      }
+    });
     ui.refreshTree.addEventListener('click', loadTree);
     ui.newFileRoot.addEventListener('click', () => createNode('.', false));
     ui.newFolderRoot.addEventListener('click', () => createNode('.', true));

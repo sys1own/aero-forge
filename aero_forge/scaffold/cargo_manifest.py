@@ -20,6 +20,16 @@ PYO3_REQUIRED_FEATURES = (
 )
 
 
+DEFAULT_WORKSPACE_CARGO_TOML = '''\
+# Synthesised by aero-forge. Commit this file to take full control.
+[workspace]
+members = [
+    "crates/native_core",
+]
+resolver = "2"
+'''
+
+
 def _load_toml(path: Path) -> Optional[Dict[str, Any]]:
     """Load a TOML file using the best available parser."""
     try:
@@ -42,6 +52,59 @@ def _load_toml(path: Path) -> Optional[Dict[str, Any]]:
         return toml.load(str(path))
     except Exception:
         return None
+
+
+def ensure_workspace_cargo_toml(
+    workspace_dir: Path,
+    crate_member: str = "crates/native_core",
+) -> Path:
+    """Ensure the workspace root ``Cargo.toml`` declares ``crate_member``.
+
+    If no root ``Cargo.toml`` exists, write a workspace manifest. If one already
+    exists, append ``crate_member`` to the ``members`` array when missing.
+    """
+    workspace_dir = Path(workspace_dir).resolve()
+    manifest = workspace_dir / MANIFEST_NAME
+    if not manifest.is_file():
+        manifest.write_text(DEFAULT_WORKSPACE_CARGO_TOML, encoding="utf-8")
+        return manifest
+
+    text = manifest.read_text(encoding="utf-8")
+    data = _load_toml(manifest) or {}
+    members = data.get("workspace", {}).get("members", [])
+    if crate_member in members:
+        return manifest
+
+    # Append the member to the existing [workspace] members list.
+    member_quoted = f'"{crate_member}"'
+    if "[workspace]" in text:
+        # Find the members = [...] array and append.
+        pattern = re.compile(r'(members\s*=\s*\[)([^\]]*)(\])', re.DOTALL)
+        match = pattern.search(text)
+        if match:
+            inner = match.group(2)
+            separator = ",\n        " if "\n" in inner.strip() else ", "
+            new_member = f"{separator}{member_quoted}"
+            if inner.strip():
+                if not inner.rstrip().endswith(","):
+                    new_member = "," + new_member
+            new_inner = inner + new_member
+            text = text[: match.start(2)] + new_inner + text[match.end(2) :]
+        else:
+            # No members array yet; inject one under [workspace].
+            text = text.replace(
+                "[workspace]",
+                f'[workspace]\nmembers = ["{crate_member}"]',
+                1,
+            )
+    else:
+        text = (
+            DEFAULT_WORKSPACE_CARGO_TOML.rstrip()
+            + "\n\n"
+            + text.lstrip("\n")
+        )
+    manifest.write_text(text, encoding="utf-8")
+    return manifest
 
 
 def ensure_pyo3_features(dependencies: Optional[Dict[str, Any]]) -> Dict[str, Any]:

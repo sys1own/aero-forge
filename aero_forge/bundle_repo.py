@@ -418,8 +418,22 @@ def scaffold_native_crate(
                 continue
             target = crate_dest / rel
             target.parent.mkdir(parents=True, exist_ok=True)
+            if target.name == "Cargo.toml":
+                # Use the canonical directory name as the package name so that
+                # workspace-scoped cargo commands like ``cargo test -p native_core``
+                # resolve correctly without relying on the source crate's name.
+                content = re.sub(
+                    r'^name\s*=\s*"[^"]+"',
+                    'name = "native_core"',
+                    content,
+                    flags=re.MULTILINE,
+                )
             target.write_text(content, encoding="utf-8")
 
     pyproject = workspace_dir / "pyproject.toml"
     if not pyproject.is_file():
         pyproject.write_text(_pyproject_toml_for_maturin(project_name), encoding="utf-8")
+
+    from aero_forge.scaffold.cargo_manifest import ensure_workspace_cargo_toml
+
+    ensure_workspace_cargo_toml(workspace_dir, crate_member="crates/native_core")

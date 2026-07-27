@@ -657,7 +657,7 @@ def test_api_workspace_accelerate_scaffold_pyo3(server):
     assert summary["mode"] == "scaffold_pyo3"
     assert any("maturin develop" in c["cmd"] for c in summary["commands"])
     assert any(
-        c["cmd"] == "cargo test --manifest-path crates/native_core/Cargo.toml"
+        c["cmd"] in ("cargo test -p native_core", "cargo test --workspace")
         for c in summary["commands"]
     )
 
