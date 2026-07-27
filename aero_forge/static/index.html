@@ -1449,18 +1449,61 @@
       if (!state.sessionId) { log('No session; create or load a workspace first', 'error'); return; }
       const selected = document.querySelector('input[name="accelerate-mode"]:checked');
       const mode = selected ? selected.value : 'runtime';
+      ui.acceleratorLog.innerHTML = '<div class="placeholder" style="color:var(--muted);padding:0.5rem 0">Acceleration progress will appear here.</div>';
+      switchBottomTab('accelerator');
       setBusy(true);
       try {
-        const data = await api('POST', '/api/workspace/accelerate', buildBody({ mode }));
-        if (data.status !== 'accelerated') throw new Error(data.error || 'Acceleration failed');
+        const res = await fetch('/api/workspace/accelerate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildBody({ mode }))
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: 'HTTP ' + res.status }));
+          throw new Error(err.error || 'Acceleration failed');
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let summary = null;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (value) buffer += decoder.decode(value, { stream: true });
+          if (done) buffer += decoder.decode();
+          while (buffer.includes('\n')) {
+            const line = buffer.substring(0, buffer.indexOf('\n'));
+            buffer = buffer.substring(buffer.indexOf('\n') + 1);
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            try {
+              const msg = JSON.parse(trimmed);
+              if (msg.type === 'accel') {
+                if (ui.acceleratorLog.querySelector('.placeholder')) ui.acceleratorLog.innerHTML = '';
+                appendAccelLog(escapeHtml(msg.data), msg.level || '');
+              } else if (msg.type === 'summary') {
+                summary = msg;
+              } else if (msg.type === 'error') {
+                appendAccelLog(escapeHtml(msg.data), 'error');
+              }
+            } catch (e) {
+              if (ui.acceleratorLog.querySelector('.placeholder')) ui.acceleratorLog.innerHTML = '';
+              appendAccelLog(escapeHtml(trimmed), '');
+            }
+          }
+          if (done) break;
+        }
+        if (!summary || summary.status !== 'accelerated') {
+          throw new Error((summary && summary.error) || 'Acceleration did not complete');
+        }
         ui.accelerateBadge.classList.add('visible');
         ui.accelerateBadge.textContent = mode === 'scaffold_pyo3'
           ? '⚡ Accelerated (PyO3 Source Injected)'
-          : `⚡ Accelerated (${data.native_active ? 'Runtime Native' : 'Runtime Fallback'})`;
-        renderDetectedCommands(data.commands || []);
+          : `⚡ Accelerated (${summary.native_active ? 'Runtime Native' : 'Runtime Fallback'})`;
+        renderDetectedCommands(summary.commands || []);
         log(`Workspace accelerated (${mode})`, 'success');
         if (mode === 'scaffold_pyo3') loadTree();
       } catch (e) {
+        appendAccelLog(`Acceleration failed: ${escapeHtml(e.message)}`, 'error');
         log(`Acceleration failed: ${e.message}`, 'error');
       } finally {
         setBusy(false);

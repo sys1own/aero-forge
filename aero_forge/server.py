@@ -43,6 +43,7 @@ from aero_forge.bundle_repo import (
 from aero_forge.chat import ChatSession
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
+from aero_forge import runner as sandbox_runner
 from aero_forge.orchestrator.router import toolchains_for_intent
 from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_CPP_PYTHON,
@@ -1238,7 +1239,11 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             return _send_json(self, 500, {"error": str(exc)})
 
     def _handle_workspace_accelerate(self) -> None:
-        """Activate runtime native acceleration or scaffold a PyO3 crate in the workspace."""
+        """Activate runtime native acceleration or scaffold a PyO3 crate in the workspace.
+
+        Streams step-by-step acceleration progress as NDJSON ``type: accel`` chunks
+        and ends with a ``type: summary`` payload.
+        """
         try:
             body = _parse_json_body(self)
             session_id = body.get("session_id", "").strip()
@@ -1259,32 +1264,88 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     404,
                     {"error": f"Sandbox for session '{session_id}' does not exist"},
                 )
+        except Exception as exc:
+            logger.exception("Workspace accelerate endpoint setup failed")
+            return _send_json(self, 500, {"error": str(exc)})
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+
+        def _write_chunk(obj):
+            data = (json.dumps(obj) + "\n").encode("utf-8")
+            self.wfile.write(f"{len(data):X}\r\n".encode("ascii"))
+            self.wfile.write(data)
+            self.wfile.write(b"\r\n")
+            self.wfile.flush()
+
+        def _accel(level: str, message: str):
+            _write_chunk({"type": "accel", "data": f"[ACCEL] {message}", "level": level})
+
+        try:
+            _accel("info", f"Initializing workspace acceleration (Mode: {mode})...")
+            _accel("info", "Scanning workspace root for build manifests...")
+            commands = workspace_inspector.inspect_workspace(session_dir)
+            cmd_labels = [c.get("cmd", c.get("label", "")) for c in commands]
+            _accel("info", f"Detected {len(commands)} runnable command(s): {cmd_labels}")
 
             native_active = False
+            _accel("info", "Verifying toolchain: Python, Cargo, Maturin...")
+            python_ok = shutil.which(sys.executable) or shutil.which("python3")
+            _accel("info" if python_ok else "error", f"Python ({'ok' if python_ok else 'missing'})")
+
+            cargo_ok = sandbox_runner.ensure_cargo()
+            _accel("info" if cargo_ok else "error", f"Cargo ({'ok' if cargo_ok else 'missing'})")
+
+            env = os.environ.copy()
+            if cargo_ok and mode == "scaffold_pyo3":
+                maturin_ok = sandbox_runner.maturin_available(env)
+                if not maturin_ok:
+                    _accel("info", "Maturin (installing)")
+                    maturin_ok = sandbox_runner.install_maturin_sync(env)
+                _accel("info" if maturin_ok else "error", f"Maturin ({'ok' if maturin_ok else 'missing'})")
+
             if mode == "runtime":
-                from aero_forge import accelerator as accel_module
+                try:
+                    from aero_forge import accelerator as accel_module
 
-                native_active = bool(accel_module.is_native())
-                commands = workspace_inspector.inspect_workspace(session_dir)
+                    native_active = bool(accel_module.is_native())
+                except Exception as exc:
+                    _accel("warning", f"Native acceleration engine not available: {exc}")
+                if native_active:
+                    _accel("success", "Native acceleration engine attached successfully.")
+                else:
+                    _accel("info", "Native acceleration engine not active; using pure-Python fallback.")
             else:
+                _accel("info", "Scaffolding PyO3 / Cargo.toml bindings into workspace...")
                 workspace_inspector.scaffold_pyo3_workspace(session_dir)
-                commands = workspace_inspector.inspect_workspace(session_dir)
                 _notify_tree_changed(session_id)
+                _accel("success", "PyO3 crate scaffolding complete.")
+                commands = workspace_inspector.inspect_workspace(session_dir)
+                cmd_labels = [c.get("cmd", c.get("label", "")) for c in commands]
+                _accel("info", f"Updated runnable command(s): {cmd_labels}")
 
-            return _send_json(
-                self,
-                200,
+            _write_chunk(
                 {
+                    "type": "summary",
                     "session_id": session_id,
                     "mode": mode,
                     "status": "accelerated",
                     "native_active": native_active,
                     "commands": commands,
-                },
+                }
             )
+            self.wfile.write(b"0\r\n\r\n")
         except Exception as exc:
             logger.exception("Workspace accelerate endpoint failed")
-            return _send_json(self, 500, {"error": str(exc)})
+            try:
+                _accel("error", str(exc))
+                _write_chunk({"type": "summary", "status": "error", "error": str(exc)})
+                self.wfile.write(b"0\r\n\r\n")
+            except Exception:
+                pass
 
     def _handle_blueprint_templates(self) -> None:
         """List available blueprint template names."""
@@ -1863,6 +1924,15 @@ async def _handle_terminal_run_async(request: web.Request) -> web.StreamResponse
     )
     await response.prepare(request)
 
+    env = os.environ.copy()
+    try:
+        command = await sandbox_runner.resolve_command(command, env)
+    except Exception as exc:
+        await response.write((json.dumps({"type": "stderr", "data": f"Toolchain resolution failed: {exc}"}) + "\n").encode("utf-8"))
+        await response.write((json.dumps({"type": "summary", "exit_code": -1, "duration_ms": 0, "cwd": str(session_dir)}) + "\n").encode("utf-8"))
+        await response.write_eof()
+        return response
+
     start = time.time()
     try:
         proc = await asyncio.create_subprocess_shell(
@@ -1870,11 +1940,11 @@ async def _handle_terminal_run_async(request: web.Request) -> web.StreamResponse
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(session_dir),
-            env=os.environ.copy(),
+            env=env,
         )
     except Exception as exc:
         await response.write((json.dumps({"type": "stderr", "data": f"Failed to start process: {exc}"}) + "\n").encode("utf-8"))
-        await response.write((json.dumps({"type": "summary", "exit_code": -1, "duration_ms": 0}) + "\n").encode("utf-8"))
+        await response.write((json.dumps({"type": "summary", "exit_code": -1, "duration_ms": 0, "cwd": str(session_dir)}) + "\n").encode("utf-8"))
         await response.write_eof()
         return response
 

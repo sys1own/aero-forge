@@ -61,6 +61,34 @@ def _post_json(url: str, data: dict) -> tuple:
         return resp.status, json.loads(resp.read().decode("utf-8"))
 
 
+def _post_ndjson(url: str, data: dict) -> tuple:
+    """Return (status, list_of_messages, summary) for an NDJSON streaming endpoint."""
+    body = json.dumps(data).encode("utf-8")
+    req = Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(req, timeout=30) as resp:
+        lines = resp.read().decode("utf-8").strip().split("\n")
+    messages = []
+    summary = None
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if msg.get("type") == "summary":
+            summary = msg
+        else:
+            messages.append(msg)
+    return resp.status, messages, summary
+
+
 def _post_bytes(url: str, data: bytes, content_type: str = "application/zip") -> tuple:
     req = Request(
         url,
@@ -593,15 +621,17 @@ def test_api_workspace_accelerate_runtime(server):
         server + "/api/save-file",
         {"session_id": session_id, "path": "main.py", "content": "print('ok')\n"},
     )
-    status, body = _post_json(
+    status, messages, summary = _post_ndjson(
         server + "/api/workspace/accelerate",
         {"session_id": session_id, "mode": "runtime"},
     )
     assert status == 200
-    assert body["status"] == "accelerated"
-    assert body["mode"] == "runtime"
-    assert isinstance(body["native_active"], bool)
-    assert any(c["cmd"] == "python main.py" for c in body["commands"])
+    accel_messages = [m for m in messages if m.get("type") == "accel"]
+    assert any("Initializing workspace acceleration" in m.get("data", "") for m in accel_messages)
+    assert summary["status"] == "accelerated"
+    assert summary["mode"] == "runtime"
+    assert isinstance(summary["native_active"], bool)
+    assert any(c["cmd"] == "python main.py" for c in summary["commands"])
 
     # Runtime mode must not create new files in the workspace.
     status, body = _get(server + f"/api/files?session_id={session_id}")
@@ -616,17 +646,19 @@ def test_api_workspace_accelerate_scaffold_pyo3(server):
         server + "/api/save-file",
         {"session_id": session_id, "path": "main.py", "content": "print('ok')\n"},
     )
-    status, body = _post_json(
+    status, messages, summary = _post_ndjson(
         server + "/api/workspace/accelerate",
         {"session_id": session_id, "mode": "scaffold_pyo3"},
     )
     assert status == 200
-    assert body["status"] == "accelerated"
-    assert body["mode"] == "scaffold_pyo3"
-    assert any("maturin develop" in c["cmd"] for c in body["commands"])
+    accel_messages = [m for m in messages if m.get("type") == "accel"]
+    assert any("Scaffolding PyO3" in m.get("data", "") for m in accel_messages)
+    assert summary["status"] == "accelerated"
+    assert summary["mode"] == "scaffold_pyo3"
+    assert any("maturin develop" in c["cmd"] for c in summary["commands"])
     assert any(
         c["cmd"] == "cargo test --manifest-path crates/native_core/Cargo.toml"
-        for c in body["commands"]
+        for c in summary["commands"]
     )
 
     status, body = _get(server + f"/api/files?session_id={session_id}")
@@ -636,6 +668,23 @@ def test_api_workspace_accelerate_scaffold_pyo3(server):
     assert "crates/native_core/Cargo.toml" in paths
     assert "crates/native_core/src/lib.rs" in paths
     assert "pyproject.toml" in paths
+
+
+def test_api_workspace_accelerate_stream_logs(server):
+    """Acceleration events are published as NDJSON accel messages."""
+    session_id = "test-workspace-accel-logs"
+    _post_json(
+        server + "/api/save-file",
+        {"session_id": session_id, "path": "main.py", "content": "print('ok')\n"},
+    )
+    status, messages, summary = _post_ndjson(
+        server + "/api/workspace/accelerate",
+        {"session_id": session_id, "mode": "runtime"},
+    )
+    assert status == 200
+    assert summary is not None
+    assert any(m.get("type") == "accel" and "Detected" in m.get("data", "") for m in messages)
+    assert any(m.get("type") == "accel" and "Python" in m.get("data", "") for m in messages)
 
 
 def test_api_build_passes_cargo_logs_and_test_counts(server, monkeypatch):
