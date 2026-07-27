@@ -19,6 +19,7 @@ from aero_forge.blueprint import (
 from aero_forge.build_runner import BuildRunner
 from aero_forge.config import ConfigOverride
 from aero_forge.errors import UserError
+from aero_forge.builder.intent_compiler import IntentCompiler
 from aero_forge.llm.clients import get_llm_client
 from aero_forge.overlay import OverlayManager
 from aero_forge.overlay.store import OverlayStore
@@ -888,6 +889,31 @@ def generate_and_build(
                 "output_dir": str(output_dir / "dist"),
             }
         )
+        if project_name != "core" and llm_provider and llm_provider != "none":
+            try:
+                from aero_forge.blueprint import write_blueprint
+
+                compiler = IntentCompiler(
+                    provider=llm_provider,
+                    model=model,
+                    max_retries=max_retries,
+                    config_override=config_override,
+                )
+                intent_bp = compiler.compile_prompt(
+                    prompt,
+                    output_dir=None,
+                    project_name=project_name,
+                )
+                bp.metadata = intent_bp.metadata
+                bp.execution_strategy = intent_bp.execution_strategy
+                bp.abi_contracts = intent_bp.abi_contracts
+                bp.module_graph = intent_bp.module_graph
+                # Verification nodes are left empty for the single-function path
+                # because the generated source name is not known by the compiler.
+                bp.verification_nodes = []
+                write_blueprint(bp, output_dir / "blueprint.aero")
+            except Exception as exc:
+                logger.warning("IntentCompiler enrichment failed in generate_and_build: %s", exc)
         if progress_callback:
             progress_callback("Running tests...")
         runner = BuildRunner(bp, **build_kwargs, config_override=config_override)

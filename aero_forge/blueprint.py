@@ -274,6 +274,8 @@ class Blueprint(BaseModel):
     execution_strategy: Optional[ExecutionStrategy] = None
     abi_contracts: List[ABIContract] = Field(default_factory=list)
     verification_nodes: List[Dict[str, Any]] = Field(default_factory=list)
+    metadata: Dict[str, str] = Field(default_factory=lambda: {"schema_version": "2.0.0"})
+    module_graph: List[Dict[str, Any]] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_files(self) -> "Blueprint":

@@ -20,7 +20,7 @@ from aero_forge.cache.build_cache import BuildCache
 from aero_forge.config import ConfigOverride
 from aero_forge.error_explainer import explain_error
 from aero_forge.gpu import compile_gpu_kernel, find_gpu_functions
-from aero_forge.orchestrator.orchestrator import Orchestrator
+from aero_forge.orchestrator.orchestrator import DeterministicVerificationRunner, Orchestrator
 from aero_forge.scaffold.engine import _generate_pyi
 from aero_forge.scaffold.pre_write_validator import (
     ValidationError,
@@ -327,6 +327,21 @@ class BuildRunner:
                 for r in results
             ]
             return self._summarize(failed_results)
+
+        if self.blueprint.verification_nodes:
+            runner = DeterministicVerificationRunner(
+                str(output_dir), self.blueprint.verification_nodes
+            )
+            if not runner.run_all_verifications():
+                logger.error("Deterministic verification failed")
+                failure = BuildResult(
+                    source=output_dir,
+                    function_names=[],
+                    success=False,
+                    logs="Deterministic verification failed",
+                )
+                return self._summarize(results + [failure])
+
         return self._summarize(results)
 
     def _safe_build_source(

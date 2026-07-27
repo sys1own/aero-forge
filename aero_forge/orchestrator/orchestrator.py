@@ -33,6 +33,7 @@ from aero_forge.blueprint import (
     write_blueprint,
 )
 from aero_forge.builder import build_engine, spec_from_python
+from aero_forge.builder.intent_compiler import IntentCompiler, IntentCompilerError
 from aero_forge.cache.fix_cache import FixCache
 from aero_forge.config import ConfigOverride, load_config, resolve_settings
 from aero_forge.overlay import OverlayManager, ReapplyStatus
@@ -1243,6 +1244,30 @@ def plan_workspace(
     blueprint: Optional[Blueprint] = None
 
     if llm_provider and llm_provider != "none":
+        try:
+            compiler = IntentCompiler(
+                provider=llm_provider,
+                model=model,
+                max_retries=max_retries,
+                max_schema_retries=max(1, max_retries),
+                config_override=config_override,
+            )
+            blueprint = compiler.compile_prompt(
+                prompt,
+                output_dir=output_dir,
+                project_name=project_name,
+            )
+            mismatch = _validate_blueprint_against_intent(prompt, blueprint)
+            if mismatch is not None:
+                logger.warning("IntentCompiler blueprint mismatch: %s", mismatch)
+                blueprint = None
+        except UserError:
+            raise
+        except Exception as exc:
+            logger.warning("IntentCompiler failed, falling back to YAML planner: %s", exc)
+            blueprint = None
+
+    if llm_provider and llm_provider != "none" and blueprint is None:
         correction_context: Optional[str] = None
         for attempt in range(max(1, max_retries)):
             try:
