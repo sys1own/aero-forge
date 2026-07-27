@@ -59,6 +59,7 @@ from aero_forge.orchestrator.stack_classifier import (
     StackClassification,
     classify_stack,
 )
+from aero_forge.accelerator.runtime import activate_runtime_native_acceleration
 from aero_forge.sandbox.manager import SandboxManager
 from aero_forge.scaffold.export_options import export_workspace
 from aero_forge.universal_builder import build_universal_project
@@ -1340,8 +1341,12 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     native_active = bool(accel_module.is_native())
                 except Exception as exc:
                     _accel("warning", "ACCEL", f"Native acceleration engine not available: {exc}")
+                if not native_active:
+                    native_active = activate_runtime_native_acceleration(
+                        session_dir, log_callback=_accel
+                    )
                 if native_active:
-                    _accel("success", "ACCEL", "Native acceleration engine attached successfully.")
+                    _accel("success", "ACCEL", "Native acceleration active (crates/native_core loaded).")
                 else:
                     _accel("info", "ACCEL", "Native acceleration engine not active; using pure-Python fallback.")
             else:

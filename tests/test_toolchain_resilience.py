@@ -43,8 +43,11 @@ def test_pip_failure_streams_diagnostics(mock_run, mock_which, tmp_path):
             stderr = "ERROR: Could not find a version that satisfies the requirement maturin"
         is_venv = len(cmd) >= 3 and cmd[1] == "-m" and cmd[2] == "venv"
         is_bootstrap = "pip" in str(cmd) and "--upgrade" in str(cmd)
-        if is_venv or is_bootstrap:
+        is_sysconfig = "sysconfig" in str(cmd)
+        if is_venv or is_bootstrap or is_sysconfig:
             FakeProc.returncode = 0
+            if is_sysconfig:
+                FakeProc.stdout = "/tmp/fake_venv/lib/python3.10/site-packages"
             FakeProc.stderr = ""
         return FakeProc()
 
@@ -100,6 +103,8 @@ def test_cargo_install_fallback_for_maturin(mock_run, mock_which, tmp_path):
         if "pip" in str(cmd) and "maturin" in str(cmd):
             FakeProc.returncode = 1
             FakeProc.stderr = "Network is unreachable"
+        if "sysconfig" in str(cmd):
+            FakeProc.stdout = str(tmp_path / "fake_venv" / "lib" / "python3.10" / "site-packages")
         return FakeProc()
 
     mock_run.side_effect = fake_run
