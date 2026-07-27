@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, List
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -195,3 +196,75 @@ def test_chat_cli_resumes_session(tmp_path):
     assert result.exit_code == 0
     assert "Resuming session" in result.output
     assert "resume-me" in result.output
+
+
+def test_chat_copilot_injects_workspace_bundle(tmp_path: Path) -> None:
+    """The copilot system prompt includes a workspace bundle from bundle_repo."""
+    (tmp_path / "main.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    captured_messages: List[Any] = []
+
+    class FakeClient:
+        def generate(self, messages, temperature=0.2):
+            captured_messages.extend(messages)
+            return '{"reply": "Done", "action": null}'
+
+    session = ChatSession(tmp_path)
+    with patch("aero_forge.chat.get_llm_client", return_value=FakeClient()):
+        result = session.reply_structured("How can I speed this up?")
+
+    assert result["reply"] == "Done"
+    assert result["action"] is None
+    assert captured_messages
+    system = captured_messages[0]["content"]
+    assert "CURRENT_PROJECT_CONTEXT" in system
+    assert "main.py" in system
+    assert "def add(a, b)" in system
+
+
+def test_chat_copilot_parses_propose_build_action(tmp_path: Path) -> None:
+    """reply_structured extracts a PROPOSE_BUILD action from a JSON reply."""
+    fake_response = (
+        '{"reply": "Use a Rust core for the hot loop.", '
+        '"action": {"type": "PROPOSE_BUILD", "params": '
+        '{"prompt": "matrix multiplication in rust", "target": "hybrid_cpp_rust", '
+        '"acceleration": "Selective Acceleration (Auto-Detect Heavy Compute)"}}}'
+    )
+
+    class FakeClient:
+        def generate(self, messages, temperature=0.2):
+            return fake_response
+
+    session = ChatSession(tmp_path)
+    with patch("aero_forge.chat.get_llm_client", return_value=FakeClient()):
+        result = session.reply_structured("Speed up matrix multiplication")
+
+    assert result["reply"] == "Use a Rust core for the hot loop."
+    assert result["action"]["type"] == "PROPOSE_BUILD"
+    assert result["action"]["params"]["target"] == "hybrid_cpp_rust"
+
+
+def test_chat_copilot_falls_back_to_plain_text_for_non_json(tmp_path: Path) -> None:
+    """Non-JSON assistant replies are returned as the reply with no action."""
+    class FakeClient:
+        def generate(self, messages, temperature=0.2):
+            return "Just a plain text response."
+
+    session = ChatSession(tmp_path)
+    with patch("aero_forge.chat.get_llm_client", return_value=FakeClient()):
+        result = session.reply_structured("Hello")
+
+    assert result["reply"] == "Just a plain text response."
+    assert result["action"] is None
+
+
+def test_chat_reply_returns_extracted_markdown_for_json(tmp_path: Path) -> None:
+    """The legacy ``reply`` method returns only the Markdown portion of a JSON response."""
+    class FakeClient:
+        def generate(self, messages, temperature=0.2):
+            return '{"reply": "**Hello**", "action": null}'
+
+    session = ChatSession(tmp_path)
+    with patch("aero_forge.chat.get_llm_client", return_value=FakeClient()):
+        response = session.reply("Hi")
+
+    assert response == "**Hello**"

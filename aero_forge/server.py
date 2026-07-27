@@ -116,13 +116,20 @@ def _classification_for_target(
         architecture = INTENT_PURE_PYTHON
     elif target in ("tri_polyglot", "tri_polyglot_rust_cpp_python", "rust_cpp_python"):
         architecture = INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON
+    elif target in ("multi_crate_rust", "multi_crate"):
+        architecture = INTENT_PURE_RUST
+    elif target == "wasm":
+        architecture = INTENT_PURE_RUST
     else:
         return classification
+    features = classification.features
+    if target == "wasm":
+        features = sorted(set(features) | {"wasm"})
     return StackClassification(
         architecture=architecture,
         toolchains=toolchains_for_intent(architecture),
         languages=classification.languages,
-        features=classification.features,
+        features=features,
     )
 _active_ws_lock = threading.Lock()
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -835,13 +842,25 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
     def _handle_chat(self) -> None:
         try:
             body = _parse_json_body(self)
-            message = body.get("message", "").strip()
-            if not message:
-                return _send_json(self, 400, {"error": "Missing 'message'"})
+            messages = body.get("messages", [])
+            if not messages:
+                # Backward compatibility: accept a single message field.
+                text = body.get("message", "").strip()
+                if not text:
+                    return _send_json(self, 400, {"error": "Missing 'messages' or 'message'"})
+                messages = [{"role": "user", "content": text}]
 
             session_id = body.get("session_id") or str(uuid.uuid4())
             session_dir = _session_dir(session_id)
-            history = body.get("history", [])
+            workspace_dir = body.get("workspace_dir")
+            if workspace_dir:
+                workspace_arg = Path(workspace_dir)
+                if not workspace_arg.is_absolute():
+                    workspace_arg = session_dir / workspace_arg
+                # For safety, restrict chat workspace to the session sandbox.
+                workspace_dir = workspace_arg.resolve()
+            else:
+                workspace_dir = session_dir
 
             config = ConfigOverride(
                 llm_provider=body.get("provider"),
@@ -851,7 +870,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             )
 
             chat = ChatSession(
-                session_dir,
+                workspace_dir,
                 llm_provider=config.llm_provider,
                 model=config.model,
                 api_key=config.api_key,
@@ -859,8 +878,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 max_retries=3,
                 config_override=config,
             )
-            if history:
-                chat.messages = history
+            if messages:
+                chat.messages = messages
 
             # Inject the latest terminal error context if the UI provides it.
             terminal_command = body.get("terminal_command")
@@ -877,20 +896,36 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     terminal_log_text,
                 )
 
-            response = chat.process(message)
+            # Use the last user message as the active turn text.
+            user_text = [m for m in messages if m.get("role") == "user"][-1]["content"]
+
+            # Explicit action verbs (e.g. "fix error") still dispatch through the
+            # command handler; open-ended questions are routed to the copilot for a
+            # structured, workspace-aware PROPOSE_BUILD action.
+            command_action = chat.handle_command(user_text)
+            if command_action is not None:
+                reply_text = chat._format_action_result(command_action, user_text)
+                result = {"reply": reply_text, "action": None}
+            else:
+                result = chat.reply_structured(
+                    user_text,
+                    error_context=body.get("error_context"),
+                )
 
             return _send_json(
                 self,
                 200,
                 {
+                    "status": "success",
                     "session_id": session_id,
-                    "response": response,
+                    "reply": result["reply"],
+                    "action": result["action"],
                     "messages": chat.messages,
                 },
             )
         except Exception as exc:  # pragma: no cover
             logger.exception("Chat endpoint failed")
-            return _send_json(self, 500, {"error": str(exc)})
+            return _send_json(self, 500, {"status": "failed", "error": str(exc)})
 
     def _handle_files(self, query: Dict[str, List[str]]) -> None:
         session_id = _first(query, "session_id")
