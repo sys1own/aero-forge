@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
+import json
 import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -36,6 +38,51 @@ class HealingOrchestrator:
         self.llm_model = llm_model
         self.log_callback = log_callback or self._default_log
 
+    def _attempts_path(self) -> Path:
+        return self.workspace / ".aero" / "healing_attempts.json"
+
+    def _load_attempts(self) -> List[Dict[str, Any]]:
+        try:
+            data = self._attempts_path().read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return []
+        try:
+            attempts = json.loads(data)
+            if isinstance(attempts, list):
+                return attempts
+        except json.JSONDecodeError:
+            pass
+        return []
+
+    def _record_attempt(self, error_digest: str, strategy: str, success: bool) -> None:
+        path = self._attempts_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        attempts = self._load_attempts()
+        attempts.append({
+            "error_digest": error_digest,
+            "strategy": strategy,
+            "success": success,
+        })
+        # Keep the last 50 attempts to bound file growth.
+        attempts = attempts[-50:]
+        try:
+            path.write_text(json.dumps(attempts, indent=2), encoding="utf-8")
+        except OSError as exc:
+            logger.warning("Could not persist healing attempts: %s", exc)
+
+    def _error_digest(self, error_logs: str, command: str, exit_code: int) -> str:
+        return hashlib.sha256(
+            f"{command}:{exit_code}:{error_logs}".encode("utf-8")
+        ).hexdigest()
+
+    def _has_failed_attempt(self, error_digest: str, strategy: str) -> bool:
+        return any(
+            a.get("error_digest") == error_digest
+            and a.get("strategy") == strategy
+            and a.get("success") is False
+            for a in self._load_attempts()
+        )
+
     @staticmethod
     def _default_log(level: str, prefix: str, message: str) -> None:
         log_line = f"[{level.upper()}] {prefix}: {message}"
@@ -61,29 +108,49 @@ class HealingOrchestrator:
 
         AST-only errors are patched with a deterministic overlay. If the AST
         patch fails or ``force_llm`` is set, the orchestrator escalates to a
-        full-workspace LLM healer using bundled project context.
+        full-workspace LLM healer using bundled project context. Failed
+        attempts are recorded so the exact same strategy is not retried
+        indefinitely for an unchanged error.
         """
         evaluator = LogEvaluator()
         diagnosis = evaluator.evaluate_log(command, exit_code, error_logs)
         strategy = evaluator.evaluate_error(error_logs, command=command, exit_code=exit_code)
 
-        self.log_callback("info", "HEAL", f"Selected strategy: {strategy.value}")
+        digest = self._error_digest(error_logs, command, exit_code)
+        self.log_callback("info", "HEAL", f"Selected strategy: {strategy.value}; digest={digest[:16]}")
 
-        if not force_llm and strategy == HealingStrategy.AST:
+        if not force_llm and strategy == HealingStrategy.AST and not self._has_failed_attempt(digest, "ast"):
             ast_result = self._try_ast_heal(error_logs, diagnosis, target_file)
             if ast_result.get("status") == "success":
                 return ast_result
+            self._record_attempt(digest, "ast", success=False)
             self.log_callback(
                 "info",
                 "HEAL",
                 "AST patch attempt unsuccessful. Escalating to Full-Workspace LLM Heal.",
             )
 
-        # Always fall back to the full-workspace LLM healer when AST fails or
-        # when the user explicitly requests it. This prevents the "no strategy"
-        # dead-end and gives multi-file / cross-crate errors a chance to be
-        # repaired with bundled context.
-        return self._llm_heal(error_logs, command, exit_code, diagnosis)
+        if force_llm and self._has_failed_attempt(digest, "llm"):
+            return {
+                "status": "failed",
+                "strategy_used": None,
+                "patched_files": [],
+                "error_message": "LLM healing was already attempted and failed for this error. Manual fix required.",
+                "attempts_exhausted": True,
+            }
+
+        if not self._has_failed_attempt(digest, "llm"):
+            llm_result = self._llm_heal(error_logs, command, exit_code, diagnosis)
+            self._record_attempt(digest, "llm", success=llm_result.get("status") == "success")
+            return llm_result
+
+        return {
+            "status": "failed",
+            "strategy_used": None,
+            "patched_files": [],
+            "error_message": "Both AST and full-workspace LLM healing were already attempted and failed. Manual fix required.",
+            "attempts_exhausted": True,
+        }
 
     def _try_ast_heal(
         self,

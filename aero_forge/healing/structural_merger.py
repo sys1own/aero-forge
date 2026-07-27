@@ -76,16 +76,20 @@ def _extract_python_entities(source: str) -> Dict[str, Entity]:
 
 
 def _python_imports_text(source: str) -> str:
-    """Return the leading comments/imports block before the first function/class."""
+    """Return the leading imports/docstring/comments block before code."""
     try:
         tree = ast.parse(source)
     except SyntaxError:
         return ""
-    for i, node in enumerate(tree.body):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            start_line = getattr(node, "lineno", 1)
-            return "".join(source.splitlines(keepends=True)[: start_line - 1])
-    return source
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        # Allow a leading module docstring to remain in the header.
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+            continue
+        start_line = getattr(node, "lineno", 1)
+        return "".join(source.splitlines(keepends=True)[: start_line - 1])
+    return ""
 
 
 def _merge_python(base: str, left: str, right: str) -> Overlay:
@@ -268,9 +272,55 @@ def structural_merge(base: str, left: str, right: str, language: str = "python")
     raise ValueError(f"Unsupported language for structural merge: {language}")
 
 
+def _is_complete_python_overlay(source: str, overlay: str) -> bool:
+    """Return True when *overlay* is a full rewrite containing every source entity."""
+    try:
+        source_tree = ast.parse(source)
+        overlay_tree = ast.parse(overlay)
+    except SyntaxError:
+        return False
+
+    def named_names(tree: ast.AST) -> set[str]:
+        names: set[str] = set()
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                names.add(f"function:{node.name}")
+            elif isinstance(node, ast.ClassDef):
+                names.add(f"class:{node.name}")
+            elif isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        names.add(f"variable:{target.id}")
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                names.add(f"variable:{node.target.id}")
+        return names
+
+    source_named = named_names(source_tree)
+    overlay_named = named_names(overlay_tree)
+    if source_named - overlay_named:
+        return False
+
+    def generic_count(tree: ast.AST) -> int:
+        return sum(
+            1
+            for node in tree.body
+            if not isinstance(
+                node,
+                (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom),
+            )
+        )
+
+    return generic_count(overlay_tree) >= generic_count(source_tree)
+
+
 def apply_overlay(source: str, overlay: str, language: str = "python") -> str:
     """Apply a single overlay (``overlay``) onto ``source`` structurally.
 
-    This is a convenience wrapper around ``structural_merge(source, overlay, source)``.
+    For complete Python rewrites we return the overlay directly to avoid line-
+    shift artifacts from the 3-way merge. Otherwise we fall back to a structural
+    3-way merge so partial overlays (e.g. a single changed function) do not erase
+    unrelated code.
     """
+    if language == "python" and _is_complete_python_overlay(source, overlay):
+        return overlay
     return structural_merge(source, overlay, source, language=language).source

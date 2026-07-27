@@ -1504,6 +1504,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 "target_file": result.get("target_file"),
                 "diff": result.get("diff"),
                 "diagnosis": result.get("diagnosis"),
+                "attempts_exhausted": result.get("attempts_exhausted", False),
                 "logs": logs,
             }
             return _send_json(self, 200, response)
