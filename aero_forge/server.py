@@ -65,6 +65,7 @@ from aero_forge.orchestrator.stack_classifier import (
 from aero_forge.accelerator.runtime import activate_runtime_native_acceleration
 from aero_forge.sandbox.manager import SandboxManager
 from aero_forge.scaffold.export_options import export_workspace
+from aero_forge.scaffold.workspace import BlueprintRegenerator
 from aero_forge.universal_builder import build_universal_project
 
 logger = logging.getLogger("aero_forge.server")
@@ -692,6 +693,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_workspace_heal_llm()
             if path == "/api/workspace/clean":
                 return self._handle_workspace_clean()
+            if path == "/api/workspace/regenerate_blueprint":
+                return self._handle_regenerate_blueprint()
             if path == "/api/load-blueprint-template":
                 return self._handle_load_blueprint_template()
 
@@ -1308,6 +1311,65 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             )
         except Exception as exc:
             logger.exception("Workspace clean endpoint failed")
+            return _send_json(self, 500, {"error": str(exc)})
+
+    def _handle_regenerate_blueprint(self) -> None:
+        """Wipe and rebuild a workspace from its ``blueprint.aero`` file."""
+        try:
+            body = _parse_json_body(self)
+            session_id = body.get("session_id", "").strip()
+            if not session_id:
+                return _send_json(self, 400, {"error": "Missing 'session_id'"})
+
+            session_dir = _session_dir(session_id)
+            workspace_dir = body.get("workspace_dir") or str(session_dir)
+            workspace_path = Path(workspace_dir).resolve()
+            if not workspace_path.is_dir():
+                return _send_json(
+                    self, 400, {"error": f"Workspace not found: {workspace_dir}"}
+                )
+
+            blueprint_path = workspace_path / "blueprint.aero"
+            if not blueprint_path.is_file():
+                return _send_json(
+                    self, 400, {"error": "blueprint.aero not found in workspace"}
+                )
+
+            config = ConfigOverride(
+                llm_provider=body.get("provider"),
+                api_key=self._api_key(body),
+                model=body.get("model"),
+                max_retries=3,
+            )
+
+            regenerator = BlueprintRegenerator(
+                workspace_path,
+                keep_backup=bool(body.get("keep_backup", False)),
+                run_build=bool(body.get("run_build", False)),
+                llm_provider=config.llm_provider,
+                model=config.model,
+                config_override=config,
+            )
+            result = regenerator.run()
+
+            _notify_tree_changed(session_id)
+
+            return _send_json(
+                self,
+                200,
+                {
+                    "session_id": session_id,
+                    "status": result.get("status", "partial"),
+                    "errors": result.get("errors", []),
+                    "logs": result.get("logs", []),
+                    "backup_dir": result.get("backup_dir"),
+                    "tree": _build_tree(workspace_path),
+                },
+            )
+        except FileNotFoundError as exc:
+            return _send_json(self, 400, {"error": str(exc)})
+        except Exception as exc:
+            logger.exception("Regenerate blueprint endpoint failed")
             return _send_json(self, 500, {"error": str(exc)})
 
     def _handle_workspace_accelerate(self) -> None:
