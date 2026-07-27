@@ -25,9 +25,12 @@ def test_resolve_command_leaves_non_toolchain_command_unchanged(tmp_path: Path):
     assert any(prefix == "ENV" for _level, prefix, _msg in logs)
 
 
-def test_resolve_command_detects_missing_cargo_for_maturin(monkeypatch, tmp_path: Path):
-    """If neither cargo nor a cargo shim is available, maturin commands fail fast."""
-    monkeypatch.setattr("shutil.which", lambda name: None)
+def test_resolve_command_falls_back_when_maturin_unavailable(monkeypatch, tmp_path: Path):
+    """If maturin cannot be provisioned, rewrite to a cargo build fallback."""
+    monkeypatch.setattr("shutil.which", lambda name, path=None: None)
     monkeypatch.setattr("aero_forge.toolchain.ensure_cargo_in_path", lambda: None)
-    with pytest.raises(RuntimeError, match="Rust toolchain"):
-        asyncio.run(runner.resolve_command("maturin develop", os.environ.copy(), tmp_path))
+    resolved, out_env, logs = asyncio.run(
+        runner.resolve_command("maturin develop", os.environ.copy(), tmp_path)
+    )
+    assert resolved.startswith("cargo")
+    assert any("maturin" in msg or "cargo" in msg for _level, prefix, msg in logs)
