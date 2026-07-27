@@ -1242,7 +1242,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
         """Activate runtime native acceleration or scaffold a PyO3 crate in the workspace.
 
         Streams step-by-step acceleration progress as NDJSON ``type: accel`` chunks
-        and ends with a ``type: summary`` payload.
+        and ends with a ``type: summary`` payload.  Toolchain events come directly
+        from ``ToolchainManager`` and carry ``[TOOLCHAIN]`` / ``[ENV]`` prefixes.
         """
         try:
             body = _parse_json_body(self)
@@ -1281,31 +1282,30 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"\r\n")
             self.wfile.flush()
 
-        def _accel(level: str, message: str):
-            _write_chunk({"type": "accel", "data": f"[ACCEL] {message}", "level": level})
+        def _accel(level: str, prefix: str, message: str):
+            _write_chunk({"type": "accel", "data": f"[{prefix}] {message}", "level": level})
+
+        def _log_callback(level: str, prefix: str, message: str):
+            _accel(level, prefix, message)
+
+        from aero_forge.toolchain import ToolchainManager
+
+        manager = ToolchainManager(session_dir, log_callback=_log_callback)
 
         try:
-            _accel("info", f"Initializing workspace acceleration (Mode: {mode})...")
-            _accel("info", "Scanning workspace root for build manifests...")
+            _accel("info", "ACCEL", f"Initializing workspace acceleration (Mode: {mode})...")
+            _accel("info", "ACCEL", "Scanning workspace root for build manifests...")
             commands = workspace_inspector.inspect_workspace(session_dir)
             cmd_labels = [c.get("cmd", c.get("label", "")) for c in commands]
-            _accel("info", f"Detected {len(commands)} runnable command(s): {cmd_labels}")
+            _accel("info", "ACCEL", f"Detected {len(commands)} runnable command(s): {cmd_labels}")
 
             native_active = False
-            _accel("info", "Verifying toolchain: Python, Cargo, Maturin...")
-            python_ok = shutil.which(sys.executable) or shutil.which("python3")
-            _accel("info" if python_ok else "error", f"Python ({'ok' if python_ok else 'missing'})")
-
-            cargo_ok = sandbox_runner.ensure_cargo()
-            _accel("info" if cargo_ok else "error", f"Cargo ({'ok' if cargo_ok else 'missing'})")
-
-            env = os.environ.copy()
-            if cargo_ok and mode == "scaffold_pyo3":
-                maturin_ok = sandbox_runner.maturin_available(env)
-                if not maturin_ok:
-                    _accel("info", "Maturin (installing)")
-                    maturin_ok = sandbox_runner.install_maturin_sync(env)
-                _accel("info" if maturin_ok else "error", f"Maturin ({'ok' if maturin_ok else 'missing'})")
+            probe_command = "maturin develop" if mode == "scaffold_pyo3" else "runtime"
+            try:
+                manager.prepare_environment(probe_command)
+            except RuntimeError as exc:
+                _accel("error", "TOOLCHAIN", str(exc))
+                raise
 
             if mode == "runtime":
                 try:
@@ -1313,19 +1313,19 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
 
                     native_active = bool(accel_module.is_native())
                 except Exception as exc:
-                    _accel("warning", f"Native acceleration engine not available: {exc}")
+                    _accel("warning", "ACCEL", f"Native acceleration engine not available: {exc}")
                 if native_active:
-                    _accel("success", "Native acceleration engine attached successfully.")
+                    _accel("success", "ACCEL", "Native acceleration engine attached successfully.")
                 else:
-                    _accel("info", "Native acceleration engine not active; using pure-Python fallback.")
+                    _accel("info", "ACCEL", "Native acceleration engine not active; using pure-Python fallback.")
             else:
-                _accel("info", "Scaffolding PyO3 / Cargo.toml bindings into workspace...")
+                _accel("info", "ACCEL", "Scaffolding PyO3 / Cargo.toml bindings into workspace...")
                 workspace_inspector.scaffold_pyo3_workspace(session_dir)
                 _notify_tree_changed(session_id)
-                _accel("success", "PyO3 crate scaffolding complete.")
+                _accel("success", "ACCEL", "PyO3 crate scaffolding complete.")
                 commands = workspace_inspector.inspect_workspace(session_dir)
                 cmd_labels = [c.get("cmd", c.get("label", "")) for c in commands]
-                _accel("info", f"Updated runnable command(s): {cmd_labels}")
+                _accel("info", "ACCEL", f"Updated runnable command(s): {cmd_labels}")
 
             _write_chunk(
                 {
@@ -1341,7 +1341,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             logger.exception("Workspace accelerate endpoint failed")
             try:
-                _accel("error", str(exc))
+                _accel("error", "ACCEL", str(exc))
                 _write_chunk({"type": "summary", "status": "error", "error": str(exc)})
                 self.wfile.write(b"0\r\n\r\n")
             except Exception:
@@ -1926,12 +1926,15 @@ async def _handle_terminal_run_async(request: web.Request) -> web.StreamResponse
 
     env = os.environ.copy()
     try:
-        command = await sandbox_runner.resolve_command(command, env)
+        command, env, logs = await sandbox_runner.resolve_command(command, env, session_dir)
     except Exception as exc:
         await response.write((json.dumps({"type": "stderr", "data": f"Toolchain resolution failed: {exc}"}) + "\n").encode("utf-8"))
         await response.write((json.dumps({"type": "summary", "exit_code": -1, "duration_ms": 0, "cwd": str(session_dir)}) + "\n").encode("utf-8"))
         await response.write_eof()
         return response
+
+    for level, prefix, message in logs:
+        await response.write((json.dumps({"type": "accel", "data": f"[{prefix}] {message}", "level": level}) + "\n").encode("utf-8"))
 
     start = time.time()
     try:
