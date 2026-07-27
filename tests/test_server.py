@@ -408,8 +408,11 @@ def test_api_chat_passes_config_override(server, monkeypatch):
             captured["config_override"] = config_override
             self.messages = []
 
-        def process(self, text):
-            return f"Echo: {text}"
+        def handle_command(self, text):
+            return None
+
+        def reply_structured(self, text, error_context=None):
+            return {"reply": f"Echo: {text}", "action": None}
 
     monkeypatch.setattr("aero_forge.server.ChatSession", FakeChatSession)
 
@@ -422,10 +425,74 @@ def test_api_chat_passes_config_override(server, monkeypatch):
         },
     )
     assert status == 200
-    assert data["response"] == "Echo: hello"
+    assert data["reply"] == "Echo: hello"
     assert captured["config_override"] is not None
     assert captured["config_override"].llm_provider == "openai"
     assert captured["config_override"].api_key == "sk-chat"
+
+
+def test_api_chat_returns_structured_reply_and_action(server, monkeypatch):
+    """POST /api/chat returns {status, reply, action, messages}."""
+
+    class FakeChatSession:
+        def __init__(self, output_dir, **kwargs):
+            self.messages = []
+
+        def handle_command(self, text):
+            return None
+
+        def reply_structured(self, text, error_context=None):
+            return {
+                "reply": "Use a Rust core.",
+                "action": {
+                    "type": "PROPOSE_BUILD",
+                    "params": {
+                        "prompt": "matrix multiplication in rust",
+                        "target": "hybrid_cpp_rust",
+                        "acceleration": "Selective Acceleration (Auto-Detect Heavy Compute)",
+                    },
+                },
+            }
+
+    monkeypatch.setattr("aero_forge.server.ChatSession", FakeChatSession)
+
+    status, data = _post_json(
+        server + "/api/chat",
+        {
+            "messages": [{"role": "user", "content": "How can I speed up matrix multiplication?"}],
+            "provider": "openai",
+        },
+    )
+    assert status == 200
+    assert data["status"] == "success"
+    assert data["reply"] == "Use a Rust core."
+    assert data["action"]["type"] == "PROPOSE_BUILD"
+    assert data["action"]["params"]["target"] == "hybrid_cpp_rust"
+    assert "messages" in data
+
+
+def test_api_chat_command_dispatch_still_works(server, monkeypatch):
+    """Explicit command verbs dispatch through handle_command and return a plain reply."""
+
+    class FakeChatSession:
+        def __init__(self, output_dir, **kwargs):
+            self.messages = []
+
+        def handle_command(self, text):
+            return {"message": "Healing applied."}
+
+        def _format_action_result(self, result, prompt):
+            return result["message"]
+
+    monkeypatch.setattr("aero_forge.server.ChatSession", FakeChatSession)
+
+    status, data = _post_json(
+        server + "/api/chat",
+        {"messages": [{"role": "user", "content": "fix error"}]},
+    )
+    assert status == 200
+    assert data["reply"] == "Healing applied."
+    assert data["action"] is None
 
 
 def test_api_file_content_path_traversal(server):

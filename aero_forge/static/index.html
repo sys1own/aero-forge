@@ -257,6 +257,11 @@
       background: rgba(255,255,255,0.06); padding: 0.1rem 0.3rem; border-radius: 3px; font-family: Consolas, Monaco, "Courier New", monospace;
     }
     .msg pre { background: rgba(0,0,0,0.3); padding: 0.5rem; border-radius: 4px; overflow: auto; margin: 0.5rem 0; }
+    .action-card { background: rgba(0,0,0,0.25); border: 1px solid var(--accent); border-radius: 6px; padding: 0.65rem; margin-top: 0.5rem; }
+    .action-card .action-title { font-weight: 600; color: var(--accent); margin-bottom: 0.4rem; }
+    .action-card .action-meta { font-size: 0.78rem; color: var(--muted); margin-bottom: 0.5rem; }
+    .action-card .action-prompt { background: rgba(0,0,0,0.3); padding: 0.45rem; border-radius: 4px; font-family: Consolas, Monaco, monospace; font-size: 0.78rem; max-height: 90px; overflow: auto; margin-bottom: 0.5rem; }
+    .action-card .action-buttons { display: flex; gap: 0.5rem; flex-wrap: wrap; }
     .prompt-row { display: flex; gap: 0.5rem; }
     textarea#prompt-input, textarea#chat-input {
       flex: 1; background: var(--editor); border: 1px solid var(--border); border-radius: 4px; color: var(--text);
@@ -512,6 +517,8 @@
                     <option value="rust">Rust (cdylib / PyO3)</option>
                     <option value="cpp">C++ (extern "C" Shared Dynamic Lib)</option>
                     <option value="hybrid_cpp_rust">Hybrid C++ / Rust</option>
+                    <option value="multi_crate_rust">Multi-Crate Rust</option>
+                    <option value="wasm">WebAssembly (wasm32)</option>
                     <option value="tri_polyglot">Tri-Polyglot (Python + Rust + C++)</option>
                   </select>
                 </div>
@@ -1938,14 +1945,75 @@
       ui.chatInput.value = '';
       setBusy(true);
       try {
-        const data = await api('POST', '/api/chat', buildBody({ message: text, history: state.messages }));
+        const data = await api('POST', '/api/chat', buildBody({ messages: state.messages, error_context: state.lastTerminalLog || '' }));
         state.sessionId = data.session_id;
         try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
         ui.settingSession.value = state.sessionId;
         state.messages = data.messages || [];
-        addChat('assistant', data.response);
+        addAssistantMessage(data.reply, data.action);
       } catch (e) { addChat('assistant', `Chat error: ${e.message}`, true); }
       finally { setBusy(false); }
+    }
+
+    function addAssistantMessage(reply, action) {
+      const msg = document.createElement('div');
+      msg.className = 'msg assistant';
+      let html = renderMarkdown(reply || '');
+      if (action && action.type === 'PROPOSE_BUILD' && action.params) {
+        const p = action.params;
+        html += `
+          <div class="action-card">
+            <div class="action-title">Proposed Build</div>
+            <div class="action-meta">Target: <strong>${escapeHtml(p.target || 'auto')}</strong> · Acceleration: <strong>${escapeHtml(p.acceleration || 'auto')}</strong></div>
+            <div class="action-prompt">${escapeHtml(p.prompt || '')}</div>
+            <div class="action-buttons">
+              <button class="primary run-btn" onclick="triggerBuildFromChat(${JSON.stringify(p.prompt || '')}, ${JSON.stringify(p.target || '')}, ${JSON.stringify(p.acceleration || '')})">🚀 Send to Builder &amp; Run</button>
+              <button class="run-btn" onclick="populateBuildTab(${JSON.stringify(p.prompt || '')}, ${JSON.stringify(p.target || '')}, ${JSON.stringify(p.acceleration || '')})">📝 Edit in Build Tab</button>
+            </div>
+          </div>`;
+      }
+      msg.innerHTML = html;
+      ui.chatFeed.appendChild(msg);
+      ui.chatFeed.scrollTo({ top: ui.chatFeed.scrollHeight, behavior: 'smooth' });
+    }
+
+    function showBuildTab() {
+      ui.deckTabs.forEach(t => t.classList.remove('active'));
+      ui.deckPanels.forEach(p => p.classList.remove('active'));
+      const buildTab = Array.from(ui.deckTabs).find(t => t.dataset.tab === 'build');
+      const buildPanel = document.getElementById('build-panel');
+      if (buildTab) buildTab.classList.add('active');
+      if (buildPanel) buildPanel.classList.add('active');
+      if (state.editor) state.editor.layout();
+    }
+
+    function setBuildForm(prompt, target, acceleration) {
+      ui.promptInput.value = prompt || '';
+      if (target && ui.targetLanguage) {
+        const opts = Array.from(ui.targetLanguage.options);
+        const match = opts.find(o => o.value === target);
+        if (match) ui.targetLanguage.value = target;
+      }
+      if (acceleration && ui.accelerationPolicy) {
+        const accMap = {
+          'Selective Acceleration (Auto-Detect Heavy Compute)': 'selective',
+          'Force Native Bridge': 'force',
+          'Standard Runtime (Bypass Bridge)': 'bypass'
+        };
+        const val = accMap[acceleration];
+        if (val) ui.accelerationPolicy.value = val;
+      }
+    }
+
+    function triggerBuildFromChat(prompt, target, acceleration) {
+      setBuildForm(prompt, target, acceleration);
+      showBuildTab();
+      runBuild();
+    }
+
+    function populateBuildTab(prompt, target, acceleration) {
+      setBuildForm(prompt, target, acceleration);
+      showBuildTab();
     }
 
     function addChat(role, text, isError=false) {
@@ -1957,6 +2025,10 @@
       if (role === 'assistant' && !isError) state.messages.push({ role: 'assistant', content: text });
       else if (role === 'user') state.messages.push({ role: 'user', content: text });
     }
+
+    // Expose chat helpers for inline action cards and manual testing.
+    window.triggerBuildFromChat = triggerBuildFromChat;
+    window.populateBuildTab = populateBuildTab;
 
     function renderMarkdown(text) {
       if (!text) return '';

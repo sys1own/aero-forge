@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from aero_forge.build_summary import format_build_summary
 from aero_forge.bundle_repo import bundle_workspace, format_context_block
 from aero_forge.config import ConfigOverride, Tier
+from aero_forge.prompts import AERO_FORGE_COPILOT_SYSTEM_PROMPT
 from aero_forge.error_explainer import explain_error
 from aero_forge.healing.router import try_auto_fix
 from aero_forge.generate import (
@@ -309,6 +310,7 @@ class ChatSession:
         self.last_summary: Optional[str] = None
         self.last_build_result: Optional[Dict[str, Any]] = None
         self.project_context: Optional[str] = None
+        self.last_error_context: Optional[str] = None
 
         # Terminal context for self-healing
         self.last_terminal_command: Optional[str] = None
@@ -326,6 +328,7 @@ class ChatSession:
             "in a single Python fenced code block and, if tests are requested, "
             "a second fenced code block for pytest tests."
         )
+        self.copilot_system_prompt = AERO_FORGE_COPILOT_SYSTEM_PROMPT
         self.system_prompt = self.base_system_prompt
 
         requested_output_dir = self.output_dir
@@ -356,6 +359,7 @@ class ChatSession:
             self.last_error = data.get("last_error")
             self.last_build_result = data.get("last_build_result")
             self.project_context = data.get("project_context")
+            self.last_error_context = data.get("last_error_context")
             self.last_terminal_command = data.get("last_terminal_command")
             self.last_terminal_exit_code = data.get("last_terminal_exit_code")
             self.last_terminal_log = data.get("last_terminal_log")
@@ -393,6 +397,22 @@ class ChatSession:
             )
             self.system_prompt += "\n\n" + terminal_summary
 
+    def _copilot_system_prompt(self) -> str:
+        """Build the workspace-aware copilot system prompt used by the web UI."""
+        prompt = self.copilot_system_prompt
+        if self.project_context:
+            prompt += "\n\n" + self.project_context
+        if self.last_terminal_log:
+            prompt += (
+                "\n\n[TERMINAL CONTEXT]\n"
+                f"Command: {self.last_terminal_command}\n"
+                f"Exit code: {self.last_terminal_exit_code}\n"
+                f"LogEvaluator: {self.last_evaluator_state}\n"
+            )
+        if self.last_error_context:
+            prompt += "\n\n[ERROR CONTEXT]\n" + self.last_error_context
+        return prompt
+
     def set_terminal_context(
         self,
         command: str,
@@ -423,6 +443,7 @@ class ChatSession:
             "last_error": self.last_error,
             "last_build_result": self.last_build_result,
             "project_context": self.project_context,
+            "last_error_context": self.last_error_context,
             "last_terminal_command": self.last_terminal_command,
             "last_terminal_exit_code": self.last_terminal_exit_code,
             "last_terminal_log": self.last_terminal_log,
@@ -456,10 +477,41 @@ class ChatSession:
 
         return self.reply(text)
 
+    def _maybe_parse_json_reply(self, response: str) -> Optional[Dict[str, Any]]:
+        """Extract a JSON object from an LLM response, accepting fenced blocks."""
+        text = response.strip()
+        if "```" in text:
+            match = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+            if match:
+                text = match.group(1).strip()
+        if not text.startswith("{"):
+            return None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
     def reply(self, text: str) -> str:
-        """Append user message, call the LLM, and return the assistant response."""
+        """Append user message, call the LLM, and return the assistant response text."""
+        structured = self.reply_structured(text)
+        return structured["reply"]
+
+    def reply_structured(
+        self,
+        text: str,
+        error_context: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Append user message, call the LLM, and return a structured reply + action.
+
+        If ``error_context`` is provided, it is injected into the system prompt for
+        this turn only and does not persist to the session file.
+        """
+        self.last_error_context = error_context
+        self._refresh_project_context()
+
         if not self.messages:
-            self.messages.append({"role": "system", "content": self.system_prompt})
+            self.messages.append({"role": "system", "content": self._copilot_system_prompt()})
         self.messages.append({"role": "user", "content": text})
         self._save_session()
 
@@ -468,21 +520,36 @@ class ChatSession:
             model=self.model,
             max_retries=self.max_retries,
             config_override=self.config_override,
-            tier=Tier.FAST,
+            tier=Tier.REASONING,
         )
         if client is None:
-            return (
-                "No LLM provider is configured. Set AERO_FORGE_LLM_PROVIDER "
-                "or pass --llm-provider."
-            )
+            return {
+                "reply": (
+                    "No LLM provider is configured. Set AERO_FORGE_LLM_PROVIDER "
+                    "or pass --llm-provider."
+                ),
+                "action": None,
+            }
 
         response = client.generate(self.messages, temperature=0.2)
         if not response:
-            return "Hmm, the LLM returned an empty response. Try rephrasing?"
+            return {
+                "reply": "Hmm, the LLM returned an empty response. Try rephrasing?",
+                "action": None,
+            }
+
+        parsed = self._maybe_parse_json_reply(response)
+        if parsed:
+            self.messages.append({"role": "assistant", "content": response})
+            self._save_session()
+            return {
+                "reply": parsed.get("reply", response),
+                "action": parsed.get("action"),
+            }
 
         self.messages.append({"role": "assistant", "content": response})
         self._save_session()
-        return response
+        return {"reply": response, "action": None}
 
     def handle_command(self, text: str) -> Optional[Dict[str, Any]]:
         """Detect action verbs and optionally execute a build/optimize step."""

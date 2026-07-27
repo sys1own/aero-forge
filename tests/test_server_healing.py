@@ -117,5 +117,5 @@ def test_chat_fix_error_triggers_healing(server):
         },
     )
     assert result["session_id"] == session_id
-    # The response should mention the applied patch and re-running.
-    assert "patch" in result["response"].lower() or "re-run" in result["response"].lower()
+    # The reply should mention the applied patch and re-running.
+    assert "patch" in result["reply"].lower() or "re-run" in result["reply"].lower()
