@@ -434,21 +434,31 @@
         <div id="drop-zone" class="drop-zone">
           Drop files or a .zip here, or click to upload
         </div>
-        <div class="download-control" style="display:flex;align-items:center;gap:0.4rem;">
-          <button id="download-btn" class="secondary" style="flex:1">Download Session Zip</button>
-          <details id="export-options-popover" class="export-popover">
-            <summary title="Export options" aria-label="Export options">Options</summary>
+        <div class="download-control" style="display:flex;align-items:center;gap:0.4rem;position:relative;z-index:20;">
+          <details id="export-options-popover" class="export-popover" style="flex:1">
+            <summary id="export-summary" title="Export options" aria-label="Export options">📦 Export Workspace ▾</summary>
             <div class="export-options" title="Choose what to include in the downloaded zip">
               <label class="export-option">
-                <input type="radio" name="export-profile" value="standard" checked>
-                <span>Pure Target Code (Lightweight)</span>
-                <small>Only generated source files and tests.</small>
+                <input type="checkbox" name="export-pure-target" value="1" checked>
+                <span>Pure Target Source</span>
+                <small>Generated source files and tests only.</small>
               </label>
               <label class="export-option">
-                <input type="radio" name="export-profile" value="accelerated">
-                <span>Include Accelerated Rust / PyO3 Crate Source</span>
-                <small>For local maturin / pip native builds.</small>
+                <input type="checkbox" name="export-native-crate" value="1">
+                <span>Include Native Acceleration Crate (PyO3 / Rust)</span>
+                <small>Adds crates/native_core for maturin builds.</small>
               </label>
+              <label class="export-option">
+                <input type="checkbox" name="export-wavefront-runtime" value="1">
+                <span>Include Standalone Wavefront Micro-Runtime</span>
+                <small>Adds the zero-dependency aero_core crate.</small>
+              </label>
+              <label class="export-option">
+                <input type="checkbox" name="export-standalone-aeroc" value="1">
+                <span>Export Standalone .aeroc Binary</span>
+                <small>Includes a pre-packaged .aeroc artifact.</small>
+              </label>
+              <button id="download-btn" class="secondary" style="width:100%;margin-top:0.3rem;">Download Zip</button>
             </div>
           </details>
         </div>
@@ -1448,7 +1458,7 @@
 
     function showHealBanner(summary, targetFile, command, exitCode, logText) {
       if (!ui.healBanner) return;
-      ui.healBanner.innerHTML = `<span>&#9889; Self-Heal Available: ${escapeHtml(summary)} (${escapeHtml(targetFile || '')})</span><button id="apply-heal-btn" class="run-btn">&#128295; Apply Fix &amp; Re-run</button>`;
+      ui.healBanner.innerHTML = `<span>&#9889; Self-Heal Available: AST Overlay Patch (${escapeHtml(targetFile || '')})</span><button id="apply-heal-btn" class="run-btn">&#128295; Apply AST Fix &amp; Re-run</button>`;
       ui.healBanner.classList.add('visible');
       ui.terminalPanel.classList.add('heal-visible');
       document.getElementById('apply-heal-btn').addEventListener('click', () => applyHeal(command, exitCode, logText));
@@ -1650,9 +1660,17 @@
 
     async function downloadZip() {
       if (!state.sessionId) return;
-      const selected = document.querySelector('input[name="export-profile"]:checked');
-      const includeNative = selected && selected.value === 'accelerated' ? 'true' : 'false';
-      const res = await fetch(`/api/download-zip?session_id=${encodeURIComponent(state.sessionId)}&include_native_crate=${includeNative}`);
+      const options = {
+        pure_target: !!document.querySelector('input[name="export-pure-target"]:checked'),
+        include_native_crate: !!document.querySelector('input[name="export-native-crate"]:checked'),
+        include_wavefront_runtime: !!document.querySelector('input[name="export-wavefront-runtime"]:checked'),
+        standalone_aeroc: !!document.querySelector('input[name="export-standalone-aeroc"]:checked'),
+      };
+      const res = await fetch('/api/workspace/export', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: state.sessionId, options }),
+      });
       if (!res.ok) { log('Download failed', 'error'); return; }
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
@@ -1662,7 +1680,9 @@
       a.href = url; a.download = match ? match[1] : `${state.sessionId}.zip`;
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
-      log(`Download started (${includeNative === 'true' ? 'accelerated' : 'standard'})`, 'success');
+      const parts = Object.keys(options).filter(k => options[k]).map(k => k.replace(/_/g, ' '));
+      log(`Download started (${parts.join(', ') || 'target source only'})`, 'success');
+      if (ui.exportPopover) ui.exportPopover.removeAttribute('open');
     }
 
     async function downloadFile(path) {
@@ -1959,8 +1979,8 @@
       e.preventDefault();
       handleFiles(e.dataTransfer.files, '.');
     });
-    ui.downloadBtn.addEventListener('click', () => {
-      if (ui.exportPopover) ui.exportPopover.removeAttribute('open');
+    ui.downloadBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
       downloadZip();
     });
     // Collapse the export options popover when clicking outside it.

@@ -47,6 +47,7 @@ from aero_forge.generate import generate_and_build
 from aero_forge import runner as sandbox_runner
 from aero_forge.healing.evaluator import LogEvaluator
 from aero_forge.healing.router import try_auto_fix
+from aero_forge.healing.structural_merger import apply_overlay, MergeConflictError
 from aero_forge.orchestrator.router import toolchains_for_intent
 from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_CPP_PYTHON,
@@ -59,6 +60,7 @@ from aero_forge.orchestrator.stack_classifier import (
     classify_stack,
 )
 from aero_forge.sandbox.manager import SandboxManager
+from aero_forge.scaffold.export_options import export_workspace
 from aero_forge.universal_builder import build_universal_project
 
 logger = logging.getLogger("aero_forge.server")
@@ -664,6 +666,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_run()
             if path == "/api/workspace/accelerate":
                 return self._handle_workspace_accelerate()
+            if path == "/api/workspace/export":
+                return self._handle_workspace_export()
             if path == "/api/workspace/evaluate-error":
                 return self._handle_workspace_evaluate_error()
             if path == "/api/workspace/heal":
@@ -1369,6 +1373,38 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def _handle_workspace_export(self) -> None:
+        """Export the workspace as a ZIP according to the selected option flags."""
+        try:
+            body = _parse_json_body(self)
+            session_id = body.get("session_id", "").strip()
+            options = body.get("options", {})
+            project_name = body.get("project_name", "aero-forge-export")
+            if not session_id:
+                return _send_json(self, 400, {"error": "Missing 'session_id'"})
+
+            session_dir = _session_dir(session_id)
+            if not session_dir.is_dir():
+                return _send_json(
+                    self,
+                    404,
+                    {"error": f"Sandbox for session '{session_id}' does not exist"},
+                )
+
+            archive_bytes, filename = export_workspace(
+                session_dir, options, project_name=project_name
+            )
+            return _send_bytes(
+                self,
+                200,
+                archive_bytes,
+                "application/zip",
+                {"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+        except Exception as exc:
+            logger.exception("Workspace export endpoint failed")
+            return _send_json(self, 500, {"error": str(exc)})
+
     def _handle_workspace_evaluate_error(self) -> None:
         """Diagnose a terminal failure and decide whether it can be auto-healed."""
         try:
@@ -1442,7 +1478,23 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     },
                 )
 
-            target_path.write_text(patched, encoding="utf-8")
+            language = "rust" if target_path.suffix in (".rs",) else "python"
+            try:
+                merged = apply_overlay(original, patched, language=language)
+            except (MergeConflictError, SyntaxError) as exc:
+                return _send_json(
+                    self,
+                    200,
+                    {
+                        "session_id": session_id,
+                        "status": "not_fixable",
+                        "target_file": str(target_path.relative_to(session_dir)),
+                        "diagnosis": diagnosis,
+                        "logs": [f"AST overlay merge failed: {exc}"],
+                    },
+                )
+
+            target_path.write_text(merged, encoding="utf-8")
             _notify_tree_changed(session_id)
 
             diff = "\n".join(
