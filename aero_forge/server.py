@@ -1459,6 +1459,21 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
 
             evaluator = LogEvaluator()
             diagnosis = evaluator.evaluate_log(command, exit_code, log_text)
+            if not diagnosis.get("healable", False):
+                reason = diagnosis.get("reason") or "AST overlay is not safe for this error type."
+                return _send_json(
+                    self,
+                    200,
+                    {
+                        "session_id": session_id,
+                        "status": "failed",
+                        "target_file": diagnosis.get("target_file"),
+                        "diagnosis": diagnosis,
+                        "reason": reason,
+                        "logs": [f"Manual fix required: {reason}"],
+                    },
+                )
+
             target = target_file or diagnosis.get("target_file") or "main.py"
             target_path = session_dir / target
             if not target_path.is_file():
@@ -1468,60 +1483,91 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     return _send_json(self, 400, {"error": "Invalid target file"})
                 target_path = resolved
 
-            original = target_path.read_text(encoding="utf-8")
-            patched = try_auto_fix(log_text, original)
-            if patched is None or patched == original:
-                return _send_json(
-                    self,
-                    200,
-                    {
-                        "session_id": session_id,
-                        "status": "not_fixable",
-                        "target_file": str(target_path.relative_to(session_dir)),
-                        "diagnosis": diagnosis,
-                        "logs": ["No deterministic patch available for this error."],
-                    },
-                )
-
-            language = "rust" if target_path.suffix in (".rs",) else "python"
             try:
-                merged = apply_overlay(original, patched, language=language)
-            except (MergeConflictError, SyntaxError) as exc:
+                original = target_path.read_text(encoding="utf-8")
+                patched = try_auto_fix(log_text, original)
+                if patched is None or patched == original:
+                    return _send_json(
+                        self,
+                        200,
+                        {
+                            "session_id": session_id,
+                            "status": "failed",
+                            "target_file": str(target_path.relative_to(session_dir)),
+                            "diagnosis": diagnosis,
+                            "reason": "No deterministic patch available for this error.",
+                            "logs": ["No deterministic patch available for this error."],
+                        },
+                    )
+
+                language = "rust" if target_path.suffix in (".rs",) else "python"
+                try:
+                    merged = apply_overlay(original, patched, language=language)
+                except (MergeConflictError, SyntaxError) as exc:
+                    return _send_json(
+                        self,
+                        200,
+                        {
+                            "session_id": session_id,
+                            "status": "failed",
+                            "target_file": str(target_path.relative_to(session_dir)),
+                            "diagnosis": diagnosis,
+                            "reason": f"AST overlay merge failed: {exc}",
+                            "logs": [f"AST overlay merge failed: {exc}"],
+                        },
+                    )
+
+                if merged == original:
+                    return _send_json(
+                        self,
+                        200,
+                        {
+                            "session_id": session_id,
+                            "status": "failed",
+                            "target_file": str(target_path.relative_to(session_dir)),
+                            "diagnosis": diagnosis,
+                            "reason": "AST overlay produced no changes.",
+                            "logs": ["AST overlay produced no changes."],
+                        },
+                    )
+
+                target_path.write_text(merged, encoding="utf-8")
+                _notify_tree_changed(session_id)
+
+                diff = "\n".join(
+                    difflib.unified_diff(
+                        original.splitlines(keepends=True),
+                        merged.splitlines(keepends=True),
+                        fromfile=str(target),
+                        tofile=str(target),
+                    )
+                )
                 return _send_json(
                     self,
                     200,
                     {
                         "session_id": session_id,
-                        "status": "not_fixable",
+                        "status": "patched",
                         "target_file": str(target_path.relative_to(session_dir)),
+                        "diff": diff,
                         "diagnosis": diagnosis,
-                        "logs": [f"AST overlay merge failed: {exc}"],
+                        "logs": [f"Patched {target_path.name}"],
                     },
                 )
-
-            target_path.write_text(merged, encoding="utf-8")
-            _notify_tree_changed(session_id)
-
-            diff = "\n".join(
-                difflib.unified_diff(
-                    original.splitlines(keepends=True),
-                    patched.splitlines(keepends=True),
-                    fromfile=str(target),
-                    tofile=str(target),
+            except Exception as exc:
+                logger.exception("Workspace heal patch failed")
+                return _send_json(
+                    self,
+                    200,
+                    {
+                        "session_id": session_id,
+                        "status": "failed",
+                        "target_file": str(target_path.relative_to(session_dir)) if target_path.is_file() else target,
+                        "diagnosis": diagnosis,
+                        "reason": f"AST patch could not be applied cleanly: {exc}",
+                        "logs": [f"AST patch could not be applied cleanly: {exc}"],
+                    },
                 )
-            )
-            return _send_json(
-                self,
-                200,
-                {
-                    "session_id": session_id,
-                    "status": "patched",
-                    "target_file": str(target_path.relative_to(session_dir)),
-                    "diff": diff,
-                    "diagnosis": diagnosis,
-                    "logs": [f"Patched {target_path.name}"],
-                },
-            )
         except Exception as exc:
             logger.exception("Workspace heal endpoint failed")
             return _send_json(self, 500, {"error": str(exc)})

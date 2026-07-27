@@ -415,6 +415,9 @@ def scaffold_native_crate(
             rel = path.relative_to(crate_source)
             if _zip_skip(rel):
                 continue
+            # Never copy workspace/build artifacts from the source crate tree.
+            if rel.name == "Cargo.lock" or rel.name.endswith(".egg-info"):
+                continue
             try:
                 content = path.read_text(encoding="utf-8")
             except (UnicodeDecodeError, OSError):

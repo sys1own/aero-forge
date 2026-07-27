@@ -1450,18 +1450,30 @@
         const diagnosis = await res.json();
         if (diagnosis.healable) {
           showHealBanner(diagnosis.summary, diagnosis.target_file, command, exitCode, logText);
+        } else {
+          showManualFixBanner(diagnosis);
         }
       } catch (e) {
         // Non-critical; banner simply won't appear.
+      } finally {
+        setBusy(false);
       }
     }
 
     function showHealBanner(summary, targetFile, command, exitCode, logText) {
       if (!ui.healBanner) return;
-      ui.healBanner.innerHTML = `<span>&#9889; Self-Heal Available: AST Overlay Patch (${escapeHtml(targetFile || '')})</span><button id="apply-heal-btn" class="run-btn">&#128295; Apply AST Fix &amp; Re-run</button>`;
+      ui.healBanner.innerHTML = `<span>&#9889; Self-Heal Available: ${escapeHtml(summary || 'AST Overlay Patch')} (${escapeHtml(targetFile || '')})</span><button id="apply-heal-btn" class="run-btn">&#128295; Apply AST Fix &amp; Re-run</button>`;
       ui.healBanner.classList.add('visible');
       ui.terminalPanel.classList.add('heal-visible');
       document.getElementById('apply-heal-btn').addEventListener('click', () => applyHeal(command, exitCode, logText));
+    }
+
+    function showManualFixBanner(diagnosis) {
+      if (!ui.healBanner) return;
+      const reason = diagnosis.reason || diagnosis.summary || 'Manual fix required.';
+      ui.healBanner.innerHTML = `<span>&#9888;&#65039; Manual Fix Required: ${escapeHtml(reason)}</span>`;
+      ui.healBanner.classList.add('visible');
+      ui.terminalPanel.classList.add('heal-visible');
     }
 
     function hideHealBanner() {
@@ -1481,7 +1493,8 @@
         });
         const data = await res.json();
         if (!res.ok || data.status !== 'patched') {
-          log(data.error || 'No deterministic patch available', 'error');
+          log(data.reason || data.error || 'No deterministic patch available', 'error');
+          hideHealBanner();
           return;
         }
         log(`Self-heal applied to ${data.target_file}`, 'success');
