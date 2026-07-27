@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import functools
+import difflib
 import io
 import json
 import logging
@@ -44,6 +45,8 @@ from aero_forge.chat import ChatSession
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
 from aero_forge import runner as sandbox_runner
+from aero_forge.healing.evaluator import LogEvaluator
+from aero_forge.healing.router import try_auto_fix
 from aero_forge.orchestrator.router import toolchains_for_intent
 from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_CPP_PYTHON,
@@ -661,6 +664,10 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_run()
             if path == "/api/workspace/accelerate":
                 return self._handle_workspace_accelerate()
+            if path == "/api/workspace/evaluate-error":
+                return self._handle_workspace_evaluate_error()
+            if path == "/api/workspace/heal":
+                return self._handle_workspace_heal()
             if path == "/api/workspace/clean":
                 return self._handle_workspace_clean()
             if path == "/api/load-blueprint-template":
@@ -839,6 +846,21 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             )
             if history:
                 chat.messages = history
+
+            # Inject the latest terminal error context if the UI provides it.
+            terminal_command = body.get("terminal_command")
+            terminal_exit_code = body.get("terminal_exit_code")
+            terminal_log_text = body.get("terminal_log_text")
+            if (
+                terminal_command is not None
+                and terminal_exit_code is not None
+                and terminal_log_text is not None
+            ):
+                chat.set_terminal_context(
+                    terminal_command,
+                    terminal_exit_code,
+                    terminal_log_text,
+                )
 
             response = chat.process(message)
 
@@ -1346,6 +1368,106 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 self.wfile.write(b"0\r\n\r\n")
             except Exception:
                 pass
+
+    def _handle_workspace_evaluate_error(self) -> None:
+        """Diagnose a terminal failure and decide whether it can be auto-healed."""
+        try:
+            body = _parse_json_body(self)
+            session_id = body.get("session_id", "").strip()
+            command = body.get("command", "")
+            exit_code = body.get("exit_code", 1)
+            log_text = body.get("log_text", "")
+            if not session_id:
+                return _send_json(self, 400, {"error": "Missing 'session_id'"})
+
+            session_dir = _session_dir(session_id)
+            if not session_dir.is_dir():
+                return _send_json(
+                    self,
+                    404,
+                    {"error": f"Sandbox for session '{session_id}' does not exist"},
+                )
+
+            evaluator = LogEvaluator()
+            diagnosis = evaluator.evaluate_log(command, exit_code, log_text)
+            diagnosis["session_id"] = session_id
+            return _send_json(self, 200, diagnosis)
+        except Exception as exc:
+            logger.exception("Workspace evaluate-error endpoint failed")
+            return _send_json(self, 500, {"error": str(exc)})
+
+    def _handle_workspace_heal(self) -> None:
+        """Apply a deterministic patch to the file identified by the failure log."""
+        try:
+            body = _parse_json_body(self)
+            session_id = body.get("session_id", "").strip()
+            command = body.get("command", "")
+            exit_code = body.get("exit_code", 1)
+            log_text = body.get("log_text", "")
+            target_file = body.get("target_file", "").strip()
+            if not session_id:
+                return _send_json(self, 400, {"error": "Missing 'session_id'"})
+
+            session_dir = _session_dir(session_id)
+            if not session_dir.is_dir():
+                return _send_json(
+                    self,
+                    404,
+                    {"error": f"Sandbox for session '{session_id}' does not exist"},
+                )
+
+            evaluator = LogEvaluator()
+            diagnosis = evaluator.evaluate_log(command, exit_code, log_text)
+            target = target_file or diagnosis.get("target_file") or "main.py"
+            target_path = session_dir / target
+            if not target_path.is_file():
+                # Allow absolute paths under session_dir for safety.
+                resolved = (session_dir / Path(target).name).resolve()
+                if not str(resolved).startswith(str(session_dir.resolve())):
+                    return _send_json(self, 400, {"error": "Invalid target file"})
+                target_path = resolved
+
+            original = target_path.read_text(encoding="utf-8")
+            patched = try_auto_fix(log_text, original)
+            if patched is None or patched == original:
+                return _send_json(
+                    self,
+                    200,
+                    {
+                        "session_id": session_id,
+                        "status": "not_fixable",
+                        "target_file": str(target_path.relative_to(session_dir)),
+                        "diagnosis": diagnosis,
+                        "logs": ["No deterministic patch available for this error."],
+                    },
+                )
+
+            target_path.write_text(patched, encoding="utf-8")
+            _notify_tree_changed(session_id)
+
+            diff = "\n".join(
+                difflib.unified_diff(
+                    original.splitlines(keepends=True),
+                    patched.splitlines(keepends=True),
+                    fromfile=str(target),
+                    tofile=str(target),
+                )
+            )
+            return _send_json(
+                self,
+                200,
+                {
+                    "session_id": session_id,
+                    "status": "patched",
+                    "target_file": str(target_path.relative_to(session_dir)),
+                    "diff": diff,
+                    "diagnosis": diagnosis,
+                    "logs": [f"Patched {target_path.name}"],
+                },
+            )
+        except Exception as exc:
+            logger.exception("Workspace heal endpoint failed")
+            return _send_json(self, 500, {"error": str(exc)})
 
     def _handle_blueprint_templates(self) -> None:
         """List available blueprint template names."""
