@@ -258,6 +258,45 @@ def _session_path(session_id: str) -> Path:
     return SESSION_DIR / f"{session_id}.json"
 
 
+def get_session_metadata(session_id: str) -> Dict[str, Any]:
+    """Return blueprint provenance metadata for a session."""
+    path = _session_path(session_id)
+    if not path.exists():
+        return {"blueprint_source": "unknown", "auto_initialized": False}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"blueprint_source": "unknown", "auto_initialized": False}
+    return {
+        "blueprint_source": data.get("blueprint_source", "unknown"),
+        "auto_initialized": data.get("auto_initialized", False),
+    }
+
+
+def set_session_blueprint_metadata(
+    session_id: str,
+    source: Optional[str] = None,
+    auto_initialized: Optional[bool] = None,
+) -> None:
+    """Update blueprint provenance metadata for a session."""
+    path = _session_path(session_id)
+    data: Dict[str, Any] = {}
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            data = {}
+    if source is not None:
+        data["blueprint_source"] = source
+    if auto_initialized is not None:
+        data["auto_initialized"] = auto_initialized
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Could not update session metadata %s: %s", session_id, exc)
+
+
 def _noop(_msg: str) -> None:
     pass
 
@@ -318,6 +357,10 @@ class ChatSession:
         self.last_terminal_log: Optional[str] = None
         self.last_evaluator_state: Optional[Dict[str, Any]] = None
 
+        # Blueprint provenance for the web workspace
+        self.blueprint_source: str = "unknown"
+        self.auto_initialized: bool = False
+
         self.base_system_prompt = (
             "You are Aero-Forge, a fast, friendly coding co-pilot. "
             "Talk like a helpful teammate: casual, short, and punchy. "
@@ -364,6 +407,8 @@ class ChatSession:
             self.last_terminal_exit_code = data.get("last_terminal_exit_code")
             self.last_terminal_log = data.get("last_terminal_log")
             self.last_evaluator_state = data.get("last_evaluator_state")
+            self.blueprint_source = data.get("blueprint_source", self.blueprint_source)
+            self.auto_initialized = data.get("auto_initialized", self.auto_initialized)
             loaded_output = data.get("output_dir")
             if loaded_output:
                 self.output_dir = Path(loaded_output)
@@ -448,6 +493,8 @@ class ChatSession:
             "last_terminal_exit_code": self.last_terminal_exit_code,
             "last_terminal_log": self.last_terminal_log,
             "last_evaluator_state": self.last_evaluator_state,
+            "blueprint_source": self.blueprint_source,
+            "auto_initialized": self.auto_initialized,
         }
         try:
             path.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -1259,4 +1306,9 @@ class ChatSession:
         )
 
 
-__all__ = ["ChatSession", "SESSION_DIR"]
+__all__ = [
+    "ChatSession",
+    "SESSION_DIR",
+    "get_session_metadata",
+    "set_session_blueprint_metadata",
+]

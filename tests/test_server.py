@@ -852,3 +852,42 @@ def test_api_build_passes_cargo_logs_and_test_counts(server, monkeypatch):
     assert build["test_failed"] == 0
     assert "cargo build" in build["logs"]
     assert "Python test output" in build["logs"]
+
+
+def test_api_upload_zip_reports_auto_generated_metadata(server):
+    session_id = "test-session-zip-meta"
+    zip_bytes = _make_zip({"src/main.py": "def run():\n    pass\n"})
+    status, body = _post_bytes(
+        server + f"/api/upload-zip?session_id={session_id}", zip_bytes
+    )
+    assert status == 200
+    data = json.loads(body.decode("utf-8"))
+    assert data["blueprint_source"] == "auto_generated"
+    assert data["auto_initialized"] is True
+    assert data["message"] == "ZIP extracted & normalized to blueprint.aero"
+
+    status, body = _get(server + f"/api/files?session_id={session_id}")
+    assert status == 200
+    files_data = json.loads(body.decode("utf-8"))
+    assert files_data["blueprint_source"] == "auto_generated"
+    assert files_data["auto_initialized"] is True
+
+
+def test_api_save_file_blueprint_reports_user_drop_metadata(server):
+    session_id = "test-session-blueprint-drop"
+    status, data = _post_json(
+        server + "/api/save-file",
+        {
+            "session_id": session_id,
+            "path": "blueprint.aero",
+            "content": "project: dropped\narchitecture: pure_python\n",
+        },
+    )
+    assert status == 200
+    assert data["status"] == "saved"
+
+    status, body = _get(server + f"/api/files?session_id={session_id}")
+    assert status == 200
+    files_data = json.loads(body.decode("utf-8"))
+    assert files_data["blueprint_source"] == "user_drop"
+    assert files_data["auto_initialized"] is False
