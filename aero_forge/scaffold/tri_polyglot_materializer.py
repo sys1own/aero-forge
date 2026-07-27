@@ -129,19 +129,39 @@ def _generate_rust_source(contracts: List[ContractEntry]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _is_scalar_type(type_hint: str) -> bool:
+    return type_hint.lower() in ("int", "i64", "i32", "float", "f64", "f32", "bool", "str", "string")
+
+
+def _is_list_type(type_hint: str) -> bool:
+    return type_hint.lower().startswith("list[") and type_hint.endswith("]")
+
+
 def _generate_stub_body(name: str, args: List[Tuple[str, str]], return_type: str) -> str:
-    """Return a simple fallback body for a contract stub."""
+    """Return a simple fallback body for a contract stub from type patterns."""
     rt = return_type.lower()
-    if name == "validate_token":
-        return '    return len(token) > 8'
+    scalar_args = [(a, t) for a, t in args if _is_scalar_type(t)]
+    list_args = [(a, t) for a, t in args if _is_list_type(t)]
+
     if rt in ("int", "i64", "i32"):
         return "    return 0"
     if rt in ("float", "f64", "f32"):
         return "    return 0.0"
     if rt == "bool":
+        if len(scalar_args) == 1 and scalar_args[0][1].lower() in ("str", "string"):
+            arg = scalar_args[0][0]
+            return f"    return len({arg}) > 8"
         return "    return True"
     if rt == "str":
         return '    return "ok"'
+    if "list" in rt and list_args:
+        list_name, _ = list_args[0]
+        if scalar_args:
+            scalar_name = scalar_args[0][0]
+            return f"    return [x * {scalar_name} for x in {list_name}]"
+        return f"    return [x * 2 for x in {list_name}]"
+    if "dict" in rt and not args:
+        return '    return {"status": "ok"}'
     return "    return None"
 
 
@@ -219,17 +239,26 @@ def _generate_python_init(
 
 def _generate_fallback_body(name: str, args: List[Tuple[str, str]], return_type: str) -> str:
     rt = return_type.lower()
-    if name == "get_engine_status":
-        return '    return {"status": "ok", "engine": "tri_polyglot", "languages": ["python", "rust", "cpp"]}'
-    if "list" in rt:
-        return "    return []"
+    scalar_args = [(a, t) for a, t in args if _is_scalar_type(t)]
+    list_args = [(a, t) for a, t in args if _is_list_type(t)]
+    if "list" in rt and list_args:
+        list_name, _ = list_args[0]
+        if scalar_args:
+            scalar_name = scalar_args[0][0]
+            return f"    return [x * {scalar_name} for x in {list_name}]"
+        return f"    return [x * 2 for x in {list_name}]"
     if "dict" in rt:
+        if not args:
+            return '    return {"status": "ok"}'
         return "    return {}"
     if rt in ("int", "i64", "i32"):
         return "    return 0"
     if rt in ("float", "f64", "f32"):
         return "    return 0.0"
     if rt == "bool":
+        if len(scalar_args) == 1 and scalar_args[0][1].lower() in ("str", "string"):
+            arg = scalar_args[0][0]
+            return f"    return len({arg}) > 8"
         return "    return True"
     if rt == "str":
         return '    return "ok"'
@@ -451,125 +480,21 @@ def _generate_run_shell(main_module: str) -> str:
 
 
 def _generate_tests(
-    pkg_name: str,
-    function_names: List[str],
-    contracts: Optional[List[ContractEntry]] = None,
+    blueprint: Blueprint,
+    pkg_module: str,
 ) -> str:
-    return _generate_test_file(Path("tests/test_tri.py"), pkg_name, function_names, contracts)
+    return _generate_test_file(Path("tests/test_tri.py"), blueprint, pkg_module)
 
 
 def _generate_test_file(
     path: Path,
-    pkg_name: str,
-    function_names: List[str],
-    contracts: Optional[List[ContractEntry]] = None,
+    blueprint: Blueprint,
+    pkg_module: str,
 ) -> str:
-    """Generate pytest tests for a tri-polyglot workspace."""
-    stem = path.stem
-    contracts = contracts or []
-    contract_by_name = {c.name: c for c in contracts}
-    lines: List[str] = [
-        "import subprocess",
-        "import sys",
-        "",
-    ]
-    if function_names:
-        lines.append(f"from {pkg_name} import {', '.join(function_names)}")
-        lines.append("")
-    if "fast_vector_transform" in function_names:
-        lines.extend([
-            "def test_fast_vector_transform() -> None:",
-            "    result = fast_vector_transform([1.0, 2.0, 3.0], 2.0)",
-            "    assert isinstance(result, list)",
-            "    assert result == [2.0, 4.0, 6.0]",
-            "",
-        ])
-    if "validate_token" in function_names:
-        lines.extend([
-            'def test_validate_token() -> None:',
-            '    assert validate_token("validtoken123") is True',
-            '    assert validate_token("short") is False',
-            "",
-        ])
-    if "get_engine_status" in function_names:
-        lines.extend([
-            "def test_get_engine_status() -> None:",
-            "    status = get_engine_status()",
-            "    assert isinstance(status, dict)",
-            '    assert status.get("status") == "ok"',
-            "",
-        ])
-    if "compute_sdf_sphere" in function_names:
-        lines.extend([
-            "def test_compute_sdf_sphere() -> None:",
-            "    result = compute_sdf_sphere(2.0, 2.0, 2.0, 1.5)",
-            "    assert isinstance(result, float)",
-            "",
-        ])
-    if "march_rays_batch" in function_names:
-        march_contract = contract_by_name.get("march_rays_batch")
-        if march_contract and march_contract.signature:
-            try:
-                _, args, return_type = _parse_signature(march_contract.signature)
-            except Exception:
-                args, return_type = [], ""
-        else:
-            args, return_type = [], ""
-        if not args:
-            args = [
-                ("origins", "list[float]"),
-                ("dirs", "list[float]"),
-                ("hit_distances", "list[float]"),
-                ("count", "int"),
-                ("max_steps", "int"),
-                ("hit_threshold", "float"),
-                ("sphere_radius", "float"),
-            ]
-            return_type = "int"
-        return_list = _is_c_abi_list(return_type)
-        return_tuple = _is_c_abi_tuple_return(return_type)
-        test_lines = [
-            "def test_march_rays_batch() -> None:",
-            "    count = 4",
-            "    origins = [2.0, 2.0, 2.0] * count",
-            "    dirs = [-1.0, -1.0, -1.0] * count",
-        ]
-        if not return_list and not return_tuple:
-            test_lines.append("    hit_distances = [0.0] * count")
-        call_args = ", ".join(
-            _march_arg_expr(n, t, "count", "origins", "dirs", "hit_distances", "64", "1e-3", "1.5")
-            for n, t in args
-        )
-        test_lines.append(f"    result = march_rays_batch({call_args})")
-        if return_tuple:
-            test_lines.extend([
-                "    assert isinstance(result, tuple)",
-                "    assert len(result) == 2",
-                "    assert isinstance(result[1], list)",
-                "    assert len(result[1]) == count",
-            ])
-        elif return_list:
-            test_lines.extend([
-                "    assert isinstance(result, list)",
-                "    assert len(result) == count",
-            ])
-        else:
-            test_lines.extend([
-                "    assert isinstance(result, int)",
-                "    assert result == count",
-                "    assert all(isinstance(d, float) for d in hit_distances)",
-            ])
-        test_lines.append("")
-        lines.extend(test_lines)
-    cmd = "benchmark" if "march_rays_batch" in function_names else "run_all"
-    lines.extend([
-        f"def test_{stem}() -> None:",
-        f'    result = subprocess.run([sys.executable, "run_shell.py", "--cmd", "{cmd}"], capture_output=True, text=True, timeout=120)',
-        '    assert result.returncode == 0, result.stderr',
-        '    assert result.stdout',
-        "",
-    ])
-    return "\n".join(lines) + "\n"
+    """Generate contract-driven pytest tests for a tri-polyglot workspace."""
+    from aero_forge.scaffold import test_generator
+
+    return test_generator.generate_blueprint_tests(blueprint, module_name=pkg_module)
 
 
 def _generate_native_bridge_py(pkg_name: str, cpp_dir: Path, cpp_contracts: List[ContractEntry]) -> str:
@@ -618,7 +543,7 @@ class TriPolyglotMaterializer:
         for e in cpp_entries:
             if Path(e.path).suffix in (".cpp", ".cc", ".cxx"):
                 return self.workspace / Path(e.path).parent
-        return self.workspace / "cpp_core"
+        return self.workspace / "src/cpp"
 
     def _resolve_rust_dir(self, blueprint: Blueprint, pkg_name: str) -> Path:
         """Resolve the Rust crate directory from the manifest/module graph."""
@@ -627,7 +552,7 @@ class TriPolyglotMaterializer:
             if Path(e.path).name == "Cargo.toml"
         ]
         if not cargo_entries:
-            return self.workspace / "rust_core"
+            return self.workspace / "crates/native"
 
         # If a Cargo.toml has a matching src/lib.rs entry in the manifest, treat it as the crate root.
         def _lib_entry_for(crate_entry):
@@ -702,6 +627,15 @@ class TriPolyglotMaterializer:
         tests_dir = self.workspace / "tests"
         tests_dir.mkdir(exist_ok=True)
 
+        test_entries = [
+            e for e in blueprint.manifest
+            if e.path.endswith(".py") and Path(e.path).name.startswith("test_")
+        ]
+        if test_entries:
+            test_path = self.workspace / test_entries[0].path
+        else:
+            test_path = tests_dir / "test_generated_contracts.py"
+
         all_names = _function_names(contracts)
 
         # Telemetry
@@ -727,7 +661,7 @@ class TriPolyglotMaterializer:
             None,
         )
         if cpp_source_entry is None:
-            cpp_source_entry = ManifestEntry(path="cpp_core/native.cpp", lang="cpp", purpose="C-ABI shared library source")
+            cpp_source_entry = ManifestEntry(path="src/cpp/native.cpp", lang="cpp", purpose="C-ABI shared library source")
             blueprint.manifest.append(cpp_source_entry)
         cpp_source_path = self.workspace / cpp_source_entry.path
         cpp_source_path.parent.mkdir(parents=True, exist_ok=True)
@@ -804,8 +738,8 @@ class TriPolyglotMaterializer:
         (self.workspace / "run_shell.py").write_text(
             _generate_run_shell(main_module), encoding="utf-8"
         )
-        (tests_dir / "test_tri.py").write_text(
-            _generate_tests(pkg_name, all_names, contracts=list(blueprint.contracts)), encoding="utf-8"
+        test_path.write_text(
+            _generate_tests(blueprint, pkg_module), encoding="utf-8"
         )
         (self.workspace / "README.md").write_text(
             _generate_readme_tri(project), encoding="utf-8"
@@ -834,7 +768,7 @@ class TriPolyglotMaterializer:
             ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust workspace manifest"),
             ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python package manifest"),
             ManifestEntry(path="run_shell.py", lang="python", purpose="Headless launcher"),
-            ManifestEntry(path="tests/test_tri.py", lang="python", purpose="pytest tests"),
+            ManifestEntry(path=str(test_path.relative_to(self.workspace)), lang="python", purpose="pytest tests"),
             ManifestEntry(path="README.md", lang="markdown", purpose="Project README"),
         ]
         existing_paths = {e.path for e in blueprint.manifest}
@@ -902,6 +836,8 @@ class TriPolyglotMaterializer:
         cpp_dir = self._resolve_cpp_dir(blueprint, pkg_name)
         rust_dir = self._resolve_rust_dir(blueprint, pkg_name)
         rust_dir_rel = rust_dir.relative_to(self.workspace)
+        pkg_rel = pkg_dir.relative_to(self.workspace)
+        pkg_module = self._dotted_module(pkg_rel)
         for entry in list(blueprint.manifest):
             path = self.workspace / entry.path
             if path.exists():
@@ -938,7 +874,7 @@ class TriPolyglotMaterializer:
                 elif path.name == "native_bridge.py":
                     content = _generate_native_bridge_py(pkg_name, cpp_dir, cpp_contracts)
                 elif "test" in path.name and path.suffix == ".py":
-                    content = _generate_test_file(rel, pkg_name, function_names, contracts=list(blueprint.contracts))
+                    content = _generate_test_file(rel, blueprint, pkg_module)
                 elif path.suffix == ".py":
                     content = f"# {path.name} placeholder generated by aero-forge\n"
             elif entry.lang == "cpp":

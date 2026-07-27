@@ -234,9 +234,6 @@ def _generic_c_abi_contract_spec(pkg_name: str, contract: ContractEntry) -> Opti
     list_args = [(a, t) for a, t in args if _is_c_abi_list(t)]
     scalar_args = [(a, t) for a, t in args if _is_c_abi_scalar(t)]
 
-    if not list_args:
-        return None
-
     def is_float_list(at: str) -> bool:
         return at.startswith("list[") and _map_py_type(at[5:-1].strip()) == "float"
 
@@ -244,7 +241,7 @@ def _generic_c_abi_contract_spec(pkg_name: str, contract: ContractEntry) -> Opti
         return at.startswith("list[") and _map_py_type(at[5:-1].strip()) == "int"
 
     def scalar_literal(value: Any) -> Any:
-        if is_int_list(list_args[0][1]):
+        if list_args and is_int_list(list_args[0][1]):
             return literal(int(value))
         return literal(float(value))
 
@@ -342,7 +339,43 @@ def _generic_c_abi_contract_spec(pkg_name: str, contract: ContractEntry) -> Opti
             )
             return EngineSpec(name=pkg_name, root=module(name=pkg_name, children=[func]))
 
-        return None
+        # Generic scalar return: sum all scalar arguments and all list elements.
+        body: List[ASTNode] = [total]
+        for scalar_name, _ in scalar_args:
+            body.append(
+                ASTNode(
+                    kind="aug_assign",
+                    name="total",
+                    value="+",
+                    children=[reference(scalar_name)],
+                )
+            )
+        for list_name, _ in list_args:
+            body.append(
+                ASTNode(
+                    kind="for",
+                    name="x",
+                    children=[
+                        reference(list_name),
+                        block(children=[
+                            ASTNode(
+                                kind="aug_assign",
+                                name="total",
+                                value="+",
+                                children=[reference("x")],
+                            )
+                        ]),
+                    ],
+                )
+            )
+        body.append(return_node(reference("total")))
+        func = function(
+            name,
+            params=[param(a, t) for a, t in args],
+            return_type=return_type,
+            body=body,
+        )
+        return EngineSpec(name=pkg_name, root=module(name=pkg_name, children=[func]))
 
     # Case 2: list return
     if _is_c_abi_list(return_type):
@@ -662,22 +695,36 @@ def _generate_pyproject_toml(pkg_name: str) -> str:
     )
 
 
+def _is_scalar_type(type_hint: str) -> bool:
+    return type_hint.lower().replace(" ", "") in ("int", "i64", "i32", "float", "f64", "f32", "bool", "str", "string")
+
+
+def _is_list_type(type_hint: str) -> bool:
+    return type_hint.lower().startswith("list[") and type_hint.endswith("]")
+
+
 def _generate_fallback_body(name: str, args: List[Tuple[str, str]], return_type: str) -> str:
-    """Return a pure-Python fallback implementation for a non-native contract."""
-    if name == "get_engine_status":
-        return '    return {"status": "ok", "engine": "cpp"}'
-    if name == "fast_vector_transform":
-        return "    return [x * 2.0 for x in v]"
-    rt = return_type.lower()
-    if "list" in rt:
-        return "    return []"
+    """Return a pure-Python fallback implementation from type patterns."""
+    rt = return_type.lower().replace(" ", "")
+    scalar_args = [(a, t) for a, t in args if _is_scalar_type(t)]
+    list_args = [(a, t) for a, t in args if _is_list_type(t)]
+    if "list" in rt and list_args:
+        list_name, _ = list_args[0]
+        if scalar_args:
+            scalar_name = scalar_args[0][0]
+            return f"    return [x * {scalar_name} for x in {list_name}]"
+        return f"    return [x * 2 for x in {list_name}]"
     if "dict" in rt:
+        if not args:
+            return '    return {"status": "ok"}'
         return '    return {}'
     if rt in ("int", "i64", "i32"):
         return "    return 0"
     if rt in ("float", "f64", "f32"):
         return "    return 0.0"
     if rt == "bool":
+        if len(scalar_args) == 1 and scalar_args[0][1].lower() in ("str", "string"):
+            return f"    return len({scalar_args[0][0]}) > 8"
         return "    return True"
     if rt == "str":
         return '    return "ok"'
@@ -906,81 +953,11 @@ def _generate_cli(pkg_name: str, function_names: List[str], contracts: Optional[
     return "\n".join(lines) + "\n"
 
 
-def _generate_tests(pkg_name: str, function_names: List[str], contracts: Optional[List[ContractEntry]] = None) -> str:
-    contracts = contracts or []
-    sigs: Dict[str, str] = {}
-    for c in contracts:
-        if c.signature:
-            try:
-                name, _, _ = _parse_signature(c.signature)
-                sigs[name] = c.signature
-            except Exception:
-                pass
+def _generate_tests(blueprint: Blueprint, pkg_module: str) -> str:
+    """Generate contract-driven pytest tests for the C++ hybrid package."""
+    from aero_forge.scaffold import test_generator
 
-    lines: List[str] = [
-        "import math",
-        "from typing import Any",
-        "",
-        f"from {pkg_name} import {', '.join(function_names)}",
-        "",
-    ]
-
-    def _expected_for(name: str, sig: str) -> str:
-        try:
-            _, args, return_type = _parse_signature(sig)
-        except Exception:
-            return "assert result is not None"
-        rt = (return_type or "").strip().lower()
-        list_args = [(a, t) for a, t in args if _is_py_list_type(t) and not _is_py_nested_list(t)]
-        scalar = next((a for a, t in args if t.strip().lower() in ("float", "f64", "f32")), None)
-        if rt == "list[float]" and len(list_args) == 1 and scalar:
-            return "assert isinstance(result, list) and all(math.isclose(a, b, rel_tol=1e-9) for a, b in zip(result, [2.0, 4.0, 6.0]))"
-        if rt == "list[list[float]]" and len(list_args) == 1 and scalar:
-            return "assert isinstance(result, list) and result == [[2.0, 4.0], [6.0, 8.0]]"
-        if rt in ("float", "f64", "f32") and len(list_args) == 2:
-            return "assert isinstance(result, float) and math.isclose(result, 14.0, rel_tol=1e-9)"
-        if rt in ("int", "i64") and len(list_args) == 1:
-            return "assert isinstance(result, int) and result == 6"
-        if rt == "bool":
-            return "assert result is True or result is False"
-        if rt.startswith("dict["):
-            return "assert isinstance(result, dict)"
-        if rt.startswith("list["):
-            return "assert isinstance(result, list)"
-        return "assert result is not None"
-
-    for name in function_names:
-        sig = sigs.get(name, "")
-        if not sig:
-            continue
-        try:
-            _, args, _ = _parse_signature(sig)
-        except Exception:
-            continue
-        sample_call = ", ".join(_sample_arg_py(t) for _, t in args)
-        lines.extend([
-            f"def test_{name}() -> None:",
-            f"    result = {name}({sample_call})",
-            f"    {_expected_for(name, sig)}",
-            "",
-        ])
-
-    if function_names:
-        first = function_names[0]
-        lines.extend([
-            "def test_cli_run_all(capsys) -> None:",
-            f"    from {pkg_name}.cli import run_all",
-            "    run_all()",
-            "    assert capsys.readouterr().out",
-            "",
-            "def test_repl_quit() -> None:",
-            f"    from {pkg_name}.cli import AeroShell",
-            "    shell = AeroShell()",
-            "    assert shell.onecmd('quit') is True",
-            "",
-        ])
-
-    return "\n".join(lines) + "\n"
+    return test_generator.generate_blueprint_tests(blueprint, module_name=pkg_module)
 
 
 def _generate_run_shell(pkg_name: str) -> str:
@@ -1072,6 +1049,15 @@ class CppPolyglotMaterializer:
         tests_dir = self.workspace / "tests"
         tests_dir.mkdir(exist_ok=True)
 
+        test_entries = [
+            e for e in blueprint.manifest
+            if e.path.endswith(".py") and Path(e.path).name.startswith("test_")
+        ]
+        if test_entries:
+            test_path = self.workspace / test_entries[0].path
+        else:
+            test_path = tests_dir / "test_generated_contracts.py"
+
         pkg_rel = pkg_dir.relative_to(self.workspace)
         pkg_module = self._dotted_module(pkg_rel)
 
@@ -1138,8 +1124,8 @@ class CppPolyglotMaterializer:
         (self.workspace / "README.md").write_text(
             _generate_readme(pkg_name), encoding="utf-8"
         )
-        (tests_dir / "test_cli.py").write_text(
-            _generate_tests(pkg_module, function_names, contracts=contracts), encoding="utf-8"
+        test_path.write_text(
+            _generate_tests(blueprint, pkg_module), encoding="utf-8"
         )
 
         # Manifest integrity: ensure every declared entry exists, including
@@ -1152,7 +1138,7 @@ class CppPolyglotMaterializer:
             ManifestEntry(path=str(pkg_rel / "cli.py"), lang="python", purpose="CLI module"),
             ManifestEntry(path="pyproject.toml", lang="toml", purpose="project manifest"),
             ManifestEntry(path="run_shell.py", lang="python", purpose="launcher"),
-            ManifestEntry(path="tests/test_cli.py", lang="python", purpose="tests"),
+            ManifestEntry(path=str(test_path.relative_to(self.workspace)), lang="python", purpose="tests"),
             ManifestEntry(path="README.md", lang="markdown", purpose="docs"),
         ]
         existing_paths = {e.path for e in blueprint.manifest}
@@ -1169,7 +1155,7 @@ class CppPolyglotMaterializer:
             FunctionSpec(
                 file=pkg_dir / "__init__.py",
                 name=name,
-                tests=[tests_dir / "test_cli.py"],
+                tests=[test_path],
                 skip_build=True,
             )
             for name in function_names
@@ -1179,7 +1165,7 @@ class CppPolyglotMaterializer:
                 FunctionSpec(
                     file=pkg_dir / "cli.py",
                     name="main",
-                    tests=[tests_dir / "test_cli.py"],
+                    tests=[test_path],
                     skip_build=True,
                 )
             )
@@ -1288,7 +1274,7 @@ class CppPolyglotMaterializer:
                     so_path = (self.workspace / pkg_rel / _so_name(pkg_name)).resolve()
                     content = _ctypes_loader_source(stub, so_path, native_names)
                 elif "test" in rel.name and rel.suffix == ".py":
-                    content = _generate_tests(pkg_module, function_names, contracts=contracts)
+                    content = _generate_tests(blueprint, pkg_module)
                 elif rel.suffix == ".py":
                     content = f"# {rel.name} placeholder generated by aero-forge\n"
             elif entry.lang == "toml":

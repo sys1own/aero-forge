@@ -78,30 +78,31 @@ def _parse_signature(signature: str) -> Tuple[str, List[Tuple[str, str]], str]:
     return func.name, args, return_type
 
 
+def _is_scalar_type(type_hint: str) -> bool:
+    return type_hint.lower().replace(" ", "") in ("int", "i64", "i32", "float", "f64", "f32", "bool", "str", "string")
+
+
+def _is_list_type(type_hint: str) -> bool:
+    return type_hint.lower().startswith("list[") and type_hint.endswith("]")
+
+
 def _generate_stub_body(name: str, args: List[Tuple[str, str]], return_type: str) -> str:
-    """Return a body for a stub Python implementation of *name*."""
-    rt = return_type.lower()
+    """Return a generic fallback body for a contract from its type pattern."""
+    rt = return_type.lower().replace(" ", "")
+    scalar_args = [(a, t) for a, t in args if _is_scalar_type(t)]
+    list_args = [(a, t) for a, t in args if _is_list_type(t)]
 
-    if name == "fast_vector_transform":
-        list_arg = next((a for a in args if "list" in a[1].lower()), None)
-        scalar_arg = next(
-            (a for a in args if a[1].lower() in ("float", "int", "f64", "i64")),
-            None,
-        )
-        if list_arg and scalar_arg:
-            return f"    return [x * {scalar_arg[0]} for x in {list_arg[0]}]"
-
-    if name == "get_engine_status" or ("dict" in rt and "status" in name.lower()):
-        return '    return {"status": "ok", "engine": "polyglot"}'
-
-    if "list" in rt:
-        list_arg = next((a for a in args if "list" in a[1].lower()), None)
-        if list_arg:
-            return f"    return [x for x in {list_arg[0]}]"
-        return "    return []"
+    if "list" in rt and list_args:
+        list_name, _ = list_args[0]
+        if scalar_args:
+            scalar_name = scalar_args[0][0]
+            return f"    return [x * {scalar_name} for x in {list_name}]"
+        return f"    return [x for x in {list_name}]"
 
     if "dict" in rt:
-        return '    return {"status": "ok"}'
+        if not args:
+            return '    return {"status": "ok"}'
+        return "    return {}"
 
     if rt in ("int", "i64", "i32"):
         return "    return 0"
@@ -110,6 +111,8 @@ def _generate_stub_body(name: str, args: List[Tuple[str, str]], return_type: str
         return "    return 0.0"
 
     if rt == "bool":
+        if len(scalar_args) == 1 and scalar_args[0][1].lower() in ("str", "string"):
+            return f"    return len({scalar_args[0][0]}) > 8"
         return "    return True"
 
     if rt == "str":
@@ -243,7 +246,7 @@ def _native_loader_source(crate_names: List[str], rust_dir: str = "rust_core") -
         "            stem = so.stem",
         '            if stem.startswith("lib"):',
         '                stem = stem[3:]',
-        '            stem = re.sub(r"\.cpython-.*$", "", stem)',
+        r'            stem = re.sub(r"\.cpython-.*$", "", stem)',
         "            for preferred in _PREFERRED_MODULE_NAMES:",
         "                if preferred in stem:",
         "                    stem = preferred",
@@ -312,7 +315,11 @@ def _render_python_module(
     return "\n".join(lines) + "\n"
 
 
-def _render_orchestrator(contracts: List[ContractEntry], module_name: str) -> str:
+def _render_orchestrator(
+    contracts: List[ContractEntry],
+    module_name: str,
+    rust_dir: str = "rust_core",
+) -> str:
     """Render ``aero_polyglot_runner/orchestrator.py`` with ``PolyglotEngine``."""
     lines: List[str] = [
         '"""Polyglot runner that loads the compiled extension with a pure-Python fallback."""',
@@ -325,7 +332,7 @@ def _render_orchestrator(contracts: List[ContractEntry], module_name: str) -> st
         "from typing import Any, Dict, List, Optional",
         "",
         "_SO_CANDIDATES = [",
-        '    pathlib.Path(__file__).parent.parent / "rust_core" / "target" / "release",',
+        f'    pathlib.Path(__file__).parent.parent / "{rust_dir}" / "target" / "release",',
         '    pathlib.Path(__file__).parent.parent / "target" / "release",',
         '    pathlib.Path(__file__).parent.parent / "dist",',
         '    pathlib.Path(__file__).parent,',
@@ -352,7 +359,7 @@ def _render_orchestrator(contracts: List[ContractEntry], module_name: str) -> st
         "                stem = so.stem",
         '                if stem.startswith("lib"):',
         '                    stem = stem[3:]',
-        '                stem = re.sub(r"\.cpython-.*$", "", stem)',
+        r'                stem = re.sub(r"\.cpython-.*$", "", stem)',
         "                for preferred in _PREFERRED_MODULES:",
         "                    if preferred in stem:",
         "                        stem = preferred",
@@ -402,6 +409,27 @@ def _module_uses_engine(exports_module: str) -> bool:
     return exports_module.endswith(".orchestrator") or exports_module == "orchestrator"
 
 
+def _sample_arg(t: str) -> str:
+    t = (t or "").lower().replace(" ", "")
+    if t == "str":
+        return '"test"'
+    if t == "int" or t == "i64" or t == "i32":
+        return "1"
+    if t == "float" or t == "f64" or t == "f32":
+        return "1.0"
+    if t == "bool":
+        return "True"
+    if t.startswith("list["):
+        inner = t[5:-1].strip() if t.endswith("]") else "float"
+        lit = _sample_arg(inner)
+        if lit.startswith("[") or lit.startswith("{") or lit.startswith("("):
+            return f"[{lit}, {lit}]"
+        return f"[{lit}, {lit}, {lit}]"
+    if t.startswith("dict["):
+        return "{}"
+    return "None"
+
+
 def _render_demo(exports_module: str, contracts: List[ContractEntry]) -> str:
     names = [c.name for c in contracts if c.signature]
     if not names:
@@ -414,28 +442,22 @@ def _render_demo(exports_module: str, contracts: List[ContractEntry]) -> str:
             "def main() -> None:",
             "    engine = PolyglotEngine()",
         ]
-        for name in names:
-            if name == "fast_vector_transform":
-                lines.append(f"    print(engine.{name}([1.0, 2.0, 3.0], 2.0))")
-            elif name == "get_engine_status":
-                lines.append(f"    print(engine.{name}())")
-            else:
-                lines.append(f"    print(engine.{name}())")
-        lines.extend(["", 'if __name__ == "__main__":', "    main()"])
-        return "\n".join(lines) + "\n"
-
-    lines = [
-        f"from {exports_module} import {', '.join(names)}",
-        "",
-        "def main() -> None:",
-    ]
-    for name in names:
-        if name == "fast_vector_transform":
-            lines.append(f"    print({name}([1.0, 2.0, 3.0], 2.0))")
-        elif name == "get_engine_status":
-            lines.append(f"    print({name}())")
-        else:
-            lines.append(f"    print({name}())")
+    else:
+        lines = [
+            f"from {exports_module} import {', '.join(names)}",
+            "",
+            "def main() -> None:",
+        ]
+    for contract in contracts:
+        if not contract.signature:
+            continue
+        try:
+            name, args, _ = _parse_signature(contract.signature)
+        except Exception:
+            continue
+        prefix = "engine." if uses_engine else ""
+        arg_values = [_sample_arg(t) for _, t in args]
+        lines.append(f"    print({prefix}{name}({', '.join(arg_values)}))")
     lines.extend(["", 'if __name__ == "__main__":', "    main()"])
     return "\n".join(lines) + "\n"
 
@@ -464,25 +486,9 @@ def _render_cli(exports_module: str, contracts: List[ContractEntry]) -> str:
             name, args, return_type = _parse_signature(contract.signature)
         except Exception:
             continue
-        arg_values = []
-        for _, t in args:
-            if "list" in t.lower():
-                arg_values.append("[1.0, 2.0]")
-            elif t.lower() in ("float", "f64"):
-                arg_values.append("1.0")
-            elif t.lower() in ("int", "i64"):
-                arg_values.append("1")
-            elif t.lower() == "str":
-                arg_values.append('"x"')
-            else:
-                arg_values.append("None")
+        arg_values = [_sample_arg(t) for _, t in args]
         lines.append(f"def {name}_cmd() -> None:")
-        if name == "fast_vector_transform":
-            lines.append(f"    print({name}([1.0, 2.0, 3.0], 2.0))")
-        elif name == "get_engine_status":
-            lines.append(f"    print({name}())")
-        else:
-            lines.append(f"    print({name}({', '.join(arg_values)}))")
+        lines.append(f"    print({name}({', '.join(arg_values)}))")
         lines.append("")
     lines.append("def main() -> int:")
     lines.append('    print("CLI ready")')
@@ -493,26 +499,9 @@ def _render_cli(exports_module: str, contracts: List[ContractEntry]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _render_tests(exports_module: str, contracts: List[ContractEntry]) -> str:
-    names = [c.name for c in contracts if c.signature]
-    if not names:
-        return "def test_placeholder():\n    pass\n"
-
-    uses_engine = _module_uses_engine(exports_module)
-    if uses_engine:
-        lines = [
-            f"from {exports_module} import PolyglotEngine",
-            "",
-            "def test_engine_instantiates():",
-            "    assert PolyglotEngine() is not None",
-            "",
-        ]
-    else:
-        lines = [
-            f"from {exports_module} import {', '.join(names)}",
-            "",
-        ]
-
+def _contract_source(contracts: List[ContractEntry]) -> str:
+    """Build a synthetic Python source containing one stub per contract."""
+    lines: List[str] = []
     for contract in contracts:
         if not contract.signature:
             continue
@@ -520,51 +509,65 @@ def _render_tests(exports_module: str, contracts: List[ContractEntry]) -> str:
             name, args, return_type = _parse_signature(contract.signature)
         except Exception:
             continue
+        arg_sig = ", ".join(f"{a}: {t}" for a, t in args)
+        lines.append(f"def {name}({arg_sig}) -> {return_type}:")
+        lines.append(_generate_stub_body(name, args, return_type))
+        lines.append("")
+    return "\n".join(lines)
 
-        prefix = "engine." if uses_engine else ""
-        setup = "engine = PolyglotEngine()" if uses_engine else ""
 
-        if name == "fast_vector_transform":
-            lines.extend([
-                f"def test_{name}():",
-                f"    {setup}",
-                f"    result = {prefix}{name}([1.0, 2.0, 3.0], 2.0)",
-                "    assert isinstance(result, list)",
-                "    import math",
-                "    assert all(math.isclose(a, b, rel_tol=1e-9) for a, b in zip(result, [2.0, 4.0, 6.0]))",
-                "",
-            ])
-        elif name == "get_engine_status":
-            lines.extend([
-                f"def test_{name}():",
-                f"    {setup}",
-                f"    status = {prefix}{name}()",
-                "    assert isinstance(status, dict)",
-                '    assert status.get("status") == "ok"',
-                "",
-            ])
-        else:
-            arg_values = []
-            for _, t in args:
-                if "list" in t.lower():
-                    arg_values.append("[1.0, 2.0]")
-                elif t.lower() in ("float", "f64"):
-                    arg_values.append("1.0")
-                elif t.lower() in ("int", "i64"):
-                    arg_values.append("1")
-                elif t.lower() == "str":
-                    arg_values.append('"x"')
-                else:
-                    arg_values.append("None")
-            lines.extend([
-                f"def test_{name}():",
-                f"    {setup}",
-                f"    result = {prefix}{name}({', '.join(arg_values)})",
-                "    assert result is not None",
-                "",
-            ])
+def _render_tests(exports_module: str, contracts: List[ContractEntry]) -> str:
+    """Render contract-driven pytest tests for *exports_module*."""
+    from aero_forge.scaffold import test_generator
 
-    return "\n".join(lines) + "\n"
+    if not contracts:
+        return "def test_placeholder():\n    pass\n"
+
+    if _module_uses_engine(exports_module):
+        names = [c.name for c in contracts if c.signature]
+        lines = [
+            f"from {exports_module} import PolyglotEngine",
+            "",
+            "def test_engine_instantiates():",
+            "    assert PolyglotEngine() is not None",
+            "",
+        ]
+        for contract in contracts:
+            if not contract.signature:
+                continue
+            try:
+                name, args, return_type = _parse_signature(contract.signature)
+            except Exception:
+                continue
+            sample_call = ", ".join(_sample_arg(t) for _, t in args if _ != "self")
+            lines.append(f"def test_{name}():")
+            lines.append("    engine = PolyglotEngine()")
+            if sample_call:
+                lines.append(f"    result = engine.{name}({sample_call})")
+            else:
+                lines.append(f"    result = engine.{name}()")
+            rt = return_type.lower().replace(" ", "")
+            if "list" in rt:
+                lines.append("    assert isinstance(result, list)")
+            elif "dict" in rt:
+                lines.append("    assert isinstance(result, dict)")
+            elif rt in ("int", "i64", "i32"):
+                lines.append("    assert isinstance(result, int)")
+            elif rt in ("float", "f64", "f32"):
+                lines.append("    assert isinstance(result, float)")
+            elif rt == "bool":
+                lines.append("    assert result in (True, False)")
+            elif rt == "str":
+                lines.append("    assert isinstance(result, str)")
+            else:
+                lines.append("    assert result is not None")
+            lines.append("")
+        return "\n".join(lines) + "\n"
+
+    source = _contract_source(contracts)
+    if not source:
+        return "def test_placeholder():\n    pass\n"
+    return test_generator.generate_smoke_tests(source, module_name=exports_module)
 
 
 def _render_pyproject(pkg_name: str, package_dir: str = ".") -> str:
