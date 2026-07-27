@@ -1030,9 +1030,23 @@ class CppPolyglotMaterializer:
         if text:
             self.build_logs = (self.build_logs + "\n" + text).strip()
 
+    def _resolve_pkg_dir(self, blueprint: Blueprint, pkg_name: str) -> Path:
+        """Resolve the Python package directory from the manifest."""
+        for e in blueprint.manifest:
+            if e.path.endswith("/__init__.py"):
+                return self.workspace / Path(e.path).parent
+        for e in blueprint.manifest:
+            if Path(e.path).name in ("main.py", "cli.py"):
+                return self.workspace / Path(e.path).parent
+        return self.workspace / pkg_name
+
+    def _dotted_module(self, rel: Path) -> str:
+        rel = rel.with_suffix("") if rel.suffix == ".py" else rel
+        return ".".join(rel.parts)
+
     def materialize(self, blueprint: Blueprint, *, build: bool = False) -> Blueprint:
         """Write the C++ workspace files and optionally build the shared library."""
-        from aero_forge.scaffold.polyglot_materializer import _contracts_from_abi
+        from aero_forge.scaffold.polyglot_materializer import _contracts_from_abi, _render_pyproject
 
         project = blueprint.project or "polyglot_cpp_project"
         pkg_name = _sanitize_module_name(project)
@@ -1053,10 +1067,13 @@ class CppPolyglotMaterializer:
         os.environ["AERO_FORGE_ACCEL_LOG"] = str(accel_log)
 
         self.workspace.mkdir(parents=True, exist_ok=True)
-        pkg_dir = self.workspace / pkg_name
-        pkg_dir.mkdir(exist_ok=True)
+        pkg_dir = self._resolve_pkg_dir(blueprint, pkg_name)
+        pkg_dir.mkdir(parents=True, exist_ok=True)
         tests_dir = self.workspace / "tests"
         tests_dir.mkdir(exist_ok=True)
+
+        pkg_rel = pkg_dir.relative_to(self.workspace)
+        pkg_module = self._dotted_module(pkg_rel)
 
         for contract in contracts:
             if not contract.signature:
@@ -1079,7 +1096,7 @@ class CppPolyglotMaterializer:
             None,
         )
         if cpp_source_entry is None:
-            cpp_source_entry = ManifestEntry(path=f"{pkg_name}/native.cpp", lang="cpp", purpose="C-ABI shared library source")
+            cpp_source_entry = ManifestEntry(path=str(pkg_rel / "native.cpp"), lang="cpp", purpose="C-ABI shared library source")
             blueprint.manifest.append(cpp_source_entry)
         cpp_source_path = self.workspace / cpp_source_entry.path
 
@@ -1109,29 +1126,30 @@ class CppPolyglotMaterializer:
             _generate_init(pkg_name, pkg_dir, contracts), encoding="utf-8"
         )
         (pkg_dir / "cli.py").write_text(
-            _generate_cli(pkg_name, function_names, contracts=contracts), encoding="utf-8"
+            _generate_cli(pkg_module, function_names, contracts=contracts), encoding="utf-8"
         )
+        pyproject_pkg_dir = str(pkg_rel.parent) if pkg_rel.parts[:-1] else "."
         (self.workspace / "pyproject.toml").write_text(
-            _generate_pyproject_toml(pkg_name), encoding="utf-8"
+            _render_pyproject(pkg_module, package_dir=pyproject_pkg_dir), encoding="utf-8"
         )
         (self.workspace / "run_shell.py").write_text(
-            _generate_run_shell(pkg_name), encoding="utf-8"
+            _generate_run_shell(f"{pkg_module}.cli"), encoding="utf-8"
         )
         (self.workspace / "README.md").write_text(
             _generate_readme(pkg_name), encoding="utf-8"
         )
         (tests_dir / "test_cli.py").write_text(
-            _generate_tests(pkg_name, function_names, contracts=contracts), encoding="utf-8"
+            _generate_tests(pkg_module, function_names, contracts=contracts), encoding="utf-8"
         )
 
         # Manifest integrity: ensure every declared entry exists, including
         # any extra files requested by the module_graph/manifest (e.g. CMakeLists.txt).
-        self._write_missing_manifest_entries(blueprint, pkg_name, contracts, function_names)
+        self._write_missing_manifest_entries(blueprint, pkg_name, pkg_module, pkg_rel, contracts, function_names)
 
         manifest: List[ManifestEntry] = [
             ManifestEntry(path=str(cpp_source_path.relative_to(self.workspace)), lang="cpp", purpose="C-ABI shared library source"),
-            ManifestEntry(path=f"{pkg_name}/__init__.py", lang="python", purpose="ctypes loader package init"),
-            ManifestEntry(path=f"{pkg_name}/cli.py", lang="python", purpose="CLI module"),
+            ManifestEntry(path=str(pkg_rel / "__init__.py"), lang="python", purpose="ctypes loader package init"),
+            ManifestEntry(path=str(pkg_rel / "cli.py"), lang="python", purpose="CLI module"),
             ManifestEntry(path="pyproject.toml", lang="toml", purpose="project manifest"),
             ManifestEntry(path="run_shell.py", lang="python", purpose="launcher"),
             ManifestEntry(path="tests/test_cli.py", lang="python", purpose="tests"),
@@ -1224,6 +1242,8 @@ class CppPolyglotMaterializer:
         self,
         blueprint: Blueprint,
         pkg_name: str,
+        pkg_module: str,
+        pkg_rel: Path,
         contracts: List[ContractEntry],
         function_names: List[str],
     ) -> None:
@@ -1245,14 +1265,30 @@ class CppPolyglotMaterializer:
                 if rel.name == "__init__.py":
                     content = _generate_init(pkg_name, path.parent, contracts)
                 elif rel.name == "cli.py":
-                    content = _generate_cli(pkg_name, function_names, contracts=contracts)
+                    content = _generate_cli(pkg_module, function_names, contracts=contracts)
+                elif rel.name == "main.py":
+                    from aero_forge.scaffold.entrypoint_adapter import EntrypointAdapterEngine
+                    execution_strategy = blueprint.execution_strategy.model_dump() if blueprint.execution_strategy else {
+                        "primary_entrypoint": {"path": entry.path, "runtime": "python3", "wrapper_generation": True},
+                        "cli_contract": {"parser_type": "argparse", "flags": []},
+                        "run_spec": {},
+                    }
+                    main_pkg_module = self._dotted_module(rel.parent)
+                    EntrypointAdapterEngine(
+                        execution_strategy,
+                        str(self.workspace),
+                        contracts=contracts,
+                        abi_contracts=list(blueprint.abi_contracts or []),
+                        function_module=main_pkg_module,
+                    ).synthesize_root_entrypoint()
+                    continue
                 elif rel.name == "native_bridge.py":
                     native_names = [n for n in function_names if _is_c_abi_contract(next((c for c in contracts if c.signature and _parse_signature(c.signature)[0] == n), ContractEntry(name="", signature="")))]
                     stub = "\n".join(_contract_to_python_stub(c) for c in contracts if _is_c_abi_contract(c))
-                    so_path = (self.workspace / pkg_name / _so_name(pkg_name)).resolve()
+                    so_path = (self.workspace / pkg_rel / _so_name(pkg_name)).resolve()
                     content = _ctypes_loader_source(stub, so_path, native_names)
                 elif "test" in rel.name and rel.suffix == ".py":
-                    content = _generate_tests(pkg_name, function_names, contracts=contracts)
+                    content = _generate_tests(pkg_module, function_names, contracts=contracts)
                 elif rel.suffix == ".py":
                     content = f"# {rel.name} placeholder generated by aero-forge\n"
             elif entry.lang == "toml":

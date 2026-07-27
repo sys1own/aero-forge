@@ -23,6 +23,7 @@ from aero_forge.blueprint import (
 from aero_forge.builder import language_router
 from aero_forge.native_bridge import _ctypes_loader_source
 from aero_forge.scaffold.cargo_runner import cargo_build
+from aero_forge.scaffold.entrypoint_adapter import EntrypointAdapterEngine
 from aero_forge.scaffold.cpp_materializer import (
     _contract_to_python_stub as _cpp_contract_to_python_stub,
     _find_cpp_compiler,
@@ -146,18 +147,19 @@ def _generate_stub_body(name: str, args: List[Tuple[str, str]], return_type: str
 
 def _generate_python_init(
     pkg_name: str,
-    workspace: Path,
+    cpp_dir: Path,
     cpp_contracts: List[ContractEntry],
     rust_contracts: List[ContractEntry],
     python_contracts: List[ContractEntry],
     rust_crate_name: str,
     native_bridge_module: Optional[str] = None,
+    rust_dir: str = "rust_core",
 ) -> str:
     """Generate ``<pkg>/__init__.py`` that loads both the Rust extension and C++ .so."""
     lines: List[str] = ['"""Tri-polyglot driver package."""', "", "from __future__ import annotations", ""]
 
     # Rust extension loader
-    lines.append(_native_loader_source([rust_crate_name]))
+    lines.append(_native_loader_source([rust_crate_name], rust_dir=rust_dir))
     lines.append("")
 
     # Rust-backed functions
@@ -193,7 +195,7 @@ def _generate_python_init(
             lines.append("")
         else:
             stub_source = "\n".join(_cpp_contract_to_python_stub(c) for c in cpp_contracts)
-            so_path = (workspace / "cpp_core" / _so_name(f"{pkg_name}_cpp")).resolve()
+            so_path = (cpp_dir / _so_name(f"{pkg_name}_cpp")).resolve()
             lines.append(_ctypes_loader_source(stub_source, so_path, cpp_names))
             lines.append("")
 
@@ -438,10 +440,10 @@ def _generate_main_py(pkg_name: str, function_names: List[str], contracts: Optio
     return "\n".join(lines)
 
 
-def _generate_run_shell(pkg_name: str) -> str:
+def _generate_run_shell(main_module: str) -> str:
     return (
         "import sys\n"
-        f"from {pkg_name}.main import main\n"
+        f"from {main_module} import main\n"
         "\n"
         'if __name__ == "__main__":\n'
         "    sys.exit(main() or 0)\n"
@@ -570,13 +572,13 @@ def _generate_test_file(
     return "\n".join(lines) + "\n"
 
 
-def _generate_native_bridge_py(pkg_name: str, workspace: Path, cpp_contracts: List[ContractEntry]) -> str:
+def _generate_native_bridge_py(pkg_name: str, cpp_dir: Path, cpp_contracts: List[ContractEntry]) -> str:
     """Generate a root-level ``native_bridge.py`` that loads the C++ shared library."""
     cpp_names = _function_names(cpp_contracts)
     if not cpp_names:
         return "# native bridge placeholder\n"
     stub_source = "\n".join(_cpp_contract_to_python_stub(c) for c in cpp_contracts)
-    so_path = (workspace / "cpp_core" / _so_name(f"{pkg_name}_cpp")).resolve()
+    so_path = (cpp_dir / _so_name(f"{pkg_name}_cpp")).resolve()
     return _ctypes_loader_source(stub_source, so_path, cpp_names)
 
 
@@ -595,6 +597,66 @@ class TriPolyglotMaterializer:
     def _log(self, text: str) -> None:
         if text:
             self.build_logs = (self.build_logs + "\n" + text).strip()
+
+    def _resolve_pkg_dir(self, blueprint: Blueprint, pkg_name: str) -> Path:
+        """Resolve the Python package directory from the manifest/module graph."""
+        # Prefer an __init__.py entry, then a main.py entry, then default to pkg_name.
+        for e in blueprint.manifest:
+            if e.path.endswith("/__init__.py"):
+                return self.workspace / Path(e.path).parent
+        for e in blueprint.manifest:
+            if Path(e.path).name == "main.py":
+                return self.workspace / Path(e.path).parent
+        return self.workspace / pkg_name
+
+    def _resolve_cpp_dir(self, blueprint: Blueprint, pkg_name: str) -> Path:
+        """Resolve the C++ source directory from the manifest/module graph."""
+        cpp_entries = [
+            e for e in blueprint.manifest
+            if e.lang == "cpp" or Path(e.path).suffix in (".cpp", ".cc", ".cxx")
+        ]
+        for e in cpp_entries:
+            if Path(e.path).suffix in (".cpp", ".cc", ".cxx"):
+                return self.workspace / Path(e.path).parent
+        return self.workspace / "cpp_core"
+
+    def _resolve_rust_dir(self, blueprint: Blueprint, pkg_name: str) -> Path:
+        """Resolve the Rust crate directory from the manifest/module graph."""
+        cargo_entries = [
+            e for e in blueprint.manifest
+            if Path(e.path).name == "Cargo.toml"
+        ]
+        if not cargo_entries:
+            return self.workspace / "rust_core"
+
+        # If a Cargo.toml has a matching src/lib.rs entry in the manifest, treat it as the crate root.
+        def _lib_entry_for(crate_entry):
+            crate_dir = Path(crate_entry.path).parent
+            lib_path = str(crate_dir / "src" / "lib.rs").replace("/./", "/")
+            return lib_path
+
+        manifest_paths = {e.path for e in blueprint.manifest}
+        candidates = []
+        for e in cargo_entries:
+            crate_dir = self.workspace / Path(e.path).parent
+            if _lib_entry_for(e) in manifest_paths:
+                candidates.append(crate_dir)
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            # Prefer a non-root crate; fall back to the deepest path.
+            non_root = [c for c in candidates if c != self.workspace]
+            return non_root[0] if non_root else candidates[0]
+
+        # No explicit src/lib.rs entry; prefer a non-root Cargo.toml, then the only Cargo.toml.
+        non_root = [e for e in cargo_entries if Path(e.path).parent != Path(".")]
+        if non_root:
+            return self.workspace / sorted(Path(e.path).parent for e in non_root)[0]
+        return self.workspace / Path(cargo_entries[0].path).parent
+
+    def _dotted_module(self, rel: Path) -> str:
+        rel = rel.with_suffix("") if rel.suffix == ".py" else rel
+        return ".".join(rel.parts)
 
     def materialize(
         self,
@@ -631,12 +693,12 @@ class TriPolyglotMaterializer:
         accel_log = self.workspace / ".aero_forge_accel.log"
         os.environ["AERO_FORGE_ACCEL_LOG"] = str(accel_log)
 
-        pkg_dir = self.workspace / pkg_name
-        pkg_dir.mkdir(exist_ok=True)
-        cpp_dir = self.workspace / "cpp_core"
-        cpp_dir.mkdir(exist_ok=True)
-        rust_dir = self.workspace / "rust_core"
-        rust_dir.mkdir(exist_ok=True)
+        pkg_dir = self._resolve_pkg_dir(blueprint, pkg_name)
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+        cpp_dir = self._resolve_cpp_dir(blueprint, pkg_name)
+        cpp_dir.mkdir(parents=True, exist_ok=True)
+        rust_dir = self._resolve_rust_dir(blueprint, pkg_name)
+        rust_dir.mkdir(parents=True, exist_ok=True)
         tests_dir = self.workspace / "tests"
         tests_dir.mkdir(exist_ok=True)
 
@@ -699,18 +761,48 @@ class TriPolyglotMaterializer:
             native_bridge_module = "native_bridge"
 
         # Python package and project files
+        pkg_rel = pkg_dir.relative_to(self.workspace)
+        pkg_module = self._dotted_module(pkg_rel)
+        main_rel = pkg_rel / "main.py"
+        main_module = self._dotted_module(main_rel)
+        cpp_dir_rel = cpp_dir.relative_to(self.workspace)
+        rust_dir_rel = rust_dir.relative_to(self.workspace)
+
         (pkg_dir / "__init__.py").write_text(
             _generate_python_init(
-                pkg_name, self.workspace, cpp_contracts, rust_contracts, python_contracts, rust_crate_name, native_bridge_module
+                pkg_name,
+                cpp_dir,
+                cpp_contracts,
+                rust_contracts,
+                python_contracts,
+                rust_crate_name,
+                native_bridge_module,
+                rust_dir=str(rust_dir_rel),
             ),
             encoding="utf-8",
         )
-        (pkg_dir / "main.py").write_text(_generate_main_py(pkg_name, all_names, contracts=contracts), encoding="utf-8")
+
+        # Generate the primary entrypoint from the execution strategy / CLI contract.
+        execution_strategy = blueprint.execution_strategy.model_dump() if blueprint.execution_strategy else {
+            "primary_entrypoint": {"path": str(main_rel), "runtime": "python3", "wrapper_generation": True},
+            "cli_contract": {"parser_type": "argparse", "flags": []},
+            "run_spec": {},
+        }
+        EntrypointAdapterEngine(
+            execution_strategy,
+            str(self.workspace),
+            contracts=contracts,
+            abi_contracts=list(blueprint.abi_contracts or []),
+            function_module=pkg_module,
+        ).synthesize_root_entrypoint()
+
+        pyproject_pkg_dir = str(pkg_rel.parent) if pkg_rel.parts[:-1] else "."
+        pyproject_pkg_name = pkg_rel.name
         (self.workspace / "pyproject.toml").write_text(
-            _render_pyproject(pkg_name, package_dir="."), encoding="utf-8"
+            _render_pyproject(pyproject_pkg_name, package_dir=pyproject_pkg_dir), encoding="utf-8"
         )
         (self.workspace / "run_shell.py").write_text(
-            _generate_run_shell(pkg_name), encoding="utf-8"
+            _generate_run_shell(main_module), encoding="utf-8"
         )
         (tests_dir / "test_tri.py").write_text(
             _generate_tests(pkg_name, all_names, contracts=list(blueprint.contracts)), encoding="utf-8"
@@ -732,12 +824,13 @@ class TriPolyglotMaterializer:
         )
 
         # Standard tri-polyglot manifest entries.
+        rust_dir_rel = rust_dir.relative_to(self.workspace)
         manifest: List[ManifestEntry] = [
-            ManifestEntry(path=f"{pkg_name}/__init__.py", lang="python", purpose="Python driver package init"),
-            ManifestEntry(path=f"{pkg_name}/main.py", lang="python", purpose="Python CLI / REPL entrypoint"),
+            ManifestEntry(path=str(pkg_dir / "__init__.py"), lang="python", purpose="Python driver package init"),
+            ManifestEntry(path=str(pkg_dir / "main.py"), lang="python", purpose="Python CLI / REPL entrypoint"),
             ManifestEntry(path=str(cpp_source_path.relative_to(self.workspace)), lang="cpp", purpose="C-ABI shared library source"),
-            ManifestEntry(path="rust_core/Cargo.toml", lang="toml", purpose="PyO3 crate manifest"),
-            ManifestEntry(path="rust_core/src/lib.rs", lang="rust", purpose="Rust native core"),
+            ManifestEntry(path=str(rust_dir_rel / "Cargo.toml"), lang="toml", purpose="PyO3 crate manifest"),
+            ManifestEntry(path=str(rust_dir_rel / "src" / "lib.rs"), lang="rust", purpose="Rust native core"),
             ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust workspace manifest"),
             ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python package manifest"),
             ManifestEntry(path="run_shell.py", lang="python", purpose="Headless launcher"),
@@ -770,7 +863,7 @@ class TriPolyglotMaterializer:
 
         if build:
             self._build_cpp(cpp_pkg_name, cpp_source_path, header_paths)
-            self._build_rust()
+            self._build_rust(rust_dir)
 
         functions: List[FunctionSpec] = [
             FunctionSpec(
@@ -805,6 +898,10 @@ class TriPolyglotMaterializer:
         native_bridge_module: Optional[str],
     ) -> None:
         """Write any manifest entry that has not already been materialized."""
+        pkg_dir = self._resolve_pkg_dir(blueprint, pkg_name)
+        cpp_dir = self._resolve_cpp_dir(blueprint, pkg_name)
+        rust_dir = self._resolve_rust_dir(blueprint, pkg_name)
+        rust_dir_rel = rust_dir.relative_to(self.workspace)
         for entry in list(blueprint.manifest):
             path = self.workspace / entry.path
             if path.exists():
@@ -815,17 +912,31 @@ class TriPolyglotMaterializer:
                 if path.name == "__init__.py":
                     content = _generate_python_init(
                         pkg_name,
-                        self.workspace,
+                        cpp_dir,
                         cpp_contracts,
                         rust_contracts,
                         python_contracts,
                         rust_crate_name,
                         native_bridge_module,
+                        rust_dir=str(rust_dir_rel),
                     )
                 elif path.name == "main.py":
-                    content = _generate_main_py(pkg_name, function_names, contracts=list(blueprint.contracts))
+                    execution_strategy = blueprint.execution_strategy.model_dump() if blueprint.execution_strategy else {
+                        "primary_entrypoint": {"path": entry.path, "runtime": "python3", "wrapper_generation": True},
+                        "cli_contract": {"parser_type": "argparse", "flags": []},
+                        "run_spec": {},
+                    }
+                    function_module = self._dotted_module(rel.parent)
+                    EntrypointAdapterEngine(
+                        execution_strategy,
+                        str(self.workspace),
+                        contracts=list(blueprint.contracts or []),
+                        abi_contracts=list(blueprint.abi_contracts or []),
+                        function_module=function_module,
+                    ).synthesize_root_entrypoint()
+                    continue
                 elif path.name == "native_bridge.py":
-                    content = _generate_native_bridge_py(pkg_name, self.workspace, cpp_contracts)
+                    content = _generate_native_bridge_py(pkg_name, cpp_dir, cpp_contracts)
                 elif "test" in path.name and path.suffix == ".py":
                     content = _generate_test_file(rel, pkg_name, function_names, contracts=list(blueprint.contracts))
                 elif path.suffix == ".py":
@@ -853,7 +964,8 @@ class TriPolyglotMaterializer:
             raise RuntimeError("No C++ compiler found (g++, clang++, or c++)")
 
         so_name = _so_name(cpp_pkg_name)
-        so_path = self.workspace / "cpp_core" / so_name
+        cpp_dir = cpp_source.parent
+        so_path = cpp_dir / so_name
 
         include_dirs = {str(Path(h).parent) for h in header_paths if Path(h).parent != Path(".")}
         build_cmd = [
@@ -891,16 +1003,16 @@ class TriPolyglotMaterializer:
         _accel_log("success", f"BUILD: dynamic shared library compiled: {so_path}")
         return True
 
-    def _build_rust(self) -> bool:
-        cargo_toml = self.workspace / "rust_core" / "Cargo.toml"
+    def _build_rust(self, rust_dir: Path) -> bool:
+        cargo_toml = rust_dir / "Cargo.toml"
         if not cargo_toml.is_file():
             logger.error("Rust crate manifest not found: %s", cargo_toml)
             return False
 
-        self._log("Building Rust PyO3 crate in rust_core")
+        self._log(f"Building Rust PyO3 crate in {rust_dir}")
         _accel_log("info", "BUILD: building Rust PyO3 extension with cargo")
 
-        result = cargo_build(self.workspace / "rust_core", release=True, timeout=600)
+        result = cargo_build(rust_dir, release=True, timeout=600)
         output = f"{result.stdout}\n{result.stderr}".strip()
         if output:
             self._log(f"--- cargo build ---\n{output}")

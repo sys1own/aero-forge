@@ -111,3 +111,90 @@ def test_unsupported_runtime_raises() -> None:
     engine = EntrypointAdapterEngine(strategy, "/tmp")
     with pytest.raises(NotImplementedError):
         engine.synthesize_root_entrypoint()
+
+
+def _strategy_with_custom_flags() -> dict:
+    return {
+        "primary_entrypoint": {
+            "path": "main.py",
+            "runtime": "python3",
+            "wrapper_generation": True,
+        },
+        "cli_contract": {
+            "parser_type": "argparse",
+            "flags": [
+                {
+                    "name": "cmd",
+                    "short": "c",
+                    "type": "string",
+                    "required": True,
+                    "default": None,
+                    "choices": [],
+                    "help": "Sub-command to run",
+                    "dest_var": "cmd",
+                },
+                {
+                    "name": "simulations",
+                    "short": "n",
+                    "type": "int",
+                    "required": False,
+                    "default": 100000,
+                    "choices": [],
+                    "help": "Number of simulations",
+                    "dest_var": "simulations",
+                },
+                {
+                    "name": "spot",
+                    "short": "s",
+                    "type": "float",
+                    "required": False,
+                    "default": 100.0,
+                    "choices": [],
+                    "help": "Spot price",
+                    "dest_var": "spot",
+                },
+                {
+                    "name": "strike",
+                    "short": "k",
+                    "type": "float",
+                    "required": False,
+                    "default": 100.0,
+                    "choices": [],
+                    "help": "Strike price",
+                    "dest_var": "strike",
+                },
+            ],
+        },
+        "run_spec": {
+            "working_dir": ".",
+            "env_vars": {},
+            "timeout_seconds": 120,
+        },
+    }
+
+
+def test_synthesize_cli_contract_with_custom_flags(tmp_path: Path) -> None:
+    """Custom Monte-Carlo style CLI flags are registered in main.py."""
+    engine_dir = tmp_path / "src" / "python"
+    engine_dir.mkdir(parents=True, exist_ok=True)
+    (engine_dir / "__init__.py").write_text("")
+    (engine_dir / "engine.py").write_text(
+        "def run_domain_task(args):\n"
+        "    print(f'cmd={args.cmd} simulations={args.simulations} spot={args.spot} strike={args.strike}')\n"
+        "    return 0\n"
+    )
+
+    engine = EntrypointAdapterEngine(_strategy_with_custom_flags(), str(tmp_path))
+    main_path = engine.synthesize_root_entrypoint()
+
+    result = subprocess.run(
+        [sys.executable, main_path, "--cmd", "simulate", "--simulations", "500000", "--spot", "105.0", "--strike", "100.0"],
+        cwd=str(tmp_path),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "cmd=simulate" in result.stdout
+    assert "simulations=500000" in result.stdout
+    assert "spot=105.0" in result.stdout
+    assert "strike=100.0" in result.stdout

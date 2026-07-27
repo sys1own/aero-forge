@@ -206,3 +206,21 @@ def test_api_blueprint_missing_session(server):
     status, body = _get(server + "/api/blueprint")
     assert status == 400
     assert "Missing 'session_id'" in json.loads(body.decode("utf-8"))["error"]
+
+
+def test_terminal_run_summary_includes_cwd_for_prompt(server, tmp_path):
+    """The terminal run summary returns the sandbox cwd so the UI can render a prompt."""
+    from aero_forge.server import _manager
+
+    session_id = "test-terminal-prompt"
+    session_dir = _manager.create_session_sandbox(session_id)
+    status, lines = _post_ndjson(
+        server + "/api/terminal/run",
+        {"session_id": session_id, "command": "pwd"},
+    )
+    assert status == 200
+    summary = lines[-1]
+    assert summary["type"] == "summary"
+    assert summary["exit_code"] == 0
+    assert "cwd" in summary
+    assert summary["cwd"] == str(session_dir.resolve())

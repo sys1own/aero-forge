@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -643,3 +644,88 @@ def test_hybrid_cpp_rust_materializer_builds_and_runs(tmp_path: Path) -> None:
         log_text = accel_log.read_text(encoding="utf-8")
         assert "C++ selected for extern \"C\"" in log_text, "Expected C++ dispatch in accelerator log"
         assert "hybrid C++/Rust binary compiled successfully" in log_text, "Expected build success in accelerator log"
+
+
+@pytest.mark.integration
+def test_tri_polyglot_materializer_honors_module_graph_paths(tmp_path: Path) -> None:
+    """Tri-polyglot materializer places Rust/C++/Python files at module_graph paths."""
+    from aero_forge.blueprint import Blueprint, ContractEntry, ManifestEntry
+    from aero_forge.scaffold.tri_polyglot_materializer import TriPolyglotMaterializer
+
+    if not _find_cpp_compiler():
+        pytest.skip("No C++ compiler available")
+    if not shutil.which("cargo"):
+        pytest.skip("No Rust cargo available")
+
+    workspace = tmp_path / "tri_mc"
+    blueprint = Blueprint(
+        project="mc_engine",
+        architecture="tri_polyglot_rust_cpp_python",
+        toolchains=["python", "rust", "cpp", "cargo"],
+        module_graph=[
+            {"path": "crates/mc_engine/Cargo.toml", "lang": "toml", "purpose": "PyO3 crate manifest"},
+            {"path": "crates/mc_engine/src/lib.rs", "lang": "rust", "purpose": "Rust core"},
+            {"path": "src/cpp/native.cpp", "lang": "cpp", "purpose": "C-ABI source"},
+            {"path": "src/python/__init__.py", "lang": "python", "purpose": "package init"},
+            {"path": "src/python/main.py", "lang": "python", "purpose": "CLI"},
+            {"path": "pyproject.toml", "lang": "toml", "purpose": "project manifest"},
+            {"path": "run_shell.py", "lang": "python", "purpose": "launcher"},
+            {"path": "tests/test_mc.py", "lang": "python", "purpose": "tests"},
+            {"path": "README.md", "lang": "markdown", "purpose": "docs"},
+        ],
+        contracts=[
+            ContractEntry(
+                name="fast_vector_transform",
+                signature="def fast_vector_transform(v: list[float], scalar: float) -> list[float]",
+            ),
+            ContractEntry(
+                name="get_status",
+                signature="def get_status() -> dict[str, str]",
+            ),
+        ],
+        execution_strategy={
+            "primary_entrypoint": {"path": "src/python/main.py", "runtime": "python3", "wrapper_generation": True},
+            "cli_contract": {
+                "parser_type": "argparse",
+                "flags": [
+                    {"name": "cmd", "short": "c", "type": "string", "required": True, "default": None, "choices": [], "help": "Command", "dest_var": "cmd"},
+                    {"name": "simulations", "short": "n", "type": "int", "required": False, "default": 100000, "choices": [], "help": "Simulations", "dest_var": "simulations"},
+                    {"name": "spot", "short": "s", "type": "float", "required": False, "default": 100.0, "choices": [], "help": "Spot", "dest_var": "spot"},
+                    {"name": "strike", "short": "k", "type": "float", "required": False, "default": 100.0, "choices": [], "help": "Strike", "dest_var": "strike"},
+                ],
+            },
+            "run_spec": {},
+        },
+    )
+    updated = TriPolyglotMaterializer(workspace).materialize(blueprint, build=True)
+
+    assert (workspace / "crates" / "mc_engine" / "Cargo.toml").is_file()
+    assert (workspace / "crates" / "mc_engine" / "src" / "lib.rs").is_file()
+    assert (workspace / "src" / "cpp" / "native.cpp").is_file()
+    assert (workspace / "src" / "python" / "main.py").is_file()
+
+    main_text = (workspace / "src" / "python" / "main.py").read_text(encoding="utf-8")
+    assert "--simulations" in main_text
+    assert "--spot" in main_text
+    assert "--strike" in main_text
+
+    cargo_result = subprocess.run(
+        ["cargo", "test", "--manifest-path", "crates/mc_engine/Cargo.toml"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+    )
+    assert cargo_result.returncode == 0, f"Cargo test failed:\n{cargo_result.stdout}\n{cargo_result.stderr}"
+
+    help_result = subprocess.run(
+        [sys.executable, "-m", "src.python.main", "--help"],
+        cwd=workspace,
+        capture_output=True,
+        text=True,
+    )
+    assert help_result.returncode == 0, help_result.stderr
+    assert "--simulations" in help_result.stdout
+    assert "--spot" in help_result.stdout
+    assert "--strike" in help_result.stdout
+
+    assert updated.architecture == "tri_polyglot_rust_cpp_python"

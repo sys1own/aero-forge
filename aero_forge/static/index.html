@@ -584,6 +584,7 @@
       activeTab: null,
       term: null,
       fitAddon: null,
+      lastCwd: '',
       socket: null,
       contextTarget: null,
       treeRefreshInterval: null,
@@ -1272,7 +1273,7 @@
       if (!cmd) return;
       if (typeof command !== 'string') ui.terminalInput.value = '';
       if (state.term) {
-        state.term.writeln(`\r\n$ ${cmd}\r\n`);
+        state.term.write(`\r\n$ ${cmd}\r\n`);
       }
       switchBottomTab('terminal');
       setBusy(true);
@@ -1284,7 +1285,7 @@
         });
         if (!res.ok) {
           const data = await res.json().catch(() => ({}));
-          if (state.term) state.term.writeln(`\r\nError: ${data.error || `HTTP ${res.status}`}\r\n`);
+          if (state.term) state.term.write(`\r\nError: ${data.error || `HTTP ${res.status}`}\r\n`);
           return;
         }
         const reader = res.body.getReader();
@@ -1301,17 +1302,19 @@
             try {
               const msg = JSON.parse(line);
               if (msg.type === 'stdout' || msg.type === 'stderr') {
-                if (state.term) state.term.writeln((msg.data || '') + '\r\n');
+                if (state.term) state.term.writeln((msg.data || '') + '\r');
               } else if (msg.type === 'summary') {
-                if (state.term) state.term.writeln(`\r\n[exit ${msg.exit_code}] ${msg.duration_ms}ms\r\n`);
+                state.lastCwd = msg.cwd || state.lastCwd;
+                const prompt = `${state.lastCwd || state.sessionId}# `;
+                if (state.term) state.term.write(`\r\n[exit ${msg.exit_code}] ${msg.duration_ms}ms\r\n${prompt}`);
               }
             } catch (e) {
-              if (state.term) state.term.writeln(line + '\r\n');
+              if (state.term) state.term.writeln(line + '\r');
             }
           }
         }
       } catch (e) {
-        if (state.term) state.term.writeln(`\r\nTerminal error: ${e.message}\r\n`);
+        if (state.term) state.term.write(`\r\nTerminal error: ${e.message}\r\n`);
       } finally {
         setBusy(false);
       }
@@ -1321,6 +1324,8 @@
       if (state.term) {
         state.term.clear();
         state.term.writeln('Terminal cleared.\r\n');
+        const prompt = `${state.lastCwd || state.sessionId || '/tmp/aero-forge-sandboxes/session-'}# `;
+        state.term.write(prompt);
       }
     }
 
@@ -1436,10 +1441,16 @@
         setBusy(true);
         const data = await api('POST', '/api/workspace/clean', buildBody({}));
         state.sessionId = data.session_id;
-        state.tabs.forEach(tab => { tab.model.dispose(); });
+        state.lastCwd = null;
+        state.tabs.forEach(tab => { if (tab.model) tab.model.dispose(); });
         state.tabs = [];
         state.activeTab = null;
         renderTabs();
+        if (ui.actionButtons) ui.actionButtons.innerHTML = '';
+        ui.runOutput.innerHTML = '<div class="placeholder" style="color:var(--muted);padding:0.5rem 0">Click Run or press Ctrl+Enter to execute the active file.</div>';
+        ui.acceleratorLog.innerHTML = '<div class="placeholder" style="color:var(--muted);padding:0.5rem 0">Accelerator events appear here when native code is executed.</div>';
+        ui.logLines.innerHTML = '';
+        if (state.term) { state.term.clear(); state.term.writeln('Workspace cleared.\r\n'); }
         try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
         ui.settingSession.value = state.sessionId;
         reconnectTerminal();
