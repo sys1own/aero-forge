@@ -712,6 +712,8 @@
       lastTerminalExitCode: null,
       lastTerminalLog: '',
       treeExpanded: new Set(),
+      blueprintSource: 'unknown',
+      autoInitialized: false,
     };
 
     let _treeSnapshot = '';
@@ -942,20 +944,32 @@
         const snapshot = JSON.stringify(data.tree);
         if (!force && snapshot === _treeSnapshot) return;
         _treeSnapshot = snapshot;
+        state.blueprintSource = data.blueprint_source || 'unknown';
+        state.autoInitialized = !!data.auto_initialized;
         const scrollTop = ui.fileTree.scrollTop;
         const selected = state.activeTab ? state.activeTab.path : null;
         ui.fileTree.innerHTML = '';
         ui.fileTree.appendChild(renderNode(data.tree, true));
         if (selected) setTreeActive(selected);
         ui.fileTree.scrollTop = scrollTop;
-        const hasBlueprint = Array.from(ui.fileTree.querySelectorAll('.tree-node.file')).some(n => (n.querySelector('.node-name')?.textContent || '') === 'blueprint.aero');
-        if (ui.blueprintInitBanner) ui.blueprintInitBanner.style.display = hasBlueprint ? 'block' : 'none';
+        renderBlueprintBanner(data.tree);
       } catch (e) {
         if (!ui.fileTree.querySelector('.tree-node')) {
           ui.fileTree.innerHTML = `<div class="placeholder" style="padding:1rem;color:var(--danger)">${e.message}</div>`;
         }
       } finally {
         _treeLoading = false;
+      }
+    }
+
+    function renderBlueprintBanner(tree) {
+      if (!ui.blueprintInitBanner) return;
+      const hasBlueprint = Array.from(ui.fileTree.querySelectorAll('.tree-node.file')).some(n => (n.querySelector('.node-name')?.textContent || '') === 'blueprint.aero');
+      // Suppress the banner for auto-generated ZIP blueprints and for already-initialized workspaces.
+      if (!hasBlueprint || state.blueprintSource === 'auto_generated' || state.autoInitialized) {
+        ui.blueprintInitBanner.style.display = 'none';
+      } else {
+        ui.blueprintInitBanner.style.display = 'block';
       }
     }
 
@@ -1761,11 +1775,15 @@
       const dest = targetPath === '.' ? 'root' : targetPath;
       log(`Uploading ${files.length} item(s) to ${dest}...`);
       let sessionId = state.sessionId;
+      let zipUploaded = false;
+      let zipMessage = '';
       for (const file of files) {
         if (file.name.toLowerCase().endsWith('.zip')) {
           try {
             const data = await api('POST', `/api/upload-zip?session_id=${encodeURIComponent(sessionId)}&target_path=${encodeURIComponent(targetPath)}`, await file.arrayBuffer(), 'application/zip');
             sessionId = data.session_id;
+            zipUploaded = true;
+            if (data.message) zipMessage = data.message;
           } catch (e) { log(`Upload failed for ${file.name}: ${e.message}`, 'error'); continue; }
         } else {
           let text;
@@ -1780,7 +1798,11 @@
       state.sessionId = sessionId;
       try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
       ui.settingSession.value = state.sessionId;
-      log('Upload complete', 'success');
+      if (zipUploaded) {
+        log(zipMessage || 'ZIP extracted & normalized to blueprint.aero', 'info');
+      } else {
+        log('Upload complete', 'success');
+      }
       reconnectTerminal();
       await loadTree();
       setBusy(false);
@@ -1871,6 +1893,8 @@
       try {
         log('[1/4] Backing up workspace and reading blueprint.aero...', 'info');
         const data = await api('POST', '/api/workspace/regenerate_blueprint', buildBody({ run_build: false }));
+        state.blueprintSource = data.blueprint_source || state.blueprintSource;
+        state.autoInitialized = !!data.auto_initialized;
         log('[2/4] Purged generated files and re-scaffolded directories.', 'info');
         log('[3/4] Wrote syntactically valid stub files from manifest.', 'info');
         if (data.status === 'success' && (data.errors || []).length === 0) {
@@ -1968,6 +1992,8 @@
       try {
         const data = await api('POST', '/api/build', buildBody({ prompt, variants: ui.variantToggle.checked, target_language: ui.targetLanguage.value, acceleration_policy: ui.accelerationPolicy.value, model: state.provider === 'deepseek' ? 'deepseek-v4-flash' : undefined }));
         state.sessionId = data.session_id;
+        state.blueprintSource = data.blueprint_source || state.blueprintSource;
+        state.autoInitialized = !!data.auto_initialized;
         try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
         ui.settingSession.value = state.sessionId;
 

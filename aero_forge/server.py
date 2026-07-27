@@ -41,7 +41,11 @@ from aero_forge.bundle_repo import (
     create_project_zip,
     zip_export_filename,
 )
-from aero_forge.chat import ChatSession
+from aero_forge.chat import (
+    ChatSession,
+    get_session_metadata,
+    set_session_blueprint_metadata,
+)
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
 from aero_forge import runner as sandbox_runner
@@ -297,6 +301,7 @@ async def _handle_build_async(request: web.Request) -> web.Response:
                 acceleration_policy=acceleration_policy,
             )
         _notify_tree_changed(session_id)
+        set_session_blueprint_metadata(session_id, source="auto_generated", auto_initialized=True)
         return web.json_response(
             _build_web_response(session_id, session_dir, result),
             headers=_CORS_HEADERS,
@@ -592,12 +597,14 @@ def _build_web_response(
             status = "failure"
     else:
         status = "success" if build.get("success") else "failure"
+    metadata = get_session_metadata(session_id)
     return {
         "session_id": session_id,
         "status": status,
         "files": files,
         "tree": tree,
         "result": result,
+        **metadata,
     }
 
 
@@ -784,6 +791,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 )
 
             _notify_tree_changed(session_id)
+            set_session_blueprint_metadata(session_id, source="auto_generated", auto_initialized=True)
             return _send_json(self, 200, _build_web_response(session_id, session_dir, result))
         except Exception as exc:  # pragma: no cover
             logger.exception("Build endpoint failed")
@@ -815,6 +823,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return _send_json(self, 400, {"error": "Invalid path"})
 
             target.parent.mkdir(parents=True, exist_ok=True)
+            is_new_blueprint = target.name.lower() == "blueprint.aero" and not target.exists()
             target.write_text(content, encoding="utf-8")
 
             # Repair common LLM truncation in Rust/C/C++ files saved through the editor.
@@ -823,6 +832,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
 
                 if repair_file(target):
                     logger.info("Repaired syntax truncation in saved file %s", target)
+
+            if is_new_blueprint:
+                set_session_blueprint_metadata(session_id, source="user_drop", auto_initialized=False)
 
             _notify_tree_changed(session_id)
 
@@ -936,6 +948,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             return _send_json(self, 400, {"error": "Missing 'session_id'"})
 
         session_dir = _session_dir(session_id)
+        metadata = get_session_metadata(session_id)
 
         return _send_json(
             self,
@@ -943,6 +956,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             {
                 "session_id": session_id,
                 "tree": _build_tree(session_dir),
+                **metadata,
             },
         )
 
@@ -1031,14 +1045,18 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             repair_workspace(session_dir)
 
             # Synthesize a blueprint if none exists, then bundle the repo for chat context.
+            blueprint_generated = False
             try:
                 generate_blueprint_from_uploaded_repo(session_dir)
+                blueprint_generated = True
             except Exception as exc:
                 logger.warning("Could not auto-generate blueprint for upload: %s", exc)
 
             # Refresh the chat session context with a compact workspace bundle so
             # subsequent chat turns can see the uploaded source tree.
             chat = ChatSession(session_dir, session_id=session_id)
+            chat.blueprint_source = "auto_generated"
+            chat.auto_initialized = blueprint_generated
             chat._save_session()
 
             _notify_tree_changed(session_id)
@@ -1050,6 +1068,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     "session_id": session_id,
                     "status": "uploaded",
                     "files": _build_tree(session_dir),
+                    "blueprint_source": "auto_generated",
+                    "auto_initialized": blueprint_generated,
+                    "message": "ZIP extracted & normalized to blueprint.aero",
                 },
             )
         except ValueError as exc:
@@ -1267,7 +1288,10 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             if filename.lower().endswith(".zip"):
                 _extract_zip_safely(body, dest_dir, archive_name=filename)
             else:
+                is_new_blueprint = filename.lower() == "blueprint.aero" and not dest.exists()
                 dest.write_bytes(body)
+                if is_new_blueprint:
+                    set_session_blueprint_metadata(session_id, source="user_drop", auto_initialized=False)
 
             _notify_tree_changed(session_id)
 
@@ -1352,6 +1376,11 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             )
             result = regenerator.run()
 
+            # The workspace has now been materialized from the blueprint.
+            set_session_blueprint_metadata(
+                session_id, source="user_drop", auto_initialized=True
+            )
+
             _notify_tree_changed(session_id)
 
             return _send_json(
@@ -1364,6 +1393,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     "logs": result.get("logs", []),
                     "backup_dir": result.get("backup_dir"),
                     "tree": _build_tree(workspace_path),
+                    "blueprint_source": "user_drop",
+                    "auto_initialized": True,
                 },
             )
         except FileNotFoundError as exc:
