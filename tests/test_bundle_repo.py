@@ -5,10 +5,16 @@ from pathlib import Path
 
 import pytest
 
+import zipfile
+from io import BytesIO
+
 from aero_forge.bundle_repo import (
+    ExportProfile,
     bundle_to_json,
     bundle_to_xml,
     bundle_workspace,
+    create_project_zip,
+    zip_export_filename,
     format_context_block,
 )
 
@@ -147,3 +153,71 @@ def test_format_context_block_contains_marker(tmp_path: Path) -> None:
     block_json = format_context_block(bundle, fmt="json")
     assert "CURRENT_PROJECT_CONTEXT" in block_json
     assert '"main.py"' in block_json
+
+
+def _native_source_dir(tmp_path: Path) -> Path:
+    """Create a tiny PyO3 crate tree to simulate the in-repo native acceleration source."""
+    root = tmp_path / "native_source"
+    root.mkdir(parents=True)
+    (root / "Cargo.toml").write_text("[package]\nname = 'demo_native'\n")
+    (root / "src").mkdir()
+    (root / "src" / "lib.rs").write_text("// pyo3 module\n")
+    (root / "__init__.py").write_text("from .demo_native import *\n")
+    (root / "target" / "release").mkdir(parents=True)
+    (root / "target" / "release" / "libdemo.so").write_bytes(b"binary")
+    return root
+
+
+def test_create_project_zip_standard(tmp_path: Path) -> None:
+    """Standard export includes source/config files and excludes build artifacts."""
+    (tmp_path / "main.py").write_text("def main(): pass\n")
+    (tmp_path / "src").mkdir(parents=True)
+    (tmp_path / "src" / "lib.rs").write_text("pub fn add(a: i32, b: i32) -> i32 { a + b }\n")
+    (tmp_path / "tests").mkdir(parents=True)
+    (tmp_path / "tests" / "test_main.py").write_text("def test_ok(): pass\n")
+    (tmp_path / "blueprint.aero").write_text("project: demo\n")
+    (tmp_path / "target" / "release").mkdir(parents=True)
+    (tmp_path / "target" / "release" / "libdemo.so").write_bytes(b"binary")
+
+    archive = create_project_zip(tmp_path, profile=ExportProfile.STANDARD)
+    with zipfile.ZipFile(BytesIO(archive), "r") as zf:
+        names = zf.namelist()
+
+    assert "main.py" in names
+    assert "src/lib.rs" in names
+    assert "tests/test_main.py" in names
+    assert "blueprint.aero" in names
+    assert "target/release/libdemo.so" not in names
+    assert "crates/native_core/Cargo.toml" not in names
+    assert "pyproject.toml" not in names
+
+
+def test_create_project_zip_accelerated(tmp_path: Path) -> None:
+    """Accelerated export bundles the PyO3 crate source and a maturin pyproject.toml."""
+    (tmp_path / "main.py").write_text("def main(): pass\n")
+    native = _native_source_dir(tmp_path)
+
+    archive = create_project_zip(
+        tmp_path,
+        profile=ExportProfile.ACCELERATED_PYO3,
+        native_crate_source=native,
+    )
+    with zipfile.ZipFile(BytesIO(archive), "r") as zf:
+        names = zf.namelist()
+        pyproject = zf.read("pyproject.toml").decode("utf-8")
+
+    assert "main.py" in names
+    assert "crates/native_core/Cargo.toml" in names
+    assert "crates/native_core/src/lib.rs" in names
+    assert "crates/native_core/__init__.py" in names
+    assert "crates/native_core/target/release/libdemo.so" not in names
+    assert "pyproject.toml" in names
+    assert '[build-system]' in pyproject
+    assert '"maturin' in pyproject or 'maturin' in pyproject
+    assert '[tool.maturin]' in pyproject
+    assert 'crates/native_core/Cargo.toml' in pyproject
+
+
+def test_zip_export_filename() -> None:
+    assert zip_export_filename(ExportProfile.STANDARD) == "project-standard.zip"
+    assert zip_export_filename(ExportProfile.ACCELERATED_PYO3) == "project-accelerated.zip"

@@ -214,11 +214,42 @@ def test_api_download_zip(server):
     )
     assert status == 200
 
-    status, body = _get(server + f"/api/download-zip?session_id={session_id}")
-    assert status == 200
+    req = Request(server + f"/api/download-zip?session_id={session_id}", method="GET")
+    with urlopen(req, timeout=5) as resp:
+        assert resp.status == 200
+        assert "project-standard.zip" in resp.headers.get("Content-Disposition", "")
+        body = resp.read()
     with zipfile.ZipFile(io.BytesIO(body), "r") as zf:
         assert "data.txt" in zf.namelist()
         assert zf.read("data.txt").decode("utf-8") == "hello"
+        assert "crates/native_core/Cargo.toml" not in zf.namelist()
+
+
+def test_api_download_zip_accelerated(server):
+    session_id = "test-session-download-accel"
+    zip_bytes = _make_zip({"main.py": "print('ok')\n"})
+    status, _ = _post_bytes(
+        server + f"/api/upload-zip?session_id={session_id}", zip_bytes
+    )
+    assert status == 200
+
+    req = Request(
+        server + f"/api/download-zip?session_id={session_id}&include_native_crate=true",
+        method="GET",
+    )
+    with urlopen(req, timeout=5) as resp:
+        assert resp.status == 200
+        assert "project-accelerated.zip" in resp.headers.get("Content-Disposition", "")
+        body = resp.read()
+    with zipfile.ZipFile(io.BytesIO(body), "r") as zf:
+        assert "main.py" in zf.namelist()
+        assert "crates/native_core/Cargo.toml" in zf.namelist()
+        assert "crates/native_core/src/lib.rs" in zf.namelist()
+        assert "pyproject.toml" in zf.namelist()
+        pyproject = zf.read("pyproject.toml").decode("utf-8")
+        assert "[build-system]" in pyproject
+        assert "maturin" in pyproject
+        assert "[tool.maturin]" in pyproject
 
 
 def test_api_run_streaming(server):
