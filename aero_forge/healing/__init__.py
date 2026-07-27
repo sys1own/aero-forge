@@ -7,5 +7,6 @@ intent parsing and human-facing diagnostics.
 
 from aero_forge.healing.evaluator import LogEvaluator
 from aero_forge.healing.router import try_auto_fix
+from aero_forge.healing.structural_merger import apply_overlay, structural_merge
 
-__all__ = ["try_auto_fix", "LogEvaluator"]
+__all__ = ["try_auto_fix", "LogEvaluator", "structural_merge", "apply_overlay"]

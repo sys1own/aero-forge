@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from aero_forge.errors import SemanticRegressionError
+from aero_forge.scheduler.wavefront import Task, WavefrontScheduler
 
 CARGO_BIN_DIR = Path(os.path.expanduser("~/.cargo/bin"))
 logger = logging.getLogger("aero_forge.sandbox")
@@ -298,7 +299,7 @@ class Sandbox:
                 shutil.copy(extra, self.root / extra.name)
 
     def run_tests(self, timeout: int = 120) -> Dict[str, Any]:
-        """Run pytest or unittest on the sandboxed test files."""
+        """Run pytest or unittest on the sandboxed test files through WavefrontScheduler."""
         present_tests = [p for p in self.test_paths if p.is_file()]
         if not present_tests:
             return {
@@ -315,33 +316,29 @@ class Sandbox:
         test_env["PYTHONPATH"] = (
             f"{self.root}{os.pathsep}{test_env.get('PYTHONPATH', '')}"
         ).strip(os.pathsep)
-        try:
-            result = subprocess.run(
-                cmd,
+
+        scheduler = WavefrontScheduler()
+        tasks = {
+            "pytest": Task(
+                name="pytest",
+                command=" ".join(cmd),
                 cwd=self.root,
                 env=test_env,
-                capture_output=True,
-                text=True,
                 timeout=timeout,
             )
-        except subprocess.TimeoutExpired as exc:
-            return {
-                "passed": False,
-                "returncode": -1,
-                "logs": f"Test execution timed out after {timeout}s.\n{exc}",
-                "test_total": 0,
-                "test_passed": 0,
-                "test_failed": 0,
-            }
+        }
+        try:
+            results = scheduler.execute_sync(tasks, {"pytest": []})
         except FileNotFoundError:
             # pytest not installed; fall back to unittest discovery
             return self._run_unittest(timeout)
 
-        all_output = result.stdout + result.stderr
+        result = results[0]
+        all_output = result["stdout"] + result["stderr"]
         total, passed, failed = _parse_pytest_counts(all_output)
         return {
-            "passed": result.returncode == 0,
-            "returncode": result.returncode,
+            "passed": result["returncode"] == 0,
+            "returncode": result["returncode"],
             "logs": all_output,
             "test_total": total,
             "test_passed": passed,
@@ -364,19 +361,24 @@ class Sandbox:
         test_env["PYTHONPATH"] = (
             f"{self.root}{os.pathsep}{test_env.get('PYTHONPATH', '')}"
         ).strip(os.pathsep)
-        result = subprocess.run(
-            cmd,
-            cwd=self.root,
-            env=test_env,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        all_output = result.stdout + result.stderr
+
+        scheduler = WavefrontScheduler()
+        tasks = {
+            "unittest": Task(
+                name="unittest",
+                command=" ".join(cmd),
+                cwd=self.root,
+                env=test_env,
+                timeout=timeout,
+            )
+        }
+        results = scheduler.execute_sync(tasks, {"unittest": []})
+        result = results[0]
+        all_output = result["stdout"] + result["stderr"]
         total, passed, failed = _parse_unittest_counts(all_output)
         return {
-            "passed": result.returncode == 0,
-            "returncode": result.returncode,
+            "passed": result["returncode"] == 0,
+            "returncode": result["returncode"],
             "logs": all_output,
             "test_total": total,
             "test_passed": passed,
