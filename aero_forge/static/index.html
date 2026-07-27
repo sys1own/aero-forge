@@ -1496,26 +1496,40 @@
 
     async function applyHeal(command, exitCode, logText) {
       setBusy(true);
+      ui.statusText.textContent = 'Evaluating error...';
       try {
         const res = await fetch('/api/workspace/heal', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(buildBody({ command, exit_code: exitCode, log_text: logText })),
         });
+        ui.statusText.textContent = 'Applying heal...';
         const data = await res.json();
-        if (!res.ok || data.status !== 'patched') {
-          log(data.error || data.reason || 'No deterministic patch available', 'error');
-          hideHealBanner();
+        if (!res.ok || data.status !== 'success') {
+          const message = data.error_message || data.reason || data.error || 'Heal failed';
+          log(`Heal failed: ${message}`, 'error');
+          if (ui.healBanner) {
+            ui.healBanner.innerHTML = `<span>&#9888; Heal failed: ${escapeHtml(message)}</span><button id="retry-heal-btn" class="run-btn">Retry</button>`;
+            ui.healBanner.classList.add('visible', 'manual-fix');
+            document.getElementById('retry-heal-btn').addEventListener('click', () => applyHeal(command, exitCode, logText));
+          }
           return;
         }
-        log(`Self-heal applied to ${data.target_file}`, 'success');
+        const strategy = data.strategy_used || 'unknown';
+        const files = (data.patched_files || []).join(', ');
+        log(`Self-heal applied (${strategy}) to: ${files}`, 'success');
         loadTree();
         hideHealBanner();
         runTerminalCommand(command);
       } catch (e) {
         log(`Self-heal failed: ${e.message}`, 'error');
+        if (ui.healBanner) {
+          ui.healBanner.innerHTML = `<span>&#9888; Heal failed: ${escapeHtml(e.message)}</span>`;
+          ui.healBanner.classList.add('visible', 'manual-fix');
+        }
       } finally {
         setBusy(false);
+        ui.statusText.textContent = 'Ready';
       }
     }
 

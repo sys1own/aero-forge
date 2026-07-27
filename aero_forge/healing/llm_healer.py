@@ -211,7 +211,9 @@ class LLMHealer:
     ) -> None:
         self.client = client
         self.provider = provider
-        self.model = model or os.getenv("AERO_FORGE_MODEL") or "deepseek-chat"
+        # Prefer an explicit model or AERO_FORGE_MODEL; otherwise let get_llm_client
+        # resolve the tier-mapped default so Tier.REASONING is honored.
+        self.model = model or os.getenv("AERO_FORGE_MODEL") or None
         self.fallback = fallback
         self.log_callback = log_callback
 
@@ -238,6 +240,25 @@ class LLMHealer:
         except LLMError as exc:
             self._log("warning", "LLM", f"Could not create LLM client: {exc}")
             return None
+
+    def heal(
+        self,
+        workspace: Union[str, Path],
+        error_logs: str,
+        command: str = "",
+        exit_code: int = 1,
+        diagnosis: Optional[Dict[str, Any]] = None,
+        tier: str = "reasoning",
+        full_workspace: bool = True,
+    ) -> Dict[str, Any]:
+        """Convenience entry point that builds a failure context and heals the workspace."""
+        failure_context = {
+            "command": command,
+            "exit_code": exit_code,
+            "log_text": error_logs,
+            "diagnosis": diagnosis or {},
+        }
+        return self.generate_and_apply_fix(workspace, failure_context)
 
     def generate_and_apply_fix(
         self,

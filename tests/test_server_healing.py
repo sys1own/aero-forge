@@ -88,8 +88,10 @@ def test_heal_endpoint_patches_missing_import(server, tmp_path):
             "log_text": log_text,
         },
     )
-    assert result["status"] == "patched"
-    assert result["target_file"] == "main.py"
+    assert result["status"] == "success"
+    assert result.get("strategy_used") == "ast"
+    assert result.get("target_file") == "main.py"
+    assert "main.py" in result["patched_files"]
     assert "import math" in result["diff"]
 
 
