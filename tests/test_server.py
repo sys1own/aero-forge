@@ -471,28 +471,44 @@ def test_api_chat_returns_structured_reply_and_action(server, monkeypatch):
     assert "messages" in data
 
 
-def test_api_chat_command_dispatch_still_works(server, monkeypatch):
-    """Explicit command verbs dispatch through handle_command and return a plain reply."""
+def test_api_chat_does_not_dispatch_build_commands(server, monkeypatch):
+    """Chat is a design engine: even explicit build verbs are routed to the copilot and return a PROPOSE_BUILD card."""
+
+    calls = {"handle_command": 0, "reply_structured": 0}
 
     class FakeChatSession:
         def __init__(self, output_dir, **kwargs):
             self.messages = []
 
         def handle_command(self, text):
-            return {"message": "Healing applied."}
+            calls["handle_command"] += 1
+            return None
 
-        def _format_action_result(self, result, prompt):
-            return result["message"]
+        def reply_structured(self, text, error_context=None):
+            calls["reply_structured"] += 1
+            return {
+                "reply": "I'll design a high-performance module for you.",
+                "action": {
+                    "type": "PROPOSE_BUILD",
+                    "params": {
+                        "prompt": text,
+                        "target": "hybrid_cpp_rust",
+                        "acceleration": "Selective Acceleration (Auto-Detect Heavy Compute)",
+                    },
+                },
+            }
 
     monkeypatch.setattr("aero_forge.server.ChatSession", FakeChatSession)
 
     status, data = _post_json(
         server + "/api/chat",
-        {"messages": [{"role": "user", "content": "fix error"}]},
+        {"messages": [{"role": "user", "content": "build a high-performance 2D matrix processing module"}]},
     )
     assert status == 200
-    assert data["reply"] == "Healing applied."
-    assert data["action"] is None
+    assert calls["handle_command"] == 0
+    assert calls["reply_structured"] == 1
+    assert data["reply"] == "I'll design a high-performance module for you."
+    assert data["action"]["type"] == "PROPOSE_BUILD"
 
 
 def test_api_regenerate_blueprint_missing(server):
