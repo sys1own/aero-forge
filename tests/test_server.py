@@ -495,6 +495,60 @@ def test_api_chat_command_dispatch_still_works(server, monkeypatch):
     assert data["action"] is None
 
 
+def test_api_regenerate_blueprint_missing(server):
+    """POST /api/workspace/regenerate_blueprint returns 400 when blueprint.aero is missing."""
+    try:
+        _post_json(
+            server + "/api/workspace/regenerate_blueprint",
+            {"session_id": "test-session-no-blueprint"},
+        )
+    except HTTPError as exc:
+        assert exc.code == 400
+        data = json.loads(exc.read().decode("utf-8"))
+        assert "blueprint.aero" in data.get("error", "").lower()
+        return
+    raise AssertionError("Expected HTTP 400 for missing blueprint")
+
+
+def test_api_regenerate_blueprint_success(server):
+    """POST /api/workspace/regenerate_blueprint re-scaffolds files from blueprint.aero."""
+    session_id = "test-session-regenerate"
+    blueprint = (
+        "project: testregen\n"
+        "architecture: pure_python\n"
+        "manifest:\n"
+        "  - path: pyproject.toml\n"
+        "    lang: toml\n"
+        "  - path: src/testregen/__init__.py\n"
+        "    lang: python\n"
+        "  - path: src/testregen/core.py\n"
+        "    lang: python\n"
+        "  - path: tests/test_core.py\n"
+        "    lang: python\n"
+        "contracts:\n"
+        "  - name: add\n"
+        "    signature: \"def add(a: float, b: float) -> float:\"\n"
+        "    python_name: testregen.core.add\n"
+    )
+    zip_bytes = _make_zip({
+        "blueprint.aero": blueprint,
+        "src/testregen/core.py": "def add(a, b)\n    return a + b\n",
+    })
+    _post_bytes(server + f"/api/upload-zip?session_id={session_id}", zip_bytes)
+
+    status, data = _post_json(
+        server + "/api/workspace/regenerate_blueprint",
+        {"session_id": session_id, "run_build": False},
+    )
+    assert status == 200
+    assert data["status"] == "success"
+    assert (data.get("errors") or []) == []
+    paths = _collect_paths(data["tree"])
+    assert "src/testregen/core.py" in paths
+    assert "pyproject.toml" in paths
+    assert "tests/test_core.py" in paths
+
+
 def test_api_file_content_path_traversal(server):
     session_id = "test-session-traversal"
     zip_bytes = _make_zip({"src/main.py": "x = 1\n"})

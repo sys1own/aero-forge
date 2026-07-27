@@ -335,7 +335,7 @@
     }
     .action-btn:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
     .action-btn:disabled { opacity: 0.6; cursor: not-allowed; }
-    #heal-banner { display: none; position: absolute; top: 0; left: 0; right: 0; z-index: 2; padding: 0.4rem 0.6rem; background: rgba(245, 209, 136, 0.15); border-bottom: 1px solid var(--warning); color: var(--text); font-size: 0.8rem; align-items: center; gap: 0.6rem; }
+    #heal-banner { display: none; position: absolute; top: 0; left: 0; right: 0; z-index: 2; padding: 0.4rem 0.6rem; background: rgba(245, 209, 136, 0.15); border-bottom: 1px solid var(--warning); color: var(--text); font-size: 0.8rem; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
     #heal-banner.visible { display: flex; }
     #heal-banner.manual-fix { background: rgba(244, 63, 94, 0.15); border-bottom-color: var(--danger); }
     #heal-banner button { font-size: 0.75rem; padding: 0.25rem 0.5rem; }
@@ -418,6 +418,9 @@
           <button id="clean-workspace" class="icon-btn" title="Clean workspace" aria-label="Clean workspace">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
           </button>
+          <button id="regenerate-blueprint-root" class="icon-btn" title="Regenerate workspace from blueprint" aria-label="Regenerate from blueprint">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.3"/></svg>
+          </button>
           <input id="upload-input" type="file" multiple accept=".zip,.py,.txt,.md,.json,.toml,.yaml,.yml,.sh,.rs,.c,.cpp,.h,.hpp,.cc,.html,.css,.js,.ts" class="sr-only">
         </div>
       </div>
@@ -437,6 +440,9 @@
         <div class="placeholder" style="padding:1rem;color:var(--muted)">Create or select a session to explore files.</div>
       </div>
       <div class="sidebar-footer">
+        <div id="blueprint-init-banner" class="drop-zone" style="display:none;background:rgba(0,122,204,0.15);border-style:solid;border-color:var(--accent);color:var(--text);cursor:pointer;">
+          &#128260; <strong>Initialize Project from Blueprint</strong><br><small>blueprint.aero detected in workspace</small>
+        </div>
         <div id="drop-zone" class="drop-zone">
           Drop files or a .zip here, or click to upload
         </div>
@@ -591,6 +597,8 @@
     <div class="context-menu-item" data-action="upload">Upload file/zip</div>
     <div class="context-menu-item" data-action="download">Download</div>
     <div class="context-menu-sep"></div>
+    <div class="context-menu-item" data-action="regenerate-blueprint">&#128260; Rebuild Workspace from Blueprint</div>
+    <div class="context-menu-sep"></div>
     <div class="context-menu-item" data-action="rename">Rename</div>
     <div class="context-menu-item" data-action="delete">Delete</div>
   </div>
@@ -638,6 +646,17 @@
       <div class="modal-actions">
         <button id="cancel-clean" class="secondary">Cancel</button>
         <button id="confirm-clean" class="primary" style="background:var(--danger)">Clean Workspace</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="regenerate-modal" class="modal-overlay">
+    <div class="modal">
+      <h2>Regenerate from Blueprint</h2>
+      <p style="margin:0.5rem 0 1rem;font-size:0.85rem;color:var(--text)">Regenerate from blueprint? This will clean up and re-scaffold source files according to <code>blueprint.aero</code>. A temporary backup will be created in <code>.aero_backup</code>.</p>
+      <div class="modal-actions">
+        <button id="cancel-regenerate" class="secondary">Cancel</button>
+        <button id="confirm-regenerate" class="primary" style="background:var(--accent)">&#128260; Regenerate Workspace</button>
       </div>
     </div>
   </div>
@@ -769,6 +788,11 @@
       cleanModal: document.getElementById('clean-modal'),
       cancelClean: document.getElementById('cancel-clean'),
       confirmClean: document.getElementById('confirm-clean'),
+      regenerateBlueprintRoot: document.getElementById('regenerate-blueprint-root'),
+      regenerateModal: document.getElementById('regenerate-modal'),
+      cancelRegenerate: document.getElementById('cancel-regenerate'),
+      confirmRegenerate: document.getElementById('confirm-regenerate'),
+      blueprintInitBanner: document.getElementById('blueprint-init-banner'),
       contextMenu: document.getElementById('context-menu'),
     };
 
@@ -924,6 +948,8 @@
         ui.fileTree.appendChild(renderNode(data.tree, true));
         if (selected) setTreeActive(selected);
         ui.fileTree.scrollTop = scrollTop;
+        const hasBlueprint = Array.from(ui.fileTree.querySelectorAll('.tree-node.file')).some(n => (n.querySelector('.node-name')?.textContent || '') === 'blueprint.aero');
+        if (ui.blueprintInitBanner) ui.blueprintInitBanner.style.display = hasBlueprint ? 'block' : 'none';
       } catch (e) {
         if (!ui.fileTree.querySelector('.tree-node')) {
           ui.fileTree.innerHTML = `<div class="placeholder" style="padding:1rem;color:var(--danger)">${e.message}</div>`;
@@ -1028,8 +1054,13 @@
       ui.contextMenu.classList.add('open');
       ui.contextMenu.style.left = `${Math.min(event.clientX, window.innerWidth - 150)}px`;
       ui.contextMenu.style.top = `${Math.min(event.clientY, window.innerHeight - 120)}px`;
+      const isBlueprint = !isDir && path.split('/').pop() === 'blueprint.aero';
       ui.contextMenu.querySelectorAll('.context-menu-item').forEach(item => {
         const action = item.dataset.action;
+        if (action === 'regenerate-blueprint') {
+          item.style.display = isBlueprint ? 'block' : 'none';
+          return;
+        }
         item.style.display = ((!isDir && (action === 'new-folder' || action === 'upload')) || (isDir && action === 'download')) ? 'none' : 'block';
       });
     }
@@ -1473,25 +1504,28 @@
 
     function showHealBanner(summary, targetFile, command, exitCode, logText) {
       if (!ui.healBanner) return;
-      ui.healBanner.innerHTML = `<span>&#9889; Self-Heal Available: AST Overlay Patch (${escapeHtml(targetFile || '')})</span><button id="apply-heal-btn" class="run-btn">&#128295; Apply AST Fix &amp; Re-run</button>`;
+      ui.healBanner.innerHTML = `<span>&#9889; Self-Heal Available: AST Overlay Patch (${escapeHtml(targetFile || '')})</span><button id="apply-heal-btn" class="run-btn">&#128295; Apply AST Fix &amp; Re-run</button><button id="hard-reset-btn" class="run-btn">&#128260; Hard Reset &amp; Rebuild Workspace from Blueprint</button>`;
       ui.healBanner.classList.add('visible');
       ui.terminalPanel.classList.add('heal-visible');
       document.getElementById('apply-heal-btn').addEventListener('click', () => applyHeal(command, exitCode, logText));
+      document.getElementById('hard-reset-btn').addEventListener('click', () => { hideHealBanner(); ui.regenerateModal.classList.add('open'); });
     }
 
     function showLLMBanner(summary, targetFile, reason, command, exitCode, logText) {
       if (!ui.healBanner) return;
-      ui.healBanner.innerHTML = `<span>&#129302; Apply LLM Directive Patch: ${escapeHtml(summary || '')}</span><button id="apply-llm-heal-btn" class="run-btn">&#129302; Apply LLM Fix</button>`;
+      ui.healBanner.innerHTML = `<span>&#129302; Apply LLM Directive Patch: ${escapeHtml(summary || '')}</span><button id="apply-llm-heal-btn" class="run-btn">&#129302; Apply LLM Fix</button><button id="hard-reset-btn" class="run-btn">&#128260; Hard Reset &amp; Rebuild Workspace from Blueprint</button>`;
       ui.healBanner.classList.add('visible');
       ui.terminalPanel.classList.add('heal-visible');
       document.getElementById('apply-llm-heal-btn').addEventListener('click', () => applyLLMHeal(command, exitCode, logText));
+      document.getElementById('hard-reset-btn').addEventListener('click', () => { hideHealBanner(); ui.regenerateModal.classList.add('open'); });
     }
 
     function showManualFixBanner(reason) {
       if (!ui.healBanner) return;
-      ui.healBanner.innerHTML = `<span>&#9888; Manual Fix Required: ${escapeHtml(reason || 'unknown error')}</span>`;
+      ui.healBanner.innerHTML = `<span>&#9888; Manual Fix Required: ${escapeHtml(reason || 'unknown error')}</span><button id="hard-reset-btn" class="run-btn">&#128260; Hard Reset &amp; Rebuild Workspace from Blueprint</button>`;
       ui.healBanner.classList.add('visible', 'manual-fix');
       ui.terminalPanel.classList.add('heal-visible');
+      document.getElementById('hard-reset-btn').addEventListener('click', () => { hideHealBanner(); ui.regenerateModal.classList.add('open'); });
     }
 
     function hideHealBanner() {
@@ -1525,9 +1559,11 @@
                 <span>&#9888; Heal failed: ${escapeHtml(message)}</span>
                 <button id="retry-ast-btn" class="run-btn">Retry AST</button>
                 <button id="force-llm-heal-btn" class="run-btn">Force LLM Workspace Heal</button>
+                <button id="hard-reset-btn" class="run-btn">&#128260; Hard Reset &amp; Rebuild Workspace from Blueprint</button>
               `;
               document.getElementById('retry-ast-btn').addEventListener('click', () => applyHeal(command, exitCode, logText, false));
               document.getElementById('force-llm-heal-btn').addEventListener('click', () => applyHeal(command, exitCode, logText, true));
+              document.getElementById('hard-reset-btn').addEventListener('click', () => { hideHealBanner(); ui.regenerateModal.classList.add('open'); });
             }
             ui.healBanner.classList.add('visible', 'manual-fix');
           }
@@ -1546,10 +1582,12 @@
             <span>&#9888; Heal failed: ${escapeHtml(e.message)}</span>
             <button id="retry-ast-btn" class="run-btn">Retry AST</button>
             <button id="force-llm-heal-btn" class="run-btn">Force LLM Workspace Heal</button>
+            <button id="hard-reset-btn" class="run-btn">&#128260; Hard Reset &amp; Rebuild Workspace from Blueprint</button>
           `;
           ui.healBanner.classList.add('visible', 'manual-fix');
           document.getElementById('retry-ast-btn').addEventListener('click', () => applyHeal(command, exitCode, logText, false));
           document.getElementById('force-llm-heal-btn').addEventListener('click', () => applyHeal(command, exitCode, logText, true));
+          document.getElementById('hard-reset-btn').addEventListener('click', () => { hideHealBanner(); ui.regenerateModal.classList.add('open'); });
         }
       } finally {
         setBusy(false);
@@ -1824,6 +1862,31 @@
         log('Workspace cleaned', 'success');
       } catch (e) { log(`Clean workspace failed: ${e.message}`, 'error'); }
       finally { setBusy(false); }
+    }
+
+    async function regenerateFromBlueprint() {
+      if (!state.sessionId) return;
+      setBusy(true);
+      ui.statusText.textContent = 'Regenerating workspace from blueprint...';
+      try {
+        log('[1/4] Backing up workspace and reading blueprint.aero...', 'info');
+        const data = await api('POST', '/api/workspace/regenerate_blueprint', buildBody({ run_build: false }));
+        log('[2/4] Purged generated files and re-scaffolded directories.', 'info');
+        log('[3/4] Wrote syntactically valid stub files from manifest.', 'info');
+        if (data.status === 'success' && (data.errors || []).length === 0) {
+          log('[4/4] Regeneration complete.', 'success');
+          if (data.backup_dir) log(`Backup retained at ${data.backup_dir}`, 'info');
+        } else {
+          const errs = (data.errors || []).join(', ');
+          log(`Regeneration finished with errors: ${errs || data.status}`, 'error');
+        }
+        await loadTree(true);
+      } catch (e) {
+        log(`Regenerate from blueprint failed: ${e.message}`, 'error');
+      } finally {
+        setBusy(false);
+        ui.statusText.textContent = 'Ready';
+      }
     }
 
     function formatBuildSummary(data) {
@@ -2108,6 +2171,10 @@
     ui.cleanWorkspace.addEventListener('click', () => ui.cleanModal.classList.add('open'));
     ui.cancelClean.addEventListener('click', () => ui.cleanModal.classList.remove('open'));
     ui.confirmClean.addEventListener('click', () => { ui.cleanModal.classList.remove('open'); cleanWorkspace(); });
+    ui.regenerateBlueprintRoot.addEventListener('click', () => ui.regenerateModal.classList.add('open'));
+    ui.cancelRegenerate.addEventListener('click', () => ui.regenerateModal.classList.remove('open'));
+    ui.confirmRegenerate.addEventListener('click', () => { ui.regenerateModal.classList.remove('open'); regenerateFromBlueprint(); });
+    if (ui.blueprintInitBanner) ui.blueprintInitBanner.addEventListener('click', () => ui.regenerateModal.classList.add('open'));
     ui.accelerateBtn.addEventListener('click', () => ui.accelerateModal.classList.add('open'));
     ui.cancelAccelerate.addEventListener('click', () => ui.accelerateModal.classList.remove('open'));
     ui.confirmAccelerate.addEventListener('click', () => { ui.accelerateModal.classList.remove('open'); accelerateWorkspace(); });
@@ -2158,6 +2225,7 @@
         else if (action === 'new-folder') createNode(target.isDir ? target.path : parentDir(target.path), true);
         else if (action === 'upload') uploadToPath(target.isDir ? target.path : parentDir(target.path));
         else if (action === 'download') downloadFile(target.path);
+        else if (action === 'regenerate-blueprint') { ui.regenerateModal.classList.add('open'); }
         else if (action === 'rename') renameNode(target.path);
         else if (action === 'delete') deleteNode(target.path);
       });
