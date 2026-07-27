@@ -914,13 +914,21 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             # Use the last user message as the active turn text.
             user_text = [m for m in messages if m.get("role") == "user"][-1]["content"]
 
-            # Explicit action verbs (e.g. "fix error") still dispatch through the
-            # command handler; open-ended questions are routed to the copilot for a
-            # structured, workspace-aware PROPOSE_BUILD action.
-            command_action = chat.handle_command(user_text)
-            if command_action is not None:
-                reply_text = chat._format_action_result(command_action, user_text)
-                result = {"reply": reply_text, "action": None}
+            # Chat is a Design & Advisory Engine. It never triggers builds or code
+            # generation directly; it always returns a structured reply with an
+            # optional PROPOSE_BUILD Action Card for the Builder tab. The one
+            # exception is a deterministic AST self-heal request.
+            lowered = user_text.lower()
+            if any(phrase in lowered for phrase in ("fix error", "fix build", "apply self heal", "self heal", "heal")):
+                command_action = chat.handle_command(user_text)
+                if command_action is not None:
+                    reply_text = chat._format_action_result(command_action, user_text)
+                    result = {"reply": reply_text, "action": None}
+                else:
+                    result = chat.reply_structured(
+                        user_text,
+                        error_context=body.get("error_context"),
+                    )
             else:
                 result = chat.reply_structured(
                     user_text,

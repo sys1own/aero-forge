@@ -257,6 +257,8 @@
       background: rgba(255,255,255,0.06); padding: 0.1rem 0.3rem; border-radius: 3px; font-family: Consolas, Monaco, "Courier New", monospace;
     }
     .msg pre { background: rgba(0,0,0,0.3); padding: 0.5rem; border-radius: 4px; overflow: auto; margin: 0.5rem 0; }
+    .chat-processing-card { align-self: flex-start; background: var(--panel-2); border-left: 3px solid var(--accent); border-radius: 0 4px 4px 0; padding: 0.55rem 0.75rem; margin-top: 0.25rem; font-family: Consolas, Monaco, "Courier New", monospace; font-size: 0.78rem; color: var(--muted); box-shadow: 0 0 6px rgba(0,122,204,0.15); animation: pulse-glow 2s ease-in-out infinite; }
+    @keyframes pulse-glow { 0% { box-shadow: 0 0 4px rgba(0,122,204,0.1); } 50% { box-shadow: 0 0 10px rgba(0,122,204,0.35); } 100% { box-shadow: 0 0 4px rgba(0,122,204,0.1); } }
     .action-card { background: rgba(0,0,0,0.25); border: 1px solid var(--accent); border-radius: 6px; padding: 0.65rem; margin-top: 0.5rem; }
     .action-card .action-title { font-weight: 600; color: var(--accent); margin-bottom: 0.4rem; }
     .action-card .action-meta { font-size: 0.78rem; color: var(--muted); margin-bottom: 0.5rem; }
@@ -2033,6 +2035,24 @@
       addChat('user', text);
       ui.chatInput.value = '';
       setBusy(true);
+
+      // Architect Terminal Pulse: cycling state telemetry.
+      const pulseStates = [
+        'Analyzing workspace context...',
+        'Evaluating target architecture heuristics...',
+        'Formulating optimized build proposal...',
+      ];
+      const pulseCard = document.createElement('div');
+      pulseCard.className = 'chat-processing-card';
+      pulseCard.textContent = pulseStates[0];
+      ui.chatFeed.appendChild(pulseCard);
+      ui.chatFeed.scrollTo({ top: ui.chatFeed.scrollHeight, behavior: 'smooth' });
+      let pulseIdx = 0;
+      const pulseTimer = setInterval(() => {
+        pulseIdx = (pulseIdx + 1) % pulseStates.length;
+        pulseCard.textContent = pulseStates[pulseIdx];
+      }, 1800);
+
       try {
         const data = await api('POST', '/api/chat', buildBody({ messages: state.messages, error_context: state.lastTerminalLog || '' }));
         state.sessionId = data.session_id;
@@ -2041,7 +2061,11 @@
         state.messages = data.messages || [];
         addAssistantMessage(data.reply, data.action);
       } catch (e) { addChat('assistant', `Chat error: ${e.message}`, true); }
-      finally { setBusy(false); }
+      finally {
+        clearInterval(pulseTimer);
+        if (pulseCard.parentNode) pulseCard.remove();
+        setBusy(false);
+      }
     }
 
     function addAssistantMessage(reply, action) {
