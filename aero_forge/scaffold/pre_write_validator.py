@@ -29,6 +29,28 @@ class BlueprintValidationError(ValidationError):
     pass
 
 
+def deduplicate_manifest_entries(entries: List[Any]) -> List[Any]:
+    """Return *entries* with duplicate paths removed, preserving first occurrence.
+
+    Works on both ``ManifestEntry`` objects and plain path dictionaries.
+    """
+    seen: set = set()
+    unique: List[Any] = []
+    for entry in entries:
+        if isinstance(entry, dict):
+            path = entry.get("path")
+        else:
+            path = getattr(entry, "path", None)
+        if not path:
+            unique.append(entry)
+            continue
+        norm = str(path).replace("\\", "/").lstrip("/")
+        if norm not in seen:
+            seen.add(norm)
+            unique.append(entry)
+    return unique
+
+
 @dataclass
 class ValidationResult:
     """Outcome of a delegated validation run."""
