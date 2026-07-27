@@ -50,6 +50,80 @@ class ToolchainManager:
             return str(self._venv_bin() / "python.exe")
         return str(self._venv_bin() / "python")
 
+    def _venv_site_packages(self) -> Path:
+        """Return the venv purelib directory."""
+        proc = self._run_subprocess(
+            [self._venv_python(), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+            check=True,
+        )
+        return Path(proc.stdout.strip())
+
+    def _host_package_dir(self, package: str) -> Optional[Path]:
+        """Locate the host installation directory of ``package``."""
+        try:
+            import importlib.util
+
+            spec = importlib.util.find_spec(package)
+            if spec and spec.origin:
+                return Path(spec.origin).parent
+        except Exception:
+            pass
+        return None
+
+    def _symlink_host_package(self, package: str) -> None:
+        """Symlink a host Python package into the venv site-packages."""
+        src = self._host_package_dir(package)
+        if not src or not src.is_dir():
+            self._log("warning", "TOOLCHAIN", f"Host package {package} not found; cannot symlink")
+            return
+        dest = self._venv_site_packages() / src.name
+        if dest.is_symlink() or dest.exists():
+            if dest.is_symlink() or dest.is_file():
+                dest.unlink()
+            elif dest.is_dir():
+                shutil.rmtree(dest)
+        try:
+            os.symlink(src, dest, target_is_directory=True)
+            self._log("info", "TOOLCHAIN", f"Linked host {package} package into {dest}")
+        except OSError as exc:
+            self._log("warning", "TOOLCHAIN", f"Could not symlink {package}: {exc}; copying instead")
+            shutil.copytree(src, dest, dirs_exist_ok=True)
+            self._log("info", "TOOLCHAIN", f"Copied host {package} package into {dest}")
+
+    def _write_wrapper(self, name: str, module: str, command: Optional[str] = None) -> None:
+        """Write a ``.venv/bin`` wrapper that invokes ``python -m <module>``."""
+        venv_bin = self._venv_bin()
+        venv_bin.mkdir(parents=True, exist_ok=True)
+        wrapper = venv_bin / name
+        if sys.platform == "win32":
+            wrapper = wrapper.with_suffix(".bat")
+            wrapper.write_text(
+                f"@echo off\n{self._venv_python()} -m {module} %*\n",
+                encoding="utf-8",
+            )
+        else:
+            wrapper.write_text(
+                f"#!/bin/sh\nexec {self._venv_python()} -m {module} {command or ''} \"$@\"\n",
+                encoding="utf-8",
+            )
+            wrapper.chmod(0o755)
+
+    def _bootstrap_venv_from_host(self) -> None:
+        """Populate a ``--without-pip`` venv with host pip, setuptools, wheel and binaries."""
+        self._log("info", "TOOLCHAIN", "Bootstrapping .venv from host toolchains...")
+
+        # Symlink core packaging packages from the host so pip works offline.
+        for package in ("pip", "setuptools", "wheel"):
+            self._symlink_host_package(package)
+
+        # Create pip/pip3/wheel wrappers.
+        self._write_wrapper("pip", "pip")
+        self._write_wrapper("pip3", "pip")
+        self._write_wrapper("wheel", "wheel")
+
+        # Refresh PATH so the newly-added wrappers are found.
+        self.env["PATH"] = f"{self._venv_bin()}{os.pathsep}{self.env.get('PATH', '')}"
+
     def _run_subprocess(
         self,
         cmd: List[str],
@@ -78,6 +152,25 @@ class ToolchainManager:
         """Run ``pip`` inside the virtual environment, streaming captured diagnostics."""
         return self._run_subprocess([self._venv_python(), "-m", "pip", *args], check=check)
 
+    def _create_venv(self, python: str) -> None:
+        """Create the virtual environment with ``--without-pip``."""
+        venv_path = self._venv_path()
+        proc = self._run_subprocess(
+            [python, "-m", "venv", "--without-pip", str(venv_path)],
+            check=False,
+        )
+        if proc.returncode != 0:
+            # Some older venv modules do not support --without-pip; try without it.
+            if "unrecognized arguments" in (proc.stderr or ""):
+                self._log("warning", "ENV", "--without-pip not supported; retrying without it")
+                proc = self._run_subprocess(
+                    [python, "-m", "venv", str(venv_path)],
+                    check=False,
+                )
+            if proc.returncode != 0:
+                self._log("error", "ENV", f"Failed to create virtual environment: {proc.stderr or proc.stdout}")
+                raise RuntimeError("Virtual environment creation failed")
+
     def ensure_virtualenv(self) -> Dict[str, str]:
         """Ensure a ``.venv`` exists in ``sandbox_dir`` and return updated env vars."""
         venv_path = self._venv_path()
@@ -85,23 +178,14 @@ class ToolchainManager:
         if not (venv_path / python_exe).is_file():
             self._log("info", "ENV", f"Creating Python virtual environment (.venv) in {self.sandbox_dir}...")
             python = sys.executable if shutil.which(sys.executable) else "python3"
-            proc = self._run_subprocess(
-                [python, "-m", "venv", str(venv_path)],
-                check=False,
-            )
-            if proc.returncode != 0:
-                self._log("error", "ENV", f"Failed to create virtual environment: {proc.stderr or proc.stdout}")
-                raise RuntimeError("Virtual environment creation failed")
+            self._create_venv(python)
             self._log("info", "ENV", "Python virtual environment created (ok)")
-            # Bootstrap core build tools so later pip installs succeed offline.
-            self._log("info", "TOOLCHAIN", "Bootstrapping pip, setuptools, and wheel in .venv...")
-            try:
-                self._run_pip(["install", "--upgrade", "pip", "setuptools", "wheel"])
-                self._log("info", "TOOLCHAIN", "pip/setuptools/wheel upgraded (ok)")
-            except subprocess.CalledProcessError as exc:
-                self._log("warning", "TOOLCHAIN", f"pip bootstrap failed: {exc.stderr}")
+            self._bootstrap_venv_from_host()
         else:
             self._log("info", "ENV", "Using existing Python virtual environment (.venv).")
+            # Ensure wrappers exist even for pre-existing venvs.
+            if not (self._venv_bin() / "pip").exists():
+                self._bootstrap_venv_from_host()
 
         venv_bin = self._venv_bin()
         self.env["VIRTUAL_ENV"] = str(venv_path)
@@ -145,6 +229,10 @@ class ToolchainManager:
         """Create a symlink/copy of the host ``maturin`` binary inside ``.venv/bin``."""
         venv_bin = self._venv_bin()
         venv_maturin = venv_bin / "maturin"
+        real_host = Path(host_maturin).resolve()
+        if real_host.resolve() == venv_maturin.resolve():
+            # Already points to itself; nothing to do.
+            return
         try:
             if sys.platform == "win32":
                 shutil.copy2(host_maturin, venv_maturin)
