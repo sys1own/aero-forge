@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
+import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
@@ -120,33 +122,62 @@ class ABIContract(BaseModel):
     binding_framework: str
     export_symbol: str
     c_symbol_alias: str = ""
-    header_path: str = ""
+    header_path: Optional[str] = None
     memory_model: str
     signature: Dict[str, List[Dict[str, str]]] = Field(default_factory=dict)
 
-    @field_validator("target_language")
+    @field_validator("target_language", mode="before")
     @classmethod
-    def _valid_target_language(cls, value: str) -> str:
+    def _normalize_target_language(cls, value: Any) -> str:
+        if value is None:
+            return "cpp"
+        value = str(value).lower().strip()
+        synonyms = {"c++": "cpp", "py": "python"}
+        value = synonyms.get(value, value)
         allowed = {"cpp", "rust", "python"}
         if value not in allowed:
             raise ValueError(f"target_language must be one of {allowed}, got {value!r}")
         return value
 
-    @field_validator("binding_framework")
+    @field_validator("binding_framework", mode="before")
     @classmethod
-    def _valid_binding_framework(cls, value: str) -> str:
+    def _normalize_binding_framework(cls, value: Any) -> str:
+        if value is None:
+            return "c_abi"
+        value = str(value).lower().strip().replace("-", "_")
+        synonyms = {"pyo3": "pyo3", "ctypes": "ctypes", "cabi": "c_abi", "c-abi": "c_abi"}
+        value = synonyms.get(value, value)
         allowed = {"c_abi", "pyo3", "ctypes"}
         if value not in allowed:
             raise ValueError(f"binding_framework must be one of {allowed}, got {value!r}")
         return value
 
-    @field_validator("memory_model")
+    @field_validator("memory_model", mode="before")
     @classmethod
-    def _valid_memory_model(cls, value: str) -> str:
+    def _normalize_memory_model(cls, value: Any) -> str:
+        if value is None:
+            return "caller_allocates"
+        value = str(value).lower().strip().replace("-", "_")
+        synonyms = {
+            "borrowed": "shared_pyo3",
+            "shared": "shared_pyo3",
+            "owned": "callee_allocates",
+            "callee": "callee_allocates",
+            "caller": "caller_allocates",
+        }
+        value = synonyms.get(value, value)
         allowed = {"callee_allocates", "caller_allocates", "shared_pyo3"}
         if value not in allowed:
             raise ValueError(f"memory_model must be one of {allowed}, got {value!r}")
         return value
+
+    @field_validator("header_path", mode="before")
+    @classmethod
+    def _normalize_header_path(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        value = str(value).strip()
+        return value if value else None
 
 
 class BlueprintSchemaV2(BaseModel):
@@ -175,6 +206,9 @@ class BlueprintValidator:
         "*mut f64",
         "float*",
         "int*",
+        "bool",
+        "const char*",
+        "void",
     }
 
     def __init__(self, blueprint_path_or_dict: Any):
@@ -276,6 +310,44 @@ class Blueprint(BaseModel):
     verification_nodes: List[Dict[str, Any]] = Field(default_factory=list)
     metadata: Dict[str, str] = Field(default_factory=lambda: {"schema_version": "2.0.0"})
     module_graph: List[Dict[str, Any]] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _sync_manifest_and_module_graph(self) -> "Blueprint":
+        """Merge ``module_graph`` into ``manifest`` and remove duplicate paths."""
+        existing_paths = {e.path for e in self.manifest}
+        for node in self.module_graph:
+            if not isinstance(node, dict):
+                continue
+            path = node.get("path")
+            if not path or path in existing_paths:
+                continue
+            existing_paths.add(path)
+            self.manifest.append(
+                ManifestEntry(
+                    path=path,
+                    lang=node.get("lang") or node.get("language") or "python",
+                    purpose=node.get("purpose", ""),
+                )
+            )
+        seen: set = set()
+        unique: List[ManifestEntry] = []
+        for entry in self.manifest:
+            if entry.path not in seen:
+                seen.add(entry.path)
+                unique.append(entry)
+        self.manifest = unique
+
+        seen_graph: set = set()
+        unique_graph: List[Dict[str, Any]] = []
+        for node in self.module_graph:
+            path = node.get("path") if isinstance(node, dict) else None
+            if path and path in seen_graph:
+                continue
+            if path:
+                seen_graph.add(path)
+            unique_graph.append(node)
+        self.module_graph = unique_graph
+        return self
 
     @model_validator(mode="after")
     def _validate_files(self) -> "Blueprint":
@@ -601,14 +673,232 @@ def discover_project(
     return functions
 
 
+def _annotation_to_str(node: Optional[ast.AST]) -> str:
+    """Convert an AST annotation back to a Python type string."""
+    if node is None:
+        return "None"
+    try:
+        return ast.unparse(node)
+    except Exception:
+        return "Any"
+
+
+def _parse_signature_local(signature: str) -> Tuple[str, List[Tuple[str, str]], str]:
+    """Parse a ``def name(...) -> T`` style signature into (name, args, return_type)."""
+    source = signature.strip()
+    if not source.endswith(":"):
+        source = source + ":\n    pass"
+    else:
+        source = source + "\n    pass"
+    tree = ast.parse(source)
+    func = tree.body[0]
+    if not isinstance(func, ast.FunctionDef):
+        raise ValueError(f"Invalid signature: {signature!r}")
+    args = [(arg.arg, _annotation_to_str(arg.annotation)) for arg in func.args.args]
+    return func.name, args, _annotation_to_str(func.returns)
+
+
+def _py_type_to_abi(py_type: str) -> str:
+    """Map a Python type hint to a C-ABI scalar or pointer type (empty if unsupported)."""
+    t = (py_type or "").strip().lower().replace(" ", "")
+    if not t or t in ("none", "void"):
+        return "void"
+    if t in ("float", "f64", "double"):
+        return "f64"
+    if t in ("int", "i64", "i32", "int64_t", "int32_t"):
+        return "i32"
+    if t == "bool":
+        return "bool"
+    if t in ("str", "string"):
+        return "const char*"
+    if t == "list" or (t.startswith("list[") and t.endswith("]")):
+        inner = t[5:-1].strip() if t.startswith("list[") else "float"
+        inner_abi = _py_type_to_abi(inner)
+        if inner_abi == "i32":
+            return "int*"
+        if inner_abi == "f64":
+            return "double*"
+        if inner_abi == "bool":
+            return "bool*"
+        if inner_abi:
+            return "double*"
+    return ""
+
+
+def _is_c_abi_compatible(py_type: str) -> bool:
+    """Return True when *py_type* can be expressed as a simple C-ABI type."""
+    return _py_type_to_abi(py_type) != ""
+
+
+def _contracts_to_abi_contracts(
+    contracts: List[ContractEntry],
+    manifest: List[ManifestEntry],
+) -> List[ABIContract]:
+    """Synthesise ``ABIContract`` entries from legacy ``ContractEntry`` definitions."""
+    abi_contracts: List[ABIContract] = []
+    header_candidates = [
+        e.path for e in manifest
+        if Path(e.path).suffix in (".h", ".hpp")
+    ]
+    for contract in contracts:
+        if not contract.signature:
+            continue
+        try:
+            name, args, return_type = _parse_signature_local(contract.signature)
+        except Exception:
+            continue
+        if not all(_is_c_abi_compatible(t) for _, t in args) or not _is_c_abi_compatible(return_type):
+            continue
+
+        lang = (contract.language or "").lower()
+        if "cpp" in lang or "c++" in lang:
+            target_language = "cpp"
+            binding_framework = "c_abi"
+            memory_model = "callee_allocates"
+        elif "rust" in lang:
+            target_language = "rust"
+            binding_framework = "pyo3"
+            memory_model = "shared_pyo3"
+        else:
+            target_language = "python"
+            binding_framework = "ctypes"
+            memory_model = "caller_allocates"
+
+        header_path = ""
+        base = re.sub(r"\.(cpp|cc|cxx)$", ".h", name)
+        for candidate in header_candidates:
+            if Path(candidate).stem == name or Path(candidate).name == f"{base}.h":
+                header_path = candidate
+                break
+        if not header_path and any(Path(e.path).suffix in (".cpp", ".cc", ".cxx") for e in manifest):
+            header_path = f"include/{name}.h"
+
+        abi_contracts.append(
+            ABIContract(
+                contract_id=name,
+                target_language=target_language,
+                binding_framework=binding_framework,
+                export_symbol=name,
+                c_symbol_alias=name,
+                header_path=header_path or None,
+                memory_model=memory_model,
+                signature={
+                    "inputs": [{"name": a, "type": _py_type_to_abi(t)} for a, t in args],
+                    "outputs": [{"name": "return", "type": _py_type_to_abi(return_type)}],
+                },
+            )
+        )
+    return abi_contracts
+
+
+def _infer_primary_entrypoint(manifest: List[ManifestEntry]) -> Dict[str, Any]:
+    """Select the most likely executable entrypoint from the manifest."""
+    candidates = [
+        ("run_shell.py", "python3"),
+        ("main.py", "python3"),
+        ("src/main.rs", "rust"),
+        ("src/main.py", "python3"),
+    ]
+    for path, runtime in candidates:
+        if any(e.path == path for e in manifest):
+            return {"path": path, "runtime": runtime, "wrapper_generation": True}
+    for entry in manifest:
+        if entry.lang == "python" and entry.path.endswith(".py"):
+            return {"path": entry.path, "runtime": "python3", "wrapper_generation": True}
+    return {"path": "main.py", "runtime": "python3", "wrapper_generation": True}
+
+
+def _module_graph_from_manifest(manifest: List[ManifestEntry]) -> List[Dict[str, Any]]:
+    """Build a module graph from the manifest when the LLM does not provide one."""
+    return [
+        {
+            "path": e.path,
+            "lang": e.lang,
+            "purpose": e.purpose,
+        }
+        for e in manifest
+    ]
+
+
+def _default_verification_nodes(
+    primary_entrypoint: Dict[str, Any], project_name: str
+) -> List[Dict[str, Any]]:
+    """Create minimal verification nodes for a generated project."""
+    entry = primary_entrypoint.get("path", "main.py")
+    runtime = primary_entrypoint.get("runtime", "python3")
+    return [
+        {
+            "test_id": f"{project_name}_cli_parses",
+            "execution_cmd": f"{runtime} {entry} --help" if runtime == "python3" else f"cargo run -- --help",
+            "expected_exit_code": 0,
+            "stdout_match_patterns": ["usage"],
+            "stderr_prohibited_patterns": ["Traceback"],
+        },
+        {
+            "test_id": f"{project_name}_runs",
+            "execution_cmd": f"{runtime} {entry}" if runtime == "python3" else f"cargo run",
+            "expected_exit_code": 0,
+            "stdout_match_patterns": ["ok", "success"],
+            "stderr_prohibited_patterns": ["error", "Traceback"],
+        },
+    ]
+
+
 def write_blueprint(blueprint: Blueprint, path: Path) -> None:
-    """Serialize a Blueprint to a YAML ``.aero`` file."""
+    """Serialize a Blueprint to a YAML ``.aero`` file using v2 schema defaults."""
+    from aero_forge.scaffold.pre_write_validator import deduplicate_manifest_entries
+
+    v2_defaults = BlueprintSchemaV2().model_dump(mode="json")
+    metadata = {
+        **v2_defaults.get("metadata", {}),
+        **(blueprint.metadata or {}),
+        "schema_version": "2.0.0",
+        "project_name": blueprint.project or "aero_forge_project",
+        "domain_target": blueprint.architecture or "pure_python",
+    }
+
+    # Synthesise v2 fields from legacy v1 data when the LLM/planner did not emit them.
+    manifest = list(blueprint.manifest) if blueprint.manifest else []
+    execution_strategy = blueprint.execution_strategy
+    if execution_strategy is None or not execution_strategy.primary_entrypoint:
+        primary = _infer_primary_entrypoint(manifest)
+        cli_contract = execution_strategy.cli_contract if execution_strategy else CLIContract()
+        run_spec = execution_strategy.run_spec if execution_strategy else {}
+        execution_strategy = ExecutionStrategy(
+            primary_entrypoint=primary,
+            cli_contract=cli_contract,
+            run_spec=run_spec,
+        )
+
+    abi_contracts = blueprint.abi_contracts or _contracts_to_abi_contracts(
+        list(blueprint.contracts), manifest
+    )
+    module_graph = blueprint.module_graph or _module_graph_from_manifest(manifest)
+    verification_nodes = blueprint.verification_nodes or _default_verification_nodes(
+        execution_strategy.primary_entrypoint, blueprint.project or "aero_forge_project"
+    )
+
+    v2 = BlueprintSchemaV2(
+        metadata=metadata,
+        execution_strategy=execution_strategy,
+        abi_contracts=abi_contracts,
+        module_graph=module_graph,
+        verification_nodes=verification_nodes,
+    )
+    data = v2.model_dump(mode="json")
+
+    # Preserve v1 fields that are not part of the v2 schema.
+    for key, value in blueprint.model_dump(mode="json").items():
+        if key not in data:
+            data[key] = value
+
+    # Manifest and module graph are kept in sync by ``_sync_manifest_and_module_graph``,
+    # but deduplicate once more here before serialising.
+    data["manifest"] = deduplicate_manifest_entries(data.get("manifest", []))
+    data["module_graph"] = deduplicate_manifest_entries(data.get("module_graph", []))
+
     path.write_text(
-        yaml.safe_dump(
-            blueprint.model_dump(mode="json"),
-            sort_keys=False,
-            default_flow_style=False,
-        ),
+        yaml.safe_dump(data, sort_keys=False, default_flow_style=False),
         encoding="utf-8",
     )
 

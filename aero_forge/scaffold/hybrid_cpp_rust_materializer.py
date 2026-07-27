@@ -17,6 +17,7 @@ from aero_forge.builder import language_router
 from aero_forge.scaffold.cpp_materializer import (
     _contract_to_python_stub,
     _find_cpp_compiler,
+    _generate_cpp_header,
     _generate_native_cpp,
     _is_c_abi_contract,
     _is_c_abi_list,
@@ -133,7 +134,12 @@ def _generate_cargo_toml(crate_name: str) -> str:
     )
 
 
-def _generate_build_rs(compiler: str) -> str:
+def _generate_build_rs(compiler: str, cpp_source: str, include_dirs: List[str]) -> str:
+    include_array = ", ".join(f'"{d}"' for d in include_dirs)
+    if include_array:
+        include_slice = f"&[{include_array}]"
+    else:
+        include_slice = "&[]"
     return (
         "use std::env;\n"
         "use std::path::Path;\n"
@@ -141,20 +147,26 @@ def _generate_build_rs(compiler: str) -> str:
         "\n"
         "fn main() {\n"
         f"    let compiler = \"{compiler}\";\n"
-        "    let cpp = Path::new(\"src/cpp_core/native.cpp\");\n"
+        f'    let cpp = Path::new("{cpp_source}");\n'
         "    let out_dir = env::var(\"OUT_DIR\").unwrap();\n"
         "    let obj = Path::new(&out_dir).join(\"native.o\");\n"
         "    let lib = Path::new(&out_dir).join(\"libnative.a\");\n"
+        f"    let include_dirs: &[&str] = {include_slice};\n"
+        "    let mut compile_args = vec![\n"
+        "        \"-c\",\n"
+        "        \"-O2\",\n"
+        "        \"-fPIC\",\n"
+        "        \"-std=c++17\",\n"
+        "        cpp.to_str().unwrap(),\n"
+        "        \"-o\",\n"
+        "        obj.to_str().unwrap(),\n"
+        "    ];\n"
+        "    for inc in include_dirs {\n"
+        "        compile_args.push(\"-I\");\n"
+        "        compile_args.push(inc);\n"
+        "    }\n"
         "    let status = Command::new(compiler)\n"
-        "        .args(&[\n"
-        "            \"-c\",\n"
-        "            \"-O2\",\n"
-        "            \"-fPIC\",\n"
-        "            \"-std=c++17\",\n"
-        "            cpp.to_str().unwrap(),\n"
-        "            \"-o\",\n"
-        "            obj.to_str().unwrap(),\n"
-        "        ])\n"
+        "        .args(&compile_args)\n"
         "        .status()\n"
         "        .expect(\"failed to compile C++ source\");\n"
         "    assert!(status.success());\n"
@@ -496,6 +508,11 @@ class HybridCppRustMaterializer:
                 signature="def fast_vector_transform(v: list[float], scalar: float) -> list[float]",
             ),
         ]
+        if not blueprint.contracts:
+            blueprint.contracts = contracts
+        if not blueprint.abi_contracts:
+            from aero_forge.blueprint import _contracts_to_abi_contracts
+            blueprint.abi_contracts = _contracts_to_abi_contracts(contracts, list(blueprint.manifest))
         cpp_contracts = [c for c in contracts if _is_c_abi_contract(c) or _is_native_cpp_contract(c)]
         cpp_contracts_flat = [_flatten_contract(c) for c in cpp_contracts]
 
@@ -506,14 +523,51 @@ class HybridCppRustMaterializer:
         for c in cpp_contracts:
             language_router.select_native_backend(_contract_to_python_stub(c), hint="cpp")
 
-        cpp_source = _generate_native_cpp(crate_name, cpp_contracts_flat)
-        (self.workspace / "src" / "cpp_core").mkdir(parents=True, exist_ok=True)
-        (self.workspace / "tests").mkdir(exist_ok=True)
-        (self.workspace / "src" / "cpp_core" / "native.cpp").write_text(cpp_source, encoding="utf-8")
+        # Resolve C++ source and header paths from the blueprint manifest / module graph.
+        cpp_entries = [
+            e for e in blueprint.manifest
+            if e.lang == "cpp" or Path(e.path).suffix in (".cpp", ".cc", ".cxx", ".h", ".hpp")
+        ]
+        cpp_source_entry = next(
+            (e for e in cpp_entries if Path(e.path).suffix in (".cpp", ".cc", ".cxx")),
+            None,
+        )
+        if cpp_source_entry is None:
+            cpp_source_entry = ManifestEntry(path="src/cpp_core/native.cpp", lang="cpp", purpose="C-ABI math source")
+            blueprint.manifest.append(cpp_source_entry)
+        cpp_source_path = self.workspace / cpp_source_entry.path
+        cpp_source_path.parent.mkdir(parents=True, exist_ok=True)
+
+        header_paths: List[str] = []
+        for abi in blueprint.abi_contracts:
+            if abi.header_path:
+                header_paths.append(abi.header_path)
+        for e in cpp_entries:
+            if Path(e.path).suffix in (".h", ".hpp"):
+                header_paths.append(e.path)
+        header_paths = list(dict.fromkeys(header_paths))
+
+        cpp_source = _generate_native_cpp(
+            crate_name,
+            cpp_contracts_flat,
+            header_includes=[Path(h).name for h in header_paths],
+        )
+        cpp_source_path.write_text(cpp_source, encoding="utf-8")
+
+        for header_path in header_paths:
+            hdr_path = self.workspace / header_path
+            hdr_path.parent.mkdir(parents=True, exist_ok=True)
+            if not hdr_path.exists():
+                hdr_path.write_text(_generate_cpp_header(crate_name, cpp_contracts_flat), encoding="utf-8")
+            if not any(e.path == header_path for e in blueprint.manifest):
+                blueprint.manifest.append(ManifestEntry(path=header_path, lang="cpp", purpose="C-ABI header"))
 
         compiler = _find_cpp_compiler() or "g++"
+        include_dirs = [str(Path(h).parent) for h in header_paths if Path(h).parent != Path(".")]
+        (self.workspace / "src" / "cpp_core").mkdir(parents=True, exist_ok=True)
+        (self.workspace / "tests").mkdir(exist_ok=True)
         (self.workspace / "Cargo.toml").write_text(_generate_cargo_toml(crate_name), encoding="utf-8")
-        (self.workspace / "build.rs").write_text(_generate_build_rs(compiler), encoding="utf-8")
+        (self.workspace / "build.rs").write_text(_generate_build_rs(compiler, str(cpp_source_entry.path), include_dirs), encoding="utf-8")
         (self.workspace / "src" / "lib.rs").write_text(_generate_lib_rs(cpp_contracts), encoding="utf-8")
         (self.workspace / "src" / "main.rs").write_text(_generate_main_rs(crate_name, cpp_contracts), encoding="utf-8")
         (self.workspace / "tests" / "test_hybrid_cpp_rust.rs").write_text(_generate_test_rs(crate_name, cpp_contracts), encoding="utf-8")
@@ -524,7 +578,11 @@ class HybridCppRustMaterializer:
             ManifestEntry(path="build.rs", lang="rust", purpose="C++ build and link script"),
             ManifestEntry(path="src/lib.rs", lang="rust", purpose="Rust library wrappers"),
             ManifestEntry(path="src/main.rs", lang="rust", purpose="Rust CLI binary"),
-            ManifestEntry(path="src/cpp_core/native.cpp", lang="cpp", purpose="C-ABI math source"),
+            ManifestEntry(path=cpp_source_entry.path, lang="cpp", purpose="C-ABI math source"),
+            *[
+                ManifestEntry(path=hp, lang="cpp", purpose="C-ABI header")
+                for hp in header_paths
+            ],
             ManifestEntry(path="tests/test_hybrid_cpp_rust.rs", lang="rust", purpose="Rust integration test"),
             ManifestEntry(path="README.md", lang="markdown", purpose="Project README"),
         ]

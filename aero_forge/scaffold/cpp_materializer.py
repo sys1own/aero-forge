@@ -523,7 +523,83 @@ def _special_cpp_source(pkg_name: str, contract: ContractEntry) -> str:
     return ""
 
 
-def _generate_native_cpp(pkg_name: str, contracts: List[ContractEntry]) -> str:
+def _c_function_decl(contract: ContractEntry) -> str:
+    """Return the ``extern "C"`` declaration for *contract* matching its implementation."""
+    from aero_forge.scaffold.polyglot_materializer import _parse_signature
+
+    name, args, return_type = _parse_signature(contract.signature)
+    if _is_special_cpp_contract(contract):
+        list_args = [a for a, t in args if _is_c_abi_list(t)]
+        return_list = _is_c_abi_list(return_type) or _is_c_abi_tuple_return(return_type)
+        output_list_arg = list_args[-1] if (not return_list and list_args) else None
+        c_params = [
+            _special_cpp_param_decl(a, t, is_output=(a == output_list_arg))
+            for a, t in args
+        ]
+        if return_list:
+            c_params.append("size_t* out_len")
+            ret = "double*"
+        else:
+            tmap = {"float": "double", "int": "int64_t", "bool": "bool", "str": "const char*"}
+            ret = tmap.get(_map_py_type(return_type), "void")
+        return f'    AERO_EXPORT {ret} {name}({", ".join(c_params)});'
+
+    emitter = CppEmitter(c_abi=True)
+    c_params: List[str] = []
+    for a, t in args:
+        if emitter._is_list_type(t):
+            c_params.append(f"const {emitter._c_elem_type(t)}* {a}")
+            c_params.append(f"size_t {a}_len")
+        else:
+            c_params.append(f"{emitter._c_scalar_type(t)} {a}")
+    if emitter._is_list_type(return_type):
+        c_params.append("size_t* out_len")
+    ret = emitter._c_return_type(return_type)
+    return f'    AERO_EXPORT {ret} {name}({", ".join(c_params)});'
+
+
+def _generate_cpp_header(pkg_name: str, contracts: List[ContractEntry]) -> str:
+    """Generate a C/C++ header with ``extern "C"`` declarations for C-ABI *contracts*."""
+    lines = [
+        "#pragma once",
+        "",
+        '#ifdef _WIN32',
+        '#define AERO_EXPORT __declspec(dllexport)',
+        '#else',
+        '#define AERO_EXPORT __attribute__((visibility("default")))',
+        '#endif',
+        "",
+        "#include <cstdint>",
+        "#include <cstddef>",
+        "",
+        "#ifdef __cplusplus",
+        'extern "C" {',
+        "#endif",
+        "",
+    ]
+    for contract in contracts:
+        if not contract.signature or not _is_c_abi_contract(contract):
+            continue
+        try:
+            decl = _c_function_decl(contract)
+            lines.append(decl)
+        except Exception:
+            continue
+    lines.extend([
+        "",
+        "#ifdef __cplusplus",
+        "}",
+        "#endif",
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def _generate_native_cpp(
+    pkg_name: str,
+    contracts: List[ContractEntry],
+    header_includes: Optional[List[str]] = None,
+) -> str:
     """Generate an ``extern "C"`` shared-library C++ source from *contracts*."""
     normal_contracts: List[ContractEntry] = []
     special_contracts: List[ContractEntry] = []
@@ -539,7 +615,7 @@ def _generate_native_cpp(pkg_name: str, contracts: List[ContractEntry]) -> str:
         language_router.should_accelerate_with_native(telemetry_source, min_numeric_ops=2)
         language_router.select_native_backend(telemetry_source, hint="cpp")
         normal_contracts.append(contract)
-    
+
     specs: List[EngineSpec] = []
     for contract in normal_contracts:
         spec = _contract_to_engine_spec(pkg_name, contract)
@@ -557,15 +633,19 @@ def _generate_native_cpp(pkg_name: str, contracts: List[ContractEntry]) -> str:
     )
     source = CppEmitter(c_abi=True).emit(combined)
 
+    include_block = ""
+    if header_includes:
+        include_block = "\n".join(f'#include "{Path(h).name}"' for h in header_includes) + "\n"
+
     if special_contracts:
         special_parts = [_special_cpp_source(pkg_name, c) for c in special_contracts]
         source = source.rstrip() + "\n\n" + "\n\n".join(p for p in special_parts if p) + "\n"
 
     if not specs and not special_contracts:
         # Keep the file syntactically valid even when nothing is accelerated.
-        return "// Auto-generated C-ABI shared library for aero-forge\n// No C-ABI-compatible contracts were detected.\n"
+        return include_block + "// Auto-generated C-ABI shared library for aero-forge\n// No C-ABI-compatible contracts were detected.\n"
 
-    return source
+    return include_block + source
 
 
 def _generate_pyproject_toml(pkg_name: str) -> str:
@@ -957,6 +1037,11 @@ class CppPolyglotMaterializer:
         project = blueprint.project or "polyglot_cpp_project"
         pkg_name = _sanitize_module_name(project)
         contracts = list(blueprint.contracts) if blueprint.contracts else list(_DEFAULT_CONTRACTS)
+        if not blueprint.contracts:
+            blueprint.contracts = contracts
+        if not blueprint.abi_contracts:
+            from aero_forge.blueprint import _contracts_to_abi_contracts
+            blueprint.abi_contracts = _contracts_to_abi_contracts(contracts, list(blueprint.manifest))
         if blueprint.abi_contracts:
             abi_entries = _contracts_from_abi(blueprint.abi_contracts)
             existing_names = {c.name for c in contracts}
@@ -984,9 +1069,42 @@ class CppPolyglotMaterializer:
 
         _accel_log("info", "Routing C++ selective acceleration through CppEmitter and CppPolyglotMaterializer")
 
-        (pkg_dir / "native.cpp").write_text(
-            _generate_native_cpp(pkg_name, contracts), encoding="utf-8"
+        # Resolve C++ source and header paths from the blueprint manifest / module graph.
+        cpp_entries = [
+            e for e in blueprint.manifest
+            if e.lang == "cpp" or Path(e.path).suffix in (".cpp", ".cc", ".cxx", ".h", ".hpp")
+        ]
+        cpp_source_entry = next(
+            (e for e in cpp_entries if Path(e.path).suffix in (".cpp", ".cc", ".cxx")),
+            None,
         )
+        if cpp_source_entry is None:
+            cpp_source_entry = ManifestEntry(path=f"{pkg_name}/native.cpp", lang="cpp", purpose="C-ABI shared library source")
+            blueprint.manifest.append(cpp_source_entry)
+        cpp_source_path = self.workspace / cpp_source_entry.path
+
+        header_paths: List[str] = []
+        for abi in blueprint.abi_contracts:
+            if abi.header_path:
+                header_paths.append(abi.header_path)
+        for e in cpp_entries:
+            if Path(e.path).suffix in (".h", ".hpp"):
+                header_paths.append(e.path)
+        header_paths = list(dict.fromkeys(header_paths))
+
+        cpp_source_path.parent.mkdir(parents=True, exist_ok=True)
+        cpp_source_path.write_text(
+            _generate_native_cpp(pkg_name, contracts, header_includes=[Path(h).name for h in header_paths]),
+            encoding="utf-8",
+        )
+
+        for header_path in header_paths:
+            hdr_path = self.workspace / header_path
+            hdr_path.parent.mkdir(parents=True, exist_ok=True)
+            hdr_path.write_text(_generate_cpp_header(pkg_name, contracts), encoding="utf-8")
+            if not any(e.path == header_path for e in blueprint.manifest):
+                blueprint.manifest.append(ManifestEntry(path=header_path, lang="cpp", purpose="C-ABI header"))
+
         (pkg_dir / "__init__.py").write_text(
             _generate_init(pkg_name, pkg_dir, contracts), encoding="utf-8"
         )
@@ -1006,8 +1124,12 @@ class CppPolyglotMaterializer:
             _generate_tests(pkg_name, function_names, contracts=contracts), encoding="utf-8"
         )
 
+        # Manifest integrity: ensure every declared entry exists, including
+        # any extra files requested by the module_graph/manifest (e.g. CMakeLists.txt).
+        self._write_missing_manifest_entries(blueprint, pkg_name, contracts, function_names)
+
         manifest: List[ManifestEntry] = [
-            ManifestEntry(path=f"{pkg_name}/native.cpp", lang="cpp", purpose="C-ABI shared library source"),
+            ManifestEntry(path=str(cpp_source_path.relative_to(self.workspace)), lang="cpp", purpose="C-ABI shared library source"),
             ManifestEntry(path=f"{pkg_name}/__init__.py", lang="python", purpose="ctypes loader package init"),
             ManifestEntry(path=f"{pkg_name}/cli.py", lang="python", purpose="CLI module"),
             ManifestEntry(path="pyproject.toml", lang="toml", purpose="project manifest"),
@@ -1015,8 +1137,6 @@ class CppPolyglotMaterializer:
             ManifestEntry(path="tests/test_cli.py", lang="python", purpose="tests"),
             ManifestEntry(path="README.md", lang="markdown", purpose="docs"),
         ]
-
-        # Merge manifest into the blueprint so enforcement checks see the files.
         existing_paths = {e.path for e in blueprint.manifest}
         for entry in manifest:
             if entry.path not in existing_paths:
@@ -1025,7 +1145,7 @@ class CppPolyglotMaterializer:
         write_blueprint(blueprint, self.workspace / "blueprint.aero")
 
         if build:
-            self._build_extension(pkg_name, pkg_dir)
+            self._build_extension(pkg_name, pkg_dir, cpp_source_path, header_paths)
 
         functions = [
             FunctionSpec(
@@ -1049,26 +1169,33 @@ class CppPolyglotMaterializer:
 
         return blueprint
 
-    def _build_extension(self, pkg_name: str, pkg_dir: Path) -> bool:
+    def _build_extension(
+        self,
+        pkg_name: str,
+        pkg_dir: Path,
+        cpp_source_path: Path,
+        header_paths: List[str],
+    ) -> bool:
         """Compile the C-ABI shared library in place. Returns True on success."""
         compiler = _find_cpp_compiler()
         if compiler is None:
             raise RuntimeError("No C++ compiler found (g++, clang++, or c++)")
 
-        cpp_path = pkg_dir / "native.cpp"
         so_name = _so_name(pkg_name)
         so_path = pkg_dir / so_name
 
+        include_dirs = {str(Path(h).parent) for h in header_paths if Path(h).parent != Path(".")}
         build_cmd = [
             compiler,
             "-shared",
             "-fPIC",
             "-O2",
             "-std=c++17",
-            "-o",
-            str(so_path),
-            str(cpp_path),
         ]
+        for inc in sorted(include_dirs):
+            build_cmd.extend(["-I", str(self.workspace / inc)])
+        build_cmd.extend(["-o", str(so_path), str(cpp_source_path)])
+
         self._log(f"Compiling C-ABI shared library: {' '.join(build_cmd)}")
         _accel_log("info", f"BUILD: compiling dynamic shared object with {' '.join(build_cmd)}")
 
@@ -1092,3 +1219,48 @@ class CppPolyglotMaterializer:
 
         _accel_log("success", f"BUILD: dynamic shared library compiled: {so_path}")
         return True
+
+    def _write_missing_manifest_entries(
+        self,
+        blueprint: Blueprint,
+        pkg_name: str,
+        contracts: List[ContractEntry],
+        function_names: List[str],
+    ) -> None:
+        """Materialize any manifest entry that has not already been written."""
+        for entry in list(blueprint.manifest):
+            path = self.workspace / entry.path
+            if path.exists():
+                continue
+            rel = Path(entry.path)
+            content: Optional[str] = None
+            if entry.lang == "cpp":
+                if rel.suffix in (".h", ".hpp"):
+                    content = _generate_cpp_header(pkg_name, contracts)
+                elif rel.suffix in (".cpp", ".cc", ".cxx"):
+                    content = _generate_native_cpp(pkg_name, contracts)
+                else:
+                    content = "// C++ placeholder\n"
+            elif entry.lang == "python":
+                if rel.name == "__init__.py":
+                    content = _generate_init(pkg_name, path.parent, contracts)
+                elif rel.name == "cli.py":
+                    content = _generate_cli(pkg_name, function_names, contracts=contracts)
+                elif rel.name == "native_bridge.py":
+                    native_names = [n for n in function_names if _is_c_abi_contract(next((c for c in contracts if c.signature and _parse_signature(c.signature)[0] == n), ContractEntry(name="", signature="")))]
+                    stub = "\n".join(_contract_to_python_stub(c) for c in contracts if _is_c_abi_contract(c))
+                    so_path = (self.workspace / pkg_name / _so_name(pkg_name)).resolve()
+                    content = _ctypes_loader_source(stub, so_path, native_names)
+                elif "test" in rel.name and rel.suffix == ".py":
+                    content = _generate_tests(pkg_name, function_names, contracts=contracts)
+                elif rel.suffix == ".py":
+                    content = f"# {rel.name} placeholder generated by aero-forge\n"
+            elif entry.lang == "toml":
+                content = "# TOML placeholder\n"
+            elif entry.lang == "markdown":
+                content = f"# {blueprint.project or 'project'}\n"
+            elif entry.lang == "cmake":
+                content = "cmake_minimum_required(VERSION 3.10)\nproject(aero_forge_project)\n"
+            if content is not None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
