@@ -17,6 +17,7 @@ dependencies = [
     "numpy",
     "pybind11",
     "networkx",
+    "blake3",
     "z3-solver",
     "websockets>=10.0",
     "aiohttp>=3.8",

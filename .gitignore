@@ -8,6 +8,8 @@ __pycache__/
 *.so
 *.dylib
 *.dll
+**/target/
+**/.cargo/
 *.bak
 dist/
 dist_*/
