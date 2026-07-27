@@ -684,7 +684,7 @@ def test_api_workspace_accelerate_stream_logs(server):
     assert status == 200
     assert summary is not None
     assert any(m.get("type") == "accel" and "Detected" in m.get("data", "") for m in messages)
-    assert any(m.get("type") == "accel" and "Python" in m.get("data", "") for m in messages)
+    assert any(m.get("type") == "accel" and "Python" in m.get("data", "") and "detected" in m.get("data", "").lower() for m in messages)
 
 
 def test_api_build_passes_cargo_logs_and_test_counts(server, monkeypatch):
