@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from aero_forge.config import Tier
+
 
 @dataclass
 class Algorithm:
@@ -166,7 +168,10 @@ def select_algorithm(
         from aero_forge.llm.clients import get_llm_client
 
         client = get_llm_client(
-            llm_provider, model=model, config_override=config_override
+            llm_provider,
+            model=model,
+            config_override=config_override,
+            tier=Tier.FAST,
         )
         if client is not None:
             descriptions = []

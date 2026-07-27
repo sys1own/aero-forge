@@ -69,8 +69,15 @@ class TestGetLLMClient:
         monkeypatch.delenv("AERO_FORGE_MODEL", raising=False)
         client = get_llm_client("openrouter")
         assert isinstance(client, OpenRouterClient)
-        assert client.model == "openrouter/free"
+        assert client.model == "anthropic/claude-3-haiku"
         assert client.api_key == "sk-or"
+
+    def test_openrouter_reasoning_tier(self, monkeypatch):
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or")
+        monkeypatch.delenv("AERO_FORGE_MODEL", raising=False)
+        client = get_llm_client("openrouter", tier="reasoning")
+        assert isinstance(client, OpenRouterClient)
+        assert client.model == "anthropic/claude-3.5-sonnet"
 
     def test_openrouter_falls_back_to_aero_forge_key(self, monkeypatch):
         monkeypatch.setenv("AERO_FORGE_API_KEY", "sk-generic")

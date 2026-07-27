@@ -25,7 +25,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from aero_forge.build_summary import format_build_summary
 from aero_forge.bundle_repo import bundle_workspace, format_context_block
-from aero_forge.config import ConfigOverride
+from aero_forge.config import ConfigOverride, Tier
 from aero_forge.error_explainer import explain_error
 from aero_forge.healing.router import try_auto_fix
 from aero_forge.generate import (
@@ -468,6 +468,7 @@ class ChatSession:
             model=self.model,
             max_retries=self.max_retries,
             config_override=self.config_override,
+            tier=Tier.FAST,
         )
         if client is None:
             return (
@@ -728,6 +729,7 @@ class ChatSession:
             model=self.model,
             max_retries=self.max_retries,
             config_override=self.config_override,
+            tier=Tier.REASONING,
         )
         if client is None:
             return {"message": "No LLM provider configured for multi-file generation."}
@@ -977,6 +979,7 @@ class ChatSession:
             model=self.model,
             max_retries=self.max_retries,
             config_override=self.config_override,
+            tier=Tier.FAST,
         )
         if client is None:
             return {

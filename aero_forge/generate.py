@@ -17,7 +17,7 @@ from aero_forge.blueprint import (
     generate_blueprint,
 )
 from aero_forge.build_runner import BuildRunner
-from aero_forge.config import ConfigOverride
+from aero_forge.config import ConfigOverride, Tier
 from aero_forge.errors import UserError
 from aero_forge.builder.intent_compiler import IntentCompiler
 from aero_forge.llm.clients import get_llm_client
@@ -290,6 +290,7 @@ def generate_from_prompt(
         model=model,
         max_retries=max_retries,
         config_override=config_override,
+        tier=Tier.REASONING,
     )
     if client is None:
         raise GenerationError(
@@ -513,6 +514,7 @@ def _review_code(
         model=model,
         max_retries=max_retries,
         config_override=config_override,
+        tier=Tier.REASONING,
     )
     if client is None:
         return implementation
@@ -1052,6 +1054,7 @@ def _ask_for_optimize(
         model=model,
         max_retries=max_retries,
         config_override=config_override,
+        tier=Tier.REASONING,
     )
     if client is None:
         return None
@@ -1112,6 +1115,7 @@ def _ask_for_fix(
         model=model,
         max_retries=max_retries,
         config_override=config_override,
+        tier=Tier.REASONING,
     )
     if client is None:
         return None

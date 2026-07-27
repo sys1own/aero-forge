@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field, asdict
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
@@ -126,6 +128,118 @@ DEFAULTS: Dict[str, Any] = {
 }
 
 
+class Tier(str, Enum):
+    """LLM routing tiers."""
+
+    FAST = "fast"
+    REASONING = "reasoning"
+
+
+DEFAULT_TIER_MODELS: Dict[str, Dict[str, str]] = {
+    "deepseek": {
+        "fast": "deepseek-v4-flash",
+        "reasoning": "deepseek-v4-pro",
+    },
+    "openai": {
+        "fast": "gpt-4o-mini",
+        "reasoning": "gpt-4o",
+    },
+    "gemini": {
+        "fast": "gemini-2.5-flash",
+        "reasoning": "gemini-2.5-pro",
+    },
+    "openrouter": {
+        "fast": "anthropic/claude-3-haiku",
+        "reasoning": "anthropic/claude-3.5-sonnet",
+    },
+}
+
+
+def _merge_tier_env(
+    tier: str,
+    mapping: Dict[str, Dict[str, str]],
+    provider: Optional[str] = None,
+) -> Dict[str, Dict[str, str]]:
+    """Merge a JSON or per-provider env override into the tier mapping."""
+    value = os.getenv(f"AERO_LLM_TIER_{tier.upper()}")
+    if not value:
+        return mapping
+    value = value.strip()
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        # Treat the raw value as a model name for the requested provider.
+        if provider:
+            parsed = {provider: value}
+        else:
+            return mapping
+    if not isinstance(parsed, dict):
+        return mapping
+    merged = {k: dict(v) for k, v in mapping.items()}
+    for key, val in parsed.items():
+        if isinstance(val, dict):
+            merged.setdefault(key, {})
+            merged[key].update({t: str(m) for t, m in val.items()})
+        elif provider and key == provider:
+            merged.setdefault(provider, {})
+            merged[provider][tier] = str(val)
+        else:
+            # key is a provider, val is a model name for this tier.
+            merged.setdefault(key, {})[tier] = str(val)
+    return merged
+
+
+def resolve_tier_model(
+    provider: str,
+    tier: str,
+    file_config: Optional[Dict[str, Any]] = None,
+    override: Optional[ConfigOverride] = None,
+) -> Optional[str]:
+    """Return the model name for *provider* and *tier*.
+
+    Resolution order:
+    1. Explicit override.model, if set.
+    2. Environment variable ``AERO_LLM_TIER_<TIER>`` (JSON mapping or raw model name).
+    3. ``llm`` config section / ``tier_models`` config section.
+    4. ``DEFAULT_TIER_MODELS``.
+    """
+    active = override or current_override()
+    if active is not None and active.model:
+        return active.model
+
+    provider = provider.lower()
+    tier = tier.lower()
+    mapping = copy.deepcopy(DEFAULT_TIER_MODELS)
+    mapping = _merge_tier_env("fast", mapping, provider=provider)
+    mapping = _merge_tier_env("reasoning", mapping, provider=provider)
+
+    file_config = file_config or {}
+    # Support [tier_models] section with keys like ``deepseek_fast`` or nested dicts.
+    tier_section = file_config.get("tier_models") or {}
+    if isinstance(tier_section, dict):
+        for key, val in tier_section.items():
+            if isinstance(val, dict):
+                mapping.setdefault(key, {}).update(val)
+            elif "_" in key:
+                p, t = key.split("_", 1)
+                mapping.setdefault(p, {})[t] = str(val)
+    # Support [llm] section with ``tier_fast`` / ``tier_reasoning`` JSON mappings.
+    llm_section = file_config.get("llm") or {}
+    if isinstance(llm_section, dict):
+        for t in ("fast", "reasoning"):
+            val = llm_section.get(f"tier_{t}")
+            if val:
+                try:
+                    parsed = json.loads(val) if isinstance(val, str) else val
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    for p, m in parsed.items():
+                        mapping.setdefault(p, {})[t] = str(m)
+
+    return mapping.get(provider, {}).get(tier)
+
+
 def _env_list(name: str) -> Optional[List[str]]:
     value = os.getenv(name)
     if not value:
@@ -236,4 +350,7 @@ __all__ = [
     "load_config",
     "override",
     "resolve_settings",
+    "DEFAULT_TIER_MODELS",
+    "Tier",
+    "resolve_tier_model",
 ]
