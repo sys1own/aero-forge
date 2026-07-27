@@ -316,7 +316,11 @@
     }
     .action-btn:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
     .action-btn:disabled { opacity: 0.6; cursor: not-allowed; }
-    #terminal { position: absolute; top: 0; left: 0; right: 0; bottom: 28px; }
+    #heal-banner { display: none; position: absolute; top: 0; left: 0; right: 0; z-index: 2; padding: 0.4rem 0.6rem; background: rgba(245, 209, 136, 0.15); border-bottom: 1px solid var(--warning); color: var(--text); font-size: 0.8rem; align-items: center; gap: 0.6rem; }
+    #heal-banner.visible { display: flex; }
+    #heal-banner button { font-size: 0.75rem; padding: 0.25rem 0.5rem; }
+    #terminal { position: absolute; top: 0; left: 0; right: 0; bottom: 28px; transition: top 0.15s ease; }
+    #terminal-panel.heal-visible #terminal { top: 36px; }
     #terminal-bar {
       position: absolute; left: 0; right: 0; bottom: 0; height: 28px;
       display: flex; align-items: center; gap: 0.4rem;
@@ -521,6 +525,7 @@
         </div>
         <div class="bottom-body">
           <div id="terminal-panel" class="bottom-panel active">
+            <div id="heal-banner"></div>
             <div id="terminal"></div>
             <div id="terminal-bar">
               <label>$</label>
@@ -647,6 +652,9 @@
       socket: null,
       contextTarget: null,
       treeRefreshInterval: null,
+      lastTerminalCommand: '',
+      lastTerminalExitCode: null,
+      lastTerminalLog: '',
       treeExpanded: new Set(),
     };
 
@@ -709,6 +717,7 @@
       terminalInput: document.getElementById('terminal-input'),
       terminalRun: document.getElementById('terminal-run'),
       terminalClear: document.getElementById('terminal-clear'),
+      healBanner: document.getElementById('heal-banner'),
       actionButtons: document.getElementById('action-buttons'),
       runBtn: document.getElementById('run-btn'),
       runOutput: document.getElementById('run-output'),
@@ -1335,12 +1344,16 @@
       if (!state.sessionId) { log('No session; save settings first', 'error'); return; }
       const cmd = (typeof command === 'string' ? command : ui.terminalInput.value).trim();
       if (!cmd) return;
+      hideHealBanner();
       if (typeof command !== 'string') ui.terminalInput.value = '';
       if (state.term) {
         state.term.write(`\r\n$ ${cmd}\r\n`);
       }
       switchBottomTab('terminal');
       setBusy(true);
+      state.lastTerminalCommand = cmd;
+      state.lastTerminalExitCode = null;
+      state.lastTerminalLog = '';
       try {
         const res = await fetch('/api/terminal/run', {
           method: 'POST',
@@ -1355,6 +1368,8 @@
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
+        let exitCode = 0;
+        let logLines = [];
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -1367,7 +1382,12 @@
               const msg = JSON.parse(line);
               if (msg.type === 'stdout' || msg.type === 'stderr') {
                 if (state.term) state.term.writeln((msg.data || '') + '\r');
+                logLines.push(msg.data || '');
+              } else if (msg.type === 'accel') {
+                if (state.term) state.term.writeln((msg.data || '') + '\r');
+                logLines.push(msg.data || '');
               } else if (msg.type === 'summary') {
+                exitCode = msg.exit_code;
                 state.lastCwd = msg.cwd || state.lastCwd;
                 const prompt = `${state.lastCwd || state.sessionId}# `;
                 if (state.term) state.term.write(`\r\n[exit ${msg.exit_code}] ${msg.duration_ms}ms\r\n${prompt}`);
@@ -1377,8 +1397,69 @@
             }
           }
         }
+        state.lastTerminalExitCode = exitCode;
+        state.lastTerminalLog = logLines.join('\n');
+        if (exitCode !== 0) {
+          await evaluateTerminalError(cmd, exitCode, state.lastTerminalLog);
+        }
       } catch (e) {
         if (state.term) state.term.write(`\r\nTerminal error: ${e.message}\r\n`);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    async function evaluateTerminalError(command, exitCode, logText) {
+      try {
+        const res = await fetch('/api/workspace/evaluate-error', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildBody({ command, exit_code: exitCode, log_text: logText })),
+        });
+        if (!res.ok) return;
+        const diagnosis = await res.json();
+        if (diagnosis.healable) {
+          showHealBanner(diagnosis.summary, diagnosis.target_file, command, exitCode, logText);
+        }
+      } catch (e) {
+        // Non-critical; banner simply won't appear.
+      }
+    }
+
+    function showHealBanner(summary, targetFile, command, exitCode, logText) {
+      if (!ui.healBanner) return;
+      ui.healBanner.innerHTML = `<span>&#9889; Self-Heal Available: ${escapeHtml(summary)} (${escapeHtml(targetFile || '')})</span><button id="apply-heal-btn" class="run-btn">&#128295; Apply Fix &amp; Re-run</button>`;
+      ui.healBanner.classList.add('visible');
+      ui.terminalPanel.classList.add('heal-visible');
+      document.getElementById('apply-heal-btn').addEventListener('click', () => applyHeal(command, exitCode, logText));
+    }
+
+    function hideHealBanner() {
+      if (!ui.healBanner) return;
+      ui.healBanner.classList.remove('visible');
+      ui.healBanner.innerHTML = '';
+      ui.terminalPanel.classList.remove('heal-visible');
+    }
+
+    async function applyHeal(command, exitCode, logText) {
+      setBusy(true);
+      try {
+        const res = await fetch('/api/workspace/heal', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildBody({ command, exit_code: exitCode, log_text: logText })),
+        });
+        const data = await res.json();
+        if (!res.ok || data.status !== 'patched') {
+          log(data.error || 'No deterministic patch available', 'error');
+          return;
+        }
+        log(`Self-heal applied to ${data.target_file}`, 'success');
+        loadTree();
+        hideHealBanner();
+        runTerminalCommand(command);
+      } catch (e) {
+        log(`Self-heal failed: ${e.message}`, 'error');
       } finally {
         setBusy(false);
       }
@@ -1600,6 +1681,7 @@
         state.tabs = [];
         state.activeTab = null;
         renderTabs();
+        hideHealBanner();
         if (ui.actionButtons) ui.actionButtons.innerHTML = '';
         ui.runOutput.innerHTML = '<div class="placeholder" style="color:var(--muted);padding:0.5rem 0">Click Run or press Ctrl+Enter to execute the active file.</div>';
         ui.acceleratorLog.innerHTML = '<div class="placeholder" style="color:var(--muted);padding:0.5rem 0">Accelerator events appear here when native code is executed.</div>';

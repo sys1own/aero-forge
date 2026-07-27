@@ -310,6 +310,12 @@ class ChatSession:
         self.last_build_result: Optional[Dict[str, Any]] = None
         self.project_context: Optional[str] = None
 
+        # Terminal context for self-healing
+        self.last_terminal_command: Optional[str] = None
+        self.last_terminal_exit_code: Optional[int] = None
+        self.last_terminal_log: Optional[str] = None
+        self.last_evaluator_state: Optional[Dict[str, Any]] = None
+
         self.base_system_prompt = (
             "You are Aero-Forge, a fast, friendly coding co-pilot. "
             "Talk like a helpful teammate: casual, short, and punchy. "
@@ -350,6 +356,10 @@ class ChatSession:
             self.last_error = data.get("last_error")
             self.last_build_result = data.get("last_build_result")
             self.project_context = data.get("project_context")
+            self.last_terminal_command = data.get("last_terminal_command")
+            self.last_terminal_exit_code = data.get("last_terminal_exit_code")
+            self.last_terminal_log = data.get("last_terminal_log")
+            self.last_evaluator_state = data.get("last_evaluator_state")
             loaded_output = data.get("output_dir")
             if loaded_output:
                 self.output_dir = Path(loaded_output)
@@ -375,6 +385,28 @@ class ChatSession:
             self.project_context = context
             self.system_prompt = self.base_system_prompt + "\n\n" + context
 
+        if self.last_terminal_log:
+            terminal_summary = (
+                f"[TERMINAL CONTEXT]\nCommand: {self.last_terminal_command}\n"
+                f"Exit code: {self.last_terminal_exit_code}\n"
+                f"LogEvaluator: {self.last_evaluator_state}\n"
+            )
+            self.system_prompt += "\n\n" + terminal_summary
+
+    def set_terminal_context(
+        self,
+        command: str,
+        exit_code: int,
+        log_text: str,
+    ) -> None:
+        """Store the latest terminal failure and its LogEvaluator diagnosis."""
+        from aero_forge.healing.evaluator import LogEvaluator
+
+        self.last_terminal_command = command
+        self.last_terminal_exit_code = exit_code
+        self.last_terminal_log = log_text
+        self.last_evaluator_state = LogEvaluator().evaluate_log(command, exit_code, log_text)
+
     def _save_session(self) -> None:
         path = _session_path(self.session_id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -391,6 +423,10 @@ class ChatSession:
             "last_error": self.last_error,
             "last_build_result": self.last_build_result,
             "project_context": self.project_context,
+            "last_terminal_command": self.last_terminal_command,
+            "last_terminal_exit_code": self.last_terminal_exit_code,
+            "last_terminal_log": self.last_terminal_log,
+            "last_evaluator_state": self.last_evaluator_state,
         }
         try:
             path.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -509,6 +545,18 @@ class ChatSession:
 
         if any(phrase in lowered for phrase in ("explain", "why")):
             return self._explain_action()
+
+        if any(
+            phrase in lowered
+            for phrase in (
+                "fix error",
+                "fix build",
+                "apply self heal",
+                "self heal",
+                "heal",
+            )
+        ):
+            return self._heal_action()
 
         return None
 
@@ -965,6 +1013,57 @@ class ChatSession:
             config_override=self.config_override,
         )
         return {"message": f"Here's what went wrong:\n\n{explanation}"}
+
+    def _heal_action(self) -> Dict[str, Any]:
+        """Apply a deterministic self-healing patch to the failing source file."""
+        if not self.last_terminal_log:
+            return {"message": "No terminal error context. Run a command that fails, then ask me to 'fix error'."}
+
+        from aero_forge.healing.evaluator import LogEvaluator
+
+        evaluator = LogEvaluator()
+        diagnosis = evaluator.evaluate_log(
+            self.last_terminal_command or "",
+            self.last_terminal_exit_code or 1,
+            self.last_terminal_log,
+        )
+        self.last_evaluator_state = diagnosis
+
+        target_file = diagnosis.get("target_file") or "main.py"
+        target_path = self.output_dir / target_file
+        if not target_path.is_file():
+            return {
+                "message": f"Could not locate target file '{target_file}' for healing.",
+                "diagnosis": diagnosis,
+            }
+
+        original = target_path.read_text(encoding="utf-8")
+        patched = try_auto_fix(self.last_terminal_log, original)
+        if patched is None or patched == original:
+            return {
+                "message": "No deterministic patch matched this error.",
+                "diagnosis": diagnosis,
+                "status": "not_fixable",
+            }
+
+        target_path.write_text(patched, encoding="utf-8")
+        diff = "\n".join(
+            difflib.unified_diff(
+                original.splitlines(keepends=True),
+                patched.splitlines(keepends=True),
+                fromfile=target_file,
+                tofile=target_file,
+            )
+        )
+
+        return {
+            "message": f"Applied a patch to {target_file}. Re-run `{self.last_terminal_command}` to verify.",
+            "status": "patched",
+            "target_file": target_file,
+            "diff": diff,
+            "diagnosis": diagnosis,
+            "rerun_command": self.last_terminal_command,
+        }
 
     def _help_action(self) -> Dict[str, Any]:
         """Return a friendly help message for chat commands."""
