@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from aero_forge.bundle_repo import scaffold_native_crate
+from aero_forge.scaffold.cargo_manifest import ensure_workspace_cargo_toml
 
 
 def _has_make_target(makefile: Path, target: str) -> bool:
@@ -45,6 +46,13 @@ def inspect_workspace(workspace_dir: Path) -> List[Dict[str, str]]:
 
     if (workspace_dir / "main.py").is_file():
         commands.append({"source": "main.py", "label": "Run main.py", "cmd": "python main.py"})
+
+    if (workspace_dir / "Cargo.toml").is_file():
+        # Workspace root present; prefer workspace-level cargo commands.
+        root_cargo_text = (workspace_dir / "Cargo.toml").read_text(encoding="utf-8")
+        if "[workspace]" in root_cargo_text:
+            commands.append({"source": "Cargo.toml", "label": "Cargo test workspace", "cmd": "cargo test --workspace"})
+            commands.append({"source": "Cargo.toml", "label": "Cargo build workspace", "cmd": "cargo build --workspace"})
 
     if (workspace_dir / "requirements.txt").is_file():
         commands.append(
@@ -109,13 +117,31 @@ def inspect_workspace(workspace_dir: Path) -> List[Dict[str, str]]:
 
     crate_cargo = workspace_dir / "crates" / "native_core" / "Cargo.toml"
     if crate_cargo.is_file():
-        commands.append(
-            {
-                "source": "crates/native_core/Cargo.toml",
-                "label": "Test native core",
-                "cmd": "cargo test --manifest-path crates/native_core/Cargo.toml",
-            }
-        )
+        # Prefer workspace-scoped package commands to avoid "current package
+        # believes it's in a workspace when it's not" errors.
+        if (workspace_dir / "Cargo.toml").is_file():
+            commands.append(
+                {
+                    "source": "crates/native_core/Cargo.toml",
+                    "label": "Test native core",
+                    "cmd": "cargo test -p native_core",
+                }
+            )
+            commands.append(
+                {
+                    "source": "crates/native_core/Cargo.toml",
+                    "label": "Build native core",
+                    "cmd": "cargo build -p native_core",
+                }
+            )
+        else:
+            commands.append(
+                {
+                    "source": "crates/native_core/Cargo.toml",
+                    "label": "Test native core",
+                    "cmd": "cargo test --manifest-path crates/native_core/Cargo.toml",
+                }
+            )
 
     package_json = workspace_dir / "package.json"
     if package_json.is_file():
@@ -156,5 +182,10 @@ def scaffold_pyo3_workspace(
     workspace_dir: Path,
     project_name: str = "generated-native",
 ) -> None:
-    """Inject a PyO3 native acceleration crate into ``workspace_dir`` if absent."""
+    """Inject a PyO3 native acceleration crate into ``workspace_dir`` if absent.
+
+    Also ensures the workspace root contains a ``Cargo.toml`` that registers
+    ``crates/native_core`` as a workspace member.
+    """
     scaffold_native_crate(workspace_dir, project_name=project_name)
+    ensure_workspace_cargo_toml(workspace_dir, crate_member="crates/native_core")
