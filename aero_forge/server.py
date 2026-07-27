@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
 import aiohttp
+import yaml
 from aiohttp import web
 
 from aero_forge.blueprint import generate_blueprint_from_uploaded_repo
@@ -1770,6 +1771,131 @@ async def _aiohttp_ws_handler(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+async def _handle_terminal_run_async(request: web.Request) -> web.StreamResponse:
+    """Run an arbitrary shell command inside a session sandbox and stream NDJSON output."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "Invalid JSON"}, status=400, headers=_CORS_HEADERS)
+
+    session_id = (body.get("session_id") or "").strip()
+    command = (body.get("command") or "").strip()
+    if not session_id:
+        return web.json_response({"error": "Missing 'session_id'"}, status=400, headers=_CORS_HEADERS)
+    if not command:
+        return web.json_response({"error": "Missing 'command'"}, status=400, headers=_CORS_HEADERS)
+
+    session_dir = _manager.create_session_sandbox(session_id)
+    timeout = float(os.environ.get("AERO_FORGE_TERMINAL_TIMEOUT", "60"))
+
+    response = web.StreamResponse(
+        status=200,
+        reason="OK",
+        headers={
+            "Content-Type": "application/x-ndjson",
+            "Access-Control-Allow-Origin": "*",
+        },
+    )
+    await response.prepare(request)
+
+    start = time.time()
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(session_dir),
+            env=os.environ.copy(),
+        )
+    except Exception as exc:
+        await response.write((json.dumps({"type": "stderr", "data": f"Failed to start process: {exc}"}) + "\n").encode("utf-8"))
+        await response.write((json.dumps({"type": "summary", "exit_code": -1, "duration_ms": 0}) + "\n").encode("utf-8"))
+        await response.write_eof()
+        return response
+
+    async def _read_stream(stream, tag):
+        while True:
+            try:
+                line = await asyncio.wait_for(stream.readline(), timeout=1.0)
+            except asyncio.TimeoutError:
+                if proc.returncode is not None:
+                    break
+                continue
+            if not line:
+                break
+            text = line.decode("utf-8", errors="replace").rstrip("\n")
+            payload = json.dumps({"type": tag, "data": text}) + "\n"
+            await response.write(payload.encode("utf-8"))
+
+    async def _drain_stream(stream):
+        try:
+            await stream.read()
+        except Exception:
+            pass
+
+    stdout_task = asyncio.create_task(_read_stream(proc.stdout, "stdout"))
+    stderr_task = asyncio.create_task(_read_stream(proc.stderr, "stderr"))
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        payload = json.dumps({"type": "stderr", "data": f"Command timed out after {timeout}s"}) + "\n"
+        await response.write(payload.encode("utf-8"))
+    finally:
+        stdout_task.cancel()
+        stderr_task.cancel()
+        try:
+            await stdout_task
+        except asyncio.CancelledError:
+            pass
+        try:
+            await stderr_task
+        except asyncio.CancelledError:
+            pass
+        # Drain any remaining bytes from the streams.
+        await _drain_stream(proc.stdout)
+        await _drain_stream(proc.stderr)
+
+    duration = (time.time() - start) * 1000
+    summary = json.dumps({"type": "summary", "exit_code": proc.returncode or 0, "duration_ms": round(duration, 1)}) + "\n"
+    await response.write(summary.encode("utf-8"))
+    await response.write_eof()
+    return response
+
+
+async def _handle_blueprint_async(request: web.Request) -> web.Response:
+    """Return the parsed ``blueprint.aero`` for the active session, exposing verification nodes."""
+    query = parse_qs(request.query_string)
+    session_id = _first(query, "session_id") or ""
+    if not session_id:
+        return web.json_response({"error": "Missing 'session_id'"}, status=400, headers=_CORS_HEADERS)
+
+    session_dir = _manager.create_session_sandbox(session_id)
+    blueprint_path = session_dir / "blueprint.aero"
+    if not blueprint_path.is_file():
+        return web.json_response({"error": "Blueprint not found"}, status=404, headers=_CORS_HEADERS)
+
+    try:
+        data = yaml.safe_load(blueprint_path.read_text(encoding="utf-8")) or {}
+    except Exception as exc:
+        return web.json_response({"error": f"Failed to parse blueprint: {exc}"}, status=500, headers=_CORS_HEADERS)
+
+    return web.json_response(
+        {
+            "session_id": session_id,
+            "metadata": data.get("metadata", {}),
+            "execution_strategy": data.get("execution_strategy", {}),
+            "abi_contracts": data.get("abi_contracts", []),
+            "module_graph": data.get("module_graph", []),
+            "verification_nodes": data.get("verification_nodes", []),
+            "manifest": data.get("manifest", []),
+        },
+        headers=_CORS_HEADERS,
+    )
+
+
 class AioForgeServer:
     """Combined HTTP + WebSocket server using aiohttp on a single port."""
 
@@ -1787,6 +1913,8 @@ class AioForgeServer:
         self.runner: Optional[web.AppRunner] = None
         self.app = web.Application()
         self.app.router.add_get("/ws/terminal", _aiohttp_ws_handler)
+        self.app.router.add_post("/api/terminal/run", _handle_terminal_run_async)
+        self.app.router.add_get("/api/blueprint", _handle_blueprint_async)
         self.app.router.add_route("*", "/{tail:.*}", functools.partial(_aiohttp_http_handler, port=self.port))
 
     async def _serve(self) -> None:
