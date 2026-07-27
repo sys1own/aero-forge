@@ -1859,7 +1859,12 @@ async def _handle_terminal_run_async(request: web.Request) -> web.StreamResponse
         await _drain_stream(proc.stderr)
 
     duration = (time.time() - start) * 1000
-    summary = json.dumps({"type": "summary", "exit_code": proc.returncode or 0, "duration_ms": round(duration, 1)}) + "\n"
+    summary = json.dumps({
+        "type": "summary",
+        "exit_code": proc.returncode or 0,
+        "duration_ms": round(duration, 1),
+        "cwd": str(session_dir),
+    }) + "\n"
     await response.write(summary.encode("utf-8"))
     await response.write_eof()
     return response
