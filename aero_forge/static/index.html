@@ -286,6 +286,32 @@
     .accel-line.success { color: var(--terminal-success); }
     .accel-line.error { color: var(--terminal-error); }
 
+    /* Terminal action bar */
+    #action-buttons {
+      display: flex; flex-wrap: wrap; gap: 0.4rem; padding: 0.35rem 0.6rem;
+      border-bottom: 1px solid var(--border); background: var(--panel); flex-shrink: 0;
+      min-height: 0; align-items: center;
+    }
+    .action-btn {
+      display: inline-flex; align-items: center; gap: 0.35rem;
+      background: var(--panel-3); color: var(--text); border: 1px solid var(--border); border-radius: 4px;
+      padding: 0.3rem 0.6rem; font-size: 0.75rem; cursor: pointer;
+    }
+    .action-btn:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .action-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    #terminal { position: absolute; top: 0; left: 0; right: 0; bottom: 28px; }
+    #terminal-bar {
+      position: absolute; left: 0; right: 0; bottom: 0; height: 28px;
+      display: flex; align-items: center; gap: 0.4rem;
+      background: var(--panel); border-top: 1px solid var(--border); padding: 0 0.4rem;
+    }
+    #terminal-bar label { color: var(--muted); font-size: 0.75rem; white-space: nowrap; }
+    #terminal-input {
+      flex: 1; background: var(--editor); color: var(--text); border: 1px solid var(--border); border-radius: 4px;
+      padding: 0.25rem 0.4rem; font-size: 0.8rem; font-family: Consolas, Monaco, 'Courier New', monospace;
+    }
+    #terminal-bar button { font-size: 0.75rem; padding: 0.25rem 0.5rem; }
+
     /* Modal */
     .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none; align-items: center; justify-content: center; z-index: 100; }
     .modal-overlay.open { display: flex; }
@@ -453,6 +479,7 @@
       <div id="gutter-bottom" class="gutter-y"></div>
 
       <section id="bottom-panel">
+        <div id="action-buttons"></div>
         <div class="bottom-tabs">
           <button class="bottom-tab active" data-bottom="terminal">Terminal</button>
           <button class="bottom-tab" data-bottom="build-log">Build Log</button>
@@ -460,7 +487,15 @@
           <button class="bottom-tab" data-bottom="accelerator">Accelerator Log</button>
         </div>
         <div class="bottom-body">
-          <div id="terminal-panel" class="bottom-panel active"></div>
+          <div id="terminal-panel" class="bottom-panel active">
+            <div id="terminal"></div>
+            <div id="terminal-bar">
+              <label>$</label>
+              <input id="terminal-input" type="text" placeholder="cargo run -- --cmd benchmark" autocomplete="off" />
+              <button id="terminal-run" class="run-btn">Run</button>
+              <button id="terminal-clear" class="icon-btn" title="Clear terminal">&#x239a;</button>
+            </div>
+          </div>
           <div id="build-log-panel" class="bottom-panel">
             <div id="log-lines"></div>
           </div>
@@ -605,6 +640,11 @@
       bottomTabs: document.querySelectorAll('.bottom-tab'),
       bottomPanels: document.querySelectorAll('.bottom-panel'),
       terminalPanel: document.getElementById('terminal-panel'),
+      terminal: document.getElementById('terminal'),
+      terminalInput: document.getElementById('terminal-input'),
+      terminalRun: document.getElementById('terminal-run'),
+      terminalClear: document.getElementById('terminal-clear'),
+      actionButtons: document.getElementById('action-buttons'),
       runBtn: document.getElementById('run-btn'),
       runOutput: document.getElementById('run-output'),
       runPanel: document.getElementById('run-panel'),
@@ -1072,7 +1112,7 @@
           state.fitAddon = new FitClass();
           state.term.loadAddon(state.fitAddon);
         }
-        state.term.open(ui.terminalPanel);
+        state.term.open(ui.terminal);
         if (state.fitAddon) state.fitAddon.fit();
 
         function sendTerminalInput(text) {
@@ -1223,6 +1263,96 @@
         appendRunOutput(`Run error: ${e.message}`, 'error');
       } finally {
         setBusy(false);
+      }
+    }
+
+    async function runTerminalCommand(command) {
+      if (!state.sessionId) { log('No session; save settings first', 'error'); return; }
+      const cmd = (typeof command === 'string' ? command : ui.terminalInput.value).trim();
+      if (!cmd) return;
+      if (typeof command !== 'string') ui.terminalInput.value = '';
+      if (state.term) {
+        state.term.writeln(`\r\n$ ${cmd}\r\n`);
+      }
+      switchBottomTab('terminal');
+      setBusy(true);
+      try {
+        const res = await fetch('/api/terminal/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildBody({ command: cmd })),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          if (state.term) state.term.writeln(`\r\nError: ${data.error || `HTTP ${res.status}`}\r\n`);
+          return;
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop();
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const msg = JSON.parse(line);
+              if (msg.type === 'stdout' || msg.type === 'stderr') {
+                if (state.term) state.term.writeln((msg.data || '') + '\r\n');
+              } else if (msg.type === 'summary') {
+                if (state.term) state.term.writeln(`\r\n[exit ${msg.exit_code}] ${msg.duration_ms}ms\r\n`);
+              }
+            } catch (e) {
+              if (state.term) state.term.writeln(line + '\r\n');
+            }
+          }
+        }
+      } catch (e) {
+        if (state.term) state.term.writeln(`\r\nTerminal error: ${e.message}\r\n`);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function resetTerminal() {
+      if (state.term) {
+        state.term.clear();
+        state.term.writeln('Terminal cleared.\r\n');
+      }
+    }
+
+    async function loadVerificationActions() {
+      if (!state.sessionId || !ui.actionButtons) return;
+      try {
+        const res = await fetch(`/api/blueprint?session_id=${encodeURIComponent(state.sessionId)}`);
+        if (!res.ok) { ui.actionButtons.innerHTML = ''; return; }
+        const data = await res.json();
+        renderVerificationActions(data.verification_nodes || []);
+      } catch (e) {
+        ui.actionButtons.innerHTML = '';
+      }
+    }
+
+    function renderVerificationActions(nodes) {
+      if (!ui.actionButtons) return;
+      ui.actionButtons.innerHTML = '';
+      if (!nodes.length) return;
+      const label = document.createElement('span');
+      label.style.cssText = 'color:var(--muted);font-size:0.75rem;margin-right:0.3rem;';
+      label.textContent = 'Run:';
+      ui.actionButtons.appendChild(label);
+      for (const node of nodes) {
+        const cmd = node.execution_cmd;
+        if (!cmd) continue;
+        const btn = document.createElement('button');
+        btn.className = 'action-btn';
+        btn.textContent = `▶ ${node.test_id || cmd}`;
+        btn.title = cmd;
+        btn.addEventListener('click', () => runTerminalCommand(cmd));
+        ui.actionButtons.appendChild(btn);
       }
     }
 
@@ -1424,6 +1554,7 @@
         addChat('assistant', summary);
         reconnectTerminal();
         await loadTree();
+        await loadVerificationActions();
       } catch (e) {
         log(`Build error: ${e.message}`, 'error');
         addChat('assistant', `Build error: ${e.message}`);
@@ -1593,6 +1724,13 @@
     document.addEventListener('keydown', e => {
       if (e.key === 'F5') { e.preventDefault(); runCurrentFile(); }
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); runCurrentFile(); }
+    });
+
+    // Terminal command bar
+    ui.terminalRun.addEventListener('click', () => runTerminalCommand());
+    ui.terminalClear.addEventListener('click', resetTerminal);
+    ui.terminalInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); runTerminalCommand(); }
     });
 
     // Init

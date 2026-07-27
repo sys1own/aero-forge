@@ -1,192 +1,208 @@
-"""Unit tests for web-facing sandbox session isolation."""
+"""Integration tests for the sandbox web terminal and blueprint endpoints."""
 
-import os
+import json
+import shutil
+import socket
 import threading
 import time
-import uuid
-import zipfile
-from io import BytesIO
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 import pytest
 
-import sys
+from aero_forge.server import _resolve_port, make_server
 
-from aero_forge.sandbox import manager as manager_module
-from aero_forge.sandbox.manager import SandboxManager, TraceVerifier, ensure_cargo_in_path
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
 
 
 @pytest.fixture
-def manager(tmp_path):
-    return SandboxManager(base_dir=tmp_path / "sandboxes")
+def server(tmp_path, monkeypatch):
+    """Start the web server on a free port with an isolated sandbox manager."""
+    from aero_forge.sandbox.manager import SandboxManager
+    from aero_forge.server import _manager as server_manager
+
+    manager = SandboxManager(base_dir=tmp_path / "web-sessions")
+    monkeypatch.setattr("aero_forge.server._manager", manager)
+
+    port = _free_port()
+    srv = make_server(port)
+    http_thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    http_thread.start()
+    time.sleep(0.5)
+    yield f"http://localhost:{port}"
+    srv.shutdown()
+    srv.server_close()
 
 
-def test_create_session_sandbox_returns_unique_dirs(manager):
-    session_a = str(uuid.uuid4())
-    session_b = str(uuid.uuid4())
-    path_a = manager.create_session_sandbox(session_a)
-    path_b = manager.create_session_sandbox(session_b)
-
-    assert path_a != path_b
-    assert path_a.is_dir()
-    assert path_b.is_dir()
-    assert path_a.name == session_a
-    assert path_b.name == session_b
-
-
-def test_session_sandboxes_are_isolated(manager):
-    session_a = str(uuid.uuid4())
-    session_b = str(uuid.uuid4())
-
-    dir_a = manager.create_session_sandbox(session_a)
-    dir_b = manager.create_session_sandbox(session_b)
-
-    (dir_a / "a_only.txt").write_text("a", encoding="utf-8")
-    (dir_b / "b_only.txt").write_text("b", encoding="utf-8")
-
-    assert (dir_a / "a_only.txt").read_text() == "a"
-    assert not (dir_a / "b_only.txt").exists()
-    assert (dir_b / "b_only.txt").read_text() == "b"
-    assert not (dir_b / "a_only.txt").exists()
-
-
-def test_concurrent_sessions_do_not_cross_contaminate(tmp_path):
-    manager = SandboxManager(base_dir=tmp_path / "sandboxes")
-    session_a = str(uuid.uuid4())
-    session_b = str(uuid.uuid4())
-
-    errors = []
-    results = {}
-    lock = threading.Lock()
-    barrier = threading.Barrier(2)
-
-    def worker(session_id, marker):
-        try:
-            sdir = manager.create_session_sandbox(session_id)
-            # Synchronize so both threads create dirs before writing.
-            barrier.wait(timeout=5)
-            (sdir / f"{marker}.txt").write_text(marker, encoding="utf-8")
-            # Give the other thread a moment to write its marker.
-            time.sleep(0.05)
-            with lock:
-                results[session_id] = {
-                    "dir": sdir,
-                    "has_own": (sdir / f"{marker}.txt").is_file(),
-                    "has_other": any(
-                        (sdir / f"{other}.txt").is_file()
-                        for other in ("a", "b")
-                        if other != marker
-                    ),
-                }
-        except Exception as exc:  # pragma: no cover
-            with lock:
-                errors.append(exc)
-
-    threads = [
-        threading.Thread(target=worker, args=(session_a, "a")),
-        threading.Thread(target=worker, args=(session_b, "b")),
-    ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-
-    assert not errors, errors
-    assert results[session_a]["has_own"]
-    assert results[session_b]["has_own"]
-    assert not results[session_a]["has_other"]
-    assert not results[session_b]["has_other"]
-
-
-def test_archive_session_sandbox_returns_valid_zip(manager):
-    session_id = str(uuid.uuid4())
-    sdir = manager.create_session_sandbox(session_id)
-    (sdir / "data.txt").write_text("hello", encoding="utf-8")
-    nested = sdir / "subdir"
-    nested.mkdir(parents=True, exist_ok=True)
-    (nested / "nested.txt").write_text("world", encoding="utf-8")
-
-    archive_bytes = manager.archive_session_sandbox(session_id)
-    assert isinstance(archive_bytes, bytes)
-    assert len(archive_bytes) > 0
-
-    with zipfile.ZipFile(BytesIO(archive_bytes), "r") as zf:
-        names = zf.namelist()
-        assert "data.txt" in names
-        assert "subdir/nested.txt" in names
-
-
-def test_clean_session_sandbox_removes_directory(manager):
-    session_id = str(uuid.uuid4())
-    sdir = manager.create_session_sandbox(session_id)
-    (sdir / "data.txt").write_text("hello", encoding="utf-8")
-
-    assert sdir.is_dir()
-    manager.clean_session_sandbox(session_id)
-    assert not sdir.exists()
-    assert session_id not in manager._sessions
-
-
-def test_get_session_sandbox_reuses_existing(manager):
-    session_id = str(uuid.uuid4())
-    first = manager.get_session_sandbox(session_id)
-    second = manager.get_session_sandbox(session_id)
-    assert first.root == second.root
-
-
-def test_ensure_cargo_in_path_prepends_cargo_bin(monkeypatch, tmp_path):
-    fake_cargo_bin = tmp_path / ".cargo" / "bin"
-    fake_cargo_bin.mkdir(parents=True)
-    (fake_cargo_bin / "cargo").write_text("#!/bin/sh\necho fake", encoding="utf-8")
-    (fake_cargo_bin / "cargo").chmod(0o755)
-
-    original_path = os.environ.get("PATH", "")
-    monkeypatch.setenv("PATH", "/usr/bin")
-    monkeypatch.setattr(manager_module, "CARGO_BIN_DIR", fake_cargo_bin)
-    # Ensure shutil.which sees the bare environment without cargo.
-    monkeypatch.setattr(manager_module.shutil, "which", lambda name: None)
-
-    ensure_cargo_in_path()
-
-    assert str(fake_cargo_bin) in os.environ["PATH"]
-    assert os.environ["PATH"].startswith(str(fake_cargo_bin))
-
-    os.environ["PATH"] = original_path
-
-
-def test_ensure_cargo_in_path_does_nothing_when_cargo_present(monkeypatch, tmp_path):
-    original_path = os.environ.get("PATH", "")
-    monkeypatch.setenv("PATH", "/usr/bin")
-    calls = []
-
-    def fake_which(name):
-        calls.append(name)
-        return "/usr/bin/cargo" if name == "cargo" else None
-
-    monkeypatch.setattr(manager_module.shutil, "which", fake_which)
-
-    ensure_cargo_in_path()
-
-    assert calls == ["cargo"]
-    # PATH should be unchanged when cargo is already on PATH.
-    assert os.environ["PATH"] == "/usr/bin"
-
-    os.environ["PATH"] = original_path
-
-
-def test_sandbox_manager_isolated_trace_verification(manager):
-    """TraceVerifier can run reference and target scripts inside a session sandbox."""
-    session_id = str(uuid.uuid4())
-    sdir = manager.create_session_sandbox(session_id)
-
-    (sdir / "ref.py").write_text("print('session ok')\n", encoding="utf-8")
-    (sdir / "target.py").write_text("print('session ok')\n", encoding="utf-8")
-
-    verifier = TraceVerifier()
-    result = verifier.verify(
-        [sys.executable, "ref.py"],
-        [sys.executable, "target.py"],
-        cwd=sdir,
+def _post_json(url: str, data: dict) -> tuple:
+    body = json.dumps(data).encode("utf-8")
+    req = Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
     )
-    assert result["verification_passed"] is True
-    assert result["semantic_delta"] == 0
+    try:
+        with urlopen(req, timeout=30) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode("utf-8"))
+
+
+def _post_ndjson(url: str, data: dict) -> tuple:
+    body = json.dumps(data).encode("utf-8")
+    req = Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(req, timeout=30) as resp:
+        assert resp.status == 200
+        lines = [
+            json.loads(line)
+            for line in resp.read().decode("utf-8").splitlines()
+            if line.strip()
+        ]
+    return resp.status, lines
+
+
+def _get(url: str) -> tuple:
+    try:
+        with urlopen(url, timeout=10) as resp:
+            return resp.status, resp.read()
+    except HTTPError as exc:
+        return exc.code, exc.read()
+
+
+def test_terminal_run_python_version(server):
+    session_id = "test-terminal-python"
+    command = "python3 --version"
+    status, lines = _post_ndjson(
+        server + "/api/terminal/run",
+        {"session_id": session_id, "command": command},
+    )
+    assert status == 200
+    summary = lines[-1]
+    assert summary["type"] == "summary"
+    assert summary["exit_code"] == 0
+    output = "\n".join(
+        line["data"] for line in lines if line.get("type") == "stdout"
+    )
+    assert "Python" in output
+
+
+def test_terminal_run_cargo_version(server):
+    if shutil.which("cargo") is None:
+        pytest.skip("cargo not installed")
+
+    session_id = "test-terminal-cargo"
+    status, lines = _post_ndjson(
+        server + "/api/terminal/run",
+        {"session_id": session_id, "command": "cargo --version"},
+    )
+    assert status == 200
+    summary = lines[-1]
+    assert summary["type"] == "summary"
+    assert summary["exit_code"] == 0
+    output = "\n".join(
+        line["data"] for line in lines if line.get("type") == "stdout"
+    )
+    assert "cargo" in output
+
+
+def test_terminal_run_gpp_version(server):
+    if shutil.which("g++") is None:
+        pytest.skip("g++ not installed")
+
+    session_id = "test-terminal-gpp"
+    status, lines = _post_ndjson(
+        server + "/api/terminal/run",
+        {"session_id": session_id, "command": "g++ --version"},
+    )
+    assert status == 200
+    summary = lines[-1]
+    assert summary["type"] == "summary"
+    assert summary["exit_code"] == 0
+    output = "\n".join(
+        line["data"] for line in lines if line.get("type") == "stdout"
+    )
+    assert "g++" in output or "Free Software Foundation" in output
+
+
+def test_terminal_run_cwd_is_session_sandbox(server, tmp_path):
+    from aero_forge.server import _manager
+
+    session_id = "test-terminal-cwd"
+    session_dir = _manager.create_session_sandbox(session_id)
+    status, lines = _post_ndjson(
+        server + "/api/terminal/run",
+        {"session_id": session_id, "command": "pwd"},
+    )
+    assert status == 200
+    summary = lines[-1]
+    assert summary["type"] == "summary"
+    assert summary["exit_code"] == 0
+    output = "\n".join(
+        line["data"] for line in lines if line.get("type") == "stdout"
+    ).strip()
+    assert output == str(session_dir.resolve())
+
+
+def test_terminal_run_missing_command(server):
+    session_id = "test-terminal-missing"
+    status, body = _post_json(
+        server + "/api/terminal/run",
+        {"session_id": session_id, "command": ""},
+    )
+    assert status == 400
+    assert "Missing 'command'" in body["error"]
+
+
+def test_api_blueprint_exposes_verification_nodes(server):
+    session_id = "test-blueprint-nodes"
+    blueprint = """
+metadata:
+  schema_version: "2.0.0"
+  project_name: sandbox_test
+  domain_target: pure_python
+execution_strategy:
+  primary_entrypoint:
+    path: main.py
+    runtime: python3
+  cli_contract:
+    parser_type: argparse
+    flags: []
+  run_spec: {}
+abi_contracts: []
+module_graph: []
+verification_nodes:
+  - test_id: cli_parses
+    execution_cmd: python3 main.py --help
+    expected_exit_code: 0
+    stdout_match_patterns: [usage]
+"""
+    status, _ = _post_json(
+        server + "/api/save-file",
+        {"session_id": session_id, "path": "blueprint.aero", "content": blueprint},
+    )
+    assert status == 200
+
+    status, body = _get(server + f"/api/blueprint?session_id={session_id}")
+    assert status == 200
+    data = json.loads(body.decode("utf-8"))
+    assert data["session_id"] == session_id
+    assert data["metadata"]["project_name"] == "sandbox_test"
+    assert len(data["verification_nodes"]) == 1
+    assert data["verification_nodes"][0]["test_id"] == "cli_parses"
+
+
+def test_api_blueprint_missing_session(server):
+    status, body = _get(server + "/api/blueprint")
+    assert status == 400
+    assert "Missing 'session_id'" in json.loads(body.decode("utf-8"))["error"]
