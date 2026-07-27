@@ -45,7 +45,9 @@ from aero_forge.chat import ChatSession
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
 from aero_forge import runner as sandbox_runner
+from aero_forge.healing.context_builder import ContextBuilder
 from aero_forge.healing.evaluator import LogEvaluator
+from aero_forge.healing.llm_healer import LLMHealer, run_command
 from aero_forge.healing.router import try_auto_fix
 from aero_forge.healing.structural_merger import apply_overlay, MergeConflictError
 from aero_forge.orchestrator.router import toolchains_for_intent
@@ -673,6 +675,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_workspace_evaluate_error()
             if path == "/api/workspace/heal":
                 return self._handle_workspace_heal()
+            if path == "/api/workspace/heal/llm":
+                return self._handle_workspace_heal_llm()
             if path == "/api/workspace/clean":
                 return self._handle_workspace_clean()
             if path == "/api/load-blueprint-template":
@@ -1571,6 +1575,120 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             logger.exception("Workspace heal endpoint failed")
             return _send_json(self, 500, {"error": str(exc)})
+
+    def _handle_workspace_heal_llm(self) -> None:
+        """Apply an LLM-generated directive-based fix and re-run the command."""
+        try:
+            body = _parse_json_body(self)
+            session_id = body.get("session_id", "").strip()
+            command = body.get("command", "")
+            exit_code = body.get("exit_code", 1)
+            log_text = body.get("log_text", "")
+            if not session_id:
+                return _send_json(self, 400, {"error": "Missing 'session_id'"})
+
+            session_dir = _session_dir(session_id)
+            if not session_dir.is_dir():
+                return _send_json(
+                    self,
+                    404,
+                    {"error": f"Sandbox for session '{session_id}' does not exist"},
+                )
+
+            env = os.environ.copy()
+            env["AERO_FORGE_SESSION"] = session_id
+            env["AERO_FORGE_SESSION_DIR"] = str(session_dir)
+            env["AERO_FORGE_ACCEL_LOG"] = str(session_dir / ".aero_forge_accel.log")
+
+            evaluator = LogEvaluator()
+            diagnosis = evaluator.evaluate_log(command, exit_code, log_text)
+
+            logs: list[str] = []
+
+            def _log(level: str, prefix: str, message: str) -> None:
+                line = f"[{level.upper()}] {prefix}: {message}"
+                logs.append(line)
+                try:
+                    with open(env["AERO_FORGE_ACCEL_LOG"], "a", encoding="utf-8") as fh:
+                        fh.write(line + "\n")
+                except OSError:
+                    pass
+
+            failure_context = {
+                "command": command,
+                "exit_code": exit_code,
+                "log_text": log_text,
+                "diagnosis": diagnosis,
+            }
+
+            _log("info", "HEAL_LLM", "Building workspace context...")
+            ContextBuilder(session_dir).build_failure_context(command, exit_code, log_text, diagnosis)
+            _log("info", "HEAL_LLM", "Workspace context packaged.")
+
+            healer = LLMHealer(log_callback=_log)
+            fix_result = healer.generate_and_apply_fix(session_dir, failure_context)
+            if fix_result.get("status") != "success":
+                return _send_json(
+                    self,
+                    200,
+                    {
+                        "session_id": session_id,
+                        "status": "failed",
+                        "verified": False,
+                        "reason": fix_result.get("reason", "No directives generated."),
+                        "diagnosis": diagnosis,
+                        "logs": logs,
+                    },
+                )
+
+            _log("info", "HEAL_LLM", f"Applied {len(fix_result['applied'])} directive(s).")
+
+            resolved, proc_env, _ = asyncio.run(
+                sandbox_runner.resolve_command(
+                    command,
+                    env=env,
+                    sandbox_dir=session_dir,
+                )
+            )
+            _log("info", "HEAL_LLM", f"Re-running: {resolved}")
+            run_result = run_command(resolved, session_dir, env=proc_env, timeout=300)
+            _log("info" if run_result["exit_code"] == 0 else "error", "HEAL_LLM", f"Re-run exit code: {run_result['exit_code']}")
+
+            if run_result["exit_code"] == 0:
+                _notify_tree_changed(session_id)
+                return _send_json(
+                    self,
+                    200,
+                    {
+                        "session_id": session_id,
+                        "status": "success",
+                        "verified": True,
+                        "output": run_result["output"],
+                        "directives": fix_result["directives"],
+                        "applied": fix_result["applied"],
+                        "diagnosis": diagnosis,
+                        "logs": logs,
+                    },
+                )
+
+            return _send_json(
+                self,
+                200,
+                {
+                    "session_id": session_id,
+                    "status": "failed",
+                    "verified": False,
+                    "output": run_result["output"],
+                    "reason": "Re-run still failed after applying LLM directives.",
+                    "directives": fix_result["directives"],
+                    "applied": fix_result["applied"],
+                    "diagnosis": diagnosis,
+                    "logs": logs,
+                },
+            )
+        except Exception as exc:
+            logger.exception("Workspace heal/llm endpoint failed")
+            return _send_json(self, 200, {"status": "failed", "reason": str(exc), "verified": False})
 
     def _handle_blueprint_templates(self) -> None:
         """List available blueprint template names."""
