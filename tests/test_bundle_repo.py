@@ -210,6 +210,7 @@ def test_create_project_zip_accelerated(tmp_path: Path) -> None:
     assert "crates/native_core/Cargo.toml" in names
     assert "crates/native_core/src/lib.rs" in names
     assert "crates/native_core/__init__.py" in names
+    assert ".cargo/config.toml" in names
     assert "crates/native_core/target/release/libdemo.so" not in names
     assert "pyproject.toml" in names
     assert '[build-system]' in pyproject

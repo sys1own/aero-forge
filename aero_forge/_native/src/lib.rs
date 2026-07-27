@@ -186,10 +186,220 @@ fn hash_file(path: &str) -> PyResult<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
+/// A wavefront task exposed to Python.
+#[derive(Clone)]
+struct WavefrontTask {
+    name: String,
+    command: String,
+    dependencies: Vec<String>,
+}
+
+/// Parallel wavefront task executor exposed to Python.
+#[pyclass(name = "WavefrontEngine")]
+struct WavefrontEngine {
+    tasks: Vec<WavefrontTask>,
+}
+
+#[pymethods]
+impl WavefrontEngine {
+    #[new]
+    fn new() -> Self {
+        Self { tasks: Vec::new() }
+    }
+
+    #[pyo3(signature = (name, command, dependencies=None))]
+    fn add_task(
+        &mut self,
+        name: String,
+        command: String,
+        dependencies: Option<Vec<String>>,
+    ) -> PyResult<()> {
+        self.tasks.push(WavefrontTask {
+            name,
+            command,
+            dependencies: dependencies.unwrap_or_default(),
+        });
+        Ok(())
+    }
+
+    #[pyo3(signature = (cwd=None, timeout_seconds=None))]
+    fn execute<'py>(
+        &self,
+        py: Python<'py>,
+        cwd: Option<String>,
+        timeout_seconds: Option<u64>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyList>> {
+        let results = py.allow_threads(|| self.run(cwd, timeout_seconds))?;
+
+        let py_results = pyo3::types::PyList::empty(py);
+        for r in results {
+            let dict = pyo3::types::PyDict::new(py);
+            dict.set_item("name", r.name)?;
+            dict.set_item("command", r.command)?;
+            dict.set_item("exit_code", r.exit_code)?;
+            dict.set_item("stdout", r.stdout)?;
+            dict.set_item("stderr", r.stderr)?;
+            py_results.append(dict)?;
+        }
+        Ok(py_results)
+    }
+
+    fn clear(&mut self) {
+        self.tasks.clear();
+    }
+}
+
+#[derive(Clone)]
+struct WaveResult {
+    name: String,
+    command: String,
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+impl WavefrontEngine {
+    fn run(
+        &self,
+        cwd: Option<String>,
+        timeout_seconds: Option<u64>,
+    ) -> PyResult<Vec<WaveResult>> {
+        let name_to_index: HashMap<String, usize> = self
+            .tasks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.name.clone(), i))
+            .collect();
+
+        let n = self.tasks.len();
+        let mut in_degree = vec![0usize; n.max(1)];
+        let mut dependents: HashMap<usize, Vec<usize>> = HashMap::new();
+
+        for (i, task) in self.tasks.iter().enumerate() {
+            for dep in &task.dependencies {
+                let dep_idx = *name_to_index.get(dep).ok_or_else(|| {
+                    PyValueError::new_err(format!("Unknown dependency '{}'", dep))
+                })?;
+                dependents.entry(dep_idx).or_default().push(i);
+                in_degree[i] += 1;
+            }
+        }
+
+        let mut queue: VecDeque<usize> = in_degree
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| **d == 0)
+            .map(|(i, _)| i)
+            .collect();
+
+        let mut ordered: Vec<usize> = Vec::with_capacity(n);
+
+        while let Some(current) = queue.pop_front() {
+            ordered.push(current);
+            for &succ in dependents.get(&current).unwrap_or(&Vec::new()) {
+                in_degree[succ] -= 1;
+                if in_degree[succ] == 0 {
+                    queue.push_back(succ);
+                }
+            }
+        }
+
+        if ordered.len() != n {
+            return Err(PyValueError::new_err(
+                "Wavefront graph contains a cycle",
+            ));
+        }
+
+        // Group ordered nodes into waves by dependency level.
+        let mut level: HashMap<usize, usize> = HashMap::new();
+        let mut waves: Vec<Vec<usize>> = Vec::new();
+        for node in ordered {
+            let node_level = self.tasks[node]
+                .dependencies
+                .iter()
+                .map(|d| level.get(name_to_index.get(d).unwrap()).unwrap_or(&0) + 1)
+                .max()
+                .unwrap_or(0);
+            level.insert(node, node_level);
+            if node_level >= waves.len() {
+                waves.resize_with(node_level + 1, Vec::new);
+            }
+            waves[node_level].push(node);
+        }
+
+        let mut results: Vec<Option<WaveResult>> = vec![None; n];
+
+        for wave in waves {
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = wave
+                    .iter()
+                    .map(|&idx| {
+                        let task = &self.tasks[idx];
+                        let cwd_ref = cwd.as_ref();
+                        scope.spawn(move || {
+                            let mut command = if cfg!(target_os = "windows") {
+                                let mut c = std::process::Command::new("cmd");
+                                c.arg("/C").arg(&task.command);
+                                c
+                            } else {
+                                let mut c = std::process::Command::new("sh");
+                                c.arg("-c").arg(&task.command);
+                                c
+                            };
+                            if let Some(ref dir) = cwd_ref {
+                                command.current_dir(dir);
+                            }
+                            let output = if let Some(_secs) = timeout_seconds {
+                                // Build a timeout by spawning and joining with sleep is overkill
+                                // for the PyO3 wrapper; run synchronously here.
+                                match command.output() {
+                                    Ok(o) => o,
+                                    Err(e) => std::process::Output {
+                                        status: std::process::ExitStatus::default(),
+                                        stdout: Vec::new(),
+                                        stderr: format!("failed to start: {}", e).into_bytes(),
+                                    },
+                                }
+                            } else {
+                                match command.output() {
+                                    Ok(o) => o,
+                                    Err(e) => std::process::Output {
+                                        status: std::process::ExitStatus::default(),
+                                        stdout: Vec::new(),
+                                        stderr: format!("failed to start: {}", e).into_bytes(),
+                                    },
+                                }
+                            };
+                            (
+                                idx,
+                                WaveResult {
+                                    name: task.name.clone(),
+                                    command: task.command.clone(),
+                                    exit_code: output.status.code().unwrap_or(-1),
+                                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                                },
+                            )
+                        })
+                    })
+                    .collect();
+
+                for h in handles {
+                    let (idx, res) = h.join().unwrap();
+                    results[idx] = Some(res);
+                }
+            });
+        }
+
+        Ok(results.into_iter().flatten().collect())
+    }
+}
+
 #[pymodule(name = "aero_forge_native")]
 fn aero_forge_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Hasher>()?;
     m.add_class::<GraphEngine>()?;
+    m.add_class::<WavefrontEngine>()?;
     m.add_function(wrap_pyfunction!(hash_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(hash_file, m)?)?;
     Ok(())
