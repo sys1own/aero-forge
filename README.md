@@ -1,12 +1,14 @@
-# Aero-Forge: Natively Accelerated Universal Polyglot Build Engine
+# Aero-Forge: Natively Accelerated Polyglot Build Engine & Web Workspace
 
-Aero-Forge turns a plain-English prompt or an existing source file into a complete, tested, **natively accelerated** software project. It is a universal build orchestrator for **natively accelerated Python**, **pure Rust**, **native C++**, **Rust/C++ systems**, and **Python/Rust/C++ tri-polyglot** applications, with automatic PyO3/Maturin extension generation, `extern "C"` C-ABI dynamic libraries, in-memory HIN JIT compilation, and a zero-copy native bridge.
+Aero-Forge turns a plain-English prompt or an existing source file into a complete, tested, **natively accelerated** software project. It is a universal build orchestrator for **natively accelerated Python**, **pure Rust**, **native C++**, **Rust/C++ systems**, and **Python/Rust/C++ tri-polyglot** applications, with automatic PyO3/Maturin extension generation, `extern "C"` C-ABI dynamic libraries, in-memory HIN JIT compilation, a zero-copy native bridge, and an embedded **web-first workspace**.
+
+> **Web-first by design:** The fastest way to use Aero-Forge is the embedded web dashboard (`aero-forge web` or `python3 -m aero_forge.server`). It provides a full workspace environment — interactive Co-Pilot chat with Action Cards, a multi-tab file explorer & editor, real-time build/accelerator log streaming, drag-and-drop `blueprint.aero` importing, and one-click workspace regeneration. The CLI remains fully functional for scripting and automation.
 
 ## What is Aero-Forge?
 
 Aero-Forge is a prompt-driven build system for high-performance software. You describe what you want, point it at a `.py` file, or upload a ZIP, and it produces working source, native extensions, packaging manifests, tests, and a downloadable project bundle.
 
-The engine is built around a declarative contract called `blueprint.aero`. For every request, Aero-Forge first classifies the prompt to infer the target architecture (`pure_python`, `pure_rust`, `hybrid_rust_python`, `hybrid_cpp_python`, `hybrid_cpp_rust`, `tri_polyglot_rust_cpp_python`), the required toolchains (`python`, `cargo`, `maturin`, `cmake`, `cpp`, `gcc`, `clang`), the file manifest, and the exported contracts. It then materializes every declared file and invokes the appropriate native toolchains. When compilation or tests fail, it applies deterministic AST and pattern-based repairs first and surfaces precise diagnostics. LLM calls are strictly confined to intent interpretation, high-level strategy selection, and human-facing summaries.
+The engine is built around a declarative contract called `blueprint.aero`. For every request, Aero-Forge first classifies the prompt to infer the target architecture (`pure_python`, `pure_rust`, `hybrid_rust_python`, `hybrid_cpp_python`, `hybrid_cpp_rust`, `multi_crate_rust`, `tri_polyglot_rust_cpp_python`, `wasm`), the required toolchains (`python`, `cargo`, `maturin`, `cmake`, `cpp`, `gcc`, `clang`), the file manifest, and the exported contracts. It then materializes every declared file and invokes the appropriate native toolchains. When compilation or tests fail, it applies deterministic AST and pattern-based repairs first, escalates to full-workspace LLM healing when needed, and surfaces precise diagnostics. LLM calls are strictly confined to intent interpretation, high-level strategy selection, and human-facing summaries.
 
 Core value propositions:
 
@@ -15,11 +17,15 @@ Core value propositions:
 - **Multi-Language Build Matrix** - Native support for six build targets: `pure_python`, `pure_rust`, `hybrid_rust_python`, `hybrid_cpp_python`, `hybrid_cpp_rust`, and `tri_polyglot_rust_cpp_python`.
 - **Selective Acceleration Heuristics** - AST node evaluation routes heavy vector loops to C++ `extern "C"` shared libraries, concurrent/memory-safe work to Rust PyO3, and light or incompatible workloads back to CPython.
 - **Sub-millisecond execution pathways** - Numeric Python functions compile to native code and are cached at the AST node level for instant re-execution.
+- **Wavefront Parallel Acceleration Engine** - Dependency-graph wavefront analysis batches independent functions and UAST nodes across multi-crate and polyglot targets for parallel compilation and execution, cutting build matrix times and hot-loop overhead.
+- **Drop-In Blueprint Portability** - `blueprint.aero` is a self-contained project contract. Drag or copy it into any Aero-Forge workspace to scaffold and compile the complete project.
+- **Self-Healing Workspace Regeneration** - The "Regenerate Workspace from Blueprint" action cleanly purges a broken `src/` tree and re-scaffolds the full polyglot codebase from `blueprint.aero`.
+- **Interactive Co-Pilot & Action Cards** - The web Co-Pilot chat is workspace-aware (via `bundle_repo.py`), proposes optimized target-aware build prompts, and renders `PROPOSE_BUILD` Action Cards with one-click `[ 🚀 Send to Builder & Run ]` triggers.
 - **Fall-forward safety** - Unsupported Python constructs gracefully fall back to CPython without panics.
 
 ## Core Supported Build Targets
 
-Aero-Forge natively supports six primary build targets, each with deterministic materialization and native toolchain invocation:
+Aero-Forge natively supports eight primary build targets, each with deterministic materialization and native toolchain invocation:
 
 ### 1. Natively Accelerated Python
 
@@ -78,6 +84,22 @@ A Python CLI/REPL orchestrates input, a Rust PyO3 crate manages concurrent state
 aero-forge generate --prompt "Build a Python CLI that uses Rust PyO3 for token validation and C++ for matrix transforms" --build
 ```
 
+### 7. Multi-Crate Rust Workspaces (`multi_crate_rust`)
+
+Generate Cargo workspaces with multiple interdependent crates, shared library members, and a top-level binary or workspace root:
+
+```bash
+aero-forge generate --prompt "Build a multi-crate Rust workspace with a shared math crate and a CLI crate" --build
+```
+
+### 8. WebAssembly (`wasm`)
+
+Compile Rust targets to `wasm32-unknown-unknown` for browser or Wasmtime deployment:
+
+```bash
+aero-forge generate --prompt "Compile a Rust numeric kernel to wasm32" --target wasm --build
+```
+
 Supported outputs also include:
 
 - Pure Python packages and libraries.
@@ -100,7 +122,10 @@ Supported outputs also include:
 - **Natural Language Prompts** - Describe what you want and Aero-Forge generates Python code, tests, and a build blueprint.
 - **Zero Manual Rust Boilerplate** - No `Cargo.toml`, `#[pyfunction]` annotations, or linker flags are required from the user for standard Python/Rust hybrid builds.
 - **Interactive Web Dashboard & Terminal REPL** - Start a local web server (`aero-forge web`) to prompt, build, test, monitor real-time build logs, browse generated files in a multi-tab editor, and download compiled ZIP artifacts. An embedded xterm.js terminal supports copy/paste and live command execution.
-- **Symbolic & AST Static Healing Core** - If `cargo build` or tests fail, Aero-Forge applies deterministic AST/pattern-based repairs first. Failures surface precise exception type, file, and line diagnostics. Optional LLM-generated summaries are generated only for human viewing after the build.
+- **Workspace Co-Pilot & Action Cards** - The Co-Pilot chat is workspace-aware via `bundle_repo.py`, understands all build targets, proposes optimized build prompts, and renders `PROPOSE_BUILD` Action Cards with `[ 🚀 Send to Builder & Run ]` and `[ 📝 Edit in Build Tab ]` buttons.
+- **Wavefront Parallel Acceleration Engine** - Dependency-graph wavefront analysis schedules independent functions and UAST nodes for parallel compilation and execution, reducing build matrix times for multi-crate and polyglot targets.
+- **Drop-In Blueprint Import & Workspace Regeneration** - Drag `blueprint.aero` into the web explorer to scaffold a full project, or click "Regenerate Workspace from Blueprint" to purge a broken workspace and rebuild strictly from the blueprint contract.
+- **Symbolic & AST Static Healing Core** - If `cargo build` or tests fail, Aero-Forge applies deterministic AST/pattern-based repairs first and escalates to full-workspace LLM healing when a static patch is insufficient. Failures surface precise exception type, file, and line diagnostics.
 - **Algorithm Library** - Pick from a curated library of reference implementations (sorting, matrix, FFT, math) or let the LLM select one automatically.
 - **Multi-Variant Testing** - Generate several implementations, compile them in parallel, benchmark each, and select the fastest variant that passes.
 - **Explainable Builds** - Add `--explain` to get the LLM to describe the algorithm choice, complexity, and tradeoffs.
@@ -131,7 +156,32 @@ pip install -e ".[dev]"
 
 ## Quick Start
 
-### 1. Generate from a prompt
+### 1. Launch the Web Dashboard
+
+The web dashboard is the fastest way to build, iterate, and inspect projects:
+
+```bash
+export AERO_FORGE_LLM_PROVIDER=openrouter
+export OPENROUTER_API_KEY="sk-or-v1-..."
+
+aero-forge web
+# or
+python3 -m aero_forge.server --port 8080
+```
+
+Open `http://localhost:8080` in your browser.
+
+The dashboard gives you:
+
+- **Co-Pilot Chat** — ask questions, get build suggestions, and trigger `PROPOSE_BUILD` Action Cards.
+- **Build Tab** — generate and compile polyglot projects with target and acceleration selectors.
+- **Multi-Tab File Explorer & Editor** — browse, edit, and download generated files.
+- **Real-Time BUILD LOG / ACCELERATOR LOG** — streaming `cargo`, `g++`, `maturin`, and heuristic telemetry.
+- **Drag-and-Drop Blueprint Import** — drop a `blueprint.aero` file into the explorer to scaffold the entire workspace.
+
+### 2. Generate from a prompt
+
+If you prefer the CLI, generate and build in one command:
 
 ```bash
 export AERO_FORGE_LLM_PROVIDER=openrouter
@@ -156,7 +206,7 @@ Blueprint: .../blueprint.aero
 Build: 1/1 succeeded (.../dist)
 ```
 
-### 2. Accelerate a Python function with `@accelerate`
+### 4. Accelerate a Python function with `@accelerate`
 
 ```python
 from aero_forge import accelerate
@@ -173,7 +223,7 @@ print(dot_product([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]))
 
 The first call compiles the function to a native Rust `.so`. The second call reuses the cached node key and executes in under a millisecond.
 
-### 3. Build an existing Python file
+### 5. Build an existing Python file
 
 ```bash
 aero-forge fix src/my_function.py --function my_function
@@ -187,7 +237,7 @@ aero-forge fix src/my_function.py --function my_function --json
 
 With `--json`, `fix` prints a structured result with `status`, `rust_extensions`, `execution_time_ms`, and `error`.
 
-### 4. Build from a blueprint
+### 6. Build from a blueprint
 
 Create `blueprint.aero`:
 
@@ -214,7 +264,7 @@ Then run:
 aero-forge build
 ```
 
-### 5. Build Deterministically
+### 7. Build Deterministically
 
 The transpile/build/test path is always deterministic. For existing, well-typed code you can skip LLM-driven code generation entirely:
 
@@ -223,7 +273,7 @@ aero-forge fix src/my_function.py --function my_function --no-llm
 aero-forge build blueprint.aero --no-llm
 ```
 
-### 6. Interactive Chat Mode
+### 8. Interactive Chat Mode
 
 Start a conversational session. Aero-Forge remembers your previous prompts, generated code, and build results, so you can iterate naturally:
 
@@ -286,7 +336,7 @@ After every successful `aero-forge generate --build` or `aero-forge build`, Aero
 
 ## Web Interface Setup
 
-Aero-Forge includes an embedded web dashboard. Opening it in any modern browser gives you access to the full build engine, an interactive prompt generator, a multi-tab project editor, real-time **BUILD LOG** and **ACCELERATOR LOG** streaming, and a ZIP bundle downloader.
+Aero-Forge is designed to be operated primarily through its embedded web dashboard. The dashboard runs a single HTTP + WebSocket server (`aero-forge web` or `python3 -m aero_forge.server`) and provides a full workspace environment in any modern browser.
 
 **Tagline:** `Universal AST & Polyglot Accelerator (Python · Rust · C++)`
 
@@ -318,12 +368,35 @@ aero-forge web --port 8080
 
 The web interface supports the same providers and environment variables as the CLI. Set `AERO_FORGE_LLM_PROVIDER` and the appropriate API key before starting the server.
 
+### Dashboard Layout
+
+The workspace is organized around two primary tabs plus a shared file explorer:
+
+- **Build Tab** — One-shot polyglot generation. Enter a prompt, choose a target language and acceleration policy, and click **Build**. The engine generates `blueprint.aero`, materializes source/manifests, compiles native artifacts, and streams `BUILD LOG` / `ACCELERATOR LOG` output in real time.
+- **Co-Pilot Chat Tab** — A workspace-aware assistant powered by `bundle_repo.py`. Ask questions about the current project, request optimizations, or debug build failures. When the Co-Pilot proposes a build, it returns a structured `PROPOSE_BUILD` Action Card showing the optimized prompt, selected `target`, and `acceleration` mode. Click `[ 🚀 Send to Builder & Run ]` to populate the Build tab and start compilation immediately, or `[ 📝 Edit in Build Tab ]` to review the prompt first.
+- **File Explorer (left sidebar)** — Browse, open, and edit generated files. Drag-and-drop any `blueprint.aero` file into the explorer to scaffold the complete workspace. When a `blueprint.aero` is detected, an **"Initialize Project from Blueprint"** banner appears.
+- **Embedded Terminal (bottom panel)** — An `xterm.js` terminal with copy/paste and live command execution.
+- **Real-Time Logs**:
+  - **BUILD LOG:** Output from `cargo`, `g++`, `clang++`, `maturin`, and test runners.
+  - **ACCELERATOR LOG:** Heuristic routing telemetry, AST hash evaluation, and bridge binding verdicts (e.g., `ACCELERATED: C++ selected for extern "C" dynamic shared library`).
+
 ### Dashboard Controls
 
-- **Target Language selector:** `Auto-Detect / Polyglot`, `Python`, `Rust`, `C++`, `Hybrid C++ / Rust`, `Tri-Polyglot (Python + Rust + C++)`.
-- **Acceleration Policy selector:** `Selective Acceleration`, `Force Native Bridge`, `Standard Runtime`.
-- **BUILD LOG tab:** Real-time output from `cargo`, `g++`, `clang++`, `maturin`, and test runners.
-- **ACCELERATOR LOG tab:** Real-time heuristic routing telemetry, AST hash evaluation, and bridge binding verdicts (e.g., `ACCELERATED: C++ selected for extern "C" dynamic shared library`).
+- **Target Language selector:** `Auto-Detect / Polyglot`, `Python`, `Rust`, `C++`, `Hybrid C++ / Rust`, `Multi-Crate Rust`, `Tri-Polyglot (Python + Rust + C++)`, `WebAssembly (wasm32)`.
+- **Acceleration Policy selector:** `Selective Acceleration (Auto-Detect Heavy Compute)`, `Force Native Bridge`, `Standard Runtime (Bypass Bridge)`.
+- **Blueprint actions**:
+  - **Explorer header** — click the regenerate icon to open the *Regenerate Workspace from Blueprint* confirmation modal.
+  - **Right-click `blueprint.aero`** in the explorer — choose *Rebuild Workspace from Blueprint*.
+  - **Error Recovery Panel** — when a build fails, the terminal banner offers `[ 🔄 Hard Reset & Rebuild Workspace from Blueprint ]` alongside AST and LLM healing options.
+
+### Workspace Regeneration
+
+If source files become corrupted or you want a clean slate, use **Regenerate Workspace from Blueprint** (`POST /api/workspace/regenerate_blueprint`). The engine:
+
+1. Backs up the current workspace to `.aero_backup/`.
+2. Purges generated directories (`src/`, `tests/`, `rust_core/`, `cpp_core/`, `target/`, `dist/`, etc.) and native manifests (`Cargo.toml`, `pyproject.toml`, `build.rs`).
+3. Re-scaffolds directories and writes syntactically valid stubs from the `blueprint.aero` manifest and contracts.
+4. Optionally runs a full build and removes the backup on success.
 
 ## Commands Reference
 
@@ -369,7 +442,7 @@ The web interface supports the same providers and environment variables as the C
 | Field | Type | Description |
 |-------|------|-------------|
 | `project` | string | Project name. |
-| `architecture` | string | Build strategy: `pure_python`, `pure_rust`, `hybrid_rust_python`, `hybrid_cpp_python`, `hybrid_cpp_rust`, `tri_polyglot_rust_cpp_python`. |
+| `architecture` | string | Build strategy: `pure_python`, `pure_rust`, `hybrid_rust_python`, `hybrid_cpp_python`, `hybrid_cpp_rust`, `multi_crate_rust`, `tri_polyglot_rust_cpp_python`, `wasm`. |
 | `toolchains` | list | Required tools: `python`, `pip`, `cargo`, `maturin`, `cmake`, `cpp`, `gcc`, `clang`, `npm`, `go`, etc. |
 | `manifest` | list | Files to create (see Manifest Entry). |
 | `contracts` | list | Exported symbols, FFI bindings, or shared data structures (see Contract Entry). |
@@ -674,7 +747,7 @@ See `BLUEPRINT.md` and `stress_tests/README.md` for the full supported-construct
 
 ## How It Works
 
-1. **Intent & Classification** - The user provides a natural language prompt (LLM) or an existing `.py` file. The prompt is classified into an `architecture` (e.g. `pure_python`, `pure_rust`, `hybrid_rust_python`, `hybrid_cpp_python`, `hybrid_cpp_rust`, `tri_polyglot_rust_cpp_python`) and `toolchains`.
+1. **Intent & Classification** - The user provides a natural language prompt (LLM), an existing `.py` file, or a `blueprint.aero` drag-and-drop. The prompt is classified into an `architecture` (e.g. `pure_python`, `pure_rust`, `hybrid_rust_python`, `hybrid_cpp_python`, `hybrid_cpp_rust`, `multi_crate_rust`, `tri_polyglot_rust_cpp_python`, `wasm`) and `toolchains`.
 2. **Blueprint** - A `blueprint.aero` file is generated describing the workspace, manifest, contracts, and verification steps.
 3. **Materialize** - Every file declared in the blueprint is physically emitted, including `Cargo.toml`, `pyproject.toml`, `build.rs`, `src/cpp_core/native.cpp`, `src/lib.rs`, `src/main.rs`, Python wrappers, and tests.
 4. **Parse** - The Python source is parsed into an AST.
@@ -682,9 +755,10 @@ See `BLUEPRINT.md` and `stress_tests/README.md` for the full supported-construct
 6. **Scaffold** - A temporary Cargo crate, full workspace, or polyglot package is generated automatically, with `.cargo/config.toml` network resilience settings.
 7. **Compile** - `cargo build --release`, `g++/clang++ -fPIC -shared`, or `maturin build` produces the native artifact, depending on the selected architecture.
 8. **Cache** - The compiled native artifact is keyed by the hash of the UAST node so identical functions re-execute without recompiling.
-9. **Test** - `pytest` and `cargo test` run against the generated code in an isolated sandbox.
-10. **Heal** - On failure, the orchestrator applies deterministic, static AST/pattern-based repairs from the router and fix cache. Failures are reported with the exact exception type, file, and line.
-11. **Explain** - Optional LLM-generated summaries are produced for human viewing after the build.
+9. **Wavefront Schedule** - Independent UAST nodes and functions are batched into wavefronts and compiled/executed in parallel across crates and languages, reducing build matrix times.
+10. **Test** - `pytest` and `cargo test` run against the generated code in an isolated sandbox.
+11. **Heal** - On failure, the orchestrator applies deterministic AST/pattern-based repairs, escalates to full-workspace LLM healing when static repairs are insufficient, and offers one-click "Regenerate Workspace from Blueprint" recovery.
+12. **Explain** - Optional LLM-generated summaries are produced for human viewing after the build.
 
 ## Web Integration and Session Isolation
 
