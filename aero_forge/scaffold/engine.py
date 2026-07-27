@@ -273,6 +273,10 @@ class Engine:
                 crate_dirs.append(cargo_dir)
 
         if not crate_dirs:
+            if not cargo_dirs:
+                # Blueprint manifest declares no Cargo.toml; the generated crate at
+                # ``crate_root`` is the canonical crate.
+                return
             # No crate layout declared; fall back to the first Cargo.toml.
             crate_dirs = [sorted(cargo_dirs, key=lambda p: str(p))[0]]
 

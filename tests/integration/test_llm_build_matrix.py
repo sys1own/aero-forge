@@ -47,7 +47,10 @@ MATRIX: List[Tuple[str, str, str, str]] = [
         "Write a Python function named `topological_sort` that performs topological "
         "sort on a directed acyclic graph represented as an adjacency dict. Return "
         "a list of node labels. Use while loops and a queue/stack. Include strict type hints.",
-        "def topological_sort(graph: dict[str, list[str]]) -> list[str]",
+        "def topological_sort(graph: dict[str, list[str]]) -> list[str]\n"
+        "Use `for node in graph.keys():` to iterate, build an indegree dict, and use an "
+        "index-based `while idx < len(queue):` loop. Do not use `dict.get`, `collections.deque`, "
+        "or recursion. Tests should only assert the result is a valid topological ordering.",
         "Example test: graph={'A':['B','C'],'B':['D'],'C':['D'],'D':[]}; expected one of ['A','B','C','D'] or ['A','C','B','D'].",
     ),
     (
@@ -66,7 +69,11 @@ MATRIX: List[Tuple[str, str, str, str]] = [
         "dict[str, float] of scores and a threshold float, iterates with "
         "dict.items(), and returns a list of keys whose values exceed the "
         "threshold. Include type hints.",
-        "def dict_key_evaluator(scores: dict[str, float], threshold: float) -> list[str]",
+        "def dict_key_evaluator(scores: dict[str, float], threshold: float) -> list[str]\n"
+        "Use strict `>` comparison. Generated tests: threshold=1.5 for "
+        "scores={'a':1.0,'b':2.5,'c':0.5,'d':3.0} -> ['b','d']; threshold=1.0 for "
+        "{'x':0.1,'y':0.2} -> []; threshold=2.0 for {'p':3.0,'q':4.5} -> ['p','q']; "
+        "threshold=2.0 for {'a':1.0,'b':2.0} -> [] (exact threshold is not included).",
         "Example test: scores={'a':1.0,'b':2.5,'c':0.5,'d':3.0}; threshold=1.5; expected ['b','d'].",
     ),
     (
@@ -116,7 +123,7 @@ def run_matrix() -> Dict[str, Any]:
                 build_kwargs={
                     "max_workers": 1,
                     "cache_enabled": False,
-                    "max_iterations": 1,
+                    "max_iterations": 3,
                 },
             )
         except Exception as exc:
