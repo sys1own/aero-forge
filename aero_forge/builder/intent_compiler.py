@@ -68,9 +68,185 @@ def _extract_json(raw: str) -> Any:
     if match:
         try:
             return json.loads(match.group(0))
-        except json.JSONDecodeError as exc:
-            raise IntentCompilerError(f"Could not parse JSON from response: {exc}") from exc
+        except json.JSONDecodeError:
+            pass
+    # YAML is more tolerant of trailing commas and unquoted strings.
+    try:
+        data = yaml.safe_load(cleaned)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
     raise IntentCompilerError("No JSON object found in LLM response")
+
+
+def _normalize_cli_type(value: Any) -> str:
+    if value is None:
+        return "string"
+    lowered = str(value).lower().strip()
+    synonyms = {
+        "str": "string",
+        "string": "string",
+        "json_string": "string",
+        "json": "string",
+        "json_array": "string",
+        "json_array_f64": "string",
+        "json_array_2d_f64": "string",
+        "json_array_string": "string",
+        "integer": "int",
+        "int": "int",
+        "boolean": "bool",
+        "bool": "bool",
+        "store_true": "bool",
+        "store_false": "bool",
+        "float": "float",
+        "double": "float",
+    }
+    normalized = synonyms.get(lowered, lowered)
+    if normalized in ("string", "int", "bool", "float"):
+        return normalized
+    return "string"
+
+
+def _normalize_flag_name(value: Any) -> str:
+    if value is None:
+        return ""
+    name = str(value).strip().lstrip("-")
+    return name.replace("-", "_")
+
+
+def _normalize_v2_data(data: Any) -> Any:
+    """Coerce common LLM output variants into the strict BlueprintSchemaV2 shape."""
+    if not isinstance(data, dict):
+        return data
+
+    # metadata
+    metadata = data.get("metadata") or {}
+    if isinstance(metadata, dict):
+        if metadata.get("domain_target"):
+            metadata["domain_target"] = str(metadata["domain_target"]).lower().replace(" ", "_")
+        data["metadata"] = metadata
+
+    # execution_strategy
+    exec_strategy = data.get("execution_strategy") or {}
+    if isinstance(exec_strategy, dict):
+        primary = exec_strategy.get("primary_entrypoint") or {}
+        if isinstance(primary, dict) and primary.get("runtime"):
+            runtime = str(primary["runtime"]).lower()
+            if "python" in runtime:
+                primary["runtime"] = "python3"
+            primary["wrapper_generation"] = bool(primary.get("wrapper_generation", True))
+            exec_strategy["primary_entrypoint"] = primary
+
+        cli_contract = exec_strategy.get("cli_contract") or {}
+        if isinstance(cli_contract, dict):
+            flags = cli_contract.get("flags") or []
+            normalized_flags = []
+            for flag in flags:
+                if not isinstance(flag, dict):
+                    continue
+                normalized: Dict[str, Any] = {
+                    "name": _normalize_flag_name(
+                        flag.get("name") or flag.get("long") or flag.get("long_flag") or flag.get("dest") or flag.get("dest_var", "")
+                    ),
+                    "short": str(flag.get("short") or flag.get("short_flag") or "").strip().lstrip("-"),
+                    "type": _normalize_cli_type(flag.get("type") or "string"),
+                    "required": bool(flag.get("required", False)),
+                    "default": flag.get("default", None),
+                    "choices": list(flag.get("choices", [])) if flag.get("choices") else [],
+                    "help": str(flag.get("help", "")),
+                    "dest_var": str(flag.get("dest_var") or flag.get("dest") or ""),
+                }
+                normalized_flags.append(normalized)
+            cli_contract["flags"] = normalized_flags
+            exec_strategy["cli_contract"] = cli_contract
+
+        run_spec = exec_strategy.get("run_spec") or {}
+        if isinstance(run_spec, dict):
+            if "timeout_seconds" in run_spec:
+                try:
+                    run_spec["timeout_seconds"] = int(run_spec["timeout_seconds"])
+                except (TypeError, ValueError):
+                    run_spec["timeout_seconds"] = 30
+            exec_strategy["run_spec"] = run_spec
+        data["execution_strategy"] = exec_strategy
+
+    # abi_contracts
+    abi_contracts = data.get("abi_contracts") or []
+    normalized_abis = []
+    for abi in abi_contracts:
+        if not isinstance(abi, dict):
+            continue
+        normalized_abi: Dict[str, Any] = dict(abi)
+        target = str(normalized_abi.get("target_language") or "").lower().strip()
+        target_synonyms = {"c": "cpp", "c++": "cpp", "py": "python"}
+        normalized_abi["target_language"] = target_synonyms.get(target, target) or "cpp"
+
+        binding = str(normalized_abi.get("binding_framework") or "").lower().strip().replace("-", "_")
+        binding_synonyms = {
+            "pyo3": "pyo3",
+            "ctypes": "ctypes",
+            "cabi": "c_abi",
+            "c_abi": "c_abi",
+            "cpython_api": "pyo3",
+            "python_api": "pyo3",
+            "python_capi": "pyo3",
+            "c_api": "c_abi",
+            "python_native": "c_abi",
+            "native_python": "c_abi",
+            "direct": "c_abi",
+            "ffi": "c_abi",
+            "cffi": "ctypes",
+            "python_cffi": "ctypes",
+            "cython": "c_abi",
+            "python_cython": "c_abi",
+        }
+        normalized_abi["binding_framework"] = binding_synonyms.get(binding, binding) or "c_abi"
+        c_alias = normalized_abi.get("c_symbol_alias")
+        if c_alias is None:
+            normalized_abi["c_symbol_alias"] = ""
+
+        memory = str(normalized_abi.get("memory_model") or "").lower().strip().replace("-", "_")
+        memory_synonyms = {
+            "owned": "callee_allocates",
+            "owned_results": "callee_allocates",
+            "borrowed": "shared_pyo3",
+            "shared": "shared_pyo3",
+            "caller": "caller_allocates",
+            "callee": "callee_allocates",
+            "manual": "caller_allocates",
+            "auto": "callee_allocates",
+            "python_gc": "callee_allocates",
+            "gc": "callee_allocates",
+            "ptr_with_length": "caller_allocates",
+            "shared_ptr": "shared_pyo3",
+            "c": "caller_allocates",
+            "c_owned": "callee_allocates",
+            "rust_owned": "callee_allocates",
+        }
+        normalized_abi["memory_model"] = memory_synonyms.get(memory, memory) or "caller_allocates"
+        normalized_abis.append(normalized_abi)
+    data["abi_contracts"] = normalized_abis
+
+    # module_graph
+    module_graph = data.get("module_graph") or []
+    normalized_graph = []
+    for node in module_graph:
+        if not isinstance(node, dict):
+            continue
+        normalized_node = dict(node)
+        lang = str(normalized_node.get("lang") or normalized_node.get("language") or "python").lower()
+        if "python" in lang:
+            lang = "python"
+        elif lang in {"rust", "cpp", "c++"}:
+            lang = {"c++": "cpp"}.get(lang, lang)
+        else:
+            lang = "python"
+        normalized_node["lang"] = lang
+        normalized_graph.append(normalized_node)
+    data["module_graph"] = normalized_graph
+
+    return data
 
 
 def _abi_type_to_py(c_type: str) -> str:
@@ -229,7 +405,7 @@ class IntentCompiler:
                 continue
 
             try:
-                data = _extract_json(raw)
+                data = _normalize_v2_data(_extract_json(raw))
                 validator.validate(data)
                 v2 = BlueprintSchemaV2.model_validate(data)
             except (JsonSchemaValidationError, Exception) as exc:
