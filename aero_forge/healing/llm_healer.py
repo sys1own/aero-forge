@@ -400,14 +400,78 @@ class LLMHealer:
 
     @staticmethod
     def _apply_unified_diff(original: str, diff: str) -> str:
-        """Apply a tiny subset of unified diff lines. Falls back to full content on mismatch."""
-        try:
-            from difflib import unified_diff
-        except ImportError:
-            return diff
-        # A robust diff applier is overkill for the directive harness; return diff text
-        # as the replacement if it does not look like a full file.
-        return diff
+        """Apply a unified diff to *original*, falling back to the diff text on parse errors."""
+        original_lines = original.splitlines(keepends=True)
+        # Normalize line endings for matching.
+        normalized_original = [line.rstrip("\r\n") for line in original_lines]
+        result: List[str] = []
+        idx = 0
+        hunk_re = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
+        in_hunk = False
+        hunk_old_start = 0
+        hunk_old_count = 0
+        hunk_old_seen = 0
+
+        def normalized_starts_with(raw_line: str, prefix: str) -> bool:
+            return raw_line.startswith(prefix)
+
+        for raw_line in diff.splitlines(keepends=True):
+            line = raw_line.rstrip("\r\n")
+            if line.startswith("---") or line.startswith("+++"):
+                continue
+            match = hunk_re.match(line)
+            if match:
+                # Flush any remaining pre-hunk context.
+                if in_hunk and hunk_old_seen < hunk_old_count:
+                    while idx < len(normalized_original) and hunk_old_seen < hunk_old_count:
+                        result.append(original_lines[idx])
+                        idx += 1
+                        hunk_old_seen += 1
+                in_hunk = True
+                hunk_old_start = int(match.group(1))
+                hunk_old_count = int(match.group(2)) if match.group(2) else 1
+                hunk_old_seen = 0
+                # Position index to the start of the hunk in the original file.
+                idx = max(0, hunk_old_start - 1)
+                continue
+            if not in_hunk:
+                # Lines outside hunks are ignored.
+                continue
+
+            # Within a hunk, process context, addition, and deletion lines.
+            if normalized_starts_with(line, " "):
+                # Context line must match the next original line.
+                if idx < len(normalized_original):
+                    result.append(original_lines[idx])
+                    idx += 1
+                    hunk_old_seen += 1
+            elif normalized_starts_with(line, "-"):
+                if idx < len(normalized_original):
+                    expected = normalized_original[idx]
+                    removed = line[1:]
+                    if removed == expected:
+                        idx += 1
+                        hunk_old_seen += 1
+                    else:
+                        # Mismatch: still skip the closest original line so the
+                        # patch can be applied leniently.
+                        idx += 1
+                        hunk_old_seen += 1
+            elif normalized_starts_with(line, "+"):
+                result.append(line[1:] + "\n")
+            else:
+                # Possible empty context line or trailing marker.
+                if idx < len(normalized_original):
+                    result.append(original_lines[idx])
+                    idx += 1
+                    hunk_old_seen += 1
+
+        # Append any remaining original lines after the last hunk.
+        while idx < len(original_lines):
+            result.append(original_lines[idx])
+            idx += 1
+
+        return "".join(result)
 
 
 def run_command(

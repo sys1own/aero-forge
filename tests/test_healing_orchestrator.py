@@ -104,3 +104,23 @@ def test_llm_strategy_errors_skip_ast_and_call_llm_healer(tmp_path: Path) -> Non
     assert result["status"] == "success"
     assert result["strategy_used"] == HealingStrategy.LLM.value
     assert mock_healer.heal.called
+
+
+def test_failed_attempts_are_not_repeated(tmp_path: Path) -> None:
+    """After AST and LLM both fail for the same error, the orchestrator does not retry."""
+    log = "error[E0308]: mismatched types\n  --> crates/native_core/src/lib.rs:12:23\n"
+
+    with patch("aero_forge.healing.orchestrator.LLMHealer") as mock_healer_cls:
+        mock_healer = MagicMock()
+        mock_healer.heal.return_value = {"status": "failed", "reason": "No directives"}
+        mock_healer_cls.return_value = mock_healer
+
+        orchestrator = HealingOrchestrator(tmp_path)
+        first = orchestrator.heal(log, command="cargo test", exit_code=101)
+        assert first["status"] == "failed"
+        # Second call with identical error should short-circuit and not re-invoke LLM.
+        second = orchestrator.heal(log, command="cargo test", exit_code=101)
+        assert second["attempts_exhausted"] is True
+        assert second["error_message"]
+    # LLM should only be called once because the failed attempt is recorded.
+    assert mock_healer.heal.call_count == 1
