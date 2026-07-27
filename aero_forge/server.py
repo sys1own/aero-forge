@@ -1456,6 +1456,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             exit_code = body.get("exit_code", 1)
             log_text = body.get("log_text", "")
             target_file = body.get("target_file", "").strip()
+            force_llm = bool(body.get("force_llm", False))
             if not session_id:
                 return _send_json(self, 400, {"error": "Missing 'session_id'"})
 
@@ -1488,6 +1489,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 command=command,
                 exit_code=exit_code,
                 target_file=target_file or None,
+                force_llm=force_llm,
             )
             if result.get("status") == "success":
                 _notify_tree_changed(session_id)

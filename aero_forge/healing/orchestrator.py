@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from aero_forge.bundle_repo import bundle_workspace
 from aero_forge.healing.evaluator import HealingStrategy, LogEvaluator
 from aero_forge.healing.llm_healer import LLMHealer
 from aero_forge.healing.router import try_auto_fix
@@ -51,11 +52,16 @@ class HealingOrchestrator:
         command: str = "",
         exit_code: int = 1,
         target_file: Optional[str] = None,
+        force_llm: bool = False,
     ) -> Dict[str, Any]:
         """Evaluate *error_logs* and apply the appropriate repair strategy.
 
         Returns a structured payload with ``status``, ``strategy_used``,
         ``patched_files``, and ``error_message``.
+
+        AST-only errors are patched with a deterministic overlay. If the AST
+        patch fails or ``force_llm`` is set, the orchestrator escalates to a
+        full-workspace LLM healer using bundled project context.
         """
         evaluator = LogEvaluator()
         diagnosis = evaluator.evaluate_log(command, exit_code, error_logs)
@@ -63,7 +69,7 @@ class HealingOrchestrator:
 
         self.log_callback("info", "HEAL", f"Selected strategy: {strategy.value}")
 
-        if strategy == HealingStrategy.AST:
+        if not force_llm and strategy == HealingStrategy.AST:
             ast_result = self._try_ast_heal(error_logs, diagnosis, target_file)
             if ast_result.get("status") == "success":
                 return ast_result
@@ -73,17 +79,11 @@ class HealingOrchestrator:
                 "AST patch attempt unsuccessful. Escalating to Full-Workspace LLM Heal.",
             )
 
-        if strategy in (HealingStrategy.LLM, HealingStrategy.MANUAL):
-            # Even MANUAL cases get an LLM attempt; the model may see patterns
-            # the deterministic classifier missed.
-            return self._llm_heal(error_logs, command, exit_code, diagnosis)
-
-        return {
-            "status": "failed",
-            "strategy_used": strategy.value,
-            "patched_files": [],
-            "error_message": "No repair strategy could be applied.",
-        }
+        # Always fall back to the full-workspace LLM healer when AST fails or
+        # when the user explicitly requests it. This prevents the "no strategy"
+        # dead-end and gives multi-file / cross-crate errors a chance to be
+        # repaired with bundled context.
+        return self._llm_heal(error_logs, command, exit_code, diagnosis)
 
     def _try_ast_heal(
         self,
@@ -174,18 +174,23 @@ class HealingOrchestrator:
         diagnosis: Dict[str, Any],
     ) -> Dict[str, Any]:
         self.log_callback("info", "HEAL", "Building full-workspace context for LLM healing...")
-        failure_context = {
-            "command": command,
-            "exit_code": exit_code,
-            "log_text": error_logs,
-            "diagnosis": diagnosis,
-        }
+        workspace_context = bundle_workspace(self.workspace)
         healer = LLMHealer(
             provider=self.llm_provider,
             model=self.llm_model,
             log_callback=self.log_callback,
         )
-        result = healer.generate_and_apply_fix(self.workspace, failure_context)
+        result = healer.heal(
+            self.workspace,
+            error_logs,
+            command=command,
+            exit_code=exit_code,
+            diagnosis=diagnosis,
+            tier="reasoning",
+            full_workspace=True,
+            workspace_context=workspace_context,
+            force_full_rewrite=True,
+        )
 
         if result.get("status") == "success":
             return {
