@@ -1029,6 +1029,14 @@ class ChatSession:
         )
         self.last_evaluator_state = diagnosis
 
+        if not diagnosis.get("healable", False):
+            reason = diagnosis.get("reason") or "AST overlay is not safe for this error type."
+            return {
+                "message": f"This error can't be auto-patched: {reason} Ask me how to fix it instead.",
+                "diagnosis": diagnosis,
+                "status": "not_fixable",
+            }
+
         target_file = diagnosis.get("target_file") or "main.py"
         target_path = self.output_dir / target_file
         if not target_path.is_file():

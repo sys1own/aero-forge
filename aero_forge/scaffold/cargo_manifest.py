@@ -54,6 +54,27 @@ def _load_toml(path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _render_workspace_block(workspace: Dict[str, Any]) -> str:
+    """Render a ``[workspace]`` block from parsed data."""
+    members = workspace.get("members", [])
+    lines = ['[workspace]', 'members = [']
+    for idx, member in enumerate(members):
+        suffix = "" if idx == len(members) - 1 else ","
+        lines.append(f'    "{member}"{suffix}')
+    lines.append(']')
+    for key, value in workspace.items():
+        if key == "members":
+            continue
+        lines.append(f"{key} = {_render_toml_scalar(value)}")
+    return "\n".join(lines) + "\n"
+
+
+def _replace_workspace_block(text: str, new_block: str) -> str:
+    """Replace the first ``[workspace]`` block in ``text`` with ``new_block``."""
+    pattern = re.compile(r"(\[workspace\].*?)(?=\n\[|\Z)", re.DOTALL)
+    return pattern.sub(new_block, text, count=1)
+
+
 def ensure_workspace_cargo_toml(
     workspace_dir: Path,
     crate_member: str = "crates/native_core",
@@ -71,32 +92,17 @@ def ensure_workspace_cargo_toml(
 
     text = manifest.read_text(encoding="utf-8")
     data = _load_toml(manifest) or {}
-    members = data.get("workspace", {}).get("members", [])
+    workspace = data.get("workspace", {})
+    members = list(workspace.get("members", []))
     if crate_member in members:
         return manifest
 
-    # Append the member to the existing [workspace] members list.
-    member_quoted = f'"{crate_member}"'
+    members.append(crate_member)
+    workspace["members"] = members
+    new_block = _render_workspace_block(workspace)
+
     if "[workspace]" in text:
-        # Find the members = [...] array and append.
-        pattern = re.compile(r'(members\s*=\s*\[)([^\]]*)(\])', re.DOTALL)
-        match = pattern.search(text)
-        if match:
-            inner = match.group(2)
-            separator = ",\n        " if "\n" in inner.strip() else ", "
-            new_member = f"{separator}{member_quoted}"
-            if inner.strip():
-                if not inner.rstrip().endswith(","):
-                    new_member = "," + new_member
-            new_inner = inner + new_member
-            text = text[: match.start(2)] + new_inner + text[match.end(2) :]
-        else:
-            # No members array yet; inject one under [workspace].
-            text = text.replace(
-                "[workspace]",
-                f'[workspace]\nmembers = ["{crate_member}"]',
-                1,
-            )
+        text = _replace_workspace_block(text, new_block)
     else:
         text = (
             DEFAULT_WORKSPACE_CARGO_TOML.rstrip()

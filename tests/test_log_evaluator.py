@@ -26,6 +26,7 @@ def test_python_syntax_error_is_healable(evaluator):
 
 
 def test_python_name_error_is_healable(evaluator):
+    """A Python NameError is healable by adding an import (AST overlay)."""
     log = (
         "Traceback (most recent call last):\n"
         '  File "src/main.py", line 12, in run\n'
@@ -48,7 +49,7 @@ def test_rust_unexpected_closing_delimiter_is_healable(evaluator):
     )
     result = evaluator.evaluate_log("cargo build", 101, log)
     assert result["healable"] is True
-    assert result["error_type"] == "rust_compile"
+    assert result["error_type"] == "rust_syntax"
     assert result["target_file"] == "src/lib.rs"
     assert result["line_number"] == 42
 
