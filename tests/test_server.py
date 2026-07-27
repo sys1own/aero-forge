@@ -587,6 +587,57 @@ def test_api_workspace_clean(server):
     assert "old.py" not in _collect_paths(tree["tree"])
 
 
+def test_api_workspace_accelerate_runtime(server):
+    session_id = "test-workspace-accel-runtime"
+    _post_json(
+        server + "/api/save-file",
+        {"session_id": session_id, "path": "main.py", "content": "print('ok')\n"},
+    )
+    status, body = _post_json(
+        server + "/api/workspace/accelerate",
+        {"session_id": session_id, "mode": "runtime"},
+    )
+    assert status == 200
+    assert body["status"] == "accelerated"
+    assert body["mode"] == "runtime"
+    assert isinstance(body["native_active"], bool)
+    assert any(c["cmd"] == "python main.py" for c in body["commands"])
+
+    # Runtime mode must not create new files in the workspace.
+    status, body = _get(server + f"/api/files?session_id={session_id}")
+    assert status == 200
+    tree = json.loads(body.decode("utf-8"))
+    assert "crates" not in _collect_paths(tree["tree"])
+
+
+def test_api_workspace_accelerate_scaffold_pyo3(server):
+    session_id = "test-workspace-accel-pyo3"
+    _post_json(
+        server + "/api/save-file",
+        {"session_id": session_id, "path": "main.py", "content": "print('ok')\n"},
+    )
+    status, body = _post_json(
+        server + "/api/workspace/accelerate",
+        {"session_id": session_id, "mode": "scaffold_pyo3"},
+    )
+    assert status == 200
+    assert body["status"] == "accelerated"
+    assert body["mode"] == "scaffold_pyo3"
+    assert any("maturin develop" in c["cmd"] for c in body["commands"])
+    assert any(
+        c["cmd"] == "cargo test --manifest-path crates/native_core/Cargo.toml"
+        for c in body["commands"]
+    )
+
+    status, body = _get(server + f"/api/files?session_id={session_id}")
+    assert status == 200
+    tree = json.loads(body.decode("utf-8"))
+    paths = _collect_paths(tree["tree"])
+    assert "crates/native_core/Cargo.toml" in paths
+    assert "crates/native_core/src/lib.rs" in paths
+    assert "pyproject.toml" in paths
+
+
 def test_api_build_passes_cargo_logs_and_test_counts(server, monkeypatch):
     """The /api/build response surfaces native compile logs and parsed test counts."""
 

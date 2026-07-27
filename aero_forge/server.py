@@ -33,6 +33,7 @@ import aiohttp
 import yaml
 from aiohttp import web
 
+from aero_forge import inspector as workspace_inspector
 from aero_forge.blueprint import generate_blueprint_from_uploaded_repo
 from aero_forge.bundle_repo import (
     ExportProfile,
@@ -657,6 +658,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_delete_node()
             if path == "/api/run":
                 return self._handle_run()
+            if path == "/api/workspace/accelerate":
+                return self._handle_workspace_accelerate()
             if path == "/api/workspace/clean":
                 return self._handle_workspace_clean()
             if path == "/api/load-blueprint-template":
@@ -1232,6 +1235,55 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             )
         except Exception as exc:
             logger.exception("Workspace clean endpoint failed")
+            return _send_json(self, 500, {"error": str(exc)})
+
+    def _handle_workspace_accelerate(self) -> None:
+        """Activate runtime native acceleration or scaffold a PyO3 crate in the workspace."""
+        try:
+            body = _parse_json_body(self)
+            session_id = body.get("session_id", "").strip()
+            mode = body.get("mode", "runtime")
+            if not session_id:
+                return _send_json(self, 400, {"error": "Missing 'session_id'"})
+            if mode not in {"runtime", "scaffold_pyo3"}:
+                return _send_json(
+                    self,
+                    400,
+                    {"error": "Invalid mode; expected 'runtime' or 'scaffold_pyo3'"},
+                )
+
+            session_dir = _session_dir(session_id)
+            if not session_dir.is_dir():
+                return _send_json(
+                    self,
+                    404,
+                    {"error": f"Sandbox for session '{session_id}' does not exist"},
+                )
+
+            native_active = False
+            if mode == "runtime":
+                from aero_forge import accelerator as accel_module
+
+                native_active = bool(accel_module.is_native())
+                commands = workspace_inspector.inspect_workspace(session_dir)
+            else:
+                workspace_inspector.scaffold_pyo3_workspace(session_dir)
+                commands = workspace_inspector.inspect_workspace(session_dir)
+                _notify_tree_changed(session_id)
+
+            return _send_json(
+                self,
+                200,
+                {
+                    "session_id": session_id,
+                    "mode": mode,
+                    "status": "accelerated",
+                    "native_active": native_active,
+                    "commands": commands,
+                },
+            )
+        except Exception as exc:
+            logger.exception("Workspace accelerate endpoint failed")
             return _send_json(self, 500, {"error": str(exc)})
 
     def _handle_blueprint_templates(self) -> None:
