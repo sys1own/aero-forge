@@ -3,8 +3,17 @@
 from __future__ import annotations
 
 import re
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+
+class HealingStrategy(str, Enum):
+    """High-level healing strategy selected for a failure."""
+
+    AST = "ast"
+    LLM = "full_workspace_llm"
+    MANUAL = "manual"
 
 
 class LogEvaluator:
@@ -285,3 +294,12 @@ class LogEvaluator:
             "reason": "The failure could not be classified; manual inspection is required.",
         })
         return result
+
+    def evaluate_error(self, error_log: str, command: str = "", exit_code: int = 1) -> HealingStrategy:
+        """Return the high-level strategy (`AST`, `LLM`, or `MANUAL`) for *error_log*."""
+        diagnosis = self.evaluate_log(command, exit_code, error_log)
+        if diagnosis.get("ast_healable"):
+            return HealingStrategy.AST
+        if diagnosis.get("llm_healable"):
+            return HealingStrategy.LLM
+        return HealingStrategy.MANUAL

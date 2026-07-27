@@ -48,6 +48,7 @@ from aero_forge import runner as sandbox_runner
 from aero_forge.healing.context_builder import ContextBuilder
 from aero_forge.healing.evaluator import LogEvaluator
 from aero_forge.healing.llm_healer import LLMHealer, run_command
+from aero_forge.healing.orchestrator import HealingOrchestrator
 from aero_forge.healing.router import try_auto_fix
 from aero_forge.healing.structural_merger import apply_overlay, MergeConflictError
 from aero_forge.orchestrator.router import toolchains_for_intent
@@ -82,6 +83,11 @@ def _resolve_port(port: Optional[int] = None) -> int:
         except ValueError:
             logger.warning("Ignoring non-integer PORT environment variable: %r", env_port)
     return DEFAULT_PORT
+
+
+def _resolve_llm_provider(body: Dict[str, Any]) -> str:
+    """Return the effective LLM provider from the request body or environment."""
+    return body.get("provider") or os.getenv("AERO_FORGE_LLM_PROVIDER") or "deepseek"
 
 _CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
@@ -1442,7 +1448,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             return _send_json(self, 500, {"error": str(exc)})
 
     def _handle_workspace_heal(self) -> None:
-        """Apply a deterministic patch to the file identified by the failure log."""
+        """Apply a smart heal (AST-first, then full-workspace LLM fallback)."""
         try:
             body = _parse_json_body(self)
             session_id = body.get("session_id", "").strip()
@@ -1461,120 +1467,56 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     {"error": f"Sandbox for session '{session_id}' does not exist"},
                 )
 
-            evaluator = LogEvaluator()
-            diagnosis = evaluator.evaluate_log(command, exit_code, log_text)
-            if not diagnosis.get("healable", False):
-                reason = diagnosis.get("reason") or "AST overlay is not safe for this error type."
-                return _send_json(
-                    self,
-                    200,
-                    {
-                        "session_id": session_id,
-                        "status": "failed",
-                        "target_file": diagnosis.get("target_file"),
-                        "diagnosis": diagnosis,
-                        "reason": reason,
-                        "logs": [f"Manual fix required: {reason}"],
-                    },
-                )
+            provider = _resolve_llm_provider(body)
+            model = body.get("model") or os.getenv("AERO_FORGE_MODEL")
 
-            target = target_file or diagnosis.get("target_file") or "main.py"
-            target_path = session_dir / target
-            if not target_path.is_file():
-                # Allow absolute paths under session_dir for safety.
-                resolved = (session_dir / Path(target).name).resolve()
-                if not str(resolved).startswith(str(session_dir.resolve())):
-                    return _send_json(self, 400, {"error": "Invalid target file"})
-                target_path = resolved
+            logs: list[str] = []
 
-            try:
-                original = target_path.read_text(encoding="utf-8")
-                patched = try_auto_fix(log_text, original)
-                if patched is None or patched == original:
-                    return _send_json(
-                        self,
-                        200,
-                        {
-                            "session_id": session_id,
-                            "status": "failed",
-                            "target_file": str(target_path.relative_to(session_dir)),
-                            "diagnosis": diagnosis,
-                            "reason": "No deterministic patch available for this error.",
-                            "logs": ["No deterministic patch available for this error."],
-                        },
-                    )
+            def _log(level: str, prefix: str, message: str) -> None:
+                line = f"[{level.upper()}] {prefix}: {message}"
+                logs.append(line)
+                logger.log(getattr(logging, level.upper(), logging.INFO), message)
 
-                language = "rust" if target_path.suffix in (".rs",) else "python"
-                try:
-                    merged = apply_overlay(original, patched, language=language)
-                except (MergeConflictError, SyntaxError) as exc:
-                    return _send_json(
-                        self,
-                        200,
-                        {
-                            "session_id": session_id,
-                            "status": "failed",
-                            "target_file": str(target_path.relative_to(session_dir)),
-                            "diagnosis": diagnosis,
-                            "reason": f"AST overlay merge failed: {exc}",
-                            "logs": [f"AST overlay merge failed: {exc}"],
-                        },
-                    )
-
-                if merged == original:
-                    return _send_json(
-                        self,
-                        200,
-                        {
-                            "session_id": session_id,
-                            "status": "failed",
-                            "target_file": str(target_path.relative_to(session_dir)),
-                            "diagnosis": diagnosis,
-                            "reason": "AST overlay produced no changes.",
-                            "logs": ["AST overlay produced no changes."],
-                        },
-                    )
-
-                target_path.write_text(merged, encoding="utf-8")
+            orchestrator = HealingOrchestrator(
+                session_dir,
+                llm_provider=provider,
+                llm_model=model,
+                log_callback=_log,
+            )
+            result = orchestrator.heal(
+                error_logs=log_text,
+                command=command,
+                exit_code=exit_code,
+                target_file=target_file or None,
+            )
+            if result.get("status") == "success":
                 _notify_tree_changed(session_id)
 
-                diff = "\n".join(
-                    difflib.unified_diff(
-                        original.splitlines(keepends=True),
-                        merged.splitlines(keepends=True),
-                        fromfile=str(target),
-                        tofile=str(target),
-                    )
-                )
-                return _send_json(
-                    self,
-                    200,
-                    {
-                        "session_id": session_id,
-                        "status": "patched",
-                        "target_file": str(target_path.relative_to(session_dir)),
-                        "diff": diff,
-                        "diagnosis": diagnosis,
-                        "logs": [f"Patched {target_path.name}"],
-                    },
-                )
-            except Exception as exc:
-                logger.exception("Workspace heal patch failed")
-                return _send_json(
-                    self,
-                    200,
-                    {
-                        "session_id": session_id,
-                        "status": "failed",
-                        "target_file": str(target_path.relative_to(session_dir)) if target_path.is_file() else target,
-                        "diagnosis": diagnosis,
-                        "reason": f"AST patch could not be applied cleanly: {exc}",
-                        "logs": [f"AST patch could not be applied cleanly: {exc}"],
-                    },
-                )
+            # Translate the orchestrator result into the frontend contract.
+            response = {
+                "session_id": session_id,
+                "status": result.get("status", "failed"),
+                "strategy_used": result.get("strategy_used"),
+                "patched_files": result.get("patched_files", []),
+                "error_message": result.get("error_message"),
+                "target_file": result.get("target_file"),
+                "diff": result.get("diff"),
+                "diagnosis": result.get("diagnosis"),
+                "logs": logs,
+            }
+            return _send_json(self, 200, response)
         except Exception as exc:
             logger.exception("Workspace heal endpoint failed")
-            return _send_json(self, 500, {"error": str(exc)})
+            return _send_json(
+                self,
+                200,
+                {
+                    "status": "failed",
+                    "strategy_used": None,
+                    "patched_files": [],
+                    "error_message": str(exc),
+                },
+            )
 
     def _handle_workspace_heal_llm(self) -> None:
         """Apply an LLM-generated directive-based fix and re-run the command."""
