@@ -770,6 +770,9 @@ def _contracts_to_abi_contracts(
             if Path(candidate).stem == name or Path(candidate).name == f"{base}.h":
                 header_path = candidate
                 break
+        if not header_path and header_candidates:
+            # Reuse the first declared header for the whole C-ABI surface.
+            header_path = header_candidates[0]
         if not header_path and any(Path(e.path).suffix in (".cpp", ".cc", ".cxx") for e in manifest):
             header_path = f"include/{name}.h"
 

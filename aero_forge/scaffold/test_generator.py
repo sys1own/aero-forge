@@ -463,3 +463,155 @@ def generate_smoke_tests(implementation: str, module_name: str = "generated") ->
     imports = ["import math", ""]
     imports.extend(f"from {module_name} import {n}" for n in all_names)
     return "\n".join(imports) + "\n\n" + "\n".join(test_lines)
+
+
+def _abi_type_to_py(abi_type: str) -> str:
+    """Map a supported ABI scalar/pointer type to a Python type hint."""
+    t = (abi_type or "").strip().lower()
+    if t in {"f64", "double", "float"}:
+        return "float"
+    if t in {"i32", "i64", "int", "int32_t", "int64_t", "usize", "u32"}:
+        return "int"
+    if t in {"bool"}:
+        return "bool"
+    if t in {"const char*", "char*", "c_str"}:
+        return "str"
+    if t in {"void"}:
+        return "None"
+    if "*" in t:
+        # Pointer types are treated as a flat list of the underlying scalar.
+        inner = t.replace("*", "").replace("mut", "").replace("const", "").strip()
+        return f"list[{_abi_type_to_py(inner)}]"
+    return "Any"
+
+
+def _abi_contract_to_signature(contract: Any) -> str:
+    """Convert an ``ABIContract`` signature dict into a Python signature string."""
+    sig = contract.signature or {}
+    inputs = sig.get("inputs", [])
+    outputs = sig.get("outputs", [])
+    name = contract.export_symbol or contract.contract_id
+    args = ", ".join(
+        f"{entry.get('name', 'arg')}: {_abi_type_to_py(entry.get('type', ''))}"
+        for entry in inputs
+    )
+    ret = "None"
+    if outputs:
+        ret = _abi_type_to_py(outputs[0].get("type", ""))
+        if len(outputs) > 1:
+            ret = f"tuple[{', '.join(_abi_type_to_py(o.get('type', '')) for o in outputs)}]"
+    return f"def {name}({args}) -> {ret}:"
+
+
+def _contract_to_signature(contract: Any) -> str:
+    """Return a Python signature string from a ``ContractEntry`` or ``ABIContract``."""
+    if hasattr(contract, "signature") and isinstance(contract.signature, str):
+        sig = contract.signature.strip()
+        if sig:
+            if not sig.endswith(":"):
+                sig += ":"
+            return sig
+    if hasattr(contract, "signature") and isinstance(contract.signature, dict):
+        return _abi_contract_to_signature(contract)
+    return ""
+
+
+def _contract_source(contracts: List[Any]) -> str:
+    """Build a synthetic Python source containing one stub per contract."""
+    lines: List[str] = []
+    for contract in contracts:
+        sig = _contract_to_signature(contract)
+        if sig:
+            lines.append(sig)
+            lines.append("    pass")
+            lines.append("")
+    return "\n".join(lines)
+
+
+def _sample_arg_for_py_type(type_hint: str) -> str:
+    """Return a concrete Python literal for a Python type hint."""
+    t = (type_hint or "").strip().lower().replace(" ", "")
+    if t == "str":
+        return '"test"'
+    if t == "int":
+        return "1"
+    if t == "float":
+        return "1.0"
+    if t == "bool":
+        return "True"
+    if t == "none":
+        return "None"
+    if t.startswith("list["):
+        inner = t[5:-1].strip() if t.endswith("]") else "float"
+        inner_lit = _sample_arg_for_py_type(inner)
+        if inner_lit.startswith("[") or inner_lit.startswith("{") or inner_lit.startswith("("):
+            return f"[{inner_lit}, {inner_lit}]"
+        return f"[{inner_lit}, {inner_lit}, {inner_lit}]"
+    if t.startswith("dict["):
+        return "{}"
+    if t.startswith("tuple["):
+        return "(1, 2)"
+    return "None"
+
+
+def _verification_tests(verification_nodes: List[Dict[str, Any]]) -> str:
+    """Generate pytest subprocess tests from blueprint verification nodes."""
+    if not verification_nodes:
+        return ""
+    lines: List[str] = ["import re", "import subprocess", "import sys", ""]
+    for idx, node in enumerate(verification_nodes):
+        test_id = node.get("test_id") or f"verification_{idx}"
+        safe_id = "".join(c if c.isalnum() or c == "_" else "_" for c in str(test_id))
+        cmd = node.get("execution_cmd", "")
+        if isinstance(cmd, list):
+            cmd = " ".join(str(x) for x in cmd)
+        expected = node.get("expected_exit_code", 0)
+        patterns = node.get("stdout_match_patterns", [])
+        prohibited = node.get("stderr_prohibited_patterns", [])
+        numerical = node.get("numerical_assertions", [])
+
+        lines.append(f"def test_{safe_id}():")
+        lines.append(f'    result = subprocess.run({cmd!r}, shell=True, capture_output=True, text=True, timeout=120)')
+        lines.append(f'    assert result.returncode == {expected}, result.stderr')
+        for pattern in patterns:
+            lines.append(f'    assert re.search({pattern!r}, result.stdout), {pattern!r}')
+        for pattern in prohibited:
+            lines.append(f'    assert not re.search({pattern!r}, result.stderr), {pattern!r}')
+        for assertion in numerical:
+            metric = assertion.get("target_metric", "")
+            expected_val = assertion.get("expected_value", 0)
+            atol = assertion.get("absolute_tolerance", 1e-9)
+            lines.append(f'    match = re.search(r"{metric}=([-+]?\\d*\\.\\d+|\\d+)", result.stdout)')
+            lines.append(f'    assert match, "metric {metric} not found"')
+            lines.append(f'    assert abs(float(match.group(1)) - {expected_val}) <= {atol}')
+        lines.append("")
+    return "\n".join(lines)
+
+
+def generate_blueprint_tests(
+    blueprint: "Blueprint",
+    module_name: str,
+    *,
+    source_contracts: Optional[List[Any]] = None,
+) -> str:
+    """Generate a pytest file from the contracts and verification nodes in *blueprint*.
+
+    The generated tests import functions from *module_name* and exercise them with
+    literal arguments derived from their type annotations.  Verification nodes are
+    turned into subprocess tests that assert exit codes, stdout patterns, and
+    numerical tolerances.
+    """
+    from aero_forge.blueprint import ABIContract, ContractEntry
+
+    contracts = source_contracts or []
+    if not contracts:
+        contracts = list(getattr(blueprint, "contracts", []) or [])
+    if not contracts:
+        contracts = list(getattr(blueprint, "abi_contracts", []) or [])
+
+    impl_source = _contract_source(contracts)
+    smoke = generate_smoke_tests(impl_source, module_name=module_name) if impl_source else ""
+    verification = _verification_tests(getattr(blueprint, "verification_nodes", []) or [])
+
+    parts = [p for p in [smoke, verification] if p]
+    return "\n".join(parts)

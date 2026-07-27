@@ -173,12 +173,18 @@ class DeterministicVerificationRunner:
             if isinstance(cmd, list):
                 cmd = shlex.join(str(x) for x in cmd)
 
+            env = os.environ.copy()
+            env["PYTHONPATH"] = (
+                f"{self.project_root}{os.pathsep}{env.get('PYTHONPATH', '')}"
+            ).strip(os.pathsep)
+
             proc = subprocess.run(
                 cmd,
                 shell=True,
                 cwd=self.project_root,
                 capture_output=True,
                 text=True,
+                env=env,
             )
 
             if proc.returncode != expected_code:
