@@ -309,6 +309,7 @@ class DeepSeekClient(OpenAIClient):
                 "DeepSeek API key not found. "
                 "Set DEEPSEEK_API_KEY or AERO_FORGE_API_KEY."
             )
+        self.api_key = api_key
         return super()._call(prompt, temperature, **kwargs)
 
 
