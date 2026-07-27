@@ -8,8 +8,9 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from aero_forge.scheduler.wavefront import Task, WavefrontScheduler
 from aero_forge.toolchain import ToolchainManager
 
 
@@ -75,3 +76,50 @@ def install_maturin_sync(env: Optional[Dict[str, str]] = None) -> bool:
         return manager.maturin_available()
     except Exception:
         return False
+
+
+def run_wavefront_tasks(
+    commands: List[str],
+    sandbox_dir: Path,
+    dependencies: Optional[Dict[int, List[int]]] = None,
+    env: Optional[Dict[str, str]] = None,
+    log_callback: Optional[Callable[[str, str, str], None]] = None,
+) -> List[Dict[str, Any]]:
+    """Execute a set of build/test commands through the WavefrontScheduler.
+
+    ``dependencies`` maps command index -> list of dependency indices. Commands
+    without dependencies run in wave $W_0$; each wave completes before the
+    next begins. Logs are streamed via ``log_callback`` as ``[WAVE]`` messages.
+    """
+    env = env or os.environ.copy()
+    dependencies = dependencies or {}
+    scheduler = WavefrontScheduler(log_callback=log_callback)
+
+    tasks = {str(i): Task(name=f"task-{i}", command=cmd, cwd=sandbox_dir, env=env) for i, cmd in enumerate(commands)}
+    adj: Dict[str, List[str]] = {}
+    for i, deps in dependencies.items():
+        adj[str(i)] = [str(d) for d in deps]
+    for key in tasks:
+        adj.setdefault(key, [])
+
+    return scheduler.execute_sync(tasks, adj)
+
+
+async def run_wavefront_tasks_async(
+    commands: List[str],
+    sandbox_dir: Path,
+    dependencies: Optional[Dict[int, List[int]]] = None,
+    env: Optional[Dict[str, str]] = None,
+    log_callback: Optional[Callable[[str, str, str], None]] = None,
+) -> List[Dict[str, Any]]:
+    """Async variant of ``run_wavefront_tasks``."""
+    env = env or os.environ.copy()
+    dependencies = dependencies or {}
+    scheduler = WavefrontScheduler(log_callback=log_callback)
+    tasks = {str(i): Task(name=f"task-{i}", command=cmd, cwd=sandbox_dir, env=env) for i, cmd in enumerate(commands)}
+    adj: Dict[str, List[str]] = {}
+    for i, deps in dependencies.items():
+        adj[str(i)] = [str(d) for d in deps]
+    for key in tasks:
+        adj.setdefault(key, [])
+    return await scheduler.execute(tasks, adj)

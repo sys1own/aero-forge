@@ -2059,69 +2059,39 @@ async def _handle_terminal_run_async(request: web.Request) -> web.StreamResponse
         await response.write((json.dumps({"type": "accel", "data": f"[{prefix}] {message}", "level": level}) + "\n").encode("utf-8"))
 
     start = time.time()
+
+    def _wave_log(level: str, prefix: str, message: str) -> None:
+        payload = json.dumps({"type": "accel", "data": f"[{prefix}] {message}", "level": level}) + "\n"
+        # Schedule the write on the response writer; safe because we are inside the handler coroutine.
+        data = payload.encode("utf-8")
+        loop = asyncio.get_running_loop()
+        loop.call_soon(lambda d=data: asyncio.create_task(response.write(d)))
+
     try:
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=str(session_dir),
+        results = await sandbox_runner.run_wavefront_tasks_async(
+            [command],
+            sandbox_dir=session_dir,
             env=env,
+            log_callback=_wave_log,
         )
+        result = results[0]
     except Exception as exc:
-        await response.write((json.dumps({"type": "stderr", "data": f"Failed to start process: {exc}"}) + "\n").encode("utf-8"))
+        await response.write((json.dumps({"type": "stderr", "data": f"Wavefront execution failed: {exc}"}) + "\n").encode("utf-8"))
         await response.write((json.dumps({"type": "summary", "exit_code": -1, "duration_ms": 0, "cwd": str(session_dir)}) + "\n").encode("utf-8"))
         await response.write_eof()
         return response
 
-    async def _read_stream(stream, tag):
-        while True:
-            try:
-                line = await asyncio.wait_for(stream.readline(), timeout=1.0)
-            except asyncio.TimeoutError:
-                if proc.returncode is not None:
-                    break
-                continue
-            if not line:
-                break
-            text = line.decode("utf-8", errors="replace").rstrip("\n")
-            payload = json.dumps({"type": tag, "data": text}) + "\n"
-            await response.write(payload.encode("utf-8"))
-
-    async def _drain_stream(stream):
-        try:
-            await stream.read()
-        except Exception:
-            pass
-
-    stdout_task = asyncio.create_task(_read_stream(proc.stdout, "stdout"))
-    stderr_task = asyncio.create_task(_read_stream(proc.stderr, "stderr"))
-
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        payload = json.dumps({"type": "stderr", "data": f"Command timed out after {timeout}s"}) + "\n"
-        await response.write(payload.encode("utf-8"))
-    finally:
-        stdout_task.cancel()
-        stderr_task.cancel()
-        try:
-            await stdout_task
-        except asyncio.CancelledError:
-            pass
-        try:
-            await stderr_task
-        except asyncio.CancelledError:
-            pass
-        # Drain any remaining bytes from the streams.
-        await _drain_stream(proc.stdout)
-        await _drain_stream(proc.stderr)
+    for line in result.get("stdout", "").splitlines():
+        await response.write((json.dumps({"type": "stdout", "data": line}) + "\n").encode("utf-8"))
+    for line in result.get("stderr", "").splitlines():
+        await response.write((json.dumps({"type": "stderr", "data": line}) + "\n").encode("utf-8"))
+    if result.get("timed_out"):
+        await response.write((json.dumps({"type": "stderr", "data": f"Command timed out after {timeout}s"}) + "\n").encode("utf-8"))
 
     duration = (time.time() - start) * 1000
     summary = json.dumps({
         "type": "summary",
-        "exit_code": proc.returncode or 0,
+        "exit_code": result["returncode"],
         "duration_ms": round(duration, 1),
         "cwd": str(session_dir),
     }) + "\n"
