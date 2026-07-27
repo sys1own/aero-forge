@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-from aero_forge.config import ConfigOverride
+from aero_forge.config import ConfigOverride, Tier
 from aero_forge.errors import UnsupportedError, classify_cargo_error
 from aero_forge.llm import get_llm_client
 
@@ -30,7 +30,7 @@ def explain_error(
     """
     client = (
         get_llm_client(
-            llm_provider, model=model, config_override=config_override
+            llm_provider, model=model, config_override=config_override, tier=Tier.FAST
         )
         if llm_provider
         else None

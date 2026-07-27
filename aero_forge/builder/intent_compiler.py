@@ -18,6 +18,7 @@ from aero_forge.blueprint import (
     ManifestEntry,
     write_blueprint,
 )
+from aero_forge.config import Tier
 from aero_forge.llm.clients import get_llm_client
 
 logger = logging.getLogger("aero_forge.intent")
@@ -383,6 +384,7 @@ class IntentCompiler:
                 api_key=self.api_key,
                 config_override=self.config_override,
                 raise_on_error=True,
+                tier=Tier.REASONING,
             )
 
         schema = BlueprintSchemaV2.model_json_schema()

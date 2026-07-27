@@ -8,9 +8,15 @@ import os
 import re
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
-from aero_forge.config import ConfigOverride, current_override
+from aero_forge.config import (
+    DEFAULT_TIER_MODELS,
+    ConfigOverride,
+    Tier,
+    current_override,
+    resolve_tier_model,
+)
 
 logger = logging.getLogger("aero_forge.llm")
 
@@ -55,13 +61,20 @@ class BaseLLMClient(ABC):
 
     def __init__(
         self,
-        model: str,
+        model: Optional[str] = None,
         max_retries: int = 3,
         api_key: Optional[str] = None,
         backoff_initial: float = 1.0,
         backoff_max: float = 30.0,
         timeout: Optional[float] = None,
+        provider: Optional[str] = None,
+        tier: Union[str, Tier] = Tier.FAST,
+        model_resolver: Optional[Callable[[str, str], Optional[str]]] = None,
     ):
+        self.provider = provider
+        self.tier = Tier(tier) if tier else Tier.FAST
+        self._model_resolver = model_resolver
+        self._model_is_pinned = model is not None
         self.model = model
         self.max_retries = max(1, max_retries)
         self.api_key = api_key
@@ -70,11 +83,21 @@ class BaseLLMClient(ABC):
         self.timeout = timeout or float(
             os.getenv("AERO_FORGE_LLM_TIMEOUT", "120.0")
         )
+        # Resolve a concrete default model for the requested tier when no
+        # explicit model is supplied. This makes ``client.model`` inspectable
+        # while still honoring tier switches at ``generate()`` time.
+        if not self._model_is_pinned:
+            try:
+                self.model = self._resolve_model(self.tier)
+            except LLMError:
+                self.model = None
 
     def generate(
         self,
         prompt: Union[str, List[Dict[str, str]]],
         temperature: float = 0.2,
+        *,
+        tier: Optional[Union[str, Tier]] = None,
         **kwargs: Any,
     ) -> Optional[str]:
         """Generate a completion with exponential backoff retry.
@@ -96,7 +119,7 @@ class BaseLLMClient(ABC):
                 )
                 time.sleep(delay)
             try:
-                return self._call(prompt, temperature, **kwargs)
+                return self._call(prompt, temperature, tier=tier, **kwargs)
             except LLMError:
                 # Configuration or usage errors should not be retried.
                 raise
@@ -184,6 +207,8 @@ class BaseLLMClient(ABC):
         self,
         prompt: Union[str, List[Dict[str, str]]],
         temperature: float,
+        *,
+        tier: Optional[Union[str, Tier]] = None,
         **kwargs: Any,
     ) -> str:
         """Provider-specific completion call."""
@@ -201,13 +226,35 @@ class BaseLLMClient(ABC):
                 return key
         return None
 
+    def _resolve_model(
+        self, tier: Optional[Union[str, Tier]] = None
+    ) -> str:
+        """Return the concrete model name for this request.
+
+        An explicit model passed at construction time is always pinned. Otherwise
+        the model is resolved from the configured provider + tier mapping.
+        """
+        if self._model_is_pinned and self.model:
+            return self.model
+        requested = Tier(tier) if tier else self.tier
+        if self._model_resolver and self.provider:
+            resolved = self._model_resolver(self.provider, requested.value)
+            if resolved:
+                return resolved
+        # Fallback to the default model computed at construction time.
+        if self.model:
+            return self.model
+        raise LLMError(
+            f"No model configured for provider {self.provider!r} tier {requested.value!r}"
+        )
+
 
 class OpenAIClient(BaseLLMClient):
     """OpenAI-compatible chat completion client."""
 
     def __init__(
         self,
-        model: str,
+        model: Optional[str] = None,
         *,
         base_url: Optional[str] = None,
         **kwargs: Any,
@@ -219,6 +266,8 @@ class OpenAIClient(BaseLLMClient):
         self,
         prompt: Union[str, List[Dict[str, str]]],
         temperature: float,
+        *,
+        tier: Optional[Union[str, Tier]] = None,
         **kwargs: Any,
     ) -> str:
         from openai import OpenAI
@@ -237,7 +286,7 @@ class OpenAIClient(BaseLLMClient):
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=self.timeout)
         messages = _normalize_messages(prompt)
         response = client.chat.completions.create(
-            model=self.model,
+            model=self._resolve_model(tier),
             messages=messages,
             temperature=temperature,
             **kwargs,
@@ -256,7 +305,7 @@ class OpenAIClient(BaseLLMClient):
 class OpenRouterClient(OpenAIClient):
     """OpenRouter uses an OpenAI-compatible endpoint with its own defaults."""
 
-    def __init__(self, model: str, **kwargs: Any):
+    def __init__(self, model: Optional[str] = None, **kwargs: Any):
         kwargs.setdefault("base_url", "https://openrouter.ai/api/v1")
         super().__init__(model, **kwargs)
 
@@ -264,6 +313,8 @@ class OpenRouterClient(OpenAIClient):
         self,
         prompt: Union[str, List[Dict[str, str]]],
         temperature: float,
+        *,
+        tier: Optional[Union[str, Tier]] = None,
         **kwargs: Any,
     ) -> str:
         api_key = self._resolve_key(["OPENROUTER_API_KEY", "AERO_FORGE_API_KEY"])
@@ -279,7 +330,7 @@ class OpenRouterClient(OpenAIClient):
         client = OpenAI(api_key=api_key, base_url=base_url, timeout=self.timeout)
         messages = _normalize_messages(prompt)
         response = client.chat.completions.create(
-            model=self.model,
+            model=self._resolve_model(tier),
             messages=messages,
             temperature=temperature,
             **kwargs,
@@ -293,7 +344,7 @@ class OpenRouterClient(OpenAIClient):
 class DeepSeekClient(OpenAIClient):
     """DeepSeek API uses an OpenAI-compatible endpoint."""
 
-    def __init__(self, model: str, **kwargs: Any):
+    def __init__(self, model: Optional[str] = None, **kwargs: Any):
         kwargs.setdefault("base_url", "https://api.deepseek.com/v1")
         super().__init__(model, **kwargs)
 
@@ -301,6 +352,8 @@ class DeepSeekClient(OpenAIClient):
         self,
         prompt: Union[str, List[Dict[str, str]]],
         temperature: float,
+        *,
+        tier: Optional[Union[str, Tier]] = None,
         **kwargs: Any,
     ) -> str:
         api_key = self._resolve_key(["DEEPSEEK_API_KEY", "AERO_FORGE_API_KEY"])
@@ -310,7 +363,7 @@ class DeepSeekClient(OpenAIClient):
                 "Set DEEPSEEK_API_KEY or AERO_FORGE_API_KEY."
             )
         self.api_key = api_key
-        return super()._call(prompt, temperature, **kwargs)
+        return super()._call(prompt, temperature, tier=tier, **kwargs)
 
 
 class GeminiClient(BaseLLMClient):
@@ -320,6 +373,8 @@ class GeminiClient(BaseLLMClient):
         self,
         prompt: Union[str, List[Dict[str, str]]],
         temperature: float,
+        *,
+        tier: Optional[Union[str, Tier]] = None,
         **kwargs: Any,
     ) -> str:
         import importlib
@@ -339,7 +394,8 @@ class GeminiClient(BaseLLMClient):
             )
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(self.model)
+        model_name = self._resolve_model(tier)
+        model = genai.GenerativeModel(model_name)
         messages = _normalize_messages(prompt)
         content = _messages_to_string(messages)
 
@@ -366,6 +422,14 @@ class GeminiClient(BaseLLMClient):
             return (Exception,)
 
 
+_UNKNOWN_PROVIDER_FALLBACKS: Dict[str, str] = {
+    "openai": "gpt-4",
+    "openrouter": "openrouter/free",
+    "deepseek": "deepseek-v4-pro",
+    "gemini": "gemini-2.0-flash",
+}
+
+
 def get_llm_client(
     provider: Optional[str],
     model: Optional[str] = None,
@@ -373,6 +437,8 @@ def get_llm_client(
     api_key: Optional[str] = None,
     config_override: Optional[ConfigOverride] = None,
     raise_on_error: bool = False,
+    tier: Optional[Union[str, Tier]] = None,
+    file_config: Optional[Dict[str, Any]] = None,
 ) -> Optional[BaseLLMClient]:
     """Return a configured LLM client for ``provider``.
 
@@ -380,6 +446,11 @@ def get_llm_client(
     missing, after logging a clear error. When ``raise_on_error`` is ``True``,
     missing API keys or unsupported providers raise ``LLMError`` instead of
     silently returning ``None``.
+
+    ``tier`` selects the cost-capable model tier. If ``model`` is supplied
+    explicitly it overrides the tier mapping. The requested ``tier`` is still
+    honored on subsequent ``generate(tier=...)`` calls unless an explicit model
+    was pinned at construction time.
     """
     override = config_override or current_override()
     if override is not None:
@@ -396,25 +467,62 @@ def get_llm_client(
         return None
 
     provider = provider.lower()
+    tier_obj = Tier(tier) if tier else Tier.FAST
+
+    if file_config is None:
+        from aero_forge.config import find_config, load_config
+
+        cfg_path = find_config()
+        file_config = load_config(cfg_path) if cfg_path else {}
+
+    # Tier-aware model resolution. An explicit ``model`` argument or the legacy
+    # ``AERO_FORGE_MODEL`` environment variable pins the model. Otherwise the
+    # provider's tier mapping is used, allowing ``generate(tier=...)`` to switch
+    # between fast and reasoning models at call time.
+    explicit_model = model or os.getenv("AERO_FORGE_MODEL")
+    if explicit_model:
+        model_name = explicit_model
+    elif provider in DEFAULT_TIER_MODELS:
+        model_name = None
+    else:
+        model_name = _UNKNOWN_PROVIDER_FALLBACKS.get(provider)
+
+    model_resolver: Optional[Callable[[str, str], Optional[str]]]
+    if provider in DEFAULT_TIER_MODELS:
+        model_resolver = lambda p, t: resolve_tier_model(
+            p, t, file_config=file_config, override=override
+        )
+    else:
+        model_resolver = None
+
+    def _key(*names: str) -> Optional[str]:
+        if api_key:
+            return api_key
+        for name in names:
+            value = os.getenv(name)
+            if value:
+                return value
+        return None
 
     if provider == "openai":
-        resolved_model = model or os.getenv("AERO_FORGE_MODEL") or "gpt-4"
-        key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("AERO_FORGE_API_KEY")
+        key = _key("OPENAI_API_KEY", "AERO_FORGE_API_KEY")
         if not key:
             msg = "OpenAI provider selected but OPENAI_API_KEY or AERO_FORGE_API_KEY is not set."
             logger.error(msg)
             if raise_on_error:
                 raise LLMError(msg)
             return None
-        return OpenAIClient(model=resolved_model, max_retries=max_retries, api_key=key)
+        return OpenAIClient(
+            model=model_name,
+            provider=provider,
+            tier=tier_obj,
+            model_resolver=model_resolver,
+            max_retries=max_retries,
+            api_key=key,
+        )
 
     if provider == "openrouter":
-        resolved_model = model or os.getenv("AERO_FORGE_MODEL") or "openrouter/free"
-        key = (
-            api_key
-            or os.getenv("OPENROUTER_API_KEY")
-            or os.getenv("AERO_FORGE_API_KEY")
-        )
+        key = _key("OPENROUTER_API_KEY", "AERO_FORGE_API_KEY")
         if not key:
             msg = "OpenRouter provider selected but OPENROUTER_API_KEY or AERO_FORGE_API_KEY is not set."
             logger.error(msg)
@@ -422,14 +530,16 @@ def get_llm_client(
                 raise LLMError(msg)
             return None
         return OpenRouterClient(
-            model=resolved_model, max_retries=max_retries, api_key=key
+            model=model_name,
+            provider=provider,
+            tier=tier_obj,
+            model_resolver=model_resolver,
+            max_retries=max_retries,
+            api_key=key,
         )
 
     if provider == "deepseek":
-        resolved_model = model or os.getenv("AERO_FORGE_MODEL") or "deepseek-v4-pro"
-        key = (
-            api_key or os.getenv("DEEPSEEK_API_KEY") or os.getenv("AERO_FORGE_API_KEY")
-        )
+        key = _key("DEEPSEEK_API_KEY", "AERO_FORGE_API_KEY")
         if not key:
             msg = "DeepSeek provider selected but DEEPSEEK_API_KEY or AERO_FORGE_API_KEY is not set."
             logger.error(msg)
@@ -437,24 +547,35 @@ def get_llm_client(
                 raise LLMError(msg)
             return None
         return DeepSeekClient(
-            model=resolved_model, max_retries=max_retries, api_key=key
+            model=model_name,
+            provider=provider,
+            tier=tier_obj,
+            model_resolver=model_resolver,
+            max_retries=max_retries,
+            api_key=key,
         )
 
     if provider == "gemini":
-        resolved_model = model or os.getenv("AERO_FORGE_MODEL") or "gemini-2.0-flash"
         if importlib.util.find_spec("google.generativeai") is None:
             raise ImportError(
                 "Gemini provider requires the google-generativeai package. "
                 "Install it with: pip install google-generativeai"
             )
-        key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("AERO_FORGE_API_KEY")
+        key = _key("GEMINI_API_KEY", "AERO_FORGE_API_KEY")
         if not key:
             msg = "Gemini provider selected but GEMINI_API_KEY or AERO_FORGE_API_KEY is not set."
             logger.error(msg)
             if raise_on_error:
                 raise LLMError(msg)
             return None
-        return GeminiClient(model=resolved_model, max_retries=max_retries, api_key=key)
+        return GeminiClient(
+            model=model_name,
+            provider=provider,
+            tier=tier_obj,
+            model_resolver=model_resolver,
+            max_retries=max_retries,
+            api_key=key,
+        )
 
     msg = (
         f"Unknown LLM provider: {provider}. "

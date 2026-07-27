@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from aero_forge.config import ConfigOverride
+from aero_forge.config import ConfigOverride, Tier
 from aero_forge.llm.clients import get_llm_client
 
 logger = logging.getLogger("aero_forge.build_summary")
@@ -73,6 +73,7 @@ def format_build_summary(
         max_retries=max_retries,
         api_key=api_key,
         config_override=config_override,
+        tier=Tier.FAST,
     )
     if client is not None:
         metrics = {

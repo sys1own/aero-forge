@@ -35,7 +35,7 @@ from aero_forge.blueprint import (
 from aero_forge.builder import build_engine, spec_from_python
 from aero_forge.builder.intent_compiler import IntentCompiler, IntentCompilerError
 from aero_forge.cache.fix_cache import FixCache
-from aero_forge.config import ConfigOverride, load_config, resolve_settings
+from aero_forge.config import ConfigOverride, Tier, load_config, resolve_settings
 from aero_forge.overlay import OverlayManager, ReapplyStatus
 from aero_forge.precision_shield.rust_shield import RustSemanticShield
 from aero_forge.scaffold.active_merge import find_compiled_library, merge_active
@@ -319,6 +319,7 @@ class Orchestrator:
                 model=self.settings.get("MODEL"),
                 max_retries=self.settings["MAX_RETRIES"],
                 api_key=self.settings.get("API_KEY"),
+                tier=Tier.REASONING,
             )
             if self.llm_client is None:
                 logger.warning(
@@ -1177,6 +1178,7 @@ def _llm_plan_blueprint(
             max_retries=max_retries,
             config_override=config_override,
             raise_on_error=True,
+            tier=Tier.REASONING,
         )
     except LLMError as exc:
         raise UserError(

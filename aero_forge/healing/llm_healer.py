@@ -16,6 +16,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
+from aero_forge.config import Tier
 from aero_forge.healing.context_builder import ContextBuilder
 from aero_forge.llm.clients import BaseLLMClient, get_llm_client, LLMError
 
@@ -228,7 +229,12 @@ class LLMHealer:
         if self.client is not None:
             return self.client
         try:
-            return get_llm_client(self.provider, model=self.model, raise_on_error=False)
+            return get_llm_client(
+                self.provider,
+                model=self.model,
+                raise_on_error=False,
+                tier=Tier.REASONING,
+            )
         except LLMError as exc:
             self._log("warning", "LLM", f"Could not create LLM client: {exc}")
             return None
