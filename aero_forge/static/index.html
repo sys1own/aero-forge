@@ -82,6 +82,10 @@
       width: 28px; height: 28px; display: grid; place-items: center; cursor: pointer; font-size: 0.9rem;
     }
     button.icon-btn:hover { background: var(--panel-2); color: var(--accent); }
+    #accelerate-btn { background: var(--warning); color: #1e1e1e; }
+    #accelerate-btn:hover { filter: brightness(1.05); }
+    #accelerate-badge { display: none; }
+    #accelerate-badge.visible { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.7rem; color: var(--warning); border: 1px solid var(--warning); padding: 0.15rem 0.4rem; border-radius: 999px; }
 
     /* App layout */
     html, body, .app { height: 100vh; width: 100vw; margin: 0; padding: 0; overflow: hidden; }
@@ -357,6 +361,10 @@
       </div>
     </div>
     <div class="header-actions">
+      <span id="accelerate-badge">&#9889; Accelerated</span>
+      <button id="accelerate-btn" class="run-btn" title="Accelerate workspace" aria-label="Accelerate workspace">
+        <span>&#9889;</span> Accelerate
+      </button>
       <button id="run-btn" class="run-btn" title="Run current file (Ctrl+Enter)" aria-label="Run">
         <span>&#9654;</span> Run
       </button>
@@ -592,6 +600,32 @@
     </div>
   </div>
 
+  <div id="accelerate-modal" class="modal-overlay">
+    <div class="modal">
+      <h2>Accelerate Workspace</h2>
+      <div class="form-group" style="margin:0.8rem 0">
+        <label class="export-option" style="align-items:flex-start">
+          <input type="radio" name="accelerate-mode" value="runtime" checked style="margin-top:0.2rem">
+          <div>
+            <span>Background Runtime Acceleration (Clean &amp; Fast)</span>
+            <small>Accelerates workspace tasks using aero_forge's native engine. Keeps project source code untouched.</small>
+          </div>
+        </label>
+        <label class="export-option" style="align-items:flex-start;margin-top:0.5rem">
+          <input type="radio" name="accelerate-mode" value="scaffold_pyo3" style="margin-top:0.2rem">
+          <div>
+            <span>Inject PyO3/Rust Source Crate (Export Ready)</span>
+            <small>Scaffolds Cargo.toml and PyO3 glue into the repo for standalone native compilation and exports.</small>
+          </div>
+        </label>
+      </div>
+      <div class="modal-actions">
+        <button id="cancel-accelerate" class="secondary">Cancel</button>
+        <button id="confirm-accelerate" class="primary">Confirm &amp; Accelerate</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const LS = window.localStorage;
     const LS_KEYS = { apiKey: 'aero_forge_api_key', provider: 'aero_forge_provider', tier: 'aero_forge_tier', session: 'aero_forge_session', sidebarWidth: 'aero_forge_sidebar_width', promptWidth: 'aero_forge_prompt_width', bottomHeight: 'aero_forge_bottom_height', treeExpanded: 'aero_forge_tree_expanded' };
@@ -647,6 +681,11 @@
       logLines: document.getElementById('log-lines'),
       statusDot: document.getElementById('status-dot'),
       statusText: document.getElementById('status-text'),
+      accelerateBtn: document.getElementById('accelerate-btn'),
+      accelerateBadge: document.getElementById('accelerate-badge'),
+      accelerateModal: document.getElementById('accelerate-modal'),
+      cancelAccelerate: document.getElementById('cancel-accelerate'),
+      confirmAccelerate: document.getElementById('confirm-accelerate'),
       targetLanguage: document.getElementById('target-language'),
       accelerationPolicy: document.getElementById('acceleration-policy'),
       templateSelect: document.getElementById('template-select'),
@@ -1386,6 +1425,49 @@
       }
     }
 
+    function renderDetectedCommands(commands) {
+      if (!ui.actionButtons) return;
+      ui.actionButtons.innerHTML = '';
+      if (!commands || !commands.length) return;
+      const label = document.createElement('span');
+      label.style.cssText = 'color:var(--muted);font-size:0.75rem;margin-right:0.3rem;';
+      label.textContent = 'Detected:';
+      ui.actionButtons.appendChild(label);
+      for (const item of commands) {
+        const cmd = item.cmd;
+        if (!cmd) continue;
+        const btn = document.createElement('button');
+        btn.className = 'action-btn';
+        btn.textContent = `▶ ${item.label || cmd}`;
+        btn.title = `${item.source ? `[${item.source}] ` : ''}${cmd}`;
+        btn.addEventListener('click', () => runTerminalCommand(cmd));
+        ui.actionButtons.appendChild(btn);
+      }
+    }
+
+    async function accelerateWorkspace() {
+      if (!state.sessionId) { log('No session; create or load a workspace first', 'error'); return; }
+      const selected = document.querySelector('input[name="accelerate-mode"]:checked');
+      const mode = selected ? selected.value : 'runtime';
+      setBusy(true);
+      try {
+        const data = await api('POST', '/api/workspace/accelerate', buildBody({ mode }));
+        if (data.status !== 'accelerated') throw new Error(data.error || 'Acceleration failed');
+        ui.accelerateBadge.classList.add('visible');
+        ui.accelerateBadge.textContent = mode === 'scaffold_pyo3'
+          ? '⚡ Accelerated (PyO3 Source Injected)'
+          : `⚡ Accelerated (${data.native_active ? 'Runtime Native' : 'Runtime Fallback'})`;
+        renderDetectedCommands(data.commands || []);
+        log(`Workspace accelerated (${mode})`, 'success');
+        if (mode === 'scaffold_pyo3') loadTree();
+      } catch (e) {
+        log(`Acceleration failed: ${e.message}`, 'error');
+      } finally {
+        setBusy(false);
+        ui.accelerateModal.classList.remove('open');
+      }
+    }
+
     function uploadToPath(targetPath) {
       _dragTarget = targetPath || '.';
       ui.uploadInput.click();
@@ -1706,6 +1788,9 @@
     ui.cleanWorkspace.addEventListener('click', () => ui.cleanModal.classList.add('open'));
     ui.cancelClean.addEventListener('click', () => ui.cleanModal.classList.remove('open'));
     ui.confirmClean.addEventListener('click', () => { ui.cleanModal.classList.remove('open'); cleanWorkspace(); });
+    ui.accelerateBtn.addEventListener('click', () => ui.accelerateModal.classList.add('open'));
+    ui.cancelAccelerate.addEventListener('click', () => ui.accelerateModal.classList.remove('open'));
+    ui.confirmAccelerate.addEventListener('click', () => { ui.accelerateModal.classList.remove('open'); accelerateWorkspace(); });
     ui.settingTier.addEventListener('change', () => {
       if (ui.settingTier.value === 'lifetime') { ui.keyGroup.classList.add('hidden'); ui.settingProvider.value = 'deepseek'; }
       else ui.keyGroup.classList.remove('hidden');

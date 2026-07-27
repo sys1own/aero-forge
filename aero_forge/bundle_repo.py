@@ -384,3 +384,42 @@ def zip_export_filename(profile: ExportProfile) -> str:
     if profile == ExportProfile.ACCELERATED_PYO3:
         return "project-accelerated.zip"
     return "project-standard.zip"
+
+
+def scaffold_native_crate(
+    workspace_dir: Path,
+    project_name: str = "generated-native",
+    native_crate_source: Optional[Path] = None,
+) -> None:
+    """Write the PyO3 native acceleration crate source into ``workspace_dir``.
+
+    The crate is placed at ``crates/native_core/`` and a root ``pyproject.toml``
+    configured for ``maturin`` is written only if those files do not already exist.
+    Compiled artifacts (``.so``, ``target/``, etc.) are ignored when copying.
+    """
+    workspace_dir = Path(workspace_dir).resolve()
+    crate_dest = workspace_dir / "crates" / "native_core"
+    crate_source = native_crate_source or _NATIVE_CRATE_SOURCE
+
+    if crate_dest.is_dir() and (crate_dest / "Cargo.toml").is_file():
+        # Leave an existing crate in place to avoid overwriting user work.
+        pass
+    else:
+        crate_dest.mkdir(parents=True, exist_ok=True)
+        for path in sorted(crate_source.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(crate_source)
+            if _zip_skip(rel):
+                continue
+            try:
+                content = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            target = crate_dest / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+
+    pyproject = workspace_dir / "pyproject.toml"
+    if not pyproject.is_file():
+        pyproject.write_text(_pyproject_toml_for_maturin(project_name), encoding="utf-8")
