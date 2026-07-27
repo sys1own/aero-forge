@@ -1494,14 +1494,16 @@
       ui.terminalPanel.classList.remove('heal-visible');
     }
 
-    async function applyHeal(command, exitCode, logText) {
+    async function applyHeal(command, exitCode, logText, forceLLM = false) {
       setBusy(true);
-      ui.statusText.textContent = 'Evaluating error...';
+      ui.statusText.textContent = forceLLM ? 'Running full-workspace LLM healing...' : 'Evaluating error...';
       try {
+        const payload = { command, exit_code: exitCode, log_text: logText };
+        if (forceLLM) payload.force_llm = true;
         const res = await fetch('/api/workspace/heal', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(buildBody({ command, exit_code: exitCode, log_text: logText })),
+          body: JSON.stringify(buildBody(payload)),
         });
         ui.statusText.textContent = 'Applying heal...';
         const data = await res.json();
@@ -1509,9 +1511,14 @@
           const message = data.error_message || data.reason || data.error || 'Heal failed';
           log(`Heal failed: ${message}`, 'error');
           if (ui.healBanner) {
-            ui.healBanner.innerHTML = `<span>&#9888; Heal failed: ${escapeHtml(message)}</span><button id="retry-heal-btn" class="run-btn">Retry</button>`;
+            ui.healBanner.innerHTML = `
+              <span>&#9888; Heal failed: ${escapeHtml(message)}</span>
+              <button id="retry-ast-btn" class="run-btn">Retry AST</button>
+              <button id="force-llm-heal-btn" class="run-btn">Force LLM Workspace Heal</button>
+            `;
             ui.healBanner.classList.add('visible', 'manual-fix');
-            document.getElementById('retry-heal-btn').addEventListener('click', () => applyHeal(command, exitCode, logText));
+            document.getElementById('retry-ast-btn').addEventListener('click', () => applyHeal(command, exitCode, logText, false));
+            document.getElementById('force-llm-heal-btn').addEventListener('click', () => applyHeal(command, exitCode, logText, true));
           }
           return;
         }
@@ -1524,8 +1531,14 @@
       } catch (e) {
         log(`Self-heal failed: ${e.message}`, 'error');
         if (ui.healBanner) {
-          ui.healBanner.innerHTML = `<span>&#9888; Heal failed: ${escapeHtml(e.message)}</span>`;
+          ui.healBanner.innerHTML = `
+            <span>&#9888; Heal failed: ${escapeHtml(e.message)}</span>
+            <button id="retry-ast-btn" class="run-btn">Retry AST</button>
+            <button id="force-llm-heal-btn" class="run-btn">Force LLM Workspace Heal</button>
+          `;
           ui.healBanner.classList.add('visible', 'manual-fix');
+          document.getElementById('retry-ast-btn').addEventListener('click', () => applyHeal(command, exitCode, logText, false));
+          document.getElementById('force-llm-heal-btn').addEventListener('click', () => applyHeal(command, exitCode, logText, true));
         }
       } finally {
         setBusy(false);

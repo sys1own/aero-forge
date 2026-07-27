@@ -37,7 +37,7 @@ def test_orchestrator_escalates_to_llm_when_ast_patch_not_applicable(tmp_path: P
 
     with patch("aero_forge.healing.orchestrator.LLMHealer") as mock_healer_cls:
         mock_healer = MagicMock()
-        mock_healer.generate_and_apply_fix.return_value = {
+        mock_healer.heal.return_value = {
             "status": "success",
             "applied": ["crates/native_core/src/lib.rs"],
         }
@@ -50,7 +50,7 @@ def test_orchestrator_escalates_to_llm_when_ast_patch_not_applicable(tmp_path: P
     assert result["strategy_used"] == HealingStrategy.LLM.value
     assert result["patched_files"] == ["crates/native_core/src/lib.rs"]
     assert result["error_message"] is None
-    mock_healer.generate_and_apply_fix.assert_called_once()
+    mock_healer.heal.assert_called_once()
 
 
 def test_orchestrator_returns_failure_when_llm_produces_no_directives(tmp_path: Path) -> None:

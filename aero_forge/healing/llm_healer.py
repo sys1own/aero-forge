@@ -250,13 +250,22 @@ class LLMHealer:
         diagnosis: Optional[Dict[str, Any]] = None,
         tier: str = "reasoning",
         full_workspace: bool = True,
+        workspace_context: Optional[Dict[str, Any]] = None,
+        force_full_rewrite: bool = False,
     ) -> Dict[str, Any]:
-        """Convenience entry point that builds a failure context and heals the workspace."""
+        """Convenience entry point that builds a failure context and heals the workspace.
+
+        ``workspace_context`` may contain a pre-bundled workspace snapshot.
+        ``force_full_rewrite`` asks the LLM to regenerate whole files rather than
+        minimal patches when necessary.
+        """
         failure_context = {
             "command": command,
             "exit_code": exit_code,
             "log_text": error_logs,
             "diagnosis": diagnosis or {},
+            "workspace_context": workspace_context,
+            "force_full_rewrite": force_full_rewrite,
         }
         return self.generate_and_apply_fix(workspace, failure_context)
 
