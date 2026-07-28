@@ -229,6 +229,17 @@ class DeterministicVerificationRunner:
         return True
 
 
+def validate_blueprint_for_export(blueprint_path: Path) -> None:
+    """Validate a Blueprint v3 at *blueprint_path* is finalized and transferable.
+
+    Draft or non-transferable blueprints must not be exported, remotely executed,
+    or cached for cross-system replay.
+    """
+    from aero_forge.blueprint.validator import BlueprintV3Validator
+
+    BlueprintV3Validator(blueprint_path, workspace=blueprint_path.parent).check_exportable()
+
+
 def purge_workspace_state(workspace: Path) -> Dict[str, Any]:
     """Purge caches, overlays, and healing state from *workspace* without touching source files.
 

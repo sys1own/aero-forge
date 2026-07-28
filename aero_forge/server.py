@@ -68,7 +68,9 @@ from aero_forge.orchestrator.stack_classifier import (
     classify_stack,
 )
 from aero_forge.accelerator.runtime import activate_runtime_native_acceleration
+from aero_forge.ingestion.zip_parser import extract_zip_safely, generate_draft_v3_blueprint
 from aero_forge.sandbox.manager import SandboxManager
+from aero_forge.blueprint import BlueprintV3, BlueprintV3Validator, LLMBlueprintSynthesizer, write_v3_blueprint
 from aero_forge.scaffold.export_options import export_workspace
 from aero_forge.scaffold.workspace import BlueprintRegenerator
 from aero_forge.universal_builder import build_universal_project
@@ -386,50 +388,6 @@ def _parse_multipart(body: bytes, boundary: bytes) -> Optional[bytes]:
     return None
 
 
-def _extract_zip_safely(zip_bytes: bytes, dest: Path, archive_name: Optional[str] = None) -> None:
-    """Extract a zip archive to ``dest`` while guarding against path traversal.
-
-    If every member is inside a single top-level wrapper directory (and no files
-    live at the archive root), that wrapper is stripped so files land directly
-    under ``dest``. Common source directories such as ``src`` or ``tests`` are
-    not stripped unless they match the archive filename.
-    """
-    dest = Path(dest)
-    dest.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(BytesIO(zip_bytes), "r") as zf:
-        namelist = [m for m in zf.namelist() if not m.startswith("__MACOSX/")]
-        files = [m for m in namelist if not m.endswith("/")]
-        if not files:
-            return
-
-        strip_prefix = ""
-        top_dirs = {m.split("/")[0] for m in files if "/" in m}
-        root_files = [m for m in files if "/" not in m]
-        if len(top_dirs) == 1 and not root_files:
-            prefix = next(iter(top_dirs))
-            common_folders = {
-                "src", "lib", "libs", "tests", "test", "app", "bin", "docs",
-                "examples", "scripts", "pkg", "package", "include", "includes",
-            }
-            archive_stem = Path(archive_name).stem if archive_name else ""
-            if prefix == archive_stem or prefix.lower() not in common_folders:
-                strip_prefix = prefix + "/"
-
-        for member in files:
-            rel = member[len(strip_prefix):] if strip_prefix and member.startswith(strip_prefix) else member
-            if not rel:
-                continue
-            target = dest / rel
-            try:
-                resolved = target.resolve()
-                resolved.relative_to(dest.resolve())
-            except ValueError as exc:
-                raise ValueError(f"Zip member escapes extraction directory: {member}") from exc
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with zf.open(member) as src, open(target, "wb") as dst:
-                dst.write(src.read())
-
-
 SKIP_DIRS = {
     "__pycache__",
     ".git",
@@ -673,6 +631,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_build()
             if path == "/api/chat":
                 return self._handle_chat()
+            if path == "/api/blueprint/synthesize":
+                return self._handle_blueprint_synthesize()
             if path == "/api/upload-zip":
                 return self._handle_upload_zip()
             if path == "/api/files/upload":
@@ -951,6 +911,51 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             logger.exception("Chat endpoint failed")
             return _send_json(self, 500, {"status": "failed", "error": str(exc)})
 
+    def _handle_blueprint_synthesize(self) -> None:
+        """Synthesize a finalized Blueprint v3 from a session workspace or draft."""
+        try:
+            body = _parse_json_body(self)
+            session_id = body.get("session_id") or str(uuid.uuid4())
+            session_dir = _session_dir(session_id)
+            workspace_dir = body.get("workspace_dir")
+            if workspace_dir:
+                workspace_arg = Path(workspace_dir)
+                if not workspace_arg.is_absolute():
+                    workspace_arg = session_dir / workspace_arg
+                workspace = workspace_arg.resolve()
+            else:
+                workspace = session_dir
+
+            draft_path = workspace / "blueprint.aero"
+            draft: Optional[BlueprintV3] = None
+            if draft_path.is_file():
+                draft = BlueprintV3.load(draft_path)
+
+            provider = body.get("provider", "deepseek")
+            model = body.get("model")
+            synthesizer = LLMBlueprintSynthesizer(provider=provider, model=model)
+            finalized = synthesizer.synthesize(
+                workspace,
+                draft=draft,
+                output_path=draft_path,
+            )
+            BlueprintV3Validator(finalized.model_dump(mode="json")).check_exportable()
+
+            return _send_json(
+                self,
+                200,
+                {
+                    "status": "finalized",
+                    "session_id": session_id,
+                    "path": str(draft_path),
+                    "transferable": finalized.metadata.transferable,
+                    "metadata": finalized.metadata.model_dump(mode="json"),
+                },
+            )
+        except Exception as exc:
+            logger.exception("Blueprint synthesize endpoint failed")
+            return _send_json(self, 500, {"status": "failed", "error": str(exc)})
+
     def _handle_files(self, query: Dict[str, List[str]]) -> None:
         session_id = _first(query, "session_id")
         if not session_id:
@@ -1046,20 +1051,24 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             else:
                 dest = session_dir
 
-            _extract_zip_safely(zip_bytes, dest)
+            extract_zip_safely(zip_bytes, dest)
 
             # Repair truncated Rust/C/C++ sources before any build or bundling.
             from aero_forge.scaffold.syntax_guard import repair_workspace
 
             repair_workspace(session_dir)
 
-            # Synthesize a blueprint if none exists, then bundle the repo for chat context.
+            # Synthesize a v3.0 draft blueprint if none exists.
             blueprint_generated = False
-            try:
-                generate_blueprint_from_uploaded_repo(session_dir)
-                blueprint_generated = True
-            except Exception as exc:
-                logger.warning("Could not auto-generate blueprint for upload: %s", exc)
+            blueprint_path = session_dir / "blueprint.aero"
+            if not blueprint_path.is_file():
+                try:
+                    from aero_forge.blueprint.schema import write_v3_blueprint
+                    draft = generate_draft_v3_blueprint(session_dir)
+                    write_v3_blueprint(draft, blueprint_path)
+                    blueprint_generated = True
+                except Exception as exc:
+                    logger.warning("Could not auto-generate v3 blueprint for upload: %s", exc)
 
             # Refresh the chat session context with a compact workspace bundle so
             # subsequent chat turns can see the uploaded source tree.
@@ -1295,7 +1304,16 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return _send_json(self, 400, {"error": "Invalid filename"})
 
             if filename.lower().endswith(".zip"):
-                _extract_zip_safely(body, dest_dir, archive_name=filename)
+                extract_zip_safely(body, dest_dir, archive_name=filename)
+                # Auto-generate a v3 draft blueprint when a ZIP is dropped.
+                blueprint_path = session_dir / "blueprint.aero"
+                if not blueprint_path.is_file():
+                    try:
+                        from aero_forge.blueprint.schema import write_v3_blueprint
+                        draft = generate_draft_v3_blueprint(session_dir)
+                        write_v3_blueprint(draft, blueprint_path)
+                    except Exception as exc:
+                        logger.warning("Could not auto-generate v3 blueprint for file upload: %s", exc)
             else:
                 is_new_blueprint = filename.lower() == "blueprint.aero" and not dest.exists()
                 dest.write_bytes(body)
