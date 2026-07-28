@@ -1,0 +1,29 @@
+You are an expert build-system architect. Inspect the project described below and produce a complete, valid Blueprint v3.0.0 (JSON) that can be used to deterministically build and run the project.
+
+Project context:
+- Project name: {{ project_name }}
+- Workspace root: {{ workspace_root }}
+- Detected manifests: {{ manifests }}
+- Manifest contents:
+{{ manifest_contents }}
+- Source files:
+{{ source_files }}
+- Draft blueprint (if any):
+{{ draft_blueprint }}
+- Additional specification:
+{{ spec }}
+
+Your response MUST be a single JSON object matching the BlueprintV3 Pydantic schema with these exact rules:
+- metadata.schema_version = "3.0.0"
+- metadata.status = "finalized"
+- metadata.generation_method = "llm_synthesized"
+- metadata.transferable = true
+- metadata.project_name = "{{ project_name }}"
+- toolchains: list the concrete compilers, runtimes, and build tools required (e.g. CPython, Cargo/PyO3, GCC, Clang, CMake, Node/NAPI, Go C-Archive). Include version/channel if known.
+- build_pipeline: a DAG of artifacts. Each artifact has id, type (one of: shared_library, static_library, binary, cargo_cdylib, python_extension, custom_cmd), source_files (workspace-relative paths), output_path (workspace-relative), compiler_flags, linker_flags, dependencies (artifact ids that must be built first), and commands for custom_cmd artifacts.
+- abi_contracts: cross-language symbol contracts with binding_framework (ctypes, c_abi, cffi, pyo3, cxx), memory_model (caller_allocates, callee_allocates, shared_pyo3), inputs/outputs as name/type pairs.
+- execution_strategy: primary_entrypoint (workspace-relative path), runtime (e.g. python3, cargo, node, ./binary), args, env, working_dir using ${WORKSPACE_ROOT} placeholders, timeout in seconds.
+- verification_nodes: list of integration tests with command, expected_exit_code, stdout_match_patterns, stderr_prohibited_patterns.
+- All file paths must be relative to the workspace root. Do NOT include absolute paths. Use ${WORKSPACE_ROOT} for workspace-relative placeholders if needed.
+
+Output only the JSON object, no prose.

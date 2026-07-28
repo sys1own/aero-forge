@@ -10,17 +10,22 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import click
 
 from .blueprint import (
+    BlueprintV3,
+    BlueprintV3Validator,
+    DraftBlueprintExportError,
     FunctionSpec,
+    LLMBlueprintSynthesizer,
     discover_functions,
     discover_project,
     generate_blueprint,
     parse_blueprint,
     write_blueprint,
+    write_v3_blueprint,
 )
 from .build_runner import BuildRunner
 from .build_summary import format_build_summary
@@ -1512,6 +1517,101 @@ def reset(workspace: str, verbose: bool, json_output: bool) -> None:
         click.echo(json.dumps(result, default=str))
     else:
         click.echo(f"Reset workspace state: {result['workspace']}")
+
+
+@main.group("blueprint")
+def blueprint_group() -> None:
+    """Blueprint v3.0 management commands."""
+
+
+@blueprint_group.command("synthesize")
+@click.option(
+    "--workspace",
+    "-w",
+    type=click.Path(file_okay=False, path_type=str),
+    default=".",
+    help="Workspace directory containing source files and/or a draft blueprint.",
+)
+@click.option(
+    "--draft",
+    "-d",
+    type=click.Path(dir_okay=False, path_type=str),
+    default=None,
+    help="Path to an existing draft blueprint.aero to synthesize from.",
+)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(dir_okay=False, path_type=str),
+    default="blueprint.aero",
+    help="Output blueprint file path.",
+)
+@click.option(
+    "--provider",
+    default="deepseek",
+    help="LLM provider for synthesis.",
+)
+@click.option(
+    "--model",
+    default=None,
+    help="LLM model override.",
+)
+@click.option("--verbose", "-v", is_flag=True)
+@click.option("--json", "json_output", is_flag=True)
+def synthesize_blueprint(
+    workspace: str,
+    draft: Optional[str],
+    output: str,
+    provider: str,
+    model: Optional[str],
+    verbose: bool,
+    json_output: bool,
+) -> None:
+    """Synthesize a finalized Blueprint v3 from a workspace or draft blueprint."""
+    _setup_logging(verbose)
+    workspace_path = Path(workspace).resolve()
+    draft_path = Path(draft) if draft else (workspace_path / "blueprint.aero")
+    output_path = Path(output)
+
+    synthesizer = LLMBlueprintSynthesizer(provider=provider, model=model)
+    draft_bp: Optional[BlueprintV3] = None
+    if draft_path.is_file():
+        draft_bp = BlueprintV3.load(draft_path)
+
+    finalized = synthesizer.synthesize(
+        workspace_path,
+        draft=draft_bp,
+        output_path=output_path,
+    )
+    BlueprintV3Validator(finalized.model_dump(mode="json")).check_exportable()
+
+    result = {
+        "status": "finalized",
+        "path": str(output_path.resolve()),
+        "transferable": finalized.metadata.transferable,
+    }
+    if json_output:
+        click.echo(json.dumps(result, default=str))
+    else:
+        click.echo(f"Synthesized finalized blueprint: {result['path']}")
+
+
+@blueprint_group.command("validate")
+@click.argument("blueprint_path", type=click.Path(exists=True, dir_okay=False, path_type=str))
+@click.option("--json", "json_output", is_flag=True)
+@click.option("--export", "export_check", is_flag=True, help="Enforce finalized/transferable for export.")
+def validate_blueprint(blueprint_path: str, json_output: bool, export_check: bool) -> None:
+    """Validate a Blueprint v3.0.0 file."""
+    validator = BlueprintV3Validator(blueprint_path)
+    if export_check:
+        validator.check_exportable()
+    else:
+        validator.validate()
+    result = {"status": "valid", "path": blueprint_path, "exportable": export_check}
+    if json_output:
+        click.echo(json.dumps(result, default=str))
+    else:
+        click.echo(f"Blueprint is valid{' and exportable' if export_check else ''}: {blueprint_path}")
 
 
 if __name__ == "__main__":

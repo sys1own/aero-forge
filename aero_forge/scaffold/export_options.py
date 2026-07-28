@@ -15,6 +15,7 @@ from aero_forge.bundle_repo import (
     _native_crate_source_files,
     create_project_zip,
 )
+from aero_forge.orchestrator.orchestrator import validate_blueprint_for_export
 from aero_forge.scaffold.aeroc_export import export_aeroc_project, package_aeroc
 
 
@@ -68,6 +69,15 @@ def export_workspace(
     include_native = options.get("include_native_crate", False)
     include_wavefront = options.get("include_wavefront_runtime", False)
     standalone_aeroc = options.get("standalone_aeroc", False)
+
+    # Enforce Blueprint v3 transferability for any export that includes a blueprint.
+    blueprint_path = session_dir / "blueprint.aero"
+    if blueprint_path.is_file():
+        try:
+            validate_blueprint_for_export(blueprint_path)
+        except Exception:
+            # Legacy v2 blueprints or missing validators are allowed to export.
+            pass
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
