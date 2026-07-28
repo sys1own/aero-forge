@@ -1072,6 +1072,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 "action": canonical_action,
                 "clean_prompt": clean_prompt,
                 "parameters": (canonical_action or {}).get("parameters", {}),
+                "suggested_prompt": clean_prompt,
                 # Backward-compatible legacy fields
                 "reply": result.get("reply"),
                 "message": result.get("message", result.get("reply", "")),
