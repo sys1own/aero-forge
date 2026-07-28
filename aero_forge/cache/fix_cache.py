@@ -77,5 +77,9 @@ class FixCache:
             except OSError as exc:
                 logger.warning("Could not remove fix cache: %s", exc)
 
+    def reset(self) -> None:
+        """Reset the cache to an empty state (alias for ``clear``)."""
+        self.clear()
+
 
 __all__ = ["FixCache"]

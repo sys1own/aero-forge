@@ -7,7 +7,7 @@ import re
 import traceback
 from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 
 class ErrorClass(Enum):
@@ -136,10 +136,35 @@ def format_transpiler_error_with_traceback(
     return f"{formatted}\n\nTraceback:\n{tb}"
 
 
+# Heuristic for source-like file references in stack traces / error text.
+# Captures Python traceback ``File "..."`` markers, Rust ``--> file:line:col``,
+# and generic ``path/to/file.ext:line`` references including ``tests/*.py``,
+# ``blueprint.aero``, and paths outside ``src/``.
+_TARGET_FILE_RE = re.compile(
+    r'(?:File\s+["\']?|-->\s+|at\s+)?'
+    r'([\w\-/.]+\.(?:py|rs|toml|aero))'
+    r'(?::(\d+))?(?::(\d+))?',
+    re.MULTILINE,
+)
+
+
+def extract_target_files(text: Optional[str]) -> List[str]:
+    """Return a sorted, unique list of source-like file paths found in *text*.
+
+    This explicitly captures references to ``tests/*.py``, ``blueprint.aero``,
+    and other non-``src/`` paths so the healing context builder can include
+    them in the LLM prompt.
+    """
+    if not text:
+        return []
+    return sorted({match.group(1) for match in _TARGET_FILE_RE.finditer(text)})
+
+
 __all__ = [
     "ErrorClass",
     "classify",
     "classify_exception",
+    "extract_target_files",
     "format_transpiler_error",
     "format_transpiler_error_with_traceback",
     "is_fatal",

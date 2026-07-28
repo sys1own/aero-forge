@@ -50,6 +50,7 @@ from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
 from aero_forge import runner as sandbox_runner
 from aero_forge.healing.context_builder import ContextBuilder
+from aero_forge.orchestrator.orchestrator import purge_workspace_state
 from aero_forge.healing.evaluator import LogEvaluator
 from aero_forge.healing.llm_healer import LLMHealer, run_command
 from aero_forge.healing.orchestrator import HealingOrchestrator
@@ -1327,6 +1328,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             if not session_id:
                 return _send_json(self, 400, {"error": "Missing 'session_id'"})
 
+            session_dir = _session_dir(session_id)
+            purge_workspace_state(session_dir)
             _manager.clean_session_sandbox(session_id)
             session_dir = _manager.create_session_sandbox(session_id)
 
@@ -1366,6 +1369,10 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return _send_json(
                     self, 400, {"error": "blueprint.aero not found in workspace"}
                 )
+
+            # Purge caches, overlays, and healing state before regenerating so
+            # stale state cannot corrupt the rebuilt workspace.
+            purge_workspace_state(workspace_path)
 
             config = ConfigOverride(
                 llm_provider=body.get("provider"),

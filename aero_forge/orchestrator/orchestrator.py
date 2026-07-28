@@ -34,6 +34,7 @@ from aero_forge.blueprint import (
 )
 from aero_forge.builder import build_engine, spec_from_python
 from aero_forge.builder.intent_compiler import IntentCompiler, IntentCompilerError
+from aero_forge.cache.build_cache import BuildCache
 from aero_forge.cache.fix_cache import FixCache
 from aero_forge.config import ConfigOverride, Tier, load_config, resolve_settings
 from aero_forge.overlay import OverlayManager, ReapplyStatus
@@ -228,6 +229,37 @@ class DeterministicVerificationRunner:
         return True
 
 
+def purge_workspace_state(workspace: Path) -> Dict[str, Any]:
+    """Purge caches, overlays, and healing state from *workspace* without touching source files.
+
+    ``blueprint.aero`` and user source files are preserved.
+    """
+    workspace = Path(workspace).resolve()
+    fix_cache = FixCache(path=workspace / ".aero" / "cache" / "fix_cache.json")
+    fix_cache.reset()
+    # Clear the workspace-local build cache and the global build cache.
+    BuildCache(root=workspace / ".aero" / "cache" / "build_cache", enabled=True).reset()
+    if not os.getenv("AERO_FORGE_CACHE_DIR"):
+        BuildCache(enabled=True).reset()
+    OverlayManager(workspace).clear_all_overlays()
+
+    aero_dir = workspace / ".aero"
+    for subdir in ("cache", "overlay", "overlays"):
+        path = aero_dir / subdir
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+
+    for state_file in ("healing_attempts.json",):
+        path = aero_dir / state_file
+        if path.is_file():
+            path.unlink(missing_ok=True)
+
+    return {
+        "status": "reset",
+        "workspace": str(workspace),
+    }
+
+
 class Orchestrator:
     """Drive the deterministic transpile/build/test/heal loop.
 
@@ -328,6 +360,15 @@ class Orchestrator:
                 )
                 self.use_llm = False
         self._cargo_target = Path.home() / ".cache" / "aero-forge" / "target"
+
+    def hard_reset(self) -> Dict[str, Any]:
+        """Purge all persisted state for this workspace.
+
+        Clears the fix cache, build cache, overlay store, and any per-workspace
+        ``.aero/cache`` or ``.aero/overlay`` directories.  Source files and
+        ``blueprint.aero`` are preserved.
+        """
+        return purge_workspace_state(self.output_dir)
 
     def run(self) -> Dict[str, Any]:
         """Run the deterministic transpile/compile/test/heal loop.

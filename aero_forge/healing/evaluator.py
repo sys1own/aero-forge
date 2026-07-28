@@ -7,6 +7,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from aero_forge.orchestrator.error_classifier import extract_target_files
+
 
 class HealingStrategy(str, Enum):
     """High-level healing strategy selected for a failure."""
@@ -89,7 +91,7 @@ class LogEvaluator:
         """Best-effort target file from the command string."""
         parts = command.split()
         for i, part in enumerate(parts):
-            if part.endswith(".py") and Path(part).suffix == ".py":
+            if any(part.endswith(ext) for ext in (".py", ".rs", ".toml", ".aero")):
                 return part
             if part in ("--manifest-path", "--file") and i + 1 < len(parts):
                 return parts[i + 1]
@@ -203,6 +205,7 @@ class LogEvaluator:
         # Python semantic / runtime errors are non-healable by AST, but LLM may fix.
         for pattern, error_type, _code, reason in self.PYTHON_SEMANTIC_PATTERNS:
             if re.search(pattern, log_text, re.IGNORECASE):
+                frame = self._last_python_frame(log_text)
                 result.update({
                     "healable": False,
                     "ast_healable": False,
@@ -211,6 +214,11 @@ class LogEvaluator:
                     "reason": reason,
                     "summary": reason or f"Python runtime/semantic error ({error_type}).",
                 })
+                if frame:
+                    result["target_file"] = frame["file"]
+                    result["line_number"] = frame["line_number"]
+                else:
+                    result["target_file"] = self._extract_target_from_command(command) or "main.py"
                 return result
 
         # Rust semantic / type / trait errors.

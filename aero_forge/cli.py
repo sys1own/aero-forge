@@ -1488,5 +1488,31 @@ def web(port: int, no_browser: bool, verbose: bool) -> None:
     run_server(port=port, open_browser=not no_browser)
 
 
+@main.command(name="reset")
+@click.option(
+    "--workspace",
+    "-w",
+    type=click.Path(file_okay=False, path_type=str),
+    default=".",
+    help="Workspace directory to reset (default: current directory).",
+)
+@click.option("--verbose", "-v", is_flag=True, help="Show debug logs.")
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    help="Output structured JSON instead of human-readable text.")
+def reset(workspace: str, verbose: bool, json_output: bool) -> None:
+    """Purge all persisted Aero-Forge state (caches, overlays, healing attempts)."""
+    _setup_logging(verbose)
+    from aero_forge.orchestrator.orchestrator import purge_workspace_state
+
+    result = purge_workspace_state(Path(workspace))
+    if json_output:
+        click.echo(json.dumps(result, default=str))
+    else:
+        click.echo(f"Reset workspace state: {result['workspace']}")
+
+
 if __name__ == "__main__":
     main()
