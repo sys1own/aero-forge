@@ -54,7 +54,7 @@ def test_package_aeroc_creates_zip(tmp_path):
     project = export_aeroc_project(tmp_path, tmp_path / "exported")
     compile_aeroc(project)
     archive = package_aeroc(project)
-    assert archive.suffix == ".aeroc"
+    assert archive.suffix == ".aerozip"
     assert zipfile.is_zipfile(archive)
     with zipfile.ZipFile(archive) as zf:
         names = zf.namelist()

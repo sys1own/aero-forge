@@ -108,7 +108,7 @@ def export_workspace(
                 export_aeroc_project(session_dir, aeroc_dir, project_name=project_name)
                 aeroc_archive = package_aeroc(aeroc_dir)
                 zf.writestr(
-                    f"{project_name}.aeroc",
+                    f"{project_name}.aerozip",
                     aeroc_archive.read_bytes(),
                 )
 

@@ -57,7 +57,10 @@ from aero_forge.healing.orchestrator import HealingOrchestrator
 from aero_forge.healing.router import try_auto_fix
 from aero_forge.healing.structural_merger import apply_overlay, MergeConflictError
 from aero_forge.orchestrator.router import toolchains_for_intent
-from aero_forge.builder.aeroc_compiler import compile_directory_to_aeroc
+from aero_forge.builder.aeroc_compiler import (
+    compile_blueprint_to_aeroc,
+    compile_directory_to_aeroc,
+)
 from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_CPP_PYTHON,
     INTENT_HYBRID_CPP_RUST,
@@ -72,6 +75,7 @@ from aero_forge.accelerator.runtime import activate_runtime_native_acceleration
 from aero_forge.ingestion.zip_parser import extract_zip_safely, generate_draft_v3_blueprint
 from aero_forge.sandbox.manager import SandboxManager
 from aero_forge.blueprint import BlueprintV3, BlueprintV3Validator, LLMBlueprintSynthesizer, write_v3_blueprint
+from aero_forge.scaffold.aeroc_export import export_scaffold_zip
 from aero_forge.scaffold.export_options import export_workspace
 from aero_forge.scaffold.workspace import BlueprintRegenerator
 from aero_forge.universal_builder import build_universal_project
@@ -658,6 +662,10 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_workspace_accelerate()
             if path == "/api/workspace/export":
                 return self._handle_workspace_export()
+            if path == "/api/workspace/download-aeroc":
+                return self._handle_workspace_download_aeroc()
+            if path == "/api/workspace/export-scaffold":
+                return self._handle_workspace_export_scaffold()
             if path == "/api/workspace/evaluate-error":
                 return self._handle_workspace_evaluate_error()
             if path == "/api/workspace/heal":
@@ -1676,6 +1684,90 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             )
         except Exception as exc:
             logger.exception("Workspace export endpoint failed")
+            return _send_json(self, 500, {"error": str(exc)})
+
+    def _handle_workspace_download_aeroc(self) -> None:
+        """Serve the compiled binary IR container ``workspace.aeroc`` directly.
+
+        If the container does not exist, compile it from ``blueprint.aero``,
+        ``blueprint.py``, or the entire workspace tree.
+        """
+        try:
+            body = _parse_json_body(self)
+            session_id = body.get("session_id", "").strip()
+            project_name = body.get("project_name", "workspace").strip()
+            if not session_id:
+                return _send_json(self, 400, {"error": "Missing 'session_id'"})
+
+            session_dir = _session_dir(session_id)
+            if not session_dir.is_dir():
+                return _send_json(
+                    self,
+                    404,
+                    {"error": f"Sandbox for session '{session_id}' does not exist"},
+                )
+
+            aeroc_path = session_dir / "workspace.aeroc"
+            if not aeroc_path.is_file():
+                blueprint_path = session_dir / "blueprint.aero"
+                if blueprint_path.is_file():
+                    data = yaml.safe_load(blueprint_path.read_text(encoding="utf-8")) or {}
+                    if str(data.get("metadata", {}).get("schema_version")) == "3.0.0":
+                        blueprint = BlueprintV3.load(blueprint_path)
+                        compile_blueprint_to_aeroc(blueprint, aeroc_path, workspace=session_dir)
+                    else:
+                        compile_directory_to_aeroc(session_dir, aeroc_path)
+                else:
+                    compile_directory_to_aeroc(session_dir, aeroc_path)
+
+            if not aeroc_path.is_file():
+                return _send_json(self, 404, {"error": "workspace.aeroc not found"})
+
+            data = aeroc_path.read_bytes()
+            return _send_bytes(
+                self,
+                200,
+                data,
+                "application/octet-stream",
+                {"Content-Disposition": f'attachment; filename="{project_name}.aeroc"'},
+            )
+        except Exception as exc:
+            logger.exception("download-aeroc endpoint failed")
+            return _send_json(self, 500, {"error": str(exc)})
+
+    def _handle_workspace_export_scaffold(self) -> None:
+        """Export the workspace source tree as a Wavefront scaffold zip (``.aerozip``)."""
+        try:
+            body = _parse_json_body(self)
+            session_id = body.get("session_id", "").strip()
+            project_name = body.get("project_name", "aero-forge-export").strip()
+            if not session_id:
+                return _send_json(self, 400, {"error": "Missing 'session_id'"})
+
+            session_dir = _session_dir(session_id)
+            if not session_dir.is_dir():
+                return _send_json(
+                    self,
+                    404,
+                    {"error": f"Sandbox for session '{session_id}' does not exist"},
+                )
+
+            archive_path = export_scaffold_zip(
+                session_dir,
+                output_path=session_dir / f"{project_name}.aerozip",
+                project_name=project_name,
+            )
+            archive_bytes = archive_path.read_bytes()
+            filename = archive_path.name
+            return _send_bytes(
+                self,
+                200,
+                archive_bytes,
+                "application/zip",
+                {"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+        except Exception as exc:
+            logger.exception("export-scaffold endpoint failed")
             return _send_json(self, 500, {"error": str(exc)})
 
     def _handle_workspace_evaluate_error(self) -> None:

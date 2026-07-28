@@ -1,11 +1,11 @@
-"""Standalone ``.aeroc`` executable/wheel exporter.
+"""Wavefront scaffold exporter.
 
-An ``.aeroc`` artifact is a self-contained project bundle containing the
-embedded ``aero_core`` zero-dependency Rust wavefront micro-runtime, an
-optimized ``.cargo/config.toml``, and a Python ``pyproject.toml`` that exposes
-an ``aeroc-runner`` console script.  The exported project can be built and run
-with either ``cargo build --release`` or ``pip install .`` without any
-``aero_forge`` dependency.
+A scaffold bundle (``.aerozip`` / ``-scaffold.zip``) is a self-contained
+project archive containing the embedded ``aero_core`` zero-dependency Rust
+wavefront micro-runtime, Python wrapper entrypoints, and the original
+workspace source files / compiled ``workspace.aeroc`` binary.  The bundle can
+be built and run with ``cargo build --release`` or ``pip install .`` without
+any ``aero_forge`` dependency.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from __future__ import annotations
 import io
 import shutil
 import subprocess
+import tempfile
 import zipfile
 from pathlib import Path
 from typing import Optional
@@ -126,23 +127,71 @@ def export_aeroc_project(
 
     (output_dir / "pyproject.toml").write_text(_PYPROJECT_TOML, encoding="utf-8")
     (output_dir / "README.md").write_text(
-        f"# {project_name}\n\nStandalone `.aeroc` artifact.\n\n"
+        f"# {project_name}\n\nWavefront scaffold bundle.\n\n"
         "Build with `cargo build --release` inside `aeroc/aero_core/`,\n"
-        "or install the Python wrapper with `pip install .` and run `aeroc-runner`.\n",
+        "or install the Python wrapper with `pip install .` and run `aeroc-runner`.\n"
+        "If a `workspace.aeroc` binary IR container is present, the runner will\n"
+        "execute it directly without extracting files.\n",
         encoding="utf-8",
     )
     return output_dir
 
 
 def package_aeroc(project_dir: Path, output_path: Optional[Path] = None) -> Path:
-    """Zip the exported project directory into ``{project_dir}.aeroc``."""
+    """Zip the exported project directory into ``{project_dir}.aerozip``."""
     project_dir = Path(project_dir).resolve()
-    output = output_path or (project_dir.with_suffix(".aeroc"))
+    output = output_path or (project_dir.with_suffix(".aerozip"))
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
         for path in sorted(project_dir.rglob("*")):
             if path.is_file():
                 zf.write(path, path.relative_to(project_dir))
     return output
+
+
+def export_scaffold_zip(
+    workspace_dir: Path,
+    output_path: Optional[Path] = None,
+    project_name: str = "aero-forge-export",
+) -> Path:
+    """Package the workspace and the aero_core runtime into a single scaffold zip.
+
+    The resulting ``.aerozip`` archive contains the workspace files, the
+    ``aero_core`` Rust runtime, Python wrapper entrypoints, and the compiled
+    ``workspace.aeroc`` binary if it exists.
+    """
+    workspace_dir = Path(workspace_dir).resolve()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        scaffold_dir = Path(tmpdir) / "scaffold"
+        export_aeroc_project(workspace_dir, scaffold_dir, project_name=project_name)
+
+        skip_prefixes = {
+            "target",
+            ".venv",
+            "__pycache__",
+            ".pytest_cache",
+            ".aero",
+            ".cargo",
+            "dist",
+            "build",
+        }
+        for src in sorted(workspace_dir.rglob("*")):
+            if not src.is_file():
+                continue
+            rel = src.relative_to(workspace_dir)
+            if any(part in skip_prefixes for part in rel.parts[:1]):
+                continue
+            if rel.name.startswith("."):
+                continue
+            dst = scaffold_dir / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+
+        aeroc_path = workspace_dir / "workspace.aeroc"
+        if aeroc_path.is_file():
+            shutil.copy2(aeroc_path, scaffold_dir / "workspace.aeroc")
+
+        output = output_path or (workspace_dir / f"{project_name}.aerozip")
+        return package_aeroc(scaffold_dir, output)
 
 
 def compile_aeroc(

@@ -459,8 +459,10 @@
         <div id="drop-zone" class="drop-zone">
           Drop files or a .zip here, or click to upload
         </div>
-        <div class="download-control" style="display:flex;align-items:center;gap:0.4rem;position:relative;z-index:20;">
-          <details id="export-options-popover" class="export-popover" style="flex:1">
+        <div class="download-control" style="display:flex;flex-direction:column;gap:0.4rem;position:relative;z-index:20;">
+          <button id="download-aeroc-btn" class="secondary" title="Download compiled binary IR container">⬇️ Binary IR (.aeroc)</button>
+          <button id="export-scaffold-btn" class="secondary" title="Export Wavefront scaffold zip">📦 Wavefront Scaffold (.zip)</button>
+          <details id="export-options-popover" class="export-popover" style="width:100%">
             <summary id="export-summary" title="Export options" aria-label="Export options">📦 Export Workspace ▾</summary>
             <div class="export-options" title="Choose what to include in the downloaded zip">
               <label class="export-option">
@@ -480,8 +482,8 @@
               </label>
               <label class="export-option">
                 <input type="checkbox" name="export-standalone-aeroc" value="1">
-                <span>Export Standalone .aeroc Binary</span>
-                <small>Includes a pre-packaged .aeroc artifact.</small>
+                <span>Export Wavefront Scaffold (.aerozip)</span>
+                <small>Includes the aero_core runtime and Python wrapper entrypoints.</small>
               </label>
               <button id="download-btn" class="secondary" style="width:100%;margin-top:0.3rem;">Download Zip</button>
             </div>
@@ -755,6 +757,8 @@
       uploadInput: document.getElementById('upload-input'),
       uploadRoot: document.getElementById('upload-root'),
       downloadBtn: document.getElementById('download-btn'),
+      downloadAerocBtn: document.getElementById('download-aeroc-btn'),
+      exportScaffoldBtn: document.getElementById('export-scaffold-btn'),
       exportPopover: document.getElementById('export-options-popover'),
       gutterLeft: document.getElementById('gutter-left'),
       gutterRight: document.getElementById('gutter-right'),
@@ -1895,6 +1899,61 @@
       setBusy(false);
     }
 
+    async function downloadAeroc() {
+      if (!state.sessionId) { log('No workspace session', 'error'); return; }
+      setBusy(true);
+      try {
+        const res = await fetch('/api/workspace/download-aeroc', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: state.sessionId }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          log(`Binary IR download failed: ${err.error || res.statusText}`, 'error');
+          return;
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const disposition = res.headers.get('Content-Disposition') || '';
+        const match = disposition.match(/filename="?([^";]+)"?/);
+        a.href = url; a.download = match ? match[1] : `${state.sessionId}.aeroc`;
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+        log('Binary IR (.aeroc) download started', 'success');
+      } catch (e) { log(`Binary IR download error: ${e.message}`, 'error'); }
+      finally { setBusy(false); }
+    }
+
+    async function downloadScaffold() {
+      if (!state.sessionId) { log('No workspace session', 'error'); return; }
+      setBusy(true);
+      try {
+        const includeNative = !!document.querySelector('input[name="export-native-crate"]:checked');
+        const res = await fetch('/api/workspace/export-scaffold', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: state.sessionId, include_native_crate: includeNative }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          log(`Scaffold export failed: ${err.error || res.statusText}`, 'error');
+          return;
+        }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const disposition = res.headers.get('Content-Disposition') || '';
+        const match = disposition.match(/filename="?([^";]+)"?/);
+        a.href = url; a.download = match ? match[1] : `${state.sessionId}.aerozip`;
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+        log('Wavefront scaffold (.aerozip) export started', 'success');
+      } catch (e) { log(`Scaffold export error: ${e.message}`, 'error'); }
+      finally { setBusy(false); }
+    }
+
     async function downloadZip() {
       if (!state.sessionId) return;
       const options = {
@@ -2377,6 +2436,14 @@
     ui.downloadBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       downloadZip();
+    });
+    if (ui.downloadAerocBtn) ui.downloadAerocBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      downloadAeroc();
+    });
+    if (ui.exportScaffoldBtn) ui.exportScaffoldBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      downloadScaffold();
     });
     // Collapse the export options popover when clicking outside it.
     document.addEventListener('click', (e) => {
