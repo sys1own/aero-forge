@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 
-use bytemuck::from_bytes;
+
 use constant_time_eq::constant_time_eq;
 use memmap2::MmapOptions;
 
@@ -113,47 +113,43 @@ impl ExecutionPlan {
     }
 }
 
-/// Zero-copy view of a loaded `workspace.aeroc`.
-pub struct AerocFile {
-    mmap: memmap2::Mmap,
+/// Zero-copy view over an `.aeroc` byte buffer (from an `mmap` or embedded payload).
+struct AerocView<'a> {
+    data: &'a [u8],
     header: AerocHeader,
 }
 
-impl AerocFile {
-    /// Map *path* into memory and validate magic/hash.
-    pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, DaemonError> {
-        let file = std::fs::File::open(path)?;
-        let mmap = unsafe { MmapOptions::new().map(&file)? };
-        if mmap.len() < AEROC_HEADER_SIZE as usize {
+impl<'a> AerocView<'a> {
+    fn new(data: &'a [u8]) -> Result<Self, DaemonError> {
+        if data.len() < AEROC_HEADER_SIZE as usize {
             return Err(DaemonError::Validation("file too small for header".into()));
         }
-        let header: AerocHeader =
-            *from_bytes::<AerocHeader>(&mmap[..std::mem::size_of::<AerocHeader>()]);
+        let header: AerocHeader = bytemuck::pod_read_unaligned(&data[..AEROC_HEADER_SIZE as usize]);
 
         if &header.magic() != AEROC_MAGIC {
             return Err(DaemonError::Validation("invalid aeroc magic".into()));
         }
 
-        let body = &mmap[AEROC_HEADER_SIZE as usize..];
+        let body = &data[AEROC_HEADER_SIZE as usize..];
         let computed = blake3::hash(body);
         if !constant_time_eq(&computed.as_bytes()[..16], &header.content_hash()) {
             return Err(DaemonError::Validation("content hash mismatch".into()));
         }
 
-        Ok(AerocFile { mmap, header })
+        Ok(AerocView { data, header })
     }
 
     fn slice(&self, offset: u64, len: u64) -> Result<&[u8], DaemonError> {
         let off = offset as usize;
         let end = off + len as usize;
-        if end > self.mmap.len() {
+        if end > self.data.len() {
             return Err(DaemonError::Validation("section out of bounds".into()));
         }
-        Ok(&self.mmap[off..end])
+        Ok(&self.data[off..end])
     }
 
-    /// Materialise an `ExecutionPlan` from the mapped file.
-    pub fn into_plan<P: AsRef<Path>>(self, workspace: P) -> Result<ExecutionPlan, DaemonError> {
+    /// Materialise an `ExecutionPlan` from the view.
+    fn into_plan<P: AsRef<Path>>(self, workspace: P) -> Result<ExecutionPlan, DaemonError> {
         let st = self.slice(self.header.string_table_offset(), self.header.string_table_len())?;
         let dag = self.slice(
             self.header.dag_matrix_offset(),
@@ -196,7 +192,7 @@ impl AerocFile {
         let mut p = 0usize;
         while p + std::mem::size_of::<PayloadBlockHeader>() <= pl.len() {
             let header: PayloadBlockHeader =
-                *from_bytes::<PayloadBlockHeader>(&pl[p..p + std::mem::size_of::<PayloadBlockHeader>()]);
+                bytemuck::pod_read_unaligned(&pl[p..p + std::mem::size_of::<PayloadBlockHeader>()]);
             let comp_start = p + std::mem::size_of::<PayloadBlockHeader>();
             let comp_end = comp_start + header.compressed_size as usize;
             if comp_end > pl.len() {
@@ -480,16 +476,31 @@ fn run_shell(workspace: &Path, cmd: &str) -> Result<(), DaemonError> {
     Ok(())
 }
 
+/// Parse an `.aeroc` byte buffer into an `ExecutionPlan`.
+pub fn parse_aeroc(data: &[u8], workspace: &Path) -> Result<ExecutionPlan, DaemonError> {
+    AerocView::new(data)?.into_plan(workspace)
+}
+
+/// Run an `.aeroc` already loaded in memory.
+pub fn run_aeroc_data(
+    data: &[u8],
+    workspace: &Path,
+    max_workers: usize,
+) -> Result<(), DaemonError> {
+    let plan = Arc::new(parse_aeroc(data, workspace)?);
+    let scheduler = Scheduler::new(plan);
+    scheduler.run(max_workers)
+}
+
 /// Run the `.aeroc` at *aeroc_path* inside *workspace* using *max_workers* threads.
 pub fn run_aeroc<P: AsRef<Path>>(
     aeroc_path: P,
     workspace: P,
     max_workers: usize,
 ) -> Result<(), DaemonError> {
-    let file = AerocFile::open(aeroc_path)?;
-    let plan = Arc::new(file.into_plan(workspace)?);
-    let scheduler = Scheduler::new(plan);
-    scheduler.run(max_workers)
+    let file = std::fs::File::open(aeroc_path)?;
+    let mmap = unsafe { MmapOptions::new().map(&file)? };
+    run_aeroc_data(&mmap, workspace.as_ref(), max_workers)
 }
 
 #[cfg(test)]

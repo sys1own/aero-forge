@@ -21,6 +21,35 @@ pub const AEROC_ALIGNMENT: usize = 64;
 pub const CHUNK_SIZE: usize = 128 * 1024;
 pub const DICT_SIZE: usize = 64 * 1024;
 
+pub const AEROC_BIN_MAGIC: &[u8; 8] = b"AEROCBIN";
+pub const AEROC_TRAILER_SIZE: usize = 24;
+
+/// 24-byte footer appended to a self-extracting `workspace.aeroc.bin`.
+#[repr(C, packed)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct AerocTrailerFooter {
+    pub payload_size: u64,
+    pub aeroc_offset: u64,
+    pub magic_trailer: [u8; 8],
+}
+
+impl Default for AerocTrailerFooter {
+    fn default() -> Self {
+        Self {
+            payload_size: 0,
+            aeroc_offset: 0,
+            magic_trailer: *AEROC_BIN_MAGIC,
+        }
+    }
+}
+
+impl AerocTrailerFooter {
+    /// Return true if the trailer magic is correct.
+    pub fn is_valid(&self) -> bool {
+        &self.magic_trailer == AEROC_BIN_MAGIC
+    }
+}
+
 /// Errors returned by the aeroc compiler.
 #[derive(Debug)]
 pub enum AerocError {

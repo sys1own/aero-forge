@@ -57,6 +57,7 @@ from aero_forge.healing.orchestrator import HealingOrchestrator
 from aero_forge.healing.router import try_auto_fix
 from aero_forge.healing.structural_merger import apply_overlay, MergeConflictError
 from aero_forge.orchestrator.router import toolchains_for_intent
+from aero_forge.builder.aeroc_compiler import compile_directory_to_aeroc
 from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_CPP_PYTHON,
     INTENT_HYBRID_CPP_RUST,
@@ -631,6 +632,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
 
             if path == "/api/build":
                 return self._handle_build()
+            if path == "/api/aeroc/exec":
+                return self._handle_aeroc_exec()
             if path == "/api/chat":
                 return self._handle_chat()
             if path == "/api/blueprint/synthesize":
@@ -767,6 +770,36 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     {"build": {"success": False, "error": str(exc)}},
                 ),
             )
+
+    def _handle_aeroc_exec(self) -> None:
+        """Execute a workspace.aeroc container (or compile blueprint.aero first) with the native daemon."""
+        try:
+            body = _parse_json_body(self)
+            session_id = body.get("session_id") or str(uuid.uuid4())
+            session_dir = _session_dir(session_id)
+            workspace_dir = body.get("workspace_dir", ".")
+            file_path = body.get("path", "workspace.aeroc")
+            jobs = int(body.get("jobs", 4))
+
+            workspace = _resolve_file(session_dir, workspace_dir)
+            target = _resolve_file(session_dir, file_path)
+
+            if not target.is_file() and (file_path.endswith(".aero") or file_path.endswith(".py")):
+                # Compile the workspace tree into workspace.aeroc first.
+                aeroc_out = workspace / "workspace.aeroc"
+                compile_directory_to_aeroc(workspace, aeroc_out)
+                target = aeroc_out
+
+            if not target.is_file():
+                return _send_json(self, 404, {"error": f"aeroc file not found: {file_path}"})
+
+            from aero_forge._native import run_aeroc
+
+            run_aeroc(str(target), str(workspace), jobs)
+            return _send_json(self, 200, {"status": "success", "executed": str(target), "workspace": str(workspace)})
+        except Exception as exc:  # pragma: no cover
+            logger.exception("aeroc exec failed")
+            return _send_json(self, 500, {"error": str(exc)})
 
     def _handle_save_file(self) -> None:
         try:

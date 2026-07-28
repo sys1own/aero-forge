@@ -611,6 +611,7 @@
     <div class="context-menu-item" data-action="download">Download</div>
     <div class="context-menu-sep"></div>
     <div class="context-menu-item" data-action="regenerate-blueprint">&#128260; Rebuild Workspace from Blueprint</div>
+    <div class="context-menu-item" data-action="build-aeroc">&#128640; Build Workspace</div>
     <div class="context-menu-sep"></div>
     <div class="context-menu-item" data-action="rename">Rename</div>
     <div class="context-menu-item" data-action="delete">Delete</div>
@@ -1094,11 +1095,17 @@
       ui.contextMenu.classList.add('open');
       ui.contextMenu.style.left = `${Math.min(event.clientX, window.innerWidth - 150)}px`;
       ui.contextMenu.style.top = `${Math.min(event.clientY, window.innerHeight - 120)}px`;
-      const isBlueprint = !isDir && path.split('/').pop() === 'blueprint.aero';
+      const fileName = path.split('/').pop();
+      const isBlueprint = !isDir && fileName === 'blueprint.aero';
+      const isAeroc = !isDir && fileName === 'workspace.aeroc';
       ui.contextMenu.querySelectorAll('.context-menu-item').forEach(item => {
         const action = item.dataset.action;
         if (action === 'regenerate-blueprint') {
           item.style.display = isBlueprint ? 'block' : 'none';
+          return;
+        }
+        if (action === 'build-aeroc') {
+          item.style.display = (isBlueprint || isAeroc) ? 'block' : 'none';
           return;
         }
         item.style.display = ((!isDir && (action === 'new-folder' || action === 'upload')) || (isDir && action === 'download')) ? 'none' : 'block';
@@ -2107,6 +2114,25 @@
       } finally { setBusy(false); }
     }
 
+    async function runAerocExec(path, isDir) {
+      if (isDir) return;
+      setBusy(true);
+      const fileName = path.split('/').pop();
+      log(`Running native build for ${fileName}...`);
+      try {
+        const workspace = parentDir(path);
+        const data = await api('POST', '/api/aeroc/exec', buildBody({ path, workspace_dir: workspace, jobs: 4 }));
+        if (data.status === 'success') {
+          log(`Native build completed: ${data.executed}`, 'success');
+        } else {
+          log(`Native build failed: ${data.error || 'unknown'}`, 'error');
+        }
+        await loadTree();
+      } catch (e) {
+        log(`Native build error: ${e.message}`, 'error');
+      } finally { setBusy(false); }
+    }
+
     async function sendChat() {
       const text = ui.chatInput.value.trim();
       if (!text) return;
@@ -2373,6 +2399,7 @@
         else if (action === 'upload') uploadToPath(target.isDir ? target.path : parentDir(target.path));
         else if (action === 'download') downloadFile(target.path);
         else if (action === 'regenerate-blueprint') { ui.regenerateModal.classList.add('open'); }
+        else if (action === 'build-aeroc') runAerocExec(target.path, target.isDir);
         else if (action === 'rename') renameNode(target.path);
         else if (action === 'delete') deleteNode(target.path);
       });
