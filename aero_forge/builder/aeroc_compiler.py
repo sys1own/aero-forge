@@ -28,16 +28,22 @@ def _artifact_instruction(artifact: "BuildArtifact") -> Dict[str, Any] | None:
     first_src = str(artifact.source_files[0]) if artifact.source_files else ""
     out = str(artifact.output_path) if artifact.output_path else ""
 
+    # Prefer an explicit Cargo.toml when present; otherwise default to the
+    # workspace root manifest.
+    manifest = next(
+        (s for s in artifact.source_files if str(s).endswith("Cargo.toml")),
+        "Cargo.toml",
+    )
     if artifact.type == "cargo_cdylib":
         return {
             "op": "CARGO_BUILD",
-            "manifest_ref": first_src or f"{artifact.id}/Cargo.toml",
+            "manifest_ref": manifest,
             "flags": 0,
         }
     if artifact.type == "python_extension":
         return {
             "op": "PYO3_BIND",
-            "src_ref": first_src,
+            "src_ref": first_src or manifest,
             "out_ref": out,
         }
     if artifact.type == "custom_cmd":

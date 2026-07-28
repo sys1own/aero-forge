@@ -17,6 +17,8 @@ xxhash-rust = { version = "0.8", features = ["xxh32"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
+memmap2 = "0.9"
+bytemuck = { version = "1", features = ["derive"] }
 # Pin transitive build dependencies so fresh workspaces (no Cargo.lock) still
 # build on the rustc 1.83 toolchain used by the project.
 jobserver = "=0.1.32"

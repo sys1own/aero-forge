@@ -8,9 +8,10 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use serde::Deserialize;
+use bytemuck::{Pod, Zeroable};
+use serde::{Deserialize, Serialize};
 
 pub const AEROC_MAGIC: &[u8; 8] = b"AEROFOG\0";
 pub const AEROC_VERSION_MAJOR: u16 = 1;
@@ -57,6 +58,7 @@ impl From<serde_json::Error> for AerocError {
 /// Field access is performed through explicit offsets so the on-disk layout
 /// matches the specification regardless of how Rust aligns the backing store.
 #[repr(C, align(64))]
+#[derive(Clone, Copy, Pod, Zeroable)]
 pub struct AerocHeader {
     pub data: [u8; AEROC_HEADER_SIZE as usize],
 }
@@ -224,6 +226,7 @@ impl AerocHeader {
 
 /// 16-byte header for each compressed source payload chunk.
 #[repr(C, packed)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct PayloadBlockHeader {
     pub uncompressed_size: u32,
     pub compressed_size: u32,
@@ -395,6 +398,77 @@ impl Instruction {
         }
         buf
     }
+
+    /// Decode one instruction from `buf` starting at `pos`.
+    pub fn decode(buf: &[u8], pos: &mut usize) -> Result<Instruction, AerocError> {
+        use std::convert::TryInto;
+        if *pos >= buf.len() {
+            return Err(AerocError::InvalidArgument("bytecode truncated".into()));
+        }
+        let op: OpCode = buf[*pos]
+            .try_into()
+            .map_err(|_| AerocError::InvalidArgument("unknown opcode".into()))?;
+        *pos += 1;
+        macro_rules! read_u32 {
+            () => {{
+                if *pos + 4 > buf.len() {
+                    return Err(AerocError::InvalidArgument("bytecode truncated".into()));
+                }
+                let mut tmp = [0u8; 4];
+                tmp.copy_from_slice(&buf[*pos..*pos + 4]);
+                *pos += 4;
+                u32::from_le_bytes(tmp)
+            }};
+        }
+        macro_rules! read_u64 {
+            () => {{
+                if *pos + 8 > buf.len() {
+                    return Err(AerocError::InvalidArgument("bytecode truncated".into()));
+                }
+                let mut tmp = [0u8; 8];
+                tmp.copy_from_slice(&buf[*pos..*pos + 8]);
+                *pos += 8;
+                u64::from_le_bytes(tmp)
+            }};
+        }
+        let instr = match op {
+            OpCode::Nop => Instruction::Nop,
+            OpCode::Halt => Instruction::Halt,
+            OpCode::CargoBuild => Instruction::CargoBuild {
+                manifest_ref: StringRef(read_u32!()),
+                flags: read_u32!(),
+            },
+            OpCode::Pyo3Bind => Instruction::Pyo3Bind {
+                src_ref: StringRef(read_u32!()),
+                out_ref: StringRef(read_u32!()),
+            },
+            OpCode::CAbiCheck => Instruction::CAbiCheck {
+                header_ref: StringRef(read_u32!()),
+                abi_hash: read_u64!(),
+            },
+            OpCode::VmExec => Instruction::VmExec {
+                bytecode_ref: read_u32!(),
+                mem_limit: read_u64!(),
+            },
+            OpCode::UnitVerify => Instruction::UnitVerify {
+                test_bin_ref: StringRef(read_u32!()),
+                args: read_u32!(),
+            },
+            OpCode::FsSymlink => Instruction::FsSymlink {
+                src_ref: StringRef(read_u32!()),
+                dst_ref: StringRef(read_u32!()),
+            },
+            OpCode::ZstdDecomp => Instruction::ZstdDecomp {
+                src_blk: read_u32!(),
+                dst_dir: StringRef(read_u32!()),
+            },
+            OpCode::DispatchSubdag => Instruction::DispatchSubdag {
+                subdag_offset: read_u64!(),
+                node_count: read_u32!(),
+            },
+        };
+        Ok(instr)
+    }
 }
 
 /// Row-major NxN DAG adjacency bit matrix with 64-byte aligned rows.
@@ -425,7 +499,7 @@ impl DagMatrix {
 }
 
 /// A source payload entry supplied to the compiler.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SourceFile {
     pub path: String,
     #[serde(rename = "content_base64", with = "base64_bytes")]
@@ -434,17 +508,20 @@ pub struct SourceFile {
 
 mod base64_bytes {
     use base64::Engine;
-    use serde::{Deserialize, Deserializer};
+    use serde::{Deserialize, Deserializer, Serializer};
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         let s = String::deserialize(d)?;
         base64::engine::general_purpose::STANDARD
             .decode(s)
             .map_err(serde::de::Error::custom)
     }
+    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(v))
+    }
 }
 
 /// High-level build definition consumed by the compiler.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProjectSpec {
     pub nodes: Vec<String>,
     #[serde(default)]
@@ -457,7 +534,7 @@ pub struct ProjectSpec {
 }
 
 /// Intermediate JSON representation of an instruction before string interning.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RawInstruction {
     pub op: String,
     #[serde(default)]
@@ -749,7 +826,7 @@ mod tests {
     fn string_table_roundtrip() {
         let mut t = StringTable::new();
         let r1 = t.insert("hello");
-        let r2 = t.insert("world");
+        let _r2 = t.insert("world");
         let r3 = t.insert("hello");
         assert_eq!(r1, r3);
         let bytes = t.as_bytes();

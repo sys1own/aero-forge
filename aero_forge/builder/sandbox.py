@@ -72,7 +72,19 @@ class DraftSandboxBuilder:
             self._make_source_dirs_read_only(sandbox_root)
             self._ensure_writable_output_dirs(sandbox_root)
 
-            result = self.blueprint.execute(sandbox_root, env=self.env)
+            try:
+                from aero_forge.daemon import compile_and_run_blueprint
+
+                compile_and_run_blueprint(
+                    self.blueprint,
+                    sandbox_root,
+                    output_dir=sandbox_root,
+                    max_workers=4,
+                )
+                result = {"status": "success", "build_results": [], "stdout": "", "stderr": ""}
+            except Exception:
+                logger.exception("aeroc-daemon failed, falling back to Python executor")
+                result = self.blueprint.execute(sandbox_root, env=self.env)
 
             self._copy_outputs(sandbox_root, self.output_dir)
 
