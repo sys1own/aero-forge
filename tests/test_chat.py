@@ -238,7 +238,8 @@ def test_chat_copilot_parses_propose_build_action(tmp_path: Path) -> None:
     with patch("aero_forge.chat.get_llm_client", return_value=FakeClient()):
         result = session.reply_structured("Speed up matrix multiplication")
 
-    assert result["reply"] == "Use a Rust core for the hot loop."
+    assert "### Architecture Overview" in result["reply"]
+    assert "```yaml blueprint" in result["reply"]
     assert result["action"]["type"] == "PROPOSE_BUILD"
     assert result["action"]["params"]["target"] == "hybrid_cpp_rust"
 
@@ -444,7 +445,6 @@ acceleration: "Selective Acceleration (Auto-Detect Heavy Compute)"
 
     assert result["reply"]
     assert "## Overview" in result["reply"]
-    assert "```yaml blueprint" not in result["reply"]
     assert result["action"]["type"] == "PROPOSE_BUILD"
     assert result["action"]["params"]["target"] == "hybrid_rust_python"
     assert "Fibonacci" in result["action"]["params"]["prompt"]

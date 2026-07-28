@@ -26,7 +26,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from aero_forge.build_summary import format_build_summary
 from aero_forge.bundle_repo import bundle_workspace, format_context_block
 from aero_forge.config import ConfigOverride, Tier
-from aero_forge.copilot.action_parser import parse_action_from_text, parse_copilot_response
+from aero_forge.copilot.action_parser import parse_action_from_text
+from aero_forge.copilot.agent import format_copilot_response
 from aero_forge.prompts import AERO_FORGE_COPILOT_SYSTEM_PROMPT
 from aero_forge.error_explainer import explain_error
 from aero_forge.healing.router import try_auto_fix
@@ -708,7 +709,7 @@ class ChatSession:
             return fallback
 
         reply, action = self._parse_chat_response(response, text)
-        self.messages.append({"role": "assistant", "content": response})
+        self.messages.append({"role": "assistant", "content": reply or response})
         self._save_session()
         return {
             "reply": reply,
@@ -720,11 +721,11 @@ class ChatSession:
     ) -> Tuple[str, Optional[Dict[str, Any]]]:
         """Extract a Markdown reply and optional action from an LLM response.
 
-        Uses the centralized copilot action parser which supports Markdown
-        build-contract code fences, legacy top-level JSON, and best-effort
-        prose extraction.
+        Uses the centralized copilot response formatter which guarantees
+        Markdown output with an optional YAML build contract, and converts
+        any raw JSON fallback into a human-readable Markdown explanation.
         """
-        reply, action = parse_copilot_response(response)
+        reply, action = format_copilot_response(response)
         if not action:
             action = parse_action_from_text(reply or user_text)
         return reply or response.strip(), action
