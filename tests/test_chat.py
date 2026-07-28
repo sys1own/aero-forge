@@ -316,3 +316,101 @@ def test_chat_reply_returns_extracted_markdown_for_json(tmp_path: Path) -> None:
         response = session.reply("Hi")
 
     assert response == "**Hello**"
+
+
+def test_chat_blank_workspace_plan(tmp_path: Path) -> None:
+    """On a blank workspace the copilot returns a plan and a PROPOSE_BUILD action."""
+    fake_response = (
+        '{"reply": "Starting a blank project with a pure Python core.", '
+        '"action": {"type": "PROPOSE_BUILD", "params": '
+        '{"prompt": "Build a fast iterative Fibonacci function in Python", '
+        '"target": "pure_python", '
+        '"acceleration": "Standard Runtime (Bypass Bridge)"}}}'
+    )
+
+    class FakeClient:
+        def generate(self, messages, temperature=0.2, **kwargs):
+            return fake_response
+
+    session = ChatSession(tmp_path)
+    with patch("aero_forge.chat.get_llm_client", return_value=FakeClient()):
+        result = session.reply_structured(
+            "I want to build a fast, iterative Fibonacci function on a blank workspace"
+        )
+
+    assert result["reply"]
+    assert result["action"]["type"] == "PROPOSE_BUILD"
+    assert result["action"]["params"]["target"] in {
+        "pure_python",
+        "hybrid_rust_python",
+        "pure_rust",
+    }
+    assert "prompt" in result["action"]["params"]
+
+
+def test_chat_existing_workspace_feature_plan(tmp_path: Path) -> None:
+    """On an existing workspace the copilot uses bundle_repo context and proposes a feature."""
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "math_core.py").write_text(
+        "def add(a, b):\n    return a + b\n", encoding="utf-8"
+    )
+    (tmp_path / "blueprint.aero").write_text(
+        "project: math\narchitecture: pure_python\n", encoding="utf-8"
+    )
+
+    captured_messages: List[Any] = []
+
+    class FakeClient:
+        def generate(self, messages, temperature=0.2, **kwargs):
+            captured_messages.extend(messages)
+            return (
+                '{"reply": "I see an existing pure_python workspace. I will add a multiply function.", '
+                '"action": {"type": "PROPOSE_BUILD", "params": '
+                '{"prompt": "Add a multiply function to the existing pure_python math_core project", '
+                '"target": "pure_python", '
+                '"acceleration": "Standard Runtime (Bypass Bridge)"}}}'
+            )
+
+    session = ChatSession(tmp_path)
+    with patch("aero_forge.chat.get_llm_client", return_value=FakeClient()):
+        result = session.reply_structured("Add a multiply function to math_core")
+
+    assert result["reply"]
+    assert result["action"]["type"] == "PROPOSE_BUILD"
+    assert result["action"]["params"]["target"] == "pure_python"
+    system = str([m for m in captured_messages if m.get("role") == "system"])
+    assert "src/math_core.py" in system or "def add(a, b)" in system
+
+
+def test_chat_empty_response_fallback(tmp_path: Path) -> None:
+    """An empty LLM response still returns a valid {reply, action} dict."""
+    calls: List[Any] = []
+
+    class FakeClient:
+        def generate(self, messages, temperature=0.2, **kwargs):
+            calls.append(kwargs)
+            return ""
+
+    session = ChatSession(tmp_path)
+    with patch("aero_forge.chat.get_llm_client", return_value=FakeClient()):
+        result = session.reply_structured("build a fibonacci function")
+
+    assert result["reply"]
+    assert "reply" in result and "action" in result
+    # No response_format was honored, but the result is still valid.
+    assert result["action"]["type"] == "PROPOSE_BUILD"
+
+
+def test_chat_malformed_prose_fallback(tmp_path: Path) -> None:
+    """Malformed or prose LLM output is safely wrapped into {reply, action}."""
+    class FakeClient:
+        def generate(self, messages, temperature=0.2, **kwargs):
+            return "Here is a Build prompt: create a Rust core for matrix multiplication."
+
+    session = ChatSession(tmp_path)
+    with patch("aero_forge.chat.get_llm_client", return_value=FakeClient()):
+        result = session.reply_structured("How do I speed up matrix multiplication?")
+
+    assert result["reply"]
+    assert result["action"]["type"] == "PROPOSE_BUILD"
+    assert result["action"]["params"]["target"] == "pure_rust"
