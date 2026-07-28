@@ -781,6 +781,10 @@ class ChatSession:
                     "or pass --llm-provider."
                 ),
                 "action": None,
+                "explanation": "No LLM provider is configured.",
+                "has_suggestion": False,
+                "build_prompt": None,
+                "raw": "",
             }
 
         # Try JSON mode first. Some providers return an empty body when forced
@@ -802,9 +806,17 @@ class ChatSession:
                 response = ""
 
         if not response:
+            fallback_action = parse_action_from_text(text)
+            fallback_prompt = None
+            if fallback_action and fallback_action.get("params"):
+                fallback_prompt = fallback_action["params"].get("prompt")
             fallback = {
                 "reply": "I didn't receive a response from the language model. Please check your provider/API key and try rephrasing.",
-                "action": parse_action_from_text(text),
+                "action": fallback_action,
+                "explanation": "I didn't receive a response from the language model.",
+                "has_suggestion": bool(fallback_action),
+                "build_prompt": fallback_prompt,
+                "raw": "",
             }
             self.messages.append({"role": "assistant", "content": json.dumps(fallback)})
             self._save_session()
@@ -813,9 +825,16 @@ class ChatSession:
         reply, action = self._parse_chat_response(response, text)
         self.messages.append({"role": "assistant", "content": reply or response})
         self._save_session()
+        build_prompt = None
+        if action and action.get("params"):
+            build_prompt = action["params"].get("prompt") or action["params"].get("build_prompt")
         return {
             "reply": reply,
             "action": action,
+            "explanation": reply or "",
+            "has_suggestion": bool(action),
+            "build_prompt": build_prompt,
+            "raw": response,
         }
 
     def _parse_chat_response(

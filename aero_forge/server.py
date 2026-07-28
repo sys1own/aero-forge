@@ -957,14 +957,21 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
 
             # Chat is a Design & Advisory Engine. It never triggers builds or code
             # generation directly; it always returns a structured reply with an
-            # optional PROPOSE_BUILD Action Card for the Builder tab. The one
-            # exception is a deterministic AST self-heal request.
+            # optional SUGGEST_BUILD_PROMPT Action Card for the Builder tab. The
+            # one exception is a deterministic AST self-heal request.
             lowered = user_text.lower()
             if any(phrase in lowered for phrase in ("fix error", "fix build", "apply self heal", "self heal", "heal")):
                 command_action = chat.handle_command(user_text)
                 if command_action is not None:
                     reply_text = chat._format_action_result(command_action, user_text)
-                    result = {"reply": reply_text, "action": None}
+                    result = {
+                        "reply": reply_text,
+                        "action": None,
+                        "explanation": reply_text,
+                        "has_suggestion": False,
+                        "build_prompt": None,
+                        "raw": reply_text,
+                    }
                 else:
                     result = chat.reply_structured(
                         user_text,
@@ -984,6 +991,10 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     "session_id": session_id,
                     "reply": result["reply"],
                     "action": result["action"],
+                    "explanation": result.get("explanation", result["reply"]),
+                    "has_suggestion": result.get("has_suggestion", bool(result["action"])),
+                    "build_prompt": result.get("build_prompt"),
+                    "raw": result.get("raw", result["reply"]),
                     "messages": chat.messages,
                 },
             )

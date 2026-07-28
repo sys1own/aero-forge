@@ -2223,30 +2223,79 @@
     function addAssistantMessage(reply, action) {
       const msg = document.createElement('div');
       msg.className = 'msg assistant';
-      const prompt = (action && action.params && action.params.prompt) ? action.params.prompt : '';
-      const target = (action && action.params && action.params.target) ? action.params.target : '';
-      const acceleration = (action && action.params && action.params.acceleration) ? action.params.acceleration : '';
+
+      const type = (action && action.type) ? action.type : '';
+      const p = (action && action.params) ? action.params : {};
+      const prompt = p.prompt || '';
+      const target = p.target || '';
+      const acceleration = p.acceleration || '';
+      const explanation = reply || p.explanation || '';
 
       const content = document.createElement('div');
       content.className = 'msg-content';
-      content.innerHTML = renderMarkdown(reply || '');
+      content.innerHTML = renderMarkdown(explanation);
       msg.appendChild(content);
 
-      if (action && action.type === 'PROPOSE_BUILD' && action.params) {
-        const p = action.params;
-        const promptShort = (p.prompt || '').slice(0, 80) + ((p.prompt || '').length > 80 ? '...' : '');
+      if (type === 'SUGGEST_BUILD_PROMPT' && prompt) {
+        const card = document.createElement('div');
+        card.className = 'action-card';
+
+        const title = document.createElement('div');
+        title.className = 'action-title';
+        title.textContent = '⚡ Suggested Builder Prompt';
+        card.appendChild(title);
+
+        const meta = document.createElement('div');
+        meta.className = 'action-meta';
+        meta.textContent = (target ? 'Target: ' + target + ' • ' : '') + (acceleration || 'Selective Acceleration');
+        card.appendChild(meta);
+
+        const pre = document.createElement('pre');
+        pre.className = 'action-prompt';
+        pre.textContent = prompt;
+        card.appendChild(pre);
+
+        const buttons = document.createElement('div');
+        buttons.className = 'action-buttons';
+
+        const copyBtn = document.createElement('button');
+        copyBtn.className = 'btn';
+        copyBtn.textContent = '📋 Copy';
+        copyBtn.addEventListener('click', () => {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(prompt).catch(() => {});
+          }
+        });
+        buttons.appendChild(copyBtn);
+
+        const editBtn = document.createElement('button');
+        editBtn.className = 'btn';
+        editBtn.textContent = '✏️ Edit in Builder';
+        editBtn.addEventListener('click', () => populateBuildTab(prompt, target, acceleration));
+        buttons.appendChild(editBtn);
+
+        const triggerBtn = document.createElement('button');
+        triggerBtn.className = 'btn btn-primary';
+        triggerBtn.textContent = '🚀 Trigger Build';
+        triggerBtn.addEventListener('click', () => triggerBuildFromChat(prompt, target, acceleration));
+        buttons.appendChild(triggerBtn);
+
+        card.appendChild(buttons);
+        msg.appendChild(card);
+      } else if (type === 'PROPOSE_BUILD' && prompt) {
+        const pShort = prompt.slice(0, 80) + (prompt.length > 80 ? '...' : '');
 
         const bar = document.createElement('div');
         bar.className = 'chat-action-bar';
 
         const badge = document.createElement('span');
         badge.className = 'badge';
-        badge.textContent = '🎯 ' + (p.target || 'auto');
+        badge.textContent = '🎯 ' + (target || 'auto');
         bar.appendChild(badge);
 
         const preview = document.createElement('span');
         preview.className = 'prompt-preview';
-        preview.textContent = '"' + promptShort + '"';
+        preview.textContent = '"' + pShort + '"';
         bar.appendChild(preview);
 
         const actions = document.createElement('div');

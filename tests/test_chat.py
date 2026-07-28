@@ -448,3 +448,29 @@ acceleration: "Selective Acceleration (Auto-Detect Heavy Compute)"
     assert result["action"]["type"] == "PROPOSE_BUILD"
     assert result["action"]["params"]["target"] == "hybrid_rust_python"
     assert "Fibonacci" in result["action"]["params"]["prompt"]
+
+
+def test_chat_copilot_parses_suggest_build_prompt_json(tmp_path: Path) -> None:
+    """A suggest_build_prompt JSON response produces the new structured API fields."""
+    fake_response = (
+        '{"action": "suggest_build_prompt", '
+        '"explanation": "Use a Rust core with PyO3 bindings for matrix kernels.", '
+        '"build_prompt": "Build a hybrid_rust_python project: Rust crate `matrix_core` exposes `fn matmul(a: &[f64], b: &[f64], m: usize, n: usize, k: usize)` compiled with `-C target-cpu=native`, wrapped by PyO3 `py_matrix.matmul`. Target: hybrid_rust_python. Acceleration: Selective Acceleration."}'
+    )
+
+    class FakeClient:
+        def generate(self, messages, temperature=0.2, **kwargs):
+            return fake_response
+
+    session = ChatSession(tmp_path)
+    with patch("aero_forge.chat.get_llm_client", return_value=FakeClient()):
+        result = session.reply_structured(
+            "Help me plan a high-throughput Rust matrix core with PyO3 bindings"
+        )
+
+    assert "Rust core" in result["reply"]
+    assert result["has_suggestion"] is True
+    assert result["build_prompt"] is not None
+    assert "hybrid_rust_python" in result["build_prompt"]
+    assert result["action"]["type"] == "SUGGEST_BUILD_PROMPT"
+    assert result["raw"] == fake_response

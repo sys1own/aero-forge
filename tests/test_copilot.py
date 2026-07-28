@@ -4,6 +4,7 @@ from aero_forge.copilot.action_parser import (
     extract_build_contract,
     parse_action_from_text,
     parse_copilot_response,
+    parse_suggested_build_prompt,
 )
 from aero_forge.copilot.agent import format_copilot_response
 
@@ -158,3 +159,69 @@ def test_format_copilot_response_pretty_prints_non_action_json() -> None:
     reply, action = format_copilot_response(response)
     assert "```json" in reply
     assert action is None
+
+
+def test_parse_suggested_build_prompt_from_json_fence() -> None:
+    """Extract the structured suggest_build_prompt payload from a JSON code fence."""
+    response = """### Architecture Overview
+I propose a Rust core with PyO3 bindings.
+
+```json
+{
+  "action": "suggest_build_prompt",
+  "explanation": "Use a Rust hot loop wrapped by PyO3.",
+  "build_prompt": "Build a hybrid_rust_python project with a Rust crate exposing `fn sum(input: &[f64]) -> f64` compiled with `-C target-cpu=native`, wrapped by a PyO3 module `py_kernels.sum`. Target: hybrid_rust_python. Acceleration: Selective Acceleration."
+}
+```
+"""
+    parsed = parse_suggested_build_prompt(response)
+    assert parsed["has_suggestion"] is True
+    assert parsed["explanation"] == "Use a Rust hot loop wrapped by PyO3."
+    assert "hybrid_rust_python" in parsed["build_prompt"]
+
+
+def test_parse_suggested_build_prompt_xml_fallback() -> None:
+    """Fallback to <build_prompt> tags when JSON is unavailable."""
+    response = """<explanation>Fast C++ numeric core.</explanation>
+<build_prompt>Build a hybrid_cpp_python project with a C++ function `double dot(const double* a, const double* b, size_t n)` compiled -O3 -march=native, exposed via ctypes. Target: hybrid_cpp_python. Acceleration: Force Native Bridge.</build_prompt>
+"""
+    parsed = parse_suggested_build_prompt(response)
+    assert parsed["has_suggestion"] is True
+    assert "hybrid_cpp_python" in parsed["build_prompt"]
+    assert parsed["explanation"] == "Fast C++ numeric core."
+
+
+def test_parse_copilot_response_handles_suggest_build_prompt() -> None:
+    """A suggest_build_prompt JSON fence is split into an explanation and SUGGEST_BUILD_PROMPT action."""
+    response = """### Overview
+Use a Rust matrix core.
+
+```json
+{
+  "action": "suggest_build_prompt",
+  "explanation": "Rust SIMD matrix core with PyO3 bindings.",
+  "build_prompt": "Build a hybrid_rust_python project: Rust crate `matrix_core` with `fn matmul(a: &[f64], b: &[f64], m: usize, n: usize, k: usize)` compiled with `-C target-cpu=native`, wrapped by PyO3 `py_matrix.matmul`. Target: hybrid_rust_python. Acceleration: Selective Acceleration."
+}
+```
+"""
+    reply, action = parse_copilot_response(response)
+    assert "Rust SIMD matrix core" in reply
+    assert action is not None
+    assert action["type"] == "SUGGEST_BUILD_PROMPT"
+    assert action["params"]["target"] == "hybrid_rust_python"
+    assert "matmul" in action["params"]["prompt"]
+
+
+def test_format_copilot_response_wraps_suggest_build_prompt() -> None:
+    """A raw suggest_build_prompt JSON object is formatted as Markdown + a SUGGEST_BUILD_PROMPT action."""
+    response = (
+        '{"action": "suggest_build_prompt", '
+        '"explanation": "Rust matrix core with PyO3 bindings.", '
+        '"build_prompt": "Build a hybrid_rust_python project with a Rust `matmul` kernel and PyO3 wrapper. Target: hybrid_rust_python. Acceleration: Force Native Bridge."}'
+    )
+    reply, action = format_copilot_response(response)
+    assert "Rust matrix core" in reply
+    assert "```yaml" not in reply
+    assert action is not None
+    assert action["type"] == "SUGGEST_BUILD_PROMPT"
+    assert "Force Native Bridge" in action["params"]["acceleration"]
