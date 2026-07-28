@@ -22,6 +22,11 @@ _SUGGEST_JSON_FENCE_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+_BUILD_PROMPT_FENCE_RE = re.compile(
+    r"```build_prompt\s*\n(.*?)```",
+    re.DOTALL | re.IGNORECASE,
+)
+
 _BUILD_PROMPT_TAG_RE = re.compile(
     r"<build_prompt>(.*?)</build_prompt>",
     re.DOTALL | re.IGNORECASE,
@@ -75,6 +80,63 @@ def _normalize_acceleration(raw: Any) -> str:
     return "Selective Acceleration (Auto-Detect Heavy Compute)"
 
 
+def extract_build_prompt(text: str) -> Tuple[str, Optional[str]]:
+    """Split a copilot response into conversational reply and build prompt.
+
+    Priority:
+      1. A fenced `` ```build_prompt ... ``` `` block.
+      2. A legacy JSON code-fence containing a ``suggest_build_prompt`` action.
+      3. XML-style ``<build_prompt>`` / ``<explanation>`` tags.
+      4. No prompt found: return the full text as the reply.
+
+    Returns
+    -------
+    (conversational_reply, extracted_prompt)
+    """
+    raw = text or ""
+    stripped = raw.strip()
+
+    # 1. New ``build_prompt`` fence format.
+    fence = _BUILD_PROMPT_FENCE_RE.search(stripped)
+    if fence:
+        extracted = fence.group(1).strip()
+        reply = _BUILD_PROMPT_FENCE_RE.sub("", stripped).strip()
+        return reply, extracted
+
+    # 2. JSON code fence containing a suggest_build_prompt payload.
+    json_fence = _SUGGEST_JSON_FENCE_RE.search(stripped)
+    if json_fence:
+        payload = json_fence.group(1).strip()
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict) and (
+            parsed.get("action") == "suggest_build_prompt" or "build_prompt" in parsed
+        ):
+            reply = str(parsed.get("explanation") or "").strip()
+            extracted = str(parsed.get("build_prompt") or "").strip() or None
+            if not reply:
+                reply = _SUGGEST_JSON_FENCE_RE.sub("", stripped).strip()
+            if extracted:
+                return reply, extracted
+
+    # 3. XML-style fallback tags.
+    bp_match = _BUILD_PROMPT_TAG_RE.search(stripped)
+    if bp_match:
+        extracted = bp_match.group(1).strip()
+        reply = ""
+        ex_match = _EXPLANATION_TAG_RE.search(stripped)
+        if ex_match:
+            reply = ex_match.group(1).strip()
+        if not reply:
+            reply = _BUILD_PROMPT_TAG_RE.sub("", stripped).strip()
+        return reply, extracted
+
+    # 4. No prompt found.
+    return stripped, None
+
+
 def extract_build_contract(text: str) -> Optional[Dict[str, Any]]:
     """Parse a YAML or JSON build contract from a Markdown code fence.
 
@@ -122,43 +184,18 @@ def parse_suggested_build_prompt(text: str) -> Dict[str, Any]:
     """Extract the new ``suggest_build_prompt`` structured payload.
 
     Returns a dict with ``explanation``, ``has_suggestion``, ``build_prompt``,
-    and ``raw``.  Tries JSON code fences, top-level JSON objects, and XML-style
-    ``<build_prompt>`` / ``<explanation>`` fallbacks.
+    and ``raw``.  Tries ``build_prompt`` fenced blocks first, then JSON code
+    fences, then XML-style ``<build_prompt>`` / ``<explanation>`` fallbacks.
     """
     raw = text or ""
     stripped = raw.strip()
 
-    # 1. JSON code fence (most common model output).
-    fence = _SUGGEST_JSON_FENCE_RE.search(stripped)
-    if fence:
-        payload = fence.group(1).strip()
-        try:
-            parsed = json.loads(payload)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, dict) and parsed.get("action") == "suggest_build_prompt":
-            return _build_suggestion(parsed, stripped)
-
-    # 2. Top-level JSON object.
-    if stripped.startswith("{"):
-        try:
-            parsed = json.loads(stripped)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, dict) and parsed.get("action") == "suggest_build_prompt":
-            return _build_suggestion(parsed, stripped)
-
-    # 3. XML-style fallback tags.
-    bp_match = _BUILD_PROMPT_TAG_RE.search(stripped)
-    if bp_match:
-        explanation = ""
-        ex_match = _EXPLANATION_TAG_RE.search(stripped)
-        if ex_match:
-            explanation = ex_match.group(1).strip()
+    reply, build_prompt = extract_build_prompt(stripped)
+    if build_prompt:
         return {
-            "explanation": explanation,
+            "explanation": reply,
             "has_suggestion": True,
-            "build_prompt": bp_match.group(1).strip(),
+            "build_prompt": build_prompt,
             "raw": stripped,
         }
 
@@ -304,13 +341,29 @@ def parse_copilot_response(response: str) -> Tuple[str, Optional[Dict[str, Any]]
     """Split an assistant response into a Markdown reply and an optional action.
 
     Supports, in order:
-    - ``suggest_build_prompt`` JSON payloads (new action-card format)
+    - ``build_prompt`` fenced blocks (new clean format)
+    - ``suggest_build_prompt`` JSON payloads
     - ``yaml blueprint`` / ``json blueprint`` fenced build contracts
     - legacy top-level JSON objects with ``reply``/``action``
     - best-effort extraction from plain prose
     """
     if not response or not response.strip():
         return "", None
+
+    # New ``build_prompt`` fence format.
+    reply, build_prompt = extract_build_prompt(response)
+    if build_prompt:
+        target = _normalize_target(build_prompt) or _infer_target_from_text(build_prompt)
+        action = {
+            "type": "SUGGEST_BUILD_PROMPT",
+            "params": {
+                "prompt": build_prompt,
+                "explanation": reply,
+                "target": target,
+                "acceleration": _normalize_acceleration(build_prompt),
+            },
+        }
+        return reply, action
 
     # New structured action-card format.
     suggestion = parse_suggested_build_prompt(response)

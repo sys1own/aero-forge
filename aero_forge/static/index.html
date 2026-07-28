@@ -268,7 +268,7 @@
     .action-card { background: rgba(0,0,0,0.25); border: 1px solid var(--accent); border-radius: 6px; padding: 0.65rem; margin-top: 0.5rem; }
     .action-card .action-title { font-weight: 600; color: var(--accent); margin-bottom: 0.4rem; }
     .action-card .action-meta { font-size: 0.78rem; color: var(--muted); margin-bottom: 0.5rem; }
-    .action-card .action-prompt { background: rgba(0,0,0,0.3); padding: 0.45rem; border-radius: 4px; font-family: Consolas, Monaco, monospace; font-size: 0.78rem; max-height: 90px; overflow: auto; margin-bottom: 0.5rem; }
+    .action-card .build-prompt-editor { width: 100%; min-height: 80px; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; padding: 0.45rem; font-family: Consolas, Monaco, monospace; font-size: 0.78rem; color: var(--text); resize: vertical; margin-bottom: 0.5rem; }
     .action-card .action-buttons { display: flex; gap: 0.5rem; flex-wrap: wrap; }
     .prompt-row { display: flex; gap: 0.5rem; }
     textarea#prompt-input, textarea#chat-input {
@@ -400,6 +400,9 @@
       </button>
       <button id="run-btn" class="run-btn" title="Run current file (Ctrl+Enter)" aria-label="Run">
         <span>&#9654;</span> Run
+      </button>
+      <button id="settings-btn" class="icon-btn" title="LLM API Settings" aria-label="LLM API Settings">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       </button>
     </div>
   </header>
@@ -614,7 +617,7 @@
 
   <div id="settings-modal" class="modal-overlay">
     <div class="modal">
-      <h2>Settings</h2>
+      <h2>LLM API Settings</h2>
       <div class="form-group">
         <label for="setting-provider">Provider</label>
         <select id="setting-provider">
@@ -773,6 +776,7 @@
       templateSelect: document.getElementById('template-select'),
       loadTemplate: document.getElementById('load-template'),
       acceleratorLog: document.getElementById('accelerator-log'),
+      settingsBtn: document.getElementById('settings-btn'),
       settingsModal: document.getElementById('settings-modal'),
       saveSettings: document.getElementById('save-settings'),
       cancelSettings: document.getElementById('cancel-settings'),
@@ -2219,6 +2223,11 @@
       content.innerHTML = renderMarkdown(explanation);
       msg.appendChild(content);
 
+      function getLivePrompt(card) {
+        const editor = card.querySelector('.build-prompt-editor');
+        return editor ? editor.value : prompt;
+      }
+
       if (type === 'SUGGEST_BUILD_PROMPT' && prompt) {
         const card = document.createElement('div');
         card.className = 'action-card';
@@ -2233,10 +2242,11 @@
         meta.textContent = (target ? 'Target: ' + target + ' • ' : '') + (acceleration || 'Selective Acceleration');
         card.appendChild(meta);
 
-        const pre = document.createElement('pre');
-        pre.className = 'action-prompt';
-        pre.textContent = prompt;
-        card.appendChild(pre);
+        const editor = document.createElement('textarea');
+        editor.className = 'build-prompt-editor';
+        editor.value = prompt;
+        editor.spellcheck = false;
+        card.appendChild(editor);
 
         const buttons = document.createElement('div');
         buttons.className = 'action-buttons';
@@ -2245,8 +2255,9 @@
         copyBtn.className = 'btn';
         copyBtn.textContent = '📋 Copy';
         copyBtn.addEventListener('click', () => {
+          const livePrompt = getLivePrompt(card);
           if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(prompt).catch(() => {});
+            navigator.clipboard.writeText(livePrompt).catch(() => {});
           }
         });
         buttons.appendChild(copyBtn);
@@ -2254,13 +2265,13 @@
         const editBtn = document.createElement('button');
         editBtn.className = 'btn';
         editBtn.textContent = '✏️ Edit in Builder';
-        editBtn.addEventListener('click', () => populateBuildTab(prompt, target, acceleration));
+        editBtn.addEventListener('click', () => populateBuildTab(getLivePrompt(card), target, acceleration));
         buttons.appendChild(editBtn);
 
         const triggerBtn = document.createElement('button');
         triggerBtn.className = 'btn btn-primary';
         triggerBtn.textContent = '🚀 Trigger Build';
-        triggerBtn.addEventListener('click', () => triggerBuildFromChat(prompt, target, acceleration));
+        triggerBtn.addEventListener('click', () => triggerBuildFromChat(getLivePrompt(card), target, acceleration));
         buttons.appendChild(triggerBtn);
 
         card.appendChild(buttons);
@@ -2429,6 +2440,7 @@
     ui.bottomTabs.forEach(tab => tab.addEventListener('click', () => switchBottomTab(tab.dataset.bottom)));
 
     // Settings modal
+    ui.settingsBtn.addEventListener('click', () => { applySettingsUI(); ui.settingsModal.classList.add('open'); });
     ui.cancelSettings.addEventListener('click', () => ui.settingsModal.classList.remove('open'));
     ui.saveSettings.addEventListener('click', () => { saveSettings(); ui.settingsModal.classList.remove('open'); loadTree(); });
     ui.cleanWorkspace.addEventListener('click', () => ui.cleanModal.classList.add('open'));
