@@ -36,6 +36,11 @@ class GenerationMethod(str, Enum):
     manual = "manual"
 
 
+class ContextState(str, Enum):
+    raw = "raw"
+    synthesized = "synthesized"
+
+
 class ArtifactType(str, Enum):
     shared_library = "shared_library"
     static_library = "static_library"
@@ -66,6 +71,21 @@ class Metadata(BaseModel):
     generation_method: GenerationMethod = GenerationMethod.manual
     transferable: bool = False
     description: str = ""
+
+
+class ComputeHotspot(BaseModel):
+    name: str
+    file: str = ""
+    complexity: str = ""
+    acceleration_candidate: bool = True
+    reason: str = ""
+
+
+class LLMContext(BaseModel):
+    state: ContextState = ContextState.raw
+    repository_summary: str = ""
+    dependency_graph: Dict[str, List[str]] = Field(default_factory=dict)
+    compute_hotspots: List[ComputeHotspot] = Field(default_factory=list)
 
 
 class ToolchainSpec(BaseModel):
@@ -133,6 +153,7 @@ class VerificationNode(BaseModel):
 
 class BlueprintV3(BaseModel):
     metadata: Metadata = Field(default_factory=Metadata)
+    llm_context: LLMContext = Field(default_factory=LLMContext)
     toolchains: List[ToolchainSpec] = Field(default_factory=list)
     build_pipeline: List[BuildArtifact] = Field(default_factory=list)
     abi_contracts: List[ABIContractV3] = Field(default_factory=list)

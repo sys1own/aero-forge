@@ -858,6 +858,39 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             logger.exception("Save-file endpoint failed")
             return _send_json(self, 500, {"error": str(exc)})
 
+    def _synthesize_if_raw(
+        self,
+        workspace: Path,
+        config: ConfigOverride,
+    ) -> bool:
+        """Run LLM blueprint synthesis when the workspace blueprint is still raw."""
+        blueprint_path = workspace / "blueprint.aero"
+        if not blueprint_path.is_file():
+            return False
+        try:
+            bp = BlueprintV3.load(blueprint_path)
+        except Exception as exc:
+            logger.warning("Could not load blueprint for JIT synthesis: %s", exc)
+            return False
+
+        if bp.llm_context.state != "raw":
+            return False
+
+        try:
+            provider = config.llm_provider or _resolve_llm_provider({})
+            synthesizer = LLMBlueprintSynthesizer(
+                provider=provider,
+                model=config.model,
+                api_key=config.api_key,
+                config_override=config,
+            )
+            synthesizer.synthesize(workspace, draft=bp, output_path=blueprint_path)
+            logger.info("JIT blueprint synthesis completed for %s", workspace)
+            return True
+        except Exception as exc:
+            logger.warning("JIT blueprint synthesis failed for %s: %s", workspace, exc)
+            return False
+
     def _handle_chat(self) -> None:
         try:
             body = _parse_json_body(self)
@@ -887,6 +920,10 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 model=body.get("model"),
                 max_retries=3,
             )
+
+            # If the workspace blueprint has not been synthesized yet, run the
+            # LLM synthesis pipeline before building the copilot context.
+            self._synthesize_if_raw(workspace_dir, config)
 
             chat = ChatSession(
                 workspace_dir,

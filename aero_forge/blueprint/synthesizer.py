@@ -214,6 +214,10 @@ class LLMBlueprintSynthesizer:
         metadata["generation_method"] = "llm_synthesized"
         metadata["transferable"] = True
 
+        # Mark the blueprint as LLM-context enriched.
+        llm_context = data.setdefault("llm_context", {})
+        llm_context["state"] = "synthesized"
+
         # Normalize all paths to be workspace-relative and reject any absolute paths.
         data = self._normalize_paths(data, workspace)
 
@@ -293,6 +297,11 @@ Your response MUST be a single JSON object matching the BlueprintV3 Pydantic sch
 - abi_contracts: cross-language symbol contracts with binding_framework (ctypes, c_abi, cffi, pyo3, cxx), memory_model (caller_allocates, callee_allocates, shared_pyo3), inputs/outputs as name/type pairs.
 - execution_strategy: primary_entrypoint (workspace-relative path), runtime (e.g. python3, cargo, node, ./binary), args, env map using ${WORKSPACE_ROOT} placeholders, working_dir using ${WORKSPACE_ROOT}, timeout in seconds.
 - verification_nodes: list of integration tests with command, expected_exit_code, stdout_match_patterns, stderr_prohibited_patterns.
+- llm_context: object with:
+  - state: "synthesized"
+  - repository_summary: a concise 1-3 sentence semantic summary of the project's purpose and architecture.
+  - dependency_graph: mapping of each source file to the list of files it directly depends on (e.g. {{"src/main.py": ["src/utils.py"], "src/lib.rs": ["src/ffi.rs"]}}).
+  - compute_hotspots: list of heavy-compute functions/classes with keys: name, file, complexity (e.g. "O(n^2)"), acceleration_candidate (true/false), reason (why it should be accelerated).
 - All file paths must be relative to the workspace root. Do NOT include absolute paths. Use ${WORKSPACE_ROOT} for workspace-relative placeholders if needed.
 
 Output only the JSON object, no prose.

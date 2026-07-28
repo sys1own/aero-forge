@@ -15,8 +15,10 @@ from aero_forge.blueprint.schema import (
     BlueprintStatus,
     BlueprintV3,
     BuildArtifact,
+    ContextState,
     ExecutionStrategyV3,
     GenerationMethod,
+    LLMContext,
     MemoryModel,
     Metadata,
     ToolchainSpec,
@@ -45,6 +47,12 @@ def _finalized_blueprint_json(project_name: str) -> str:
             generation_method=GenerationMethod.llm_synthesized,
             transferable=True,
             description="Finalized by LLM",
+        ),
+        llm_context=LLMContext(
+            state=ContextState.synthesized,
+            repository_summary=f"Synthesized {project_name} build contract",
+            dependency_graph={"src/main.py": ["src/utils.py"]},
+            compute_hotspots=[],
         ),
         toolchains=[
             ToolchainSpec(name="python", version="3.11"),
@@ -155,6 +163,8 @@ def test_cli_blueprint_synthesize_finalizes_draft(tmp_path: Path, monkeypatch: A
     assert finalized.metadata.transferable is True
     assert finalized.metadata.generation_method == GenerationMethod.llm_synthesized
     assert finalized.metadata.schema_version == "3.0.0"
+    assert finalized.llm_context.state == ContextState.synthesized
+    assert finalized.llm_context.dependency_graph
 
     # build_pipeline must be fully populated with compiler/linker flags and dependencies.
     assert len(finalized.build_pipeline) >= 2
@@ -237,6 +247,7 @@ def test_build_draft_then_synthesize_then_finalize(tmp_path: Path, monkeypatch: 
     assert finalized.metadata.status == BlueprintStatus.finalized
     assert finalized.metadata.transferable is True
     assert finalized.metadata.generation_method == GenerationMethod.llm_synthesized
+    assert finalized.llm_context.state == ContextState.synthesized
 
     aeroc_path = tmp_path / "workspace.aeroc"
     assert aeroc_path.is_file()
