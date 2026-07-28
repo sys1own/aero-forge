@@ -80,6 +80,21 @@ _OUTRO_PATTERNS = [
     re.compile(r"\n\s*(?:Here\s+is\s+the\s+full\s+prompt[^\n]*)\s*$", re.IGNORECASE),
 ]
 
+# Preambles specifically for the *inside* of a builder prompt payload, e.g. when the
+# LLM echoes "I've crafted a prompt for you..." inside the suggested_prompt field.
+# Each pattern stops at the first colon or newline so the actual payload is preserved.
+_BUILDER_PROMPT_PREAMBLE_RE = re.compile(
+    r"^\s*(?:"
+    r"I(?:['’]ve| have|['’]m| am)?\s+(?:crafted|created|designed|written|prepared|built|generated|assembled)\s+(?:a|the|this)\s+(?:detailed\s+)?(?:build\s+)?prompt"
+    r"|Here(?:['’]s| is)?\s+(?:a|the|this)\s+(?:detailed\s+)?(?:build\s+)?prompt"
+    r"|Below\s+is\s+(?:a|the|this)\s+(?:detailed\s+)?(?:build\s+)?prompt"
+    r"|Sure[,!]?\s+I\s+can\s+help[^\n]*?\s+(?:with\s+(?:a|the|this)\s+)?(?:detailed\s+)?(?:build\s+)?prompt"
+    r"|This\s+(?:is\s+)?(?:a|the|this)?\s+(?:detailed\s+)?(?:build\s+)?prompt"
+    r"|You\s+can\s+use\s+(?:this\s+)?(?:build\s+)?prompt"
+    r")\s*(?:[^\n:]*?:\s*|[^\n]*?\n\s*)",
+    re.IGNORECASE,
+)
+
 
 def _normalize_target(raw: Any) -> Optional[str]:
     """Return a recognized Aero-Forge target name or None."""
@@ -180,6 +195,41 @@ def _strip_outer_quotes(text: str) -> str:
         text = text[1:-1].strip()
     text = text.replace('\\n', '\n').replace('\\t', '\t').replace('\\"', '"').replace("\\'", "'")
     return text.strip()
+
+
+def _extract_code_block_from_prompt(text: str) -> str:
+    """If the prompt text is wrapped in a Markdown code fence, return the inner content."""
+    if not text:
+        return text or ""
+    # Prefer an explicit ```build_prompt fence, then any generic triple-backtick block.
+    for pattern in (_BUILD_PROMPT_FENCE_RE, re.compile(r"```(?:\w+)?\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)):
+        match = pattern.search(text)
+        if match:
+            return match.group(1).strip()
+    return text
+
+
+def sanitize_builder_prompt(prompt_text: str) -> str:
+    """Strip conversational preambles and code-fence wrappers from a builder prompt.
+
+    The returned string should start directly with the executable build/task
+    requirements and contain no meta-commentary like "I've crafted..." or
+    "Here is the prompt...".
+    """
+    if not prompt_text or not prompt_text.strip():
+        return ""
+    cleaned = _strip_outer_quotes(prompt_text.strip())
+    cleaned = _extract_code_block_from_prompt(cleaned)
+    cleaned = _BUILDER_PROMPT_PREAMBLE_RE.sub("", cleaned)
+    # Fall back to generic intro/outro stripping if the prompt is still wrapped.
+    for pattern in _INTRO_PATTERNS:
+        cleaned = pattern.sub("", cleaned)
+    for pattern in _OUTRO_PATTERNS:
+        cleaned = pattern.sub("", cleaned)
+    for pattern in _META_PROMPT_PATTERNS:
+        cleaned = pattern.sub("", cleaned)
+    cleaned = re.sub(r"\n\s*\n+", "\n\n", cleaned).strip()
+    return cleaned.rstrip("-:\n ").strip()
 
 
 def _normalize_whitespace(text: str) -> str:
@@ -324,7 +374,7 @@ class ActionParser:
         if not isinstance(data, dict):
             return None
         action = data.get("action") or {}
-        for key in ("clean_prompt", "target_prompt", "build_prompt", "prompt"):
+        for key in ("suggested_prompt", "clean_prompt", "target_prompt", "build_prompt", "prompt"):
             candidate = action.get(key) if isinstance(action, dict) else None
             if not candidate:
                 candidate = data.get(key)
@@ -405,25 +455,25 @@ class ActionParser:
         if data:
             candidate = self._extract_prompt_from_json(data)
             if candidate:
-                return self.sanitize(candidate)
+                return sanitize_builder_prompt(self.sanitize(candidate))
 
         # 2. New <builder_prompt> XML delimiter (preferred by the system prompt).
         tag = _BUILDER_PROMPT_TAG_RE.search(text)
         if tag:
-            return self.sanitize(tag.group(1))
+            return sanitize_builder_prompt(self.sanitize(tag.group(1)))
 
         # 3. New ```build_prompt fence format.
         fence = _BUILD_PROMPT_FENCE_RE.search(text)
         if fence:
-            return self.sanitize(fence.group(1))
+            return sanitize_builder_prompt(self.sanitize(fence.group(1)))
 
         # 4. Legacy <build_prompt> XML alias and generic prompt/markdown fences.
         tag = _LEGACY_BUILD_PROMPT_TAG_RE.search(text)
         if tag:
-            return self.sanitize(tag.group(1))
+            return sanitize_builder_prompt(self.sanitize(tag.group(1)))
         fence = _PROMPT_FENCE_RE.search(text)
         if fence:
-            return self.sanitize(fence.group(1))
+            return sanitize_builder_prompt(self.sanitize(fence.group(1)))
 
         # 4. YAML/JSON blueprint contract block: return the builder prompt inside it.
         contract_match = _CODE_FENCE_RE.search(text)
@@ -434,21 +484,21 @@ class ActionParser:
                 if isinstance(parsed_contract, dict):
                     prompt = parsed_contract.get("prompt") or parsed_contract.get("build_prompt")
                     if isinstance(prompt, str) and prompt.strip():
-                        return self.sanitize(prompt)
+                        return sanitize_builder_prompt(self.sanitize(prompt))
             except yaml.YAMLError:
                 try:
                     parsed_contract = json.loads(raw_contract)
                     if isinstance(parsed_contract, dict):
                         prompt = parsed_contract.get("prompt") or parsed_contract.get("build_prompt")
                         if isinstance(prompt, str) and prompt.strip():
-                            return self.sanitize(prompt)
+                            return sanitize_builder_prompt(self.sanitize(prompt))
                 except json.JSONDecodeError:
                     pass
-            return self.sanitize(raw_contract)
+            return sanitize_builder_prompt(self.sanitize(raw_contract))
 
         # 5. Plain text with build intent: return sanitized text as-is.
         if _has_build_intent(text):
-            return self.sanitize(text)
+            return sanitize_builder_prompt(self.sanitize(text))
 
         return None
 
@@ -477,7 +527,7 @@ class ActionParser:
             display_text = self._extract_display_text(data, "")
             clean = self._extract_prompt_from_json(data)
             if clean:
-                clean = self.sanitize(clean)
+                clean = sanitize_builder_prompt(self.sanitize(clean))
                 display_text = clean_explanation_text(display_text, clean)
                 params = self._extract_parameters(clean, data)
                 raw_action = data.get("action")
@@ -513,7 +563,7 @@ class ActionParser:
                     or ""
                 )
                 if isinstance(prompt, str) and prompt.strip():
-                    clean = self.sanitize(prompt)
+                    clean = sanitize_builder_prompt(self.sanitize(prompt))
                     display_text = clean_explanation_text(self._extract_display_text(data, ""), clean)
                     params = self._extract_parameters(clean, data)
                     action_type = legacy_action.get("type")
@@ -544,7 +594,7 @@ class ActionParser:
         # Build prompt fence (new clean format).
         fence = _BUILD_PROMPT_FENCE_RE.search(text)
         if fence:
-            clean = self.sanitize(fence.group(1))
+            clean = sanitize_builder_prompt(self.sanitize(fence.group(1)))
             display_text = _BUILD_PROMPT_FENCE_RE.sub("", display_text)
             display_text = clean_explanation_text(self.sanitize(display_text), clean)
             params = self._extract_parameters(clean, {})
@@ -563,7 +613,7 @@ class ActionParser:
         for tag_re in (_BUILDER_PROMPT_TAG_RE, _LEGACY_BUILD_PROMPT_TAG_RE):
             tag = tag_re.search(text)
             if tag:
-                clean = self.sanitize(tag.group(1))
+                clean = sanitize_builder_prompt(self.sanitize(tag.group(1)))
                 display_text = tag_re.sub("", display_text)
                 display_text = clean_explanation_text(self.sanitize(display_text), clean)
                 params = self._extract_parameters(clean, {})
@@ -595,7 +645,7 @@ class ActionParser:
                 prompt = contract_data.get("prompt") or contract_data.get("build_prompt") or ""
                 if not isinstance(prompt, str):
                     prompt = str(prompt)
-            clean = self.sanitize(prompt) if prompt else self.sanitize(raw_contract)
+            clean = sanitize_builder_prompt(self.sanitize(prompt)) if prompt else sanitize_builder_prompt(self.sanitize(raw_contract))
             display_text = _CODE_FENCE_RE.sub("", display_text)
             display_text = clean_explanation_text(self.sanitize(display_text), clean)
             params = self._extract_parameters(clean, contract_data if isinstance(contract_data, dict) else {})
@@ -613,7 +663,7 @@ class ActionParser:
 
         # Plain text with build intent.
         if _has_build_intent(text):
-            clean = self.sanitize(text)
+            clean = sanitize_builder_prompt(self.sanitize(text))
             params = self._extract_parameters(clean, {})
             return {
                 "display_text": "",
