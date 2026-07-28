@@ -1,0 +1,28 @@
+[package]
+name = "aeroc-runner"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "aeroc-runner"
+path = "src/main.rs"
+
+[dependencies]
+blake3 = { version = "=1.5.3", features = ["rayon", "mmap"] }
+constant_time_eq = "=0.3.1"
+rayon = "1"
+zstd = "0.13"
+xxhash-rust = { version = "0.8", features = ["xxh32"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+memmap2 = "0.9"
+bytemuck = { version = "1", features = ["derive"] }
+# Pin transitive build dependencies for the project's rustc 1.83 toolchain.
+jobserver = "=0.1.32"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "thin"
+strip = true

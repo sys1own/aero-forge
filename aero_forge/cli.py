@@ -1626,30 +1626,59 @@ def aeroc_group() -> None:
     """Native workspace.aeroc container commands."""
 
 
-@aeroc_group.command("unpack")
-@click.argument("aeroc_path", type=click.Path(exists=True, dir_okay=False, path_type=str))
-@click.argument("output_dir", type=click.Path(file_okay=False, path_type=str), default=".")
-@click.option("--verbose", "-v", is_flag=True)
-def unpack_aeroc_cmd(aeroc_path: str, output_dir: str, verbose: bool) -> None:
-    """Extract a workspace.aeroc container into OUTPUT_DIR."""
-    _setup_logging(verbose)
-    from aero_forge.materializer import unpack_aeroc_file
-
-    count = unpack_aeroc_file(aeroc_path, output_dir)
-    click.echo(f"Unpacked {count} source files to {output_dir}")
-
-
 @aeroc_group.command("compile")
-@click.argument("workspace", type=click.Path(file_okay=False, path_type=str), default=".")
-@click.argument("output", type=click.Path(dir_okay=False, path_type=str), default="workspace.aeroc")
+@click.option("--input", "-i", type=click.Path(exists=True, path_type=str), default=".", help="Workspace directory or a blueprint file inside a workspace.")
+@click.option("--output", "-o", type=click.Path(dir_okay=False, path_type=str), default="workspace.aeroc", help="Output container path.")
 @click.option("--verbose", "-v", is_flag=True)
-def compile_aeroc_cmd(workspace: str, output: str, verbose: bool) -> None:
-    """Compile an on-disk workspace tree into a workspace.aeroc container."""
+def compile_aeroc_cmd(input: str, output: str, verbose: bool) -> None:
+    """Compile a workspace tree into a workspace.aeroc container."""
     _setup_logging(verbose)
     from aero_forge.builder.aeroc_compiler import compile_directory_to_aeroc
 
+    input_path = Path(input)
+    workspace = input_path if input_path.is_dir() else input_path.parent
     compile_directory_to_aeroc(workspace, output)
     click.echo(f"Compiled {workspace} -> {output}")
+
+
+@aeroc_group.command("exec")
+@click.option("--file", "-f", type=click.Path(exists=True, dir_okay=False, path_type=str), required=True, help="workspace.aeroc file to execute.")
+@click.option("--target-dir", "-t", type=click.Path(file_okay=False, path_type=str), default=".", help="Working directory for build tasks.")
+@click.option("--jobs", "-j", type=int, default=1, help="Number of worker threads.")
+@click.option("--verbose", "-v", is_flag=True)
+def exec_aeroc_cmd(file: str, target_dir: str, jobs: int, verbose: bool) -> None:
+    """Execute a workspace.aeroc container with the native wavefront scheduler."""
+    _setup_logging(verbose)
+    from aero_forge._native import run_aeroc
+
+    run_aeroc(file, target_dir, jobs)
+    click.echo(f"Executed {file} in {target_dir}")
+
+
+@aeroc_group.command("unpack")
+@click.option("--file", "-f", type=click.Path(exists=True, dir_okay=False, path_type=str), required=True)
+@click.option("--target-dir", "-t", type=click.Path(file_okay=False, path_type=str), default=".")
+@click.option("--verbose", "-v", is_flag=True)
+def unpack_aeroc_cmd(file: str, target_dir: str, verbose: bool) -> None:
+    """Extract a workspace.aeroc container into TARGET_DIR."""
+    _setup_logging(verbose)
+    from aero_forge.materializer import unpack_aeroc_file
+
+    count = unpack_aeroc_file(file, target_dir)
+    click.echo(f"Unpacked {count} source files to {target_dir}")
+
+
+@aeroc_group.command("export")
+@click.option("--file", "-f", type=click.Path(exists=True, dir_okay=False, path_type=str), required=True, help="workspace.aeroc file to bundle.")
+@click.option("--output", "-o", type=click.Path(dir_okay=False, path_type=str), default="workspace.aeroc.bin", help="Standalone executable path.")
+@click.option("--verbose", "-v", is_flag=True)
+def export_aeroc_cmd(file: str, output: str, verbose: bool) -> None:
+    """Bundle workspace.aeroc into a self-extracting executable."""
+    _setup_logging(verbose)
+    from aero_forge.builder.aeroc_compiler import bundle_aeroc_executable
+
+    bundle_aeroc_executable(file, output)
+    click.echo(f"Exported standalone executable: {output}")
 
 
 if __name__ == "__main__":

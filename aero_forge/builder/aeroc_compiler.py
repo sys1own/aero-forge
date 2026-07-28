@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import base64
 import json
+import struct
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from aero_forge._native import compile_aeroc
 
@@ -156,3 +157,39 @@ def compile_directory_to_aeroc(
     }
 
     return compile_aeroc(json.dumps(spec), str(output_path))
+
+
+def _find_runner_binary() -> Path:
+    """Locate the pre-built ``aeroc-runner`` binary."""
+    candidates = [
+        Path(__file__).resolve().parents[1] / "_native" / "runner" / "target" / "release" / "aeroc-runner",
+        Path(__file__).resolve().parents[1] / "_native" / "target" / "release" / "aeroc-runner",
+    ]
+    if env_runner := __import__("os").environ.get("AEROC_RUNNER"):
+        candidates.insert(0, Path(env_runner))
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError("aeroc-runner binary not found; build it with cargo build --release in aero_forge/_native/runner")
+
+
+def bundle_aeroc_executable(
+    aeroc_path: str,
+    output_path: str,
+    runner_path: Optional[str] = None,
+) -> str:
+    """Create a self-extracting ``workspace.aeroc.bin`` from an ``aeroc-runner`` binary and a ``workspace.aeroc`` container.
+
+    The emitted file is ``[runner] + [aeroc payload] + [AerocTrailerFooter]``.
+    """
+    runner = Path(runner_path) if runner_path else _find_runner_binary()
+    aeroc = Path(aeroc_path).read_bytes()
+    runner_bin = runner.read_bytes()
+
+    aeroc_offset = len(runner_bin)
+    payload_size = len(aeroc)
+    footer = struct.pack("<QQ8s", payload_size, aeroc_offset, b"AEROCBIN")
+
+    output = Path(output_path)
+    output.write_bytes(runner_bin + aeroc + footer)
+    return str(output.resolve())
