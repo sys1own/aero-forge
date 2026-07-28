@@ -1036,6 +1036,10 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     "build_prompt": result.get("build_prompt"),
                     "raw": result.get("raw", result["reply"]),
                     "messages": chat.messages,
+                    # New clean-separated fields for the prompt designer
+                    "message": result.get("explanation", result["reply"]),
+                    "suggested_build_prompt": result.get("build_prompt"),
+                    "has_prompt": bool(result.get("build_prompt")),
                 },
             )
         except Exception as exc:  # pragma: no cover

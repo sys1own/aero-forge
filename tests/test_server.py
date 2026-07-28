@@ -554,6 +554,10 @@ def test_api_chat_returns_suggest_build_prompt_shape(server, monkeypatch):
     assert data["build_prompt"] == "Build a hybrid_rust_python project with a Rust `matmul` kernel and PyO3 wrapper."
     assert "raw" in data
     assert data["action"]["type"] == "SUGGEST_BUILD_PROMPT"
+    # New clean-separated prompt designer fields.
+    assert data["has_prompt"] is True
+    assert data["suggested_build_prompt"] == data["build_prompt"]
+    assert data["message"] == data["reply"]
 
 
 def test_api_regenerate_blueprint_missing(server):
