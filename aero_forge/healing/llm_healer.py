@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from aero_forge.config import Tier
 from aero_forge.healing.context_builder import ContextBuilder
+from aero_forge.healing.structural_merger import MergeConflictError, apply_overlay
 from aero_forge.llm.clients import BaseLLMClient, get_llm_client, LLMError
 
 logger = logging.getLogger("aero_forge.healing.llm_healer")
@@ -252,12 +253,15 @@ class LLMHealer:
         full_workspace: bool = True,
         workspace_context: Optional[Dict[str, Any]] = None,
         force_full_rewrite: bool = False,
+        previous_attempts: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Convenience entry point that builds a failure context and heals the workspace.
 
         ``workspace_context`` may contain a pre-bundled workspace snapshot.
         ``force_full_rewrite`` asks the LLM to regenerate whole files rather than
         minimal patches when necessary.
+        ``previous_attempts`` contains prior patch/rejection history so the LLM
+        can avoid repeating failed solutions.
         """
         failure_context = {
             "command": command,
@@ -266,6 +270,7 @@ class LLMHealer:
             "diagnosis": diagnosis or {},
             "workspace_context": workspace_context,
             "force_full_rewrite": force_full_rewrite,
+            "previous_attempts": previous_attempts or [],
         }
         return self.generate_and_apply_fix(workspace, failure_context)
 
@@ -277,6 +282,10 @@ class LLMHealer:
         """Query the LLM for directives, validate them, and apply them.
 
         Returns a result dict with ``directives`` and ``status``.
+
+        If a directive fails to apply (syntax error, merge conflict, etc.), the
+        failure is recorded in ``previous_attempts`` and the LLM is queried
+        again with the rejection context, up to ``max_repair_attempts``.
         """
         workspace = Path(workspace_path).resolve()
         builder = ContextBuilder(workspace)
@@ -284,59 +293,92 @@ class LLMHealer:
         exit_code = failure_context.get("exit_code", 1)
         log_text = failure_context.get("log_text", "")
         diagnosis = failure_context.get("diagnosis")
+        previous_attempts: List[Dict[str, Any]] = list(failure_context.get("previous_attempts") or [])
 
-        self._log("info", "HEAL_LLM", "Building workspace context for LLM healing...")
-        prompt = builder.build_prompt(command, exit_code, log_text, diagnosis)
+        max_repair_attempts = max(1, int(failure_context.get("max_repair_attempts", 3)))
 
-        directives: List[Dict[str, Any]] = []
-        source = "llm"
+        for attempt in range(1, max_repair_attempts + 1):
+            self._log("info", "HEAL_LLM", f"Building workspace context for LLM healing (attempt {attempt}/{max_repair_attempts})...")
+            prompt = builder.build_prompt(
+                command,
+                exit_code,
+                log_text,
+                diagnosis,
+                previous_attempts=previous_attempts,
+            )
 
-        client = self._get_client()
-        if client:
-            self._log("info", "HEAL_LLM", f"Querying {self.provider} ({self.model}) for repair directives...")
-            try:
-                response = client.generate(prompt, temperature=0.2)
-            except Exception as exc:
-                response = None
-                self._log("warning", "HEAL_LLM", f"LLM call failed: {exc}")
-            if response:
+            directives: List[Dict[str, Any]] = []
+            source = "llm"
+
+            client = self._get_client()
+            if client:
+                self._log("info", "HEAL_LLM", f"Querying {self.provider} ({self.model}) for repair directives...")
                 try:
-                    directives = self._parse_directives(response)
-                    self._log("info", "HEAL_LLM", f"Received {len(directives)} directive(s) from LLM.")
-                except DirectiveError as exc:
-                    self._log("warning", "HEAL_LLM", f"Malformed LLM directives: {exc}")
-                    directives = []
-            else:
-                self._log("warning", "HEAL_LLM", "LLM returned empty response.")
+                    response = client.generate(prompt, temperature=0.2)
+                except Exception as exc:
+                    response = None
+                    self._log("warning", "HEAL_LLM", f"LLM call failed: {exc}")
+                if response:
+                    try:
+                        directives = self._parse_directives(response)
+                        self._log("info", "HEAL_LLM", f"Received {len(directives)} directive(s) from LLM.")
+                    except DirectiveError as exc:
+                        self._log("warning", "HEAL_LLM", f"Malformed LLM directives: {exc}")
+                        previous_attempts.append({
+                            "strategy": "llm",
+                            "error_message": f"Malformed directives: {exc}",
+                        })
+                        directives = []
+                else:
+                    self._log("warning", "HEAL_LLM", "LLM returned empty response.")
 
-        if not directives and self.fallback:
-            self._log("info", "HEAL_LLM", "Using rule-based fallback for known error classes.")
-            source = "fallback"
-            directives = RuleBasedFallback.generate_directives(failure_context)
+            if not directives and self.fallback:
+                self._log("info", "HEAL_LLM", "Using rule-based fallback for known error classes.")
+                source = "fallback"
+                directives = RuleBasedFallback.generate_directives(failure_context)
 
-        if not directives:
-            return {
-                "status": "failed",
-                "reason": "No repair directives could be generated.",
-                "directives": [],
-                "applied": [],
-            }
+            if not directives:
+                return {
+                    "status": "failed",
+                    "reason": "No repair directives could be generated.",
+                    "directives": [],
+                    "applied": [],
+                    "details": {"previous_attempts": previous_attempts},
+                }
 
-        try:
-            applied = self._apply_directives(workspace, directives)
-        except DirectiveError as exc:
-            return {
-                "status": "failed",
-                "reason": str(exc),
-                "directives": directives,
-                "applied": [],
-            }
+            try:
+                applied = self._apply_directives(workspace, directives)
+                return {
+                    "status": "success",
+                    "source": source,
+                    "directives": directives,
+                    "applied": applied,
+                    "details": {"previous_attempts": previous_attempts},
+                }
+            except (DirectiveError, SyntaxError, MergeConflictError) as exc:
+                self._log("warning", "HEAL_LLM", f"Directive application failed: {exc}")
+                previous_attempts.append({
+                    "strategy": source,
+                    "directives": directives,
+                    "error_message": f"Patch rejected: {exc}",
+                })
+                # If we have attempts remaining, re-prompt with the rejection context.
+                if attempt < max_repair_attempts:
+                    continue
+                return {
+                    "status": "failed",
+                    "reason": str(exc),
+                    "directives": directives,
+                    "applied": [],
+                    "details": {"previous_attempts": previous_attempts},
+                }
 
         return {
-            "status": "success",
-            "source": source,
-            "directives": directives,
-            "applied": applied,
+            "status": "failed",
+            "reason": "All repair attempts exhausted.",
+            "directives": [],
+            "applied": [],
+            "details": {"previous_attempts": previous_attempts},
         }
 
     def _parse_directives(self, response: str) -> List[Dict[str, Any]]:
@@ -393,6 +435,15 @@ class LLMHealer:
                     original = target.read_text(encoding="utf-8") if target.is_file() else ""
                     patched = self._apply_unified_diff(original, content)
                     content = patched
+
+            # Validate the proposed content using the structural merger / syntax guard.
+            # This raises SyntaxError or MergeConflictError instead of silently
+            # writing an invalid file that will be rolled back later.
+            if rel.suffix in {".py", ".rs"}:
+                original = target.read_text(encoding="utf-8") if target.is_file() else ""
+                language = "rust" if rel.suffix == ".rs" else "python"
+                apply_overlay(original, content, language=language)
+
             target.write_text(content, encoding="utf-8")
             applied.append(rel.as_posix())
             self._log("info", "HEAL_LLM", f"Applied directive to {rel}")

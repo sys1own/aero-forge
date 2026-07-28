@@ -16,8 +16,12 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
+from unittest.mock import patch
+
 from aero_forge.healing.llm_healer import LLMHealer, run_command
 from aero_forge.healing.context_builder import ContextBuilder
+from aero_forge.healing.orchestrator import HealingOrchestrator
+from aero_forge.orchestrator.orchestrator import Orchestrator, purge_workspace_state
 
 
 class MockLLMClient:
@@ -299,3 +303,105 @@ def test_llm_healer_validates_directive_schema() -> None:
     )
     assert result["status"] == "failed"
     assert "directive" in result["reason"].lower() or "schema" in result["reason"].lower()
+
+
+class _BadPatchClient:
+    """Fake LLM client that always proposes syntactically invalid Python."""
+
+    def generate(self, prompt: str, **kwargs: Any) -> str:
+        return (
+            '{"diagnosis": "missing colon", "directives": [{'
+            '"target_file": "main.py", "action": "rewrite", '
+            '"reason": "fix syntax", '
+            '"instructions": "rewrite with bad syntax", '
+            '"content": "def broken()\\n    print(no closing paren\\n"'
+            '}]}'
+        )
+
+
+def test_llm_healer_tracks_previous_attempts_on_bad_patch(tmp_path: Path) -> None:
+    """A rejected LLM patch is recorded in previous_attempts and fed back."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("def original():\n    pass\n", encoding="utf-8")
+
+    healer = LLMHealer(client=_BadPatchClient(), fallback=False)
+    result = healer.heal(
+        workspace,
+        "SyntaxError: invalid syntax",
+        command="python main.py",
+        exit_code=1,
+    )
+
+    assert result["status"] == "failed"
+    previous_attempts = result.get("details", {}).get("previous_attempts", [])
+    assert len(previous_attempts) >= 1
+    assert any("Patch rejected" in str(a.get("error_message", "")) for a in previous_attempts)
+    assert "broken" not in (workspace / "main.py").read_text(encoding="utf-8")
+
+
+def test_orchestrator_passes_ast_rejection_to_llm_as_previous_attempts(tmp_path: Path) -> None:
+    """AST patch rejections are passed to the LLM healer as previous_attempts."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    log = "Traceback (most recent call last):\nNameError: name 'unknown_func' is not defined\n"
+    call_args: Dict[str, Any] = {}
+
+    class _RecordingLLMHealer(LLMHealer):
+        def heal(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+            call_args.update(kwargs)
+            return {"status": "failed", "reason": "No directives"}
+
+    with patch("aero_forge.healing.orchestrator.LLMHealer", _RecordingLLMHealer):
+        orchestrator = HealingOrchestrator(workspace)
+        result = orchestrator.heal(log, command="python main.py", exit_code=1)
+
+    assert result["status"] == "failed"
+    previous_attempts = call_args.get("previous_attempts", [])
+    assert len(previous_attempts) >= 1
+    assert previous_attempts[0].get("strategy") == "ast"
+
+
+def test_purge_workspace_state_clears_dot_aero_cache_and_overlay(tmp_path: Path) -> None:
+    """purge_workspace_state removes .aero/cache, .aero/overlay, and healing state."""
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    aero = workspace / ".aero"
+    (aero / "cache" / "build_cache").mkdir(parents=True)
+    (aero / "cache" / "build_cache" / "index.json").write_text("{}", encoding="utf-8")
+    (aero / "overlay").mkdir(parents=True)
+    (aero / "overlay" / "test.patch").write_text("patch", encoding="utf-8")
+    (aero / "healing_attempts.json").write_text("[]", encoding="utf-8")
+    (workspace / "src").mkdir()
+    (workspace / "src" / "main.py").write_text("pass\n", encoding="utf-8")
+    (workspace / "blueprint.aero").write_text("project: test\n", encoding="utf-8")
+
+    result = purge_workspace_state(workspace)
+
+    assert result["status"] == "reset"
+    assert not (aero / "cache").exists()
+    assert not (aero / "overlay").exists()
+    assert not (aero / "healing_attempts.json").exists()
+    assert (workspace / "src" / "main.py").exists()
+    assert (workspace / "blueprint.aero").exists()
+
+
+def test_orchestrator_hard_reset_clears_state_preserving_source(tmp_path: Path) -> None:
+    """Orchestrator.hard_reset purges caches/overlays while preserving source."""
+    source = tmp_path / "src" / "main.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+
+    orchestrator = Orchestrator(
+        source_path=str(source),
+        function_name="add",
+    )
+    orchestrator.hard_reset()
+
+    aero = orchestrator.output_dir / ".aero"
+    assert not (aero / "cache").exists()
+    assert not (aero / "overlay").exists()
+    assert not (aero / "healing_attempts.json").exists()
+    assert source.exists()

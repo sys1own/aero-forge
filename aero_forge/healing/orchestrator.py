@@ -54,21 +54,55 @@ class HealingOrchestrator:
             pass
         return []
 
-    def _record_attempt(self, error_digest: str, strategy: str, success: bool) -> None:
+    def _record_attempt(
+        self,
+        error_digest: str,
+        strategy: str,
+        success: bool,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
         path = self._attempts_path()
         path.parent.mkdir(parents=True, exist_ok=True)
         attempts = self._load_attempts()
-        attempts.append({
+        entry: Dict[str, Any] = {
             "error_digest": error_digest,
             "strategy": strategy,
             "success": success,
-        })
+        }
+        if details:
+            entry["details"] = self._json_safe(details)
+        attempts.append(entry)
         # Keep the last 50 attempts to bound file growth.
         attempts = attempts[-50:]
         try:
             path.write_text(json.dumps(attempts, indent=2), encoding="utf-8")
         except OSError as exc:
             logger.warning("Could not persist healing attempts: %s", exc)
+
+    def _json_safe(self, value: Any) -> Any:
+        """Return a JSON-serializable copy of *value*, discarding non-serializable items."""
+        try:
+            json.dumps(value)
+            return value
+        except (TypeError, ValueError):
+            pass
+        if isinstance(value, dict):
+            result: Dict[str, Any] = {}
+            for k, v in value.items():
+                try:
+                    result[k] = self._json_safe(v)
+                except (TypeError, ValueError):
+                    pass
+            return result
+        if isinstance(value, list):
+            result_list: List[Any] = []
+            for v in value:
+                try:
+                    result_list.append(self._json_safe(v))
+                except (TypeError, ValueError):
+                    pass
+            return result_list
+        return str(value)
 
     def _error_digest(self, error_logs: str, command: str, exit_code: int) -> str:
         return hashlib.sha256(
@@ -109,8 +143,8 @@ class HealingOrchestrator:
         AST-only errors are patched with a deterministic overlay. If the AST
         patch fails or ``force_llm`` is set, the orchestrator escalates to a
         full-workspace LLM healer using bundled project context. Failed
-        attempts are recorded so the exact same strategy is not retried
-        indefinitely for an unchanged error.
+        attempts are recorded and fed back into the LLM prompt so the same
+        broken solution is not retried indefinitely.
         """
         evaluator = LogEvaluator()
         diagnosis = evaluator.evaluate_log(command, exit_code, error_logs)
@@ -119,11 +153,20 @@ class HealingOrchestrator:
         digest = self._error_digest(error_logs, command, exit_code)
         self.log_callback("info", "HEAL", f"Selected strategy: {strategy.value}; digest={digest[:16]}")
 
+        previous_attempts: List[Dict[str, Any]] = []
+
         if not force_llm and strategy == HealingStrategy.AST and not self._has_failed_attempt(digest, "ast"):
             ast_result = self._try_ast_heal(error_logs, diagnosis, target_file)
             if ast_result.get("status") == "success":
                 return ast_result
-            self._record_attempt(digest, "ast", success=False)
+            ast_details = {
+                "target_file": ast_result.get("target_file"),
+                "error_message": ast_result.get("error_message"),
+                "patch": ast_result.get("patch"),
+                "diff": ast_result.get("diff"),
+            }
+            previous_attempts.append({"strategy": "ast", **ast_details})
+            self._record_attempt(digest, "ast", success=False, details=ast_details)
             self.log_callback(
                 "info",
                 "HEAL",
@@ -140,8 +183,12 @@ class HealingOrchestrator:
             }
 
         if not self._has_failed_attempt(digest, "llm"):
-            llm_result = self._llm_heal(error_logs, command, exit_code, diagnosis)
-            self._record_attempt(digest, "llm", success=llm_result.get("status") == "success")
+            llm_result = self._llm_heal(error_logs, command, exit_code, diagnosis, previous_attempts)
+            llm_details = llm_result.get("details") if isinstance(llm_result, dict) else None
+            self._record_attempt(
+                digest, "llm", success=llm_result.get("status") == "success" if isinstance(llm_result, dict) else False,
+                details=llm_details,
+            )
             return llm_result
 
         return {
@@ -165,6 +212,7 @@ class HealingOrchestrator:
                 "status": "failed",
                 "strategy_used": HealingStrategy.AST.value,
                 "patched_files": [],
+                "target_file": target,
                 "error_message": "Target file escapes workspace.",
             }
         if not target_path.is_file():
@@ -172,6 +220,7 @@ class HealingOrchestrator:
                 "status": "failed",
                 "strategy_used": HealingStrategy.AST.value,
                 "patched_files": [],
+                "target_file": target,
                 "error_message": f"Target file not found: {target}",
             }
 
@@ -183,6 +232,7 @@ class HealingOrchestrator:
                 "status": "failed",
                 "strategy_used": HealingStrategy.AST.value,
                 "patched_files": [],
+                "target_file": target,
                 "error_message": f"AST healer encountered exception: {exc}",
             }
 
@@ -191,6 +241,8 @@ class HealingOrchestrator:
                 "status": "failed",
                 "strategy_used": HealingStrategy.AST.value,
                 "patched_files": [],
+                "target_file": target,
+                "patch": patched,
                 "error_message": "AST patch could not be applied cleanly.",
             }
 
@@ -202,6 +254,8 @@ class HealingOrchestrator:
                 "status": "failed",
                 "strategy_used": HealingStrategy.AST.value,
                 "patched_files": [],
+                "target_file": target,
+                "patch": patched,
                 "error_message": f"AST overlay merge failed: {exc}",
             }
 
@@ -210,6 +264,8 @@ class HealingOrchestrator:
                 "status": "failed",
                 "strategy_used": HealingStrategy.AST.value,
                 "patched_files": [],
+                "target_file": target,
+                "patch": patched,
                 "error_message": "AST overlay produced no changes.",
             }
 
@@ -239,6 +295,7 @@ class HealingOrchestrator:
         command: str,
         exit_code: int,
         diagnosis: Dict[str, Any],
+        previous_attempts: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         self.log_callback("info", "HEAL", "Building full-workspace context for LLM healing...")
         workspace_context = bundle_workspace(self.workspace)
@@ -257,7 +314,10 @@ class HealingOrchestrator:
             full_workspace=True,
             workspace_context=workspace_context,
             force_full_rewrite=True,
+            previous_attempts=previous_attempts,
         )
+
+        details = result.get("details", {"directives": result.get("directives", []), "reason": result.get("reason")})
 
         if result.get("status") == "success":
             return {
@@ -266,6 +326,7 @@ class HealingOrchestrator:
                 "patched_files": result.get("applied", []),
                 "error_message": None,
                 "diagnosis": diagnosis,
+                "details": details,
             }
 
         return {
@@ -274,4 +335,5 @@ class HealingOrchestrator:
             "patched_files": [],
             "error_message": result.get("reason", "Full-workspace LLM healing failed."),
             "diagnosis": diagnosis,
+            "details": details,
         }

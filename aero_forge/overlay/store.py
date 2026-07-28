@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import List, Union
 
@@ -84,3 +85,9 @@ class OverlayStore:
 
     def file_for_key(self, key: str) -> Path:
         return self.workspace / key
+
+    def clear(self) -> None:
+        """Remove all persisted build baselines and overlays."""
+        for directory in (self.build_cache_dir, self.overlays_dir):
+            if directory.is_dir():
+                shutil.rmtree(directory, ignore_errors=True)

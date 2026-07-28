@@ -191,6 +191,10 @@ class BuildCache:
         self._task_index = {}
         self._save_task_index()
 
+    def reset(self) -> None:
+        """Reset the build cache to an empty state (alias for ``clear``)."""
+        self.clear()
+
     def _load_task_index(self) -> Dict[str, Any]:
         if self._task_index_path.is_file():
             try:

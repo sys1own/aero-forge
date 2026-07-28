@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from enum import Enum
 from pathlib import Path
 from typing import Dict, Optional, Union
@@ -143,3 +144,12 @@ class OverlayManager:
                 except OverlayError:
                     results[rel] = None
         return results
+
+    def clear_all_overlays(self) -> None:
+        """Purge all overlay baselines and patches from the workspace."""
+        self.store.clear()
+        # Also clear any per-session .aero overlay/build-cache directories.
+        for subdir in (".overlays", ".build_cache", ".aero/overlays", ".aero/build_cache"):
+            path = self.workspace / subdir
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
