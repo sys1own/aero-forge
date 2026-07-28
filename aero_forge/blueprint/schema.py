@@ -82,10 +82,20 @@ class ComputeHotspot(BaseModel):
     reason: str = ""
 
 
+class PolyglotBoundary(BaseModel):
+    python_file: str = ""
+    native_file: str = ""
+    binding: BindingFramework = BindingFramework.c_abi
+    shared_struct: str = ""
+    memory_model: MemoryModel = MemoryModel.caller_allocates
+
+
 class LLMContext(BaseModel):
     state: ContextState = ContextState.raw
     repository_summary: str = ""
     dependency_graph: Dict[str, List[str]] = Field(default_factory=dict)
+    exported_api_signatures: Dict[str, List[str]] = Field(default_factory=dict)
+    polyglot_boundaries: List[PolyglotBoundary] = Field(default_factory=list)
     compute_hotspots: List[ComputeHotspot] = Field(default_factory=list)
 
 
@@ -164,6 +174,8 @@ class BlueprintV3(BaseModel):
     abi_contracts: List[ABIContractV3] = Field(default_factory=list)
     execution_strategy: ExecutionStrategyV3 = Field(default_factory=ExecutionStrategyV3)
     verification_nodes: List[VerificationNode] = Field(default_factory=list)
+
+    model_config = {"extra": "ignore"}
 
     @model_validator(mode="after")
     def _enforce_schema_version(self) -> "BlueprintV3":

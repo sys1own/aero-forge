@@ -1,6 +1,7 @@
 """Integration tests for Blueprint v3 ingestion, synthesis, and execution."""
 
 import io
+import json
 import zipfile
 from pathlib import Path
 from typing import Any, Dict
@@ -161,6 +162,103 @@ def test_synthesize_fills_missing_verification_node_id(tmp_path: Path, monkeypat
     BlueprintV3Validator(
         finalized.model_dump(mode="json"), workspace=workspace
     ).check_exportable()
+
+
+def test_synthesizer_includes_full_repo_bundle_in_prompt(tmp_path: Path, monkeypatch: Any) -> None:
+    """The synthesis prompt contains the full repository bundle from bundle_repo.py."""
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("print('Hello')\n", encoding="utf-8")
+    (workspace / "lib.rs").write_text("pub fn answer() -> u32 { 42 }\n", encoding="utf-8")
+
+    captured: Dict[str, Any] = {}
+
+    class CapturingClient:
+        def generate(self, prompt: str, **kwargs: Any) -> str:
+            captured["prompt"] = prompt
+            return _FakeLLMClient().generate(prompt, **kwargs)
+
+    synthesizer = LLMBlueprintSynthesizer(provider="fake")
+    synthesizer._client = CapturingClient
+    finalized = synthesizer.synthesize(workspace)
+
+    assert finalized.metadata.status == "finalized"
+    assert "CURRENT_PROJECT_CONTEXT" in captured["prompt"]
+    assert "main.py" in captured["prompt"]
+    assert "lib.rs" in captured["prompt"]
+    assert "Hello" in captured["prompt"]
+    assert "pub fn answer()" in captured["prompt"]
+    assert "exported_api_signatures" in captured["prompt"]
+    assert "polyglot_boundaries" in captured["prompt"]
+
+
+def test_synthesized_blueprint_contains_enriched_llm_context(tmp_path: Path, monkeypatch: Any) -> None:
+    """The synthesized blueprint captures exported APIs, dependency graph, and polyglot boundaries."""
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("import lib\n", encoding="utf-8")
+
+    class EnrichedClient:
+        def generate(self, prompt: str, **kwargs: Any) -> str:
+            return json.dumps(
+                {
+                    "metadata": {
+                        "schema_version": "3.0.0",
+                        "project_name": "enriched_project",
+                        "status": "finalized",
+                        "generation_method": "llm_synthesized",
+                        "transferable": True,
+                    },
+                    "llm_context": {
+                        "state": "synthesized",
+                        "repository_summary": "A polyglot demo.",
+                        "dependency_graph": {"main.py": ["lib.py"]},
+                        "exported_api_signatures": {"lib.py": ["def add(a: int, b: int) -> int"]},
+                        "polyglot_boundaries": [
+                            {
+                                "python_file": "main.py",
+                                "native_file": "src/lib.rs",
+                                "binding": "pyo3",
+                                "shared_struct": "ComputeInput",
+                                "memory_model": "caller_allocates",
+                            }
+                        ],
+                        "compute_hotspots": [],
+                    },
+                    "toolchains": [{"name": "CPython"}],
+                    "build_pipeline": [],
+                    "abi_contracts": [],
+                    "execution_strategy": {
+                        "primary_entrypoint": "main.py",
+                        "runtime": "python3",
+                        "args": [],
+                        "env": {},
+                        "working_dir": "${WORKSPACE_ROOT}",
+                        "timeout": 30.0,
+                    },
+                    "verification_nodes": [
+                        {
+                            "node_id": "smoke",
+                            "command": "python3 main.py",
+                            "expected_exit_code": 0,
+                            "stdout_match_patterns": [],
+                            "stderr_prohibited_patterns": [],
+                            "metrics": [],
+                            "timeout": 30.0,
+                        }
+                    ],
+                }
+            )
+
+    synthesizer = LLMBlueprintSynthesizer(provider="fake")
+    synthesizer._client = EnrichedClient
+    finalized = synthesizer.synthesize(workspace)
+
+    assert finalized.llm_context.state.value == "synthesized"
+    assert finalized.llm_context.repository_summary == "A polyglot demo."
+    assert finalized.llm_context.exported_api_signatures == {"lib.py": ["def add(a: int, b: int) -> int"]}
+    assert len(finalized.llm_context.polyglot_boundaries) == 1
+    assert finalized.llm_context.polyglot_boundaries[0].binding.value == "pyo3"
 
 
 def test_synthesized_v3_executes_deterministically(tmp_path: Path, monkeypatch: Any) -> None:
