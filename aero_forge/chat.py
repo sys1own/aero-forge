@@ -531,13 +531,102 @@ class ChatSession:
             match = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
             if match:
                 text = match.group(1).strip()
+        # Also accept a leading JSON object that may be followed by prose.
         if not text.startswith("{"):
             return None
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
-            return None
+            # Try to extract the first balanced JSON object using brace counting.
+            depth = 0
+            end = -1
+            in_string = False
+            escape = False
+            for i, ch in enumerate(text):
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    escape = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+            if end > 0:
+                try:
+                    parsed = json.loads(text[:end])
+                except json.JSONDecodeError:
+                    return None
+            else:
+                return None
         return parsed if isinstance(parsed, dict) else None
+
+    @staticmethod
+    def _infer_build_action(text: str) -> Optional[Dict[str, Any]]:
+        """Construct a PROPOSE_BUILD action from prose if build keywords are present."""
+        lowered = text.lower()
+        build_keywords = (
+            "build",
+            "create",
+            "implement",
+            "generate",
+            "function",
+            "module",
+            "project",
+            "fast",
+            "speed",
+            "accelerate",
+            "optimize",
+        )
+        if not any(k in lowered for k in build_keywords):
+            return None
+
+        has_python = "python" in lowered or "pyo3" in lowered
+        has_rust = "rust" in lowered or "cargo" in lowered or "pyo3" in lowered
+        has_cpp = "cpp" in lowered or "c++" in lowered or "cxx" in lowered
+
+        if has_python and has_rust and has_cpp:
+            target = "tri_polyglot_rust_cpp_python"
+        elif has_python and has_rust:
+            target = "hybrid_rust_python"
+        elif has_python and has_cpp:
+            target = "hybrid_cpp_python"
+        elif has_rust and has_cpp:
+            target = "hybrid_cpp_rust"
+        elif has_rust:
+            target = "pure_rust"
+        elif has_cpp:
+            target = "hybrid_cpp_python"
+        else:
+            target = "pure_python"
+
+        if has_rust or has_cpp or "accelerate" in lowered or "fast" in lowered or "speed" in lowered:
+            acceleration = "Selective Acceleration (Auto-Detect Heavy Compute)"
+        else:
+            acceleration = "Standard Runtime (Bypass Bridge)"
+
+        prompt = text.strip()
+        # Prefer to use the original user request if the response is too terse.
+        if len(prompt) < 20 or prompt.startswith("{"):
+            prompt = f"Build {text.strip()[:200]}"
+
+        return {
+            "type": "PROPOSE_BUILD",
+            "params": {
+                "prompt": prompt,
+                "target": target,
+                "acceleration": acceleration,
+            },
+        }
 
     def reply(self, text: str) -> str:
         """Append user message, call the LLM, and return the assistant response text."""
@@ -578,7 +667,16 @@ class ChatSession:
                 "action": None,
             }
 
-        response = client.generate(self.messages, temperature=0.2)
+        # Request JSON mode when the provider supports it; fall back to plain
+        # generation if the client does not accept response_format.
+        try:
+            response = client.generate(
+                self.messages,
+                temperature=0.2,
+                response_format={"type": "json_object"},
+            )
+        except TypeError:
+            response = client.generate(self.messages, temperature=0.2)
         if not response:
             return {
                 "reply": "Hmm, the LLM returned an empty response. Try rephrasing?",
@@ -586,17 +684,23 @@ class ChatSession:
             }
 
         parsed = self._maybe_parse_json_reply(response)
-        if parsed:
+        if parsed and isinstance(parsed, dict):
             self.messages.append({"role": "assistant", "content": response})
             self._save_session()
+            action = parsed.get("action") if parsed.get("action") else self._infer_build_action(parsed.get("reply", ""))
             return {
                 "reply": parsed.get("reply", response),
-                "action": parsed.get("action"),
+                "action": action,
             }
 
+        # Last resort: try to recover a structured action from plain text.
+        action = self._infer_build_action(response)
         self.messages.append({"role": "assistant", "content": response})
         self._save_session()
-        return {"reply": response, "action": None}
+        return {
+            "reply": response,
+            "action": action,
+        }
 
     def handle_command(self, text: str) -> Optional[Dict[str, Any]]:
         """Detect action verbs and optionally execute a build/optimize step."""
