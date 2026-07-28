@@ -231,7 +231,7 @@ def test_chat_copilot_parses_propose_build_action(tmp_path: Path) -> None:
     )
 
     class FakeClient:
-        def generate(self, messages, temperature=0.2):
+        def generate(self, messages, temperature=0.2, **kwargs):
             return fake_response
 
     session = ChatSession(tmp_path)
@@ -241,6 +241,54 @@ def test_chat_copilot_parses_propose_build_action(tmp_path: Path) -> None:
     assert result["reply"] == "Use a Rust core for the hot loop."
     assert result["action"]["type"] == "PROPOSE_BUILD"
     assert result["action"]["params"]["target"] == "hybrid_cpp_rust"
+
+
+def test_chat_copilot_enforces_json_propose_build_for_fibonacci(tmp_path: Path) -> None:
+    """A build-oriented prompt returns a valid PROPOSE_BUILD action payload."""
+    fake_response = (
+        '{"reply": "I will propose a pure-Python Fibonacci implementation.", '
+        '"action": {"type": "PROPOSE_BUILD", "params": '
+        '{"prompt": "Build a fast iterative Fibonacci function in Python", '
+        '"target": "pure_python", '
+        '"acceleration": "Standard Runtime (Bypass Bridge)"}}}'
+    )
+
+    class FakeClient:
+        def generate(self, messages, temperature=0.2, **kwargs):
+            return fake_response
+
+    session = ChatSession(tmp_path)
+    with patch("aero_forge.chat.get_llm_client", return_value=FakeClient()):
+        result = session.reply_structured(
+            "I want to build a fast, iterative Fibonacci function"
+        )
+
+    assert result["action"]["type"] == "PROPOSE_BUILD"
+    assert "prompt" in result["action"]["params"]
+    assert result["action"]["params"]["target"] in {
+        "pure_python",
+        "hybrid_rust_python",
+        "pure_rust",
+    }
+    assert result["action"]["params"]["acceleration"] in {
+        "Selective Acceleration (Auto-Detect Heavy Compute)",
+        "Force Native Bridge",
+        "Standard Runtime (Bypass Bridge)",
+    }
+
+
+def test_chat_copilot_fallback_builds_action_from_plain_text(tmp_path: Path) -> None:
+    """If the LLM returns plain prose for a build request, recover a PROPOSE_BUILD action."""
+    class FakeClient:
+        def generate(self, messages, temperature=0.2, **kwargs):
+            return "I'll build a fast Rust Fibonacci core wrapped in Python."
+
+    session = ChatSession(tmp_path)
+    with patch("aero_forge.chat.get_llm_client", return_value=FakeClient()):
+        result = session.reply_structured("I want to build a fast Fibonacci function")
+
+    assert result["action"]["type"] == "PROPOSE_BUILD"
+    assert result["action"]["params"]["target"] == "hybrid_rust_python"
 
 
 def test_chat_copilot_falls_back_to_plain_text_for_non_json(tmp_path: Path) -> None:

@@ -400,6 +400,10 @@ class GeminiClient(BaseLLMClient):
         content = _messages_to_string(messages)
 
         generation_config = {"temperature": temperature}
+        # Map OpenAI-style JSON mode to Gemini's response MIME type.
+        response_format = kwargs.pop("response_format", None)
+        if isinstance(response_format, dict) and response_format.get("type") == "json_object":
+            generation_config["response_mime_type"] = "application/json"
         # Allow passing additional gemini kwargs through, but keep config separate.
         gemini_kwargs = {
             "generation_config": generation_config,
