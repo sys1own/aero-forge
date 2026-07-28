@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from aero_forge.build_summary import format_build_summary
 from aero_forge.bundle_repo import bundle_to_xml, bundle_workspace, format_context_block
 from aero_forge.config import ConfigOverride, Tier
+from aero_forge.context_bundler import ContextBundler
 from aero_forge.copilot.action_parser import (
     ActionParser,
     _has_build_intent,
@@ -372,13 +373,21 @@ class WorkspaceContextHarvester:
     def harvest(self) -> Dict[str, Any]:
         blueprint = self._blueprint() or {}
         llm_context = blueprint.get("llm_context") or {}
+        metadata = blueprint.get("metadata") or {}
         return {
             "workspace": str(self.workspace_dir),
             "blueprint": blueprint,
+            "llm_initialized": bool(
+                llm_context.get("state") == "synthesized"
+                or metadata.get("generation_method") == "llm_synthesized"
+                or metadata.get("llm_initialized")
+            ),
             "llm_context": {
                 "state": llm_context.get("state", "raw"),
                 "repository_summary": llm_context.get("repository_summary", ""),
                 "dependency_graph": llm_context.get("dependency_graph", {}),
+                "exported_api_signatures": llm_context.get("exported_api_signatures", {}),
+                "polyglot_boundaries": llm_context.get("polyglot_boundaries", []),
                 "compute_hotspots": llm_context.get("compute_hotspots", []),
             },
             "source_files": self._source_files(),
@@ -404,6 +413,16 @@ class WorkspaceContextHarvester:
             extra.append("Dependency graph:")
             for src, deps in ctx["dependency_graph"].items():
                 extra.append(f"  {src} -> {', '.join(deps) if deps else 'none'}")
+        if ctx.get("exported_api_signatures"):
+            extra.append("Exported API signatures:")
+            for src, signatures in ctx["exported_api_signatures"].items():
+                extra.append(f"  {src}:")
+                for sig in signatures:
+                    extra.append(f"    - {sig}")
+        if ctx.get("polyglot_boundaries"):
+            extra.append("Polyglot boundaries:")
+            for boundary in ctx["polyglot_boundaries"]:
+                extra.append(f"  {boundary}")
         if ctx.get("compute_hotspots"):
             extra.append("Compute hotspots:")
             for hotspot in ctx["compute_hotspots"]:
@@ -561,6 +580,58 @@ class ChatSession:
                 f"LogEvaluator: {self.last_evaluator_state}\n"
             )
             self.system_prompt += "\n\n" + terminal_summary
+
+    def _workspace_blueprint_status(self) -> Dict[str, Any]:
+        """Return existence, freshness, and LLM-initialization status of blueprint.aero."""
+        blueprint_path = self.output_dir / "blueprint.aero"
+        exists = blueprint_path.is_file()
+        stale = False
+        llm_initialized = False
+        source_count = 0
+        if exists:
+            harvester = WorkspaceContextHarvester(self.output_dir, max_file_size_kb=50)
+            info = harvester.harvest()
+            source_files = info.get("source_files", {})
+            source_count = len(source_files)
+            llm_initialized = bool(info.get("llm_initialized"))
+            bp_mtime = blueprint_path.stat().st_mtime
+            for rel, content in source_files.items():
+                src_path = self.output_dir / rel
+                if src_path.is_file():
+                    try:
+                        if src_path.stat().st_mtime > bp_mtime:
+                            stale = True
+                            break
+                    except OSError:
+                        continue
+        return {
+            "exists": exists,
+            "stale": stale,
+            "llm_initialized": llm_initialized,
+            "source_count": source_count,
+            "blueprint_path": str(blueprint_path),
+        }
+
+    def _maybe_attach_context_action(self, result: Dict[str, Any]) -> None:
+        """Attach a synthesize-blueprint Action Card when context is missing or stale."""
+        status = self._workspace_blueprint_status()
+        needs = not status["exists"] or status["stale"] or not status["llm_initialized"]
+        if not needs:
+            return
+        reason_parts: List[str] = []
+        if not status["exists"]:
+            reason_parts.append("missing blueprint.aero")
+        elif status["stale"]:
+            reason_parts.append("workspace changed since last blueprint")
+        if not status["llm_initialized"]:
+            reason_parts.append("blueprint not yet LLM-initialized")
+        result["context_action"] = {
+            "type": "synthesize_blueprint",
+            "label": "Synthesize workspace context",
+            "description": "Generate a deep, LLM-contextualized blueprint.aero for this workspace.",
+            "reason": f"Workspace context is {', '.join(reason_parts)}.",
+            "command": "synthesizeBlueprint",
+        }
 
     def _copilot_system_prompt(self) -> str:
         """Build the workspace-aware copilot system prompt used by the web UI."""
@@ -788,7 +859,7 @@ class ChatSession:
             model=self.model,
             max_retries=self.max_retries,
             config_override=self.config_override,
-            tier=Tier.REASONING,
+            tier=Tier.FAST,
         )
         if client is None:
             return {
@@ -828,6 +899,7 @@ class ChatSession:
                 action=fallback_action,
                 raw="",
             )
+            self._maybe_attach_context_action(fallback)
             self.messages.append({"role": "assistant", "content": json.dumps(fallback)})
             self._save_session()
             return fallback
@@ -841,6 +913,7 @@ class ChatSession:
             action = self._fallback_build_action(text)
 
         result = self._build_result(display_text, action=action, raw=response)
+        self._maybe_attach_context_action(result)
         self.messages.append({"role": "assistant", "content": result["display_text"] or response})
         self._save_session()
         return result

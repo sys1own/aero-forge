@@ -2199,7 +2199,7 @@
         try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
         ui.settingSession.value = state.sessionId;
         state.messages = data.messages || [];
-        addAssistantMessage(data.display_text || data.reply, data.action, data.clean_prompt);
+        addAssistantMessage(data);
       } catch (e) { addChat('assistant', `Chat error: ${e.message}`, true); }
       finally {
         if (pulseCard.parentNode) pulseCard.remove();
@@ -2207,7 +2207,11 @@
       }
     }
 
-    function addAssistantMessage(displayText, action, msgCleanPrompt) {
+    function addAssistantMessage(data) {
+      const displayText = data.display_text || data.reply || '';
+      const action = data.action || null;
+      const msgCleanPrompt = data.clean_prompt || '';
+      const contextAction = data.context_action || null;
       const msg = document.createElement('div');
       msg.className = 'msg assistant';
 
@@ -2273,6 +2277,35 @@
         triggerBtn.className = 'btn btn-primary';
         triggerBtn.textContent = 'Send to Builder & Run';
         triggerBtn.addEventListener('click', () => triggerBuildFromChat(getLivePrompt(card), target, acceleration));
+        buttons.appendChild(triggerBtn);
+
+        card.appendChild(buttons);
+        msg.appendChild(card);
+      }
+
+      if (contextAction && contextAction.command === 'synthesizeBlueprint') {
+        const card = document.createElement('div');
+        card.className = 'action-card context-action-card';
+
+        const title = document.createElement('div');
+        title.className = 'action-title';
+        title.textContent = contextAction.label || 'Synthesize workspace context';
+        card.appendChild(title);
+
+        if (contextAction.reason) {
+          const meta = document.createElement('div');
+          meta.className = 'action-meta';
+          meta.textContent = contextAction.reason;
+          card.appendChild(meta);
+        }
+
+        const buttons = document.createElement('div');
+        buttons.className = 'action-buttons';
+
+        const triggerBtn = document.createElement('button');
+        triggerBtn.className = 'btn btn-primary';
+        triggerBtn.textContent = 'Synthesize Blueprint';
+        triggerBtn.addEventListener('click', () => synthesizeBlueprint());
         buttons.appendChild(triggerBtn);
 
         card.appendChild(buttons);
