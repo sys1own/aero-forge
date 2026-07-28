@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from aero_forge.builder.aeroc_compiler import compile_blueprint_to_aeroc
 from aero_forge.builder.artifact_generator import ArtifactGenerator
 from aero_forge.builder.builder import BuildOutput, build_engine
 from aero_forge.builder.emitters import get_emitter
@@ -36,6 +37,7 @@ __all__ = [
     "EngineSpec",
     "ASTNode",
     "build_engine",
+    "compile_blueprint_to_aeroc",
     "get_emitter",
     "resolve_target_language",
     "module",

@@ -7,6 +7,7 @@ try:
     from .aero_forge_native import (  # type: ignore[import-not-found]
         GraphEngine,
         Hasher,
+        compile_aeroc,
         hash_bytes,
         hash_file,
     )
@@ -16,4 +17,4 @@ except ImportError as exc:  # pragma: no cover
         "Run 'cargo build --release' in aero_forge/_native."
     ) from exc
 
-__all__ = ["Hasher", "GraphEngine", "hash_bytes", "hash_file"]
+__all__ = ["Hasher", "GraphEngine", "compile_aeroc", "hash_bytes", "hash_file"]
