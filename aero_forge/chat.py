@@ -20,11 +20,12 @@ import shutil
 import subprocess
 import time
 import uuid
+import yaml
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from aero_forge.build_summary import format_build_summary
-from aero_forge.bundle_repo import bundle_workspace, format_context_block
+from aero_forge.bundle_repo import bundle_to_xml, bundle_workspace, format_context_block
 from aero_forge.config import ConfigOverride, Tier
 from aero_forge.copilot.action_parser import parse_action_from_text
 from aero_forge.copilot.agent import format_copilot_response
@@ -303,6 +304,108 @@ def _noop(_msg: str) -> None:
     pass
 
 
+class WorkspaceContextHarvester:
+    """Load a workspace and its ``blueprint.aero`` into an LLM-friendly context block."""
+
+    def __init__(self, workspace_dir: Path, max_file_size_kb: int = 50):
+        self.workspace_dir = Path(workspace_dir).resolve()
+        self.max_file_size_kb = max_file_size_kb
+        self.blueprint_path = self.workspace_dir / "blueprint.aero"
+
+    def _blueprint(self) -> Optional[Dict[str, Any]]:
+        if not self.blueprint_path.is_file():
+            return None
+        try:
+            text = self.blueprint_path.read_text(encoding="utf-8")
+            return yaml.safe_load(text) or {}
+        except Exception as exc:
+            logger.warning("Could not parse blueprint %s: %s", self.blueprint_path, exc)
+            return None
+
+    def _source_files(self) -> Dict[str, str]:
+        files: Dict[str, str] = {}
+        max_bytes = self.max_file_size_kb * 1024
+        skip_names = {
+            "target",
+            "dist",
+            "build",
+            "__pycache__",
+            ".pytest_cache",
+            ".aero",
+            ".venv",
+            ".git",
+        }
+        for path in sorted(self.workspace_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(self.workspace_dir)
+            if any(part.startswith(".") for part in rel.parts):
+                continue
+            if any(part in skip_names for part in rel.parts[:1]):
+                continue
+            if rel.name in ("blueprint.aero",):
+                continue
+            try:
+                if path.stat().st_size > max_bytes:
+                    continue
+                files[rel.as_posix()] = path.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+        return files
+
+    def harvest(self) -> Dict[str, Any]:
+        blueprint = self._blueprint() or {}
+        llm_context = blueprint.get("llm_context") or {}
+        return {
+            "workspace": str(self.workspace_dir),
+            "blueprint": blueprint,
+            "llm_context": {
+                "state": llm_context.get("state", "raw"),
+                "repository_summary": llm_context.get("repository_summary", ""),
+                "dependency_graph": llm_context.get("dependency_graph", {}),
+                "compute_hotspots": llm_context.get("compute_hotspots", []),
+            },
+            "source_files": self._source_files(),
+        }
+
+    def to_prompt(self) -> str:
+        data = self.harvest()
+        blueprint_text = None
+        if data["blueprint"]:
+            blueprint_text = yaml.safe_dump(data["blueprint"], sort_keys=False)
+        bundle = {
+            "workspace": data["workspace"],
+            "files": data["source_files"],
+            "blueprint": blueprint_text,
+            "test_status": None,
+        }
+        body = bundle_to_xml(bundle)
+        ctx = data["llm_context"]
+        extra: List[str] = []
+        if ctx.get("repository_summary"):
+            extra.append(f"Repository summary: {ctx['repository_summary']}")
+        if ctx.get("dependency_graph"):
+            extra.append("Dependency graph:")
+            for src, deps in ctx["dependency_graph"].items():
+                extra.append(f"  {src} -> {', '.join(deps) if deps else 'none'}")
+        if ctx.get("compute_hotspots"):
+            extra.append("Compute hotspots:")
+            for hotspot in ctx["compute_hotspots"]:
+                name = hotspot.get("name", "unknown")
+                file = hotspot.get("file", "")
+                complexity = hotspot.get("complexity", "")
+                reason = hotspot.get("reason", "")
+                candidate = hotspot.get("acceleration_candidate", True)
+                extra.append(
+                    f"  {name} ({file}) complexity={complexity} acceleration={candidate}"
+                )
+                if reason:
+                    extra.append(f"    reason: {reason}")
+        if extra:
+            body = "\n".join(["[LLM_CONTEXT]"] + extra) + "\n" + body
+        return f"CURRENT_PROJECT_CONTEXT (XML workspace bundle):\n{body}\n---END PROJECT CONTEXT---"
+
+
 class ChatSession:
     """Maintain multi-turn conversation state and dispatch code actions.
 
@@ -427,12 +530,11 @@ class ChatSession:
         if not self.output_dir.is_dir():
             return
         try:
-            bundle = bundle_workspace(self.output_dir, max_file_size_kb=50)
+            context = WorkspaceContextHarvester(self.output_dir, max_file_size_kb=50).to_prompt()
         except Exception as exc:
-            logger.warning("Could not bundle workspace %s: %s", self.output_dir, exc)
+            logger.warning("Could not harvest workspace %s: %s", self.output_dir, exc)
             return
-        if bundle["files"] or bundle["blueprint"]:
-            context = format_context_block(bundle, fmt="xml")
+        if context:
             self.project_context = context
             self.system_prompt = self.base_system_prompt + "\n\n" + context
 
