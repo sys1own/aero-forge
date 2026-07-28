@@ -71,6 +71,7 @@ class Metadata(BaseModel):
     status: BlueprintStatus = BlueprintStatus.draft
     generation_method: GenerationMethod = GenerationMethod.manual
     transferable: bool = False
+    llm_initialized: bool = False
     description: str = ""
 
 

@@ -18,6 +18,7 @@ import click
 from aero_forge.blueprint import Blueprint, FunctionSpec, discover_functions
 from aero_forge.cache.build_cache import BuildCache
 from aero_forge.config import ConfigOverride
+from aero_forge.context_bundler import ContextBundler
 from aero_forge.error_explainer import explain_error
 from aero_forge.gpu import compile_gpu_kernel, find_gpu_functions
 from aero_forge.orchestrator.orchestrator import DeterministicVerificationRunner, Orchestrator
@@ -264,7 +265,11 @@ class BuildRunner:
         # Draft Blueprint v3 builds must be executed in an isolated sandbox with
         # read-only source directories so the original workspace is never mutated.
         if self._is_v3_draft():
-            return self._run_draft_sandbox_build(output_dir)
+            result = self._run_draft_sandbox_build(output_dir)
+            self._maybe_synthesize_blueprint(
+                self._workspace_root(), result.get("success", False)
+            )
+            return result
 
         expanded = self._expand_specs()
         grouped = self._group_by_source(expanded)
@@ -333,7 +338,9 @@ class BuildRunner:
                 )
                 for r in results
             ]
-            return self._summarize(failed_results)
+            summary = self._summarize(failed_results)
+            self._maybe_synthesize_blueprint(self._workspace_root(), False)
+            return summary
 
         if self.blueprint.verification_nodes:
             runner = DeterministicVerificationRunner(
@@ -347,9 +354,15 @@ class BuildRunner:
                     success=False,
                     logs="Deterministic verification failed",
                 )
-                return self._summarize(results + [failure])
+                summary = self._summarize(results + [failure])
+                self._maybe_synthesize_blueprint(self._workspace_root(), False)
+                return summary
 
-        return self._summarize(results)
+        summary = self._summarize(results)
+        self._maybe_synthesize_blueprint(
+            self._workspace_root(), summary.get("success", False)
+        )
+        return summary
 
     def _is_v3_draft(self) -> bool:
         """Return True when the blueprint is a draft Blueprint v3.0.0."""
@@ -369,6 +382,24 @@ class BuildRunner:
         if self.blueprint.output_dir.name == "dist":
             return self.blueprint.output_dir.parent.resolve()
         return self.blueprint.output_dir.resolve()
+
+    def _maybe_synthesize_blueprint(self, workspace: Path, success: bool) -> None:
+        """Trigger async Context Bundler blueprint synthesis after a successful build."""
+        if not success:
+            return
+        try:
+            bundler = ContextBundler(
+                llm_provider=self.llm_provider,
+                model=self.model,
+                config_override=self.config_override,
+            )
+            bundler.synthesize_blueprint_async(workspace)
+        except Exception as exc:
+            logger.warning(
+                "Could not schedule post-build blueprint synthesis for %s: %s",
+                workspace,
+                exc,
+            )
 
     def _run_draft_sandbox_build(self, output_dir: Path) -> Dict[str, Any]:
         """Execute a draft Blueprint v3 in an isolated sandbox builder."""

@@ -28,6 +28,7 @@ from aero_forge.blueprint.schema import (
 )
 from aero_forge.builder.aeroc_compiler import compile_blueprint_to_aeroc
 from aero_forge.bundle_repo import bundle_workspace, format_context_block
+from aero_forge.config import Tier
 from aero_forge.llm.clients import BaseLLMClient, get_llm_client
 from aero_forge.overlay.manager import OverlayManager
 
@@ -73,6 +74,7 @@ class LLMBlueprintSynthesizer:
             api_key=self.api_key,
             config_override=self.config_override,
             raise_on_error=False,
+            tier=Tier.REASONING,
         )
         if client is None:
             # Try other providers for which an API key might be configured.
@@ -85,6 +87,7 @@ class LLMBlueprintSynthesizer:
                     api_key=self.api_key,
                     config_override=self.config_override,
                     raise_on_error=False,
+                    tier=Tier.REASONING,
                 )
                 if client is not None:
                     logger.info("LLMBlueprintSynthesizer falling back to provider: %s", fallback)
@@ -202,6 +205,7 @@ class LLMBlueprintSynthesizer:
         metadata["status"] = "finalized"
         metadata["generation_method"] = "llm_synthesized"
         metadata["transferable"] = True
+        metadata["llm_initialized"] = True
 
         # Mark the blueprint as LLM-context enriched.
         llm_context = data.setdefault("llm_context", {})
