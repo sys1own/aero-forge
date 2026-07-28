@@ -525,50 +525,62 @@ class ChatSession:
         return self.reply(text)
 
     def _maybe_parse_json_reply(self, response: str) -> Optional[Dict[str, Any]]:
-        """Extract a JSON object from an LLM response, accepting fenced blocks."""
+        """Extract a JSON object from an LLM response, accepting fenced blocks.
+
+        Handles strict JSON, Markdown fences, a leading JSON object followed by
+        prose, and a JSON object embedded anywhere in the text.
+        """
+        if not response or not response.strip():
+            return None
         text = response.strip()
+
+        # Strip Markdown code fences if present.
         if "```" in text:
             match = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
             if match:
                 text = match.group(1).strip()
-        # Also accept a leading JSON object that may be followed by prose.
-        if not text.startswith("{"):
-            return None
+
+        # Try strict JSON first.
         try:
             parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else None
         except json.JSONDecodeError:
-            # Try to extract the first balanced JSON object using brace counting.
-            depth = 0
-            end = -1
-            in_string = False
-            escape = False
-            for i, ch in enumerate(text):
-                if escape:
-                    escape = False
-                    continue
-                if ch == "\\":
-                    escape = True
-                    continue
-                if ch == '"':
-                    in_string = not in_string
-                    continue
-                if in_string:
-                    continue
-                if ch == "{":
-                    depth += 1
-                elif ch == "}":
-                    depth -= 1
-                    if depth == 0:
-                        end = i + 1
-                        break
-            if end > 0:
-                try:
-                    parsed = json.loads(text[:end])
-                except json.JSONDecodeError:
-                    return None
-            else:
+            pass
+
+        # Fall back to extracting the first balanced JSON object.
+        start = text.find("{")
+        if start == -1:
+            return None
+        depth = 0
+        end = -1
+        in_string = False
+        escape = False
+        for i, ch in enumerate(text[start:], start=start):
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if end > start:
+            try:
+                parsed = json.loads(text[start:end])
+                return parsed if isinstance(parsed, dict) else None
+            except json.JSONDecodeError:
                 return None
-        return parsed if isinstance(parsed, dict) else None
+        return None
 
     @staticmethod
     def _infer_build_action(text: str) -> Optional[Dict[str, Any]]:
@@ -667,8 +679,8 @@ class ChatSession:
                 "action": None,
             }
 
-        # Request JSON mode when the provider supports it; fall back to plain
-        # generation if the client does not accept response_format.
+        # Try JSON mode first. Some providers return an empty body when forced
+        # into JSON mode, so fall back to a plain generation attempt.
         try:
             response = client.generate(
                 self.messages,
@@ -677,30 +689,50 @@ class ChatSession:
             )
         except TypeError:
             response = client.generate(self.messages, temperature=0.2)
+
         if not response:
-            return {
-                "reply": "Hmm, the LLM returned an empty response. Try rephrasing?",
-                "action": None,
-            }
+            logger.warning("LLM returned empty response in JSON mode; retrying plain.")
+            try:
+                response = client.generate(self.messages, temperature=0.2)
+            except TypeError:
+                response = ""
 
-        parsed = self._maybe_parse_json_reply(response)
-        if parsed and isinstance(parsed, dict):
-            self.messages.append({"role": "assistant", "content": response})
+        if not response:
+            fallback = {
+                "reply": "I didn't receive a response from the language model. Please check your provider/API key and try rephrasing.",
+                "action": self._infer_build_action(text),
+            }
+            self.messages.append({"role": "assistant", "content": json.dumps(fallback)})
             self._save_session()
-            action = parsed.get("action") if parsed.get("action") else self._infer_build_action(parsed.get("reply", ""))
-            return {
-                "reply": parsed.get("reply", response),
-                "action": action,
-            }
+            return fallback
 
-        # Last resort: try to recover a structured action from plain text.
-        action = self._infer_build_action(response)
+        reply, action = self._parse_chat_response(response, text)
         self.messages.append({"role": "assistant", "content": response})
         self._save_session()
         return {
-            "reply": response,
+            "reply": reply,
             "action": action,
         }
+
+    def _parse_chat_response(
+        self, response: str, user_text: str
+    ) -> Tuple[str, Optional[Dict[str, Any]]]:
+        """Extract a Markdown reply and optional action from an LLM response.
+
+        Tries strict JSON, fenced JSON, a leading JSON object, and finally
+        best-effort recovery from plain prose.
+        """
+        parsed = self._maybe_parse_json_reply(response)
+        if parsed and isinstance(parsed, dict):
+            reply = str(parsed.get("reply", response)).strip()
+            action = parsed.get("action") if parsed.get("action") else self._infer_build_action(reply or user_text)
+            return reply, action
+
+        # No valid JSON found; treat the raw text as the reply and attempt a
+        # best-effort action extraction.
+        reply = response.strip()
+        action = self._infer_build_action(reply or user_text)
+        return reply, action
 
     def handle_command(self, text: str) -> Optional[Dict[str, Any]]:
         """Detect action verbs and optionally execute a build/optimize step."""
