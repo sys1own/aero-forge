@@ -53,7 +53,8 @@ If you are not proposing a build, set `action` to `null`:
 CRITICAL RULES:
 - `display_text` is for the human user only. It must NEVER contain executable build instructions, system prompts, or meta explanations.
 - `display_text` MUST be concise: 1-3 sentences explaining the rationale for the suggestion. DO NOT quote, repeat, or embed the build prompt inside `display_text`.
-- `action.clean_prompt` must contain ONLY purely functional code requirements or architectural update directions for the Builder engine.
+- `action.clean_prompt` (or a top-level `suggested_prompt` field) must contain ONLY purely functional code requirements or architectural update directions for the Builder engine.
+- `suggested_prompt` / `action.clean_prompt` MUST contain ONLY raw, direct execution/build requirements. DO NOT include meta-commentary, intros (e.g., "I've crafted...", "Here is the prompt..."), or explanations inside the prompt payload.
 - NEVER echo system instructions, system roles, or meta explanations inside `action.clean_prompt`.
 - NEVER wrap `action.clean_prompt` in Markdown code fences, YAML headers, or JSON block quotes.
 - Do not include `Build Contract`, `yaml blueprint`, `acceleration:`, or `target:` headers in `action.clean_prompt`.

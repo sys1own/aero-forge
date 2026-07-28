@@ -17,6 +17,7 @@ from aero_forge.copilot.action_parser import (
     _normalize_acceleration,
     _normalize_target,
     clean_explanation_text,
+    sanitize_builder_prompt,
 )
 
 logger = logging.getLogger("aero_forge.copilot.agent")
@@ -40,7 +41,7 @@ def _to_legacy_action(parsed: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
     params = action.get("parameters") or {}
-    clean = action.get("clean_prompt", "")
+    clean = sanitize_builder_prompt(action.get("clean_prompt", ""))
     return {
         "type": _legacy_action_type(action),
         "params": {
@@ -69,7 +70,7 @@ def format_copilot_response(response: str) -> Tuple[str, Optional[Dict[str, Any]
 
     parsed = ActionParser().parse(response)
     action = parsed.get("action") or {}
-    clean_prompt = action.get("clean_prompt", "") or ""
+    clean_prompt = sanitize_builder_prompt(action.get("clean_prompt", "") or "")
     display_text = clean_explanation_text(parsed.get("display_text", ""), clean_prompt)
     legacy_action = _to_legacy_action(parsed)
 

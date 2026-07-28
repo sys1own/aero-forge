@@ -204,3 +204,33 @@ def test_parse_generates_concise_default_when_no_explanation(parser: ActionParse
     assert parsed["action"]["clean_prompt"] == "Build a hybrid_rust_python matrix core."
     # Display text should be empty; the caller will generate a default rationale.
     assert "Build a hybrid_rust_python" not in parsed["display_text"]
+
+
+def test_sanitize_builder_prompt_strips_preamble_and_extracts_code_block() -> None:
+    """Meta-preambles inside the prompt payload are removed and inner code blocks are extracted."""
+    from aero_forge.copilot.action_parser import sanitize_builder_prompt
+
+    dirty = "I've crafted a detailed prompt for you: Build a pure_rust CLI tool using clap."
+    cleaned = sanitize_builder_prompt(dirty)
+    assert cleaned.startswith("Build a pure_rust")
+    assert "I've crafted" not in cleaned
+    assert "prompt for you" not in cleaned
+
+    fenced = '```build_prompt\nBuild a hybrid_cpp_python extension with pyo3.\n```'
+    assert "Build a hybrid_cpp_python extension with pyo3." in sanitize_builder_prompt(fenced)
+
+    no_colon = "Here is a prompt\nBuild a tri_polyglot Rust, C++, and Python CLI."
+    assert "Build a tri_polyglot" in sanitize_builder_prompt(no_colon)
+    assert "Here is a prompt" not in sanitize_builder_prompt(no_colon)
+
+
+def test_suggested_prompt_top_level_is_extracted_and_sanitized(parser: ActionParser) -> None:
+    """A top-level suggested_prompt field is sanitized and separated from display_text."""
+    payload = (
+        '{"display_text": "Use this prompt.", '
+        '"suggested_prompt": "Here is the prompt: Build a wasm image filter.", '
+        '"parameters": {"target": "wasm", "acceleration": "Standard Runtime (Bypass Bridge)"}}'
+    )
+    parsed = parser.parse(payload)
+    assert parsed["action"]["clean_prompt"] == "Build a wasm image filter."
+    assert "Here is the prompt" not in parsed["action"]["clean_prompt"]
