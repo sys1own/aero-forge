@@ -26,6 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from aero_forge.build_summary import format_build_summary
 from aero_forge.bundle_repo import bundle_workspace, format_context_block
 from aero_forge.config import ConfigOverride, Tier
+from aero_forge.copilot.action_parser import parse_action_from_text, parse_copilot_response
 from aero_forge.prompts import AERO_FORGE_COPILOT_SYSTEM_PROMPT
 from aero_forge.error_explainer import explain_error
 from aero_forge.healing.router import try_auto_fix
@@ -700,7 +701,7 @@ class ChatSession:
         if not response:
             fallback = {
                 "reply": "I didn't receive a response from the language model. Please check your provider/API key and try rephrasing.",
-                "action": self._infer_build_action(text),
+                "action": parse_action_from_text(text),
             }
             self.messages.append({"role": "assistant", "content": json.dumps(fallback)})
             self._save_session()
@@ -719,20 +720,14 @@ class ChatSession:
     ) -> Tuple[str, Optional[Dict[str, Any]]]:
         """Extract a Markdown reply and optional action from an LLM response.
 
-        Tries strict JSON, fenced JSON, a leading JSON object, and finally
-        best-effort recovery from plain prose.
+        Uses the centralized copilot action parser which supports Markdown
+        build-contract code fences, legacy top-level JSON, and best-effort
+        prose extraction.
         """
-        parsed = self._maybe_parse_json_reply(response)
-        if parsed and isinstance(parsed, dict):
-            reply = str(parsed.get("reply", response)).strip()
-            action = parsed.get("action") if parsed.get("action") else self._infer_build_action(reply or user_text)
-            return reply, action
-
-        # No valid JSON found; treat the raw text as the reply and attempt a
-        # best-effort action extraction.
-        reply = response.strip()
-        action = self._infer_build_action(reply or user_text)
-        return reply, action
+        reply, action = parse_copilot_response(response)
+        if not action:
+            action = parse_action_from_text(reply or user_text)
+        return reply or response.strip(), action
 
     def handle_command(self, text: str) -> Optional[Dict[str, Any]]:
         """Detect action verbs and optionally execute a build/optimize step."""

@@ -414,3 +414,37 @@ def test_chat_malformed_prose_fallback(tmp_path: Path) -> None:
     assert result["reply"]
     assert result["action"]["type"] == "PROPOSE_BUILD"
     assert result["action"]["params"]["target"] == "pure_rust"
+
+
+def test_chat_copilot_parses_markdown_yaml_contract(tmp_path: Path) -> None:
+    """A Markdown + yaml blueprint code fence is split into reply and action."""
+    fake_response = """\
+## Overview
+Build an accelerated numeric compute core using Rust with a Python driver.
+
+## Polyglot Boundaries
+- Rust handles the hot loop.
+- Python provides the CLI and orchestration.
+
+## Build Contract
+```yaml blueprint
+prompt: Build a fast Fibonacci function in Python using @accelerate and PyO3 Rust backings
+target: hybrid_rust_python
+acceleration: "Selective Acceleration (Auto-Detect Heavy Compute)"
+```
+"""
+
+    class FakeClient:
+        def generate(self, messages, temperature=0.2, **kwargs):
+            return fake_response
+
+    session = ChatSession(tmp_path)
+    with patch("aero_forge.chat.get_llm_client", return_value=FakeClient()):
+        result = session.reply_structured("I want to build a fast Fibonacci function")
+
+    assert result["reply"]
+    assert "## Overview" in result["reply"]
+    assert "```yaml blueprint" not in result["reply"]
+    assert result["action"]["type"] == "PROPOSE_BUILD"
+    assert result["action"]["params"]["target"] == "hybrid_rust_python"
+    assert "Fibonacci" in result["action"]["params"]["prompt"]
