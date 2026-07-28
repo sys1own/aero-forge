@@ -8,6 +8,11 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    import tomllib  # type: ignore[import]
+except ImportError:
+    import tomli as tomllib  # type: ignore[no-redef]
+
 import yaml
 
 from aero_forge.blueprint.schema import (
@@ -24,6 +29,8 @@ from aero_forge.blueprint.schema import (
     VerificationNode,
     write_v3_blueprint,
 )
+from aero_forge.ingestion.command_inspector import detect_runnable_commands
+from aero_forge.scaffold.module_guard import reify_missing_modules
 
 logger = logging.getLogger("aero_forge.ingestion.zip_parser")
 
@@ -96,8 +103,6 @@ def _detect_language_artifacts(workspace: Path) -> Tuple[bool, bool, bool, List[
 
 
 def _cargo_members(workspace: Path) -> List[str]:
-    import tomllib
-
     cargo_toml = workspace / "Cargo.toml"
     if not cargo_toml.is_file():
         return []
@@ -240,8 +245,10 @@ def ingest_zip_archive(
 ) -> Tuple[Dict[str, Any], Optional[BlueprintV3]]:
     """Extract a ZIP archive and optionally generate a v3 draft ``blueprint.aero``."""
     extract_zip_safely(zip_bytes, dest)
+    reify_missing_modules(dest)
     blueprint: Optional[BlueprintV3] = None
     if write_blueprint:
         blueprint = generate_draft_v3_blueprint(dest)
         write_v3_blueprint(blueprint, dest / "blueprint.aero")
-    return {"extracted_to": str(dest)}, blueprint
+    commands = detect_runnable_commands(dest)
+    return {"extracted_to": str(dest), "runnable_commands": commands}, blueprint

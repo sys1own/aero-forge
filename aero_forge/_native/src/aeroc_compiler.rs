@@ -10,6 +10,8 @@ use std::fmt;
 use std::io;
 use std::path::Path;
 
+use base64::Engine as _;
+
 use bytemuck::{Pod, Zeroable};
 use serde::{Deserialize, Serialize};
 
@@ -574,6 +576,9 @@ pub struct ProjectSpec {
     pub instructions: Vec<RawInstruction>,
     #[serde(default)]
     pub sources: Vec<SourceFile>,
+    /// Optional full file tree map (path -> base64 content) for complete workspace transport.
+    #[serde(default)]
+    pub file_tree: HashMap<String, String>,
     pub flags: u32,
 }
 
@@ -693,10 +698,28 @@ fn intern_instruction(table: &mut StringTable, raw: &RawInstruction) -> Result<I
     }
 }
 
+fn merge_file_tree(spec: &mut ProjectSpec) -> Result<(), AerocError> {
+    if spec.file_tree.is_empty() {
+        return Ok(());
+    }
+    for (path, b64) in spec.file_tree.drain() {
+        let content = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|e| AerocError::InvalidArgument(format!("invalid base64 in file_tree: {e}")))?;
+        let normalized = canonicalize_path(&path);
+        if !spec.sources.iter().any(|s| canonicalize_path(&s.path) == normalized) {
+            spec.sources.push(SourceFile { path, content });
+        }
+    }
+    Ok(())
+}
+
 /// Compile a `ProjectSpec` into a `workspace.aeroc` file at `output_path`.
 ///
 /// Returns the truncated 128-bit BLAKE3 content hash (hex) of the file body.
-pub fn compile_project(spec: &ProjectSpec, output_path: &Path) -> Result<String, AerocError> {
+pub fn compile_project(spec: &mut ProjectSpec, output_path: &Path) -> Result<String, AerocError> {
+    merge_file_tree(spec)?;
+
     let mut table = StringTable::new();
 
     // Intern node names first so their indices are stable.
@@ -867,8 +890,8 @@ pub fn xxhash32(data: &[u8]) -> u32 {
 
 /// Parse a JSON project specification and compile it to `output_path`.
 pub fn compile_aeroc_json(spec_json: &str, output_path: &str) -> Result<String, AerocError> {
-    let spec: ProjectSpec = serde_json::from_str(spec_json)?;
-    compile_project(&spec, Path::new(output_path))
+    let mut spec: ProjectSpec = serde_json::from_str(spec_json)?;
+    compile_project(&mut spec, Path::new(output_path))
 }
 
 /// Hex encoding helper used for the content hash returned to Python.
@@ -945,7 +968,7 @@ mod tests {
 
     #[test]
     fn compile_is_deterministic() {
-        let spec = ProjectSpec {
+        let mut spec = ProjectSpec {
             nodes: vec!["a".into(), "b".into()],
             edges: [("a".into(), vec!["b".into()])].into_iter().collect(),
             instructions: vec![
@@ -961,14 +984,15 @@ mod tests {
                 path: "src/main.rs".into(),
                 content: b"fn main() {}".to_vec(),
             }],
+            file_tree: HashMap::new(),
             flags: 0,
         };
 
         let tmp = std::env::temp_dir();
         let p1 = tmp.join("aeroc_det1.aeroc");
         let p2 = tmp.join("aeroc_det2.aeroc");
-        let h1 = compile_project(&spec, &p1).unwrap();
-        let h2 = compile_project(&spec, &p2).unwrap();
+        let h1 = compile_project(&mut spec, &p1).unwrap();
+        let h2 = compile_project(&mut spec, &p2).unwrap();
         assert_eq!(h1, h2);
         let b1 = fs::read(&p1).unwrap();
         let b2 = fs::read(&p2).unwrap();

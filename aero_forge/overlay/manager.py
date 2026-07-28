@@ -145,6 +145,28 @@ class OverlayManager:
                     results[rel] = None
         return results
 
+    def flush_to_workspace(self, workspace: Optional[_PathLike] = None) -> Dict[str, bool]:
+        """Merge every committed overlay into the workspace and remove the patch.
+
+        Returns ``{relkey: written}`` for each flushed overlay.
+        """
+        target = Path(workspace).resolve() if workspace else self.workspace
+        flushed: Dict[str, bool] = {}
+        for key in self.store.list_overlays():
+            patch = self.store.read_overlay_for_key(key)
+            if patch is None:
+                continue
+            baseline = self.store.read_cache_for_key(key)
+            if baseline is None:
+                baseline = ""
+            merged, _ = apply_patch(baseline, patch)
+            out_path = target / key
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(merged, encoding="utf-8")
+            flushed[key] = True
+        self.store.clear()
+        return flushed
+
     def clear_all_overlays(self) -> None:
         """Purge all overlay baselines and patches from the workspace."""
         self.store.clear()

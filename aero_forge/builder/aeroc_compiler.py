@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from aero_forge._native import compile_aeroc
+from aero_forge.overlay import OverlayManager
 
 if TYPE_CHECKING:
     from aero_forge.blueprint.schema import BlueprintV3, BuildArtifact
@@ -67,6 +68,12 @@ def compile_blueprint_to_aeroc(
     workspace = Path(workspace).resolve()
     output_path = Path(output_path)
 
+    # Flush any in-memory overlay edits so the exported IR reflects the real workspace.
+    try:
+        OverlayManager(workspace).flush_to_workspace(workspace)
+    except Exception:
+        pass
+
     nodes = [a.id for a in blueprint.build_pipeline]
     edges = {a.id: a.dependencies for a in blueprint.build_pipeline}
 
@@ -93,14 +100,35 @@ def compile_blueprint_to_aeroc(
 
     instructions.append({"op": "HALT"})
 
+    # Collect every file in the workspace so the binary IR is a complete snapshot.
+    exclude = {".aero", ".git", ".aero_core", "target", "__pycache__", "*.egg-info", ".pytest_cache"}
     sources: List[Dict[str, Any]] = []
-    seen_paths = set()
+    seen_paths: set[str] = set()
+
+    def _add_file(path: Path) -> None:
+        rel = path.relative_to(workspace).as_posix().lstrip("/")
+        if rel in seen_paths or path.resolve() == output_path.resolve():
+            return
+        if any(p in exclude or p.endswith(".egg-info") or p == "__pycache__" for p in Path(rel).parts):
+            return
+        if path.is_file():
+            seen_paths.add(rel)
+            sources.append({
+                "path": rel,
+                "content_base64": base64.b64encode(path.read_bytes()).decode("ascii"),
+            })
+
     for artifact in blueprint.build_pipeline:
         for src in artifact.source_files:
-            path = Path(src)
-            if path.as_posix() not in seen_paths:
-                seen_paths.add(path.as_posix())
-                sources.append(_encode_source(path, workspace))
+            _add_file(workspace / src)
+
+    for path in sorted(workspace.rglob("*")):
+        _add_file(path)
+
+    # Always include the contract file itself so the container is self-describing.
+    blueprint_path = workspace / "blueprint.aero"
+    if blueprint_path.is_file():
+        _add_file(blueprint_path)
 
     spec = {
         "nodes": nodes,
@@ -129,6 +157,12 @@ def compile_directory_to_aeroc(
     exclude = set(exclude or {
         ".aero", ".git", ".aero_core", "target", "__pycache__", "*.egg-info", ".pytest_cache"
     })
+
+    # Flush in-memory overlay edits so the exported IR is a complete snapshot.
+    try:
+        OverlayManager(directory).flush_to_workspace(directory)
+    except Exception:
+        pass
 
     def _keep(path: Path) -> bool:
         if path.resolve() == output_path:

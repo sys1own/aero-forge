@@ -18,6 +18,7 @@ import zipfile
 from pathlib import Path
 from typing import Optional
 
+from aero_forge.overlay import OverlayManager
 from aero_forge.scaffold.cargo_config import write_cargo_config
 
 
@@ -160,6 +161,13 @@ def export_scaffold_zip(
     ``workspace.aeroc`` binary if it exists.
     """
     workspace_dir = Path(workspace_dir).resolve()
+
+    # Flush any in-memory overlay edits so the exported scaffold reflects real files.
+    try:
+        OverlayManager(workspace_dir).flush_to_workspace(workspace_dir)
+    except Exception:
+        pass
+
     with tempfile.TemporaryDirectory() as tmpdir:
         scaffold_dir = Path(tmpdir) / "scaffold"
         export_aeroc_project(workspace_dir, scaffold_dir, project_name=project_name)

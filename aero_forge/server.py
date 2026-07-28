@@ -74,7 +74,9 @@ from aero_forge.orchestrator.stack_classifier import (
     classify_stack,
 )
 from aero_forge.accelerator.runtime import activate_runtime_native_acceleration
+from aero_forge.ingestion.command_inspector import detect_runnable_commands
 from aero_forge.ingestion.zip_parser import extract_zip_safely, generate_draft_v3_blueprint
+from aero_forge.scaffold.module_guard import reify_missing_modules
 from aero_forge.sandbox.manager import SandboxManager
 from aero_forge.blueprint import BlueprintV3, BlueprintV3Validator, LLMBlueprintSynthesizer, write_v3_blueprint
 from aero_forge.scaffold.aeroc_export import export_scaffold_zip
@@ -1298,6 +1300,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             from aero_forge.scaffold.syntax_guard import repair_workspace
 
             repair_workspace(session_dir)
+            reify_missing_modules(session_dir)
 
             # Synthesize a v3.0 draft blueprint if none exists.
             blueprint_generated = False
@@ -1320,6 +1323,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
 
             _notify_tree_changed(session_id)
 
+            runnable_commands = detect_runnable_commands(session_dir)
+
             return _send_json(
                 self,
                 200,
@@ -1327,6 +1332,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     "session_id": session_id,
                     "status": "uploaded",
                     "files": _build_tree(session_dir),
+                    "runnable_commands": runnable_commands,
                     "blueprint_source": "auto_generated",
                     "auto_initialized": blueprint_generated,
                     "message": "ZIP extracted & normalized to blueprint.aero",
@@ -1396,6 +1402,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 logger.warning("Auto-build after .aeroc upload failed: %s", exc)
 
             _notify_tree_changed(session_id)
+            runnable_commands = detect_runnable_commands(target_dir)
             return _send_json(
                 self,
                 200,
@@ -1404,6 +1411,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     "status": "uploaded",
                     "build": build_result,
                     "files": _build_tree(session_dir),
+                    "runnable_commands": runnable_commands,
                     "message": "Aeroc extracted and build pipeline triggered",
                 },
             )

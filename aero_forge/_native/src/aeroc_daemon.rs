@@ -520,6 +520,7 @@ mod tests {
                 })
                 .collect(),
             sources: Vec::new(),
+            file_tree: HashMap::new(),
             flags: 0,
         };
         for (a, b) in deps {
