@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional, Tuple
 import yaml
 
 from aero_forge.copilot.action_parser import (
+    _infer_target_from_text,
     _normalize_acceleration,
     _normalize_target,
     parse_action_from_text,
@@ -33,9 +34,23 @@ def _looks_like_json(text: str) -> bool:
 
 
 def _extract_action_from_json(data: Any) -> Optional[Dict[str, Any]]:
-    """Build a PROPOSE_BUILD action from a parsed JSON payload."""
+    """Build an action from a parsed JSON payload (legacy or new suggest_build_prompt)."""
     if not isinstance(data, dict):
         return None
+
+    # New structured action-card format.
+    if data.get("action") == "suggest_build_prompt" or "build_prompt" in data:
+        build_prompt = str(data.get("build_prompt") or "").strip()
+        if build_prompt:
+            return {
+                "type": "SUGGEST_BUILD_PROMPT",
+                "params": {
+                    "prompt": build_prompt,
+                    "explanation": str(data.get("explanation") or "").strip(),
+                    "target": _normalize_target(build_prompt) or _infer_target_from_text(build_prompt),
+                    "acceleration": _normalize_acceleration(build_prompt),
+                },
+            }
 
     action_data = data.get("action")
     if not action_data or not isinstance(action_data, dict):
@@ -84,11 +99,23 @@ def _markdown_reply_from_action(action: Dict[str, Any], fallback_text: str = "")
     params = action.get("params") or {}
     target = params.get("target", "pure_python")
     prompt = str(params.get("prompt", fallback_text)).strip()
+    explanation = str(params.get("explanation", "")).strip()
 
     target_label = target.replace("_", " ").title()
     lines = [
         "### Architecture Overview",
-        f"I propose a **{target_label}** build for this request.",
+    ]
+    if explanation:
+        lines.append(explanation)
+    else:
+        lines.append(f"I propose a **{target_label}** build for this request.")
+
+    # The new SUGGEST_BUILD_PROMPT action renders the exact prompt in a UI
+    # action card; avoid duplicating it as a YAML contract in the reply.
+    if action.get("type") == "SUGGEST_BUILD_PROMPT":
+        return "\n".join(lines)
+
+    lines.extend([
         "",
         "#### Components & Strategy",
         f"- The selected target mode is `{target}`.",
@@ -98,7 +125,7 @@ def _markdown_reply_from_action(action: Dict[str, Any], fallback_text: str = "")
         "```yaml blueprint",
         _build_yaml_contract(action),
         "```",
-    ]
+    ])
     return "\n".join(lines)
 
 
@@ -184,7 +211,9 @@ def format_copilot_response(response: str) -> Tuple[str, Optional[Dict[str, Any]
         reply = _markdown_reply_from_action(action, response)
 
     # If we have Markdown with an action but no code-fenced contract, append one.
-    if action:
+    # The new SUGGEST_BUILD_PROMPT action renders the prompt in a dedicated UI
+    # card, so do not duplicate it as a YAML contract in the reply.
+    if action and action.get("type") != "SUGGEST_BUILD_PROMPT":
         reply = _ensure_yaml_fenced_contract(reply or "", action)
 
     return (reply or response).strip(), action

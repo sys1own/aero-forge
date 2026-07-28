@@ -17,6 +17,21 @@ _CODE_FENCE_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+_SUGGEST_JSON_FENCE_RE = re.compile(
+    r"```(?:json)\s*\n(.*?)```",
+    re.DOTALL | re.IGNORECASE,
+)
+
+_BUILD_PROMPT_TAG_RE = re.compile(
+    r"<build_prompt>(.*?)</build_prompt>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+_EXPLANATION_TAG_RE = re.compile(
+    r"<explanation>(.*?)</explanation>",
+    re.DOTALL | re.IGNORECASE,
+)
+
 
 def _normalize_target(raw: Any) -> Optional[str]:
     """Return a recognized Aero-Forge target name or None."""
@@ -103,6 +118,64 @@ def extract_build_contract(text: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def parse_suggested_build_prompt(text: str) -> Dict[str, Any]:
+    """Extract the new ``suggest_build_prompt`` structured payload.
+
+    Returns a dict with ``explanation``, ``has_suggestion``, ``build_prompt``,
+    and ``raw``.  Tries JSON code fences, top-level JSON objects, and XML-style
+    ``<build_prompt>`` / ``<explanation>`` fallbacks.
+    """
+    raw = text or ""
+    stripped = raw.strip()
+
+    # 1. JSON code fence (most common model output).
+    fence = _SUGGEST_JSON_FENCE_RE.search(stripped)
+    if fence:
+        payload = fence.group(1).strip()
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict) and parsed.get("action") == "suggest_build_prompt":
+            return _build_suggestion(parsed, stripped)
+
+    # 2. Top-level JSON object.
+    if stripped.startswith("{"):
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict) and parsed.get("action") == "suggest_build_prompt":
+            return _build_suggestion(parsed, stripped)
+
+    # 3. XML-style fallback tags.
+    bp_match = _BUILD_PROMPT_TAG_RE.search(stripped)
+    if bp_match:
+        explanation = ""
+        ex_match = _EXPLANATION_TAG_RE.search(stripped)
+        if ex_match:
+            explanation = ex_match.group(1).strip()
+        return {
+            "explanation": explanation,
+            "has_suggestion": True,
+            "build_prompt": bp_match.group(1).strip(),
+            "raw": stripped,
+        }
+
+    return {"explanation": stripped, "has_suggestion": False, "build_prompt": None, "raw": stripped}
+
+
+def _build_suggestion(parsed: Dict[str, Any], raw: str) -> Dict[str, Any]:
+    build_prompt = str(parsed.get("build_prompt") or "").strip()
+    explanation = str(parsed.get("explanation") or "").strip()
+    return {
+        "explanation": explanation,
+        "has_suggestion": bool(build_prompt),
+        "build_prompt": build_prompt or None,
+        "raw": raw,
+    }
+
+
 def _infer_target_from_text(text: str) -> Optional[str]:
     """Infer a build target from prose when no explicit contract is present."""
     lowered = text.lower()
@@ -152,7 +225,20 @@ def _has_build_intent(text: str) -> bool:
 
 
 def parse_action_from_text(text: str) -> Optional[Dict[str, Any]]:
-    """Best-effort extraction of a PROPOSE_BUILD action from any assistant text."""
+    """Best-effort extraction of a build action from any assistant text."""
+    suggestion = parse_suggested_build_prompt(text)
+    if suggestion["has_suggestion"]:
+        build_prompt = suggestion["build_prompt"] or ""
+        return {
+            "type": "SUGGEST_BUILD_PROMPT",
+            "params": {
+                "prompt": build_prompt,
+                "explanation": suggestion["explanation"],
+                "target": _normalize_target(build_prompt) or _infer_target_from_text(build_prompt),
+                "acceleration": _normalize_acceleration(build_prompt),
+            },
+        }
+
     contract = extract_build_contract(text)
     if contract:
         return {
@@ -218,12 +304,30 @@ def parse_copilot_response(response: str) -> Tuple[str, Optional[Dict[str, Any]]
     """Split an assistant response into a Markdown reply and an optional action.
 
     Supports, in order:
+    - ``suggest_build_prompt`` JSON payloads (new action-card format)
     - ``yaml blueprint`` / ``json blueprint`` fenced build contracts
     - legacy top-level JSON objects with ``reply``/``action``
     - best-effort extraction from plain prose
     """
     if not response or not response.strip():
         return "", None
+
+    # New structured action-card format.
+    suggestion = parse_suggested_build_prompt(response)
+    if suggestion["has_suggestion"]:
+        build_prompt = suggestion["build_prompt"] or ""
+        target = _normalize_target(build_prompt) or _infer_target_from_text(build_prompt)
+        reply = suggestion["explanation"] or _SUGGEST_JSON_FENCE_RE.sub("", response).strip()
+        action = {
+            "type": "SUGGEST_BUILD_PROMPT",
+            "params": {
+                "prompt": build_prompt,
+                "explanation": suggestion["explanation"],
+                "target": target,
+                "acceleration": _normalize_acceleration(build_prompt),
+            },
+        }
+        return reply, action
 
     contract = extract_build_contract(response)
     if contract:

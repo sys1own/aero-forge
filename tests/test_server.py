@@ -511,6 +511,48 @@ def test_api_chat_does_not_dispatch_build_commands(server, monkeypatch):
     assert data["action"]["type"] == "PROPOSE_BUILD"
 
 
+def test_api_chat_returns_suggest_build_prompt_shape(server, monkeypatch):
+    """POST /api/chat exposes the new action-card payload fields."""
+
+    class FakeChatSession:
+        def __init__(self, output_dir, **kwargs):
+            self.messages = []
+
+        def handle_command(self, text):
+            return None
+
+        def reply_structured(self, text, error_context=None):
+            return {
+                "reply": "Use a Rust core with PyO3 bindings.",
+                "action": {
+                    "type": "SUGGEST_BUILD_PROMPT",
+                    "params": {
+                        "prompt": "Build a hybrid_rust_python project with a Rust `matmul` kernel and PyO3 wrapper.",
+                        "explanation": "Use a Rust core with PyO3 bindings.",
+                        "target": "hybrid_rust_python",
+                        "acceleration": "Selective Acceleration (Auto-Detect Heavy Compute)",
+                    },
+                },
+                "explanation": "Use a Rust core with PyO3 bindings.",
+                "has_suggestion": True,
+                "build_prompt": "Build a hybrid_rust_python project with a Rust `matmul` kernel and PyO3 wrapper.",
+                "raw": '{"action":"suggest_build_prompt"}',
+            }
+
+    monkeypatch.setattr("aero_forge.server.ChatSession", FakeChatSession)
+
+    status, data = _post_json(
+        server + "/api/chat",
+        {"messages": [{"role": "user", "content": "Plan a Rust matrix core"}]},
+    )
+    assert status == 200
+    assert data["status"] == "success"
+    assert data["has_suggestion"] is True
+    assert data["build_prompt"] == "Build a hybrid_rust_python project with a Rust `matmul` kernel and PyO3 wrapper."
+    assert "raw" in data
+    assert data["action"]["type"] == "SUGGEST_BUILD_PROMPT"
+
+
 def test_api_regenerate_blueprint_missing(server):
     """POST /api/workspace/regenerate_blueprint returns 400 when blueprint.aero is missing."""
     try:
