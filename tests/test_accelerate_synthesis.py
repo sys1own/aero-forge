@@ -130,7 +130,7 @@ def test_cli_blueprint_synthesize_finalizes_draft(tmp_path: Path, monkeypatch: A
     write_v3_blueprint(draft, blueprint_path)
 
     fake = _fake_llm_client(finalized_json=_finalized_blueprint_json("draft_to_finalize"))
-    monkeypatch.setattr("aero_forge.blueprint.synthesizer.get_llm_client", lambda provider, model=None: fake)
+    monkeypatch.setattr("aero_forge.blueprint.synthesizer.get_llm_client", lambda provider, model=None, **kwargs: fake)
 
     runner = CliRunner()
     result = runner.invoke(
@@ -216,7 +216,7 @@ def test_build_draft_then_synthesize_then_finalize(tmp_path: Path, monkeypatch: 
     assert (src_dir / "main.py").read_text(encoding="utf-8") == original
 
     fake = _fake_llm_client(finalized_json=_finalized_blueprint_json("draft_cycle"))
-    monkeypatch.setattr("aero_forge.blueprint.synthesizer.get_llm_client", lambda provider, model=None: fake)
+    monkeypatch.setattr("aero_forge.blueprint.synthesizer.get_llm_client", lambda provider, model=None, **kwargs: fake)
 
     synth_result = runner.invoke(
         main,
