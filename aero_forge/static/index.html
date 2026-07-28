@@ -86,8 +86,8 @@
     #accelerate-btn:hover { filter: brightness(1.05); }
     #accelerate-badge { display: none; }
     #accelerate-badge.visible { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.7rem; color: var(--warning); border: 1px solid var(--warning); padding: 0.15rem 0.4rem; border-radius: 999px; }
-    #blueprint-status-badge { display: none; font-size: 0.7rem; padding: 0.15rem 0.4rem; border-radius: 999px; border: 1px solid var(--danger); color: var(--danger); }
-    #blueprint-status-badge.visible { display: inline-flex; align-items: center; gap: 0.25rem; }
+    #blueprint-status-badge { display: none; font-size: 12px; line-height: 1; padding: 4px 10px; border-radius: 12px; border: 1px solid #f59e0b; color: #fbbf24; background: rgba(245, 158, 11, 0.15); cursor: default; white-space: nowrap; }
+    #blueprint-status-badge.visible { display: inline-flex; align-items: center; gap: 0.35rem; }
 
     /* App layout */
     html, body, .app { height: 100vh; width: 100vw; margin: 0; padding: 0; overflow: hidden; }
@@ -397,7 +397,7 @@
       </div>
     </div>
     <div class="header-actions">
-      <span id="blueprint-status-badge">[ DRAFT - NOT TRANSFERABLE ]</span>
+      <span id="blueprint-status-badge" title="Local sandbox build. Click Accelerate -> Synthesize for exportable blueprint.">&#9889; Draft Spec</span>
       <span id="accelerate-badge">&#9889; Accelerated</span>
       <button id="accelerate-btn" class="run-btn" title="Accelerate workspace" aria-label="Accelerate workspace">
         <span>&#9889;</span> Accelerate
@@ -1802,7 +1802,7 @@
         const data = await res.json();
         if (data.present && data.status === 'draft') {
           ui.blueprintStatusBadge.classList.add('visible');
-          ui.blueprintStatusBadge.textContent = `[ DRAFT${data.transferable ? '' : ' - NOT TRANSFERABLE'} ]`;
+          ui.blueprintStatusBadge.textContent = data.transferable ? '&#10024; Finalized' : '&#9889; Draft Spec';
           if (ui.blueprintDraftBanner) ui.blueprintDraftBanner.style.display = 'block';
         } else {
           ui.blueprintStatusBadge.classList.remove('visible');

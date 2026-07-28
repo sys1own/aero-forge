@@ -26,7 +26,7 @@ from aero_forge.blueprint.schema import (
     VerificationNode,
     write_v3_blueprint,
 )
-from aero_forge.llm.clients import get_llm_client
+from aero_forge.llm.clients import BaseLLMClient, get_llm_client
 
 logger = logging.getLogger("aero_forge.blueprint.synthesizer")
 
@@ -38,11 +38,17 @@ class LLMBlueprintSynthesizer:
 
     def __init__(
         self,
-        provider: str = "deepseek",
+        provider: Optional[str] = None,
         model: Optional[str] = None,
+        llm: Optional[BaseLLMClient] = None,
+        api_key: Optional[str] = None,
+        config_override: Optional[Any] = None,
     ) -> None:
-        self.provider = provider
+        self.provider = provider or os.getenv("AERO_FORGE_LLM_PROVIDER") or "deepseek"
         self.model = model or self.DEFAULT_MODEL
+        self.llm: Optional[BaseLLMClient] = llm
+        self.api_key = api_key
+        self.config_override = config_override
 
     def _load_prompt(self) -> Template:
         prompt_path = Path(__file__).with_name("prompts") / "blueprint_synthesis.j2"
@@ -53,8 +59,42 @@ class LLMBlueprintSynthesizer:
             return Template(path.read_text(encoding="utf-8"))
         return Template(_DEFAULT_PROMPT_TEMPLATE)
 
-    def _client(self):
-        return get_llm_client(self.provider, model=self.model)
+    def _client(self) -> BaseLLMClient:
+        """Return a configured LLM client, falling back across known providers."""
+        if self.llm is not None:
+            return self.llm
+
+        client = get_llm_client(
+            self.provider,
+            model=self.model,
+            api_key=self.api_key,
+            config_override=self.config_override,
+            raise_on_error=False,
+        )
+        if client is None:
+            # Try other providers for which an API key might be configured.
+            for fallback in ("openai", "openrouter", "gemini", "deepseek"):
+                if fallback == self.provider:
+                    continue
+                client = get_llm_client(
+                    fallback,
+                    model=self.model,
+                    api_key=self.api_key,
+                    config_override=self.config_override,
+                    raise_on_error=False,
+                )
+                if client is not None:
+                    logger.info("LLMBlueprintSynthesizer falling back to provider: %s", fallback)
+                    self.provider = fallback
+                    break
+
+        if client is None:
+            raise ValueError(
+                "No active LLM provider configured. Please check your API key in settings."
+            )
+
+        self.llm = client
+        return self.llm
 
     def synthesize(
         self,
@@ -198,12 +238,21 @@ def synthesize_v3_blueprint(
     provider: str = "deepseek",
     model: Optional[str] = None,
     draft_path: Optional[Path] = None,
+    llm: Optional[BaseLLMClient] = None,
+    api_key: Optional[str] = None,
+    config_override: Optional[Any] = None,
 ) -> BlueprintV3:
     """Convenience function: synthesize a finalized v3 blueprint and write it to disk."""
     draft: Optional[BlueprintV3] = None
     if draft_path and draft_path.is_file():
         draft = BlueprintV3.load(draft_path)
-    synthesizer = LLMBlueprintSynthesizer(provider=provider, model=model)
+    synthesizer = LLMBlueprintSynthesizer(
+        provider=provider,
+        model=model,
+        llm=llm,
+        api_key=api_key,
+        config_override=config_override,
+    )
     return synthesizer.synthesize(workspace, draft=draft, output_path=output_path)
 
 

@@ -933,9 +933,18 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             if draft_path.is_file():
                 draft = BlueprintV3.load(draft_path)
 
-            provider = body.get("provider", "deepseek")
-            model = body.get("model")
-            synthesizer = LLMBlueprintSynthesizer(provider=provider, model=model)
+            config = ConfigOverride(
+                llm_provider=_resolve_llm_provider(body),
+                api_key=self._api_key(body),
+                model=body.get("model"),
+                max_retries=3,
+            )
+            synthesizer = LLMBlueprintSynthesizer(
+                provider=config.llm_provider,
+                model=config.model,
+                api_key=config.api_key,
+                config_override=config,
+            )
             finalized = synthesizer.synthesize(
                 workspace,
                 draft=draft,
