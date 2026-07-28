@@ -164,3 +164,43 @@ def test_module_level_extract_clean_prompt() -> None:
     """The module-level helper delegates to ActionParser."""
     text = "```build_prompt\nBuild a pure_python CLI tool.\n```"
     assert "pure_python" in extract_clean_prompt(text)
+
+
+def test_clean_explanation_text_removes_prompt_duplication() -> None:
+    """A conversational explanation must not repeat the extracted build prompt."""
+    from aero_forge.copilot.action_parser import clean_explanation_text
+
+    explanation = "I suggest a Rust hot loop.\n\n```build_prompt\nBuild a hybrid_rust_python matmul kernel.\n```\n\nUse this prompt."
+    prompt = "Build a hybrid_rust_python matmul kernel."
+    cleaned = clean_explanation_text(explanation, prompt)
+    assert prompt not in cleaned
+    assert "Build a hybrid_rust_python" not in cleaned
+    assert "I suggest a Rust hot loop" in cleaned
+
+
+def test_parse_isolates_display_text_from_prompt(parser: ActionParser) -> None:
+    """JSON responses that embed the prompt inside display_text are deduplicated."""
+    payload = json.dumps(
+        {
+            "display_text": "### Rationale\nThis prompt builds a Python CLI: Build a pure_python CLI tool with argparse.",
+            "action": {
+                "type": "build",
+                "clean_prompt": "Build a pure_python CLI tool with argparse.",
+                "parameters": {"target": "pure_python", "acceleration": "Standard Runtime (Bypass Bridge)"},
+            },
+        }
+    )
+    parsed = parser.parse(payload)
+    display = parsed["display_text"]
+    assert "Build a pure_python CLI tool" not in display
+    assert "Rationale" in display
+    assert "argparse" not in display
+
+
+def test_parse_generates_concise_default_when_no_explanation(parser: ActionParser) -> None:
+    """When the model returns only a prompt with no explanation, a short rationale is produced."""
+    response = "```build_prompt\nBuild a hybrid_rust_python matrix core.\n```"
+    parsed = parser.parse(response)
+    assert parsed["action"]["clean_prompt"] == "Build a hybrid_rust_python matrix core."
+    # Display text should be empty; the caller will generate a default rationale.
+    assert "Build a hybrid_rust_python" not in parsed["display_text"]

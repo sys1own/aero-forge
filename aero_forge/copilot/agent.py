@@ -16,6 +16,7 @@ from aero_forge.copilot.action_parser import (
     _infer_target_from_text,
     _normalize_acceleration,
     _normalize_target,
+    clean_explanation_text,
 )
 
 logger = logging.getLogger("aero_forge.copilot.agent")
@@ -67,7 +68,9 @@ def format_copilot_response(response: str) -> Tuple[str, Optional[Dict[str, Any]
         return "", None
 
     parsed = ActionParser().parse(response)
-    display_text = parsed.get("display_text", "")
+    action = parsed.get("action") or {}
+    clean_prompt = action.get("clean_prompt", "") or ""
+    display_text = clean_explanation_text(parsed.get("display_text", ""), clean_prompt)
     legacy_action = _to_legacy_action(parsed)
 
     # If the model returned raw JSON without a human display_text, pretty-print it
@@ -80,8 +83,9 @@ def format_copilot_response(response: str) -> Tuple[str, Optional[Dict[str, Any]
             display_text = response.strip()
 
     if legacy_action:
+        prompt_text = clean_prompt or legacy_action["params"]["prompt"]
         # Avoid duplicating the executable prompt in the chat bubble.
-        if not display_text or display_text.strip() == legacy_action["params"]["prompt"].strip():
+        if not display_text or display_text.strip() == prompt_text.strip():
             target = legacy_action["params"]["target"]
             target_label = target.replace("_", " ").title()
             display_text = f"### Architecture Overview\n\nI propose a **{target_label}** build. Use the Action Card to edit or trigger it."
@@ -90,7 +94,7 @@ def format_copilot_response(response: str) -> Tuple[str, Optional[Dict[str, Any]
         display_text = "### Architecture Overview\n\n" + display_text
 
     if not display_text:
-        display_text = parsed.get("display_text", response.strip())
+        display_text = clean_explanation_text(parsed.get("display_text", response.strip()), clean_prompt)
 
     return display_text.strip(), legacy_action
 

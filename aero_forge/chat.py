@@ -835,7 +835,7 @@ class ChatSession:
         if not response.strip() and not action and _has_build_intent(text):
             action = self._fallback_build_action(text)
 
-        result = self._build_result(display_text or response.strip(), action=action, raw=response)
+        result = self._build_result(display_text, action=action, raw=response)
         self.messages.append({"role": "assistant", "content": result["display_text"] or response})
         self._save_session()
         return result
@@ -855,6 +855,11 @@ class ChatSession:
                     "parameters": parameters,
                 },
             }
+            # If the model left the conversational text empty, provide a concise
+            # rationale rather than echoing the executable prompt.
+            if not display_text:
+                target_label = parameters.get("target", "pure_python").replace("_", " ").title()
+                display_text = f"I propose a **{target_label}** build. Use the Action Card to edit or trigger it."
         # Wrap a heading around the conversational text when an action is attached
         # and the model did not supply one, but never hide a plain informational reply.
         if action and display_text and not _has_markdown_heading(display_text):
@@ -872,6 +877,7 @@ class ChatSession:
             "has_prompt": bool(clean_prompt),
             "build_prompt": clean_prompt,
             "suggested_build_prompt": clean_prompt,
+            "suggested_prompt": clean_prompt,
             "clean_prompt": clean_prompt,
             "parameters": parameters,
             "raw": raw,

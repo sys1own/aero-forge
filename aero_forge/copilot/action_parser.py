@@ -182,6 +182,96 @@ def _strip_outer_quotes(text: str) -> str:
     return text.strip()
 
 
+def _normalize_whitespace(text: str) -> str:
+    """Collapse whitespace for fuzzy matching."""
+    return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def _contains_prompt_fragment(text: str, prompt: str) -> bool:
+    """Return True if *text* contains a significant fragment of *prompt*."""
+    norm_text = _normalize_whitespace(text)
+    norm_prompt = _normalize_whitespace(prompt)
+    if not norm_prompt or not norm_text:
+        return False
+    if norm_prompt in norm_text:
+        return True
+    # Also match a leading or trailing chunk of the prompt.
+    head = norm_prompt[:80]
+    tail = norm_prompt[-80:] if len(norm_prompt) > 80 else ""
+    for fragment in (head, tail):
+        if fragment and fragment in norm_text:
+            return True
+    return False
+
+
+def _remove_fenced_prompt_blocks(text: str, prompt: str) -> str:
+    """Remove Markdown/JSON/XML code fences whose contents duplicate *prompt*."""
+    if not text or not prompt:
+        return text or ""
+
+    # Match any triple-backtick block, optionally with an info string.
+    fence_re = re.compile(r"```(?:\w+)?\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+
+    def repl(match: re.Match) -> str:
+        content = match.group(1)
+        if _contains_prompt_fragment(content, prompt):
+            return ""
+        return match.group(0)
+
+    return fence_re.sub(repl, text)
+
+
+def _remove_prompt_lines(text: str, prompt: str) -> str:
+    """Remove lines that contain a verbatim copy of *prompt* or a major chunk."""
+    if not text or not prompt:
+        return text or ""
+
+    norm_prompt = _normalize_whitespace(prompt)
+    head = norm_prompt[:80]
+    tail = norm_prompt[-80:] if len(norm_prompt) > 80 else ""
+
+    kept: List[str] = []
+    for line in text.splitlines():
+        norm_line = _normalize_whitespace(line)
+        if norm_prompt in norm_line:
+            continue
+        if head and head in norm_line:
+            continue
+        if tail and tail in norm_line:
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+# Meta headers that may appear above a duplicated prompt in the explanation.
+_EXPLANATION_META_HEADERS = [
+    re.compile(r"^\s*(?:Suggested\s+Builder\s+Prompt|Here\s+is\s+(?:the\s+)?prompt|Builder\s+Prompt|Build\s+Prompt)\s*[:\-]?\s*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*The\s+suggested\s+build\s+prompt\s+is\s*[:\-]?\s*$", re.IGNORECASE | re.MULTILINE),
+]
+
+
+def clean_explanation_text(response_text: str, suggested_prompt: str) -> str:
+    """Remove duplicated prompt/code fences and meta headers from the conversational text.
+
+    The remaining text should be a short rationale (1-3 sentences) with no
+    repetition of the build prompt.
+    """
+    if not response_text:
+        return ""
+    cleaned = response_text
+    if suggested_prompt:
+        cleaned = _remove_fenced_prompt_blocks(cleaned, suggested_prompt)
+        cleaned = _remove_prompt_lines(cleaned, suggested_prompt)
+
+    for pattern in _EXPLANATION_META_HEADERS:
+        cleaned = pattern.sub("", cleaned)
+
+    cleaned = re.sub(r"\n\s*\n+", "\n\n", cleaned).strip()
+    # Trim trailing punctuation/whitespace artifacts.
+    cleaned = cleaned.rstrip("-:\n ")
+    return cleaned.strip()
+
+
 class ActionParser:
     """Parse a Co-pilot response into a clean display text and an isolated action."""
 
@@ -388,6 +478,7 @@ class ActionParser:
             clean = self._extract_prompt_from_json(data)
             if clean:
                 clean = self.sanitize(clean)
+                display_text = clean_explanation_text(display_text, clean)
                 params = self._extract_parameters(clean, data)
                 raw_action = data.get("action")
                 action_type = "build"
@@ -423,12 +514,13 @@ class ActionParser:
                 )
                 if isinstance(prompt, str) and prompt.strip():
                     clean = self.sanitize(prompt)
+                    display_text = clean_explanation_text(self._extract_display_text(data, ""), clean)
                     params = self._extract_parameters(clean, data)
                     action_type = legacy_action.get("type")
                     if not action_type or action_type in ("PROPOSE_BUILD", "SUGGEST_BUILD_PROMPT"):
                         action_type = "build"
                     return {
-                        "display_text": self._extract_display_text(data, ""),
+                        "display_text": display_text,
                         "action": {
                             "type": action_type,
                             "source": "legacy_json",
@@ -454,7 +546,7 @@ class ActionParser:
         if fence:
             clean = self.sanitize(fence.group(1))
             display_text = _BUILD_PROMPT_FENCE_RE.sub("", display_text)
-            display_text = self.sanitize(display_text)
+            display_text = clean_explanation_text(self.sanitize(display_text), clean)
             params = self._extract_parameters(clean, {})
             return {
                 "display_text": display_text,
@@ -473,7 +565,7 @@ class ActionParser:
             if tag:
                 clean = self.sanitize(tag.group(1))
                 display_text = tag_re.sub("", display_text)
-                display_text = self.sanitize(display_text)
+                display_text = clean_explanation_text(self.sanitize(display_text), clean)
                 params = self._extract_parameters(clean, {})
                 return {
                     "display_text": display_text,
@@ -505,7 +597,7 @@ class ActionParser:
                     prompt = str(prompt)
             clean = self.sanitize(prompt) if prompt else self.sanitize(raw_contract)
             display_text = _CODE_FENCE_RE.sub("", display_text)
-            display_text = self.sanitize(display_text)
+            display_text = clean_explanation_text(self.sanitize(display_text), clean)
             params = self._extract_parameters(clean, contract_data if isinstance(contract_data, dict) else {})
             return {
                 "display_text": display_text,
@@ -773,6 +865,7 @@ def parse_copilot_response(response: str) -> Tuple[str, Optional[Dict[str, Any]]
     # New ``build_prompt`` fence format.
     reply, build_prompt = extract_build_prompt(response)
     if build_prompt:
+        reply = clean_explanation_text(reply, build_prompt)
         target = _normalize_target(build_prompt) or _infer_target_from_text(build_prompt)
         action = {
             "type": "SUGGEST_BUILD_PROMPT",
@@ -791,11 +884,12 @@ def parse_copilot_response(response: str) -> Tuple[str, Optional[Dict[str, Any]]
         build_prompt = suggestion["build_prompt"] or ""
         target = _normalize_target(build_prompt) or _infer_target_from_text(build_prompt)
         reply = suggestion["explanation"] or _SUGGEST_JSON_FENCE_RE.sub("", response).strip()
+        reply = clean_explanation_text(reply, build_prompt)
         action = {
             "type": "SUGGEST_BUILD_PROMPT",
             "params": {
                 "prompt": build_prompt,
-                "explanation": suggestion["explanation"],
+                "explanation": reply,
                 "target": target,
                 "acceleration": _normalize_acceleration(build_prompt),
             },
@@ -805,6 +899,7 @@ def parse_copilot_response(response: str) -> Tuple[str, Optional[Dict[str, Any]]
     contract = extract_build_contract(response)
     if contract:
         reply = _CODE_FENCE_RE.sub("\n", response).strip()
+        reply = clean_explanation_text(reply, contract["prompt"])
         action = {
             "type": "PROPOSE_BUILD",
             "params": {
@@ -817,7 +912,10 @@ def parse_copilot_response(response: str) -> Tuple[str, Optional[Dict[str, Any]]
 
     legacy = _maybe_parse_json_object(response)
     if legacy is not None:
-        return legacy
+        reply, action = legacy
+        prompt = action["params"]["prompt"] if action and action.get("params") else ""
+        return clean_explanation_text(reply, prompt), action
 
     action = parse_action_from_text(response)
-    return response.strip(), action
+    prompt = action["params"]["prompt"] if action and action.get("params") else ""
+    return clean_explanation_text(response.strip(), prompt), action
