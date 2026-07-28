@@ -422,7 +422,7 @@
           <button id="new-folder-root" class="icon-btn" title="New folder" aria-label="New folder">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
           </button>
-          <button id="upload-root" class="icon-btn" title="Upload files or zip" aria-label="Upload files or zip">
+          <button id="upload-root" class="icon-btn" title="Upload files, zip, or .aeroc" aria-label="Upload files, zip, or .aeroc">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
           </button>
           <button id="refresh-tree" class="icon-btn" title="Refresh" aria-label="Refresh">
@@ -434,7 +434,7 @@
           <button id="regenerate-blueprint-root" class="icon-btn" title="Regenerate workspace from blueprint" aria-label="Regenerate from blueprint">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.3"/></svg>
           </button>
-          <input id="upload-input" type="file" multiple accept=".zip,.py,.txt,.md,.json,.toml,.yaml,.yml,.sh,.rs,.c,.cpp,.h,.hpp,.cc,.html,.css,.js,.ts" class="sr-only">
+          <input id="upload-input" type="file" multiple accept=".zip,.aeroc,.py,.txt,.md,.json,.toml,.yaml,.yml,.sh,.rs,.c,.cpp,.h,.hpp,.cc,.html,.css,.js,.ts" class="sr-only">
         </div>
       </div>
       <div class="template-bar">
@@ -457,7 +457,7 @@
           &#128260; <strong>Initialize Project from Blueprint</strong><br><small>blueprint.aero detected in workspace</small>
         </div>
         <div id="drop-zone" class="drop-zone">
-          Drop files or a .zip here, or click to upload
+          Drop files, a .zip, or a .aeroc here, or click to upload
         </div>
         <div class="download-control" style="display:flex;flex-direction:column;gap:0.4rem;position:relative;z-index:20;">
           <button id="download-aeroc-btn" class="secondary" title="Download compiled binary IR container">⬇️ Binary IR (.aeroc)</button>
@@ -1867,14 +1867,24 @@
       log(`Uploading ${files.length} item(s) to ${dest}...`);
       let sessionId = state.sessionId;
       let zipUploaded = false;
+      let aerocUploaded = false;
       let zipMessage = '';
+      let aerocMessage = '';
       for (const file of files) {
-        if (file.name.toLowerCase().endsWith('.zip')) {
+        const lower = file.name.toLowerCase();
+        if (lower.endsWith('.zip')) {
           try {
             const data = await api('POST', `/api/upload-zip?session_id=${encodeURIComponent(sessionId)}&target_path=${encodeURIComponent(targetPath)}`, await file.arrayBuffer(), 'application/zip');
             sessionId = data.session_id;
             zipUploaded = true;
             if (data.message) zipMessage = data.message;
+          } catch (e) { log(`Upload failed for ${file.name}: ${e.message}`, 'error'); continue; }
+        } else if (lower.endsWith('.aeroc')) {
+          try {
+            const data = await api('POST', `/api/upload-aeroc?session_id=${encodeURIComponent(sessionId)}&target_path=${encodeURIComponent(targetPath)}`, await file.arrayBuffer(), 'application/octet-stream');
+            sessionId = data.session_id;
+            aerocUploaded = true;
+            if (data.message) aerocMessage = data.message;
           } catch (e) { log(`Upload failed for ${file.name}: ${e.message}`, 'error'); continue; }
         } else {
           let text;
@@ -1889,7 +1899,9 @@
       state.sessionId = sessionId;
       try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
       ui.settingSession.value = state.sessionId;
-      if (zipUploaded) {
+      if (aerocUploaded) {
+        log(aerocMessage || 'Aeroc extracted and build pipeline triggered', 'info');
+      } else if (zipUploaded) {
         log(zipMessage || 'ZIP extracted & normalized to blueprint.aero', 'info');
       } else {
         log('Upload complete', 'success');

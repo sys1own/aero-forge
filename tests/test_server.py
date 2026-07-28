@@ -6,12 +6,15 @@ import json
 import socket
 import threading
 import zipfile
+from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import pytest
 import websockets
 
+from aero_forge.builder.aeroc_compiler import compile_directory_to_aeroc
+from aero_forge.chat import set_session_blueprint_metadata
 from aero_forge.sandbox.manager import SandboxManager
 from aero_forge.server import _resolve_port, make_server
 
@@ -949,3 +952,64 @@ def test_api_save_file_blueprint_reports_user_drop_metadata(server):
     files_data = json.loads(body.decode("utf-8"))
     assert files_data["blueprint_source"] == "user_drop"
     assert files_data["auto_initialized"] is False
+
+
+def test_api_upload_aeroc_extracts_and_builds(server, tmp_path):
+    """POST /api/upload-aeroc unpacks a binary IR container and triggers the build pipeline."""
+    (tmp_path / "main.py").write_text('print("hello aero")\n', encoding="utf-8")
+    aeroc_path = tmp_path / "workspace.aeroc"
+    compile_directory_to_aeroc(tmp_path, aeroc_path)
+    aeroc_bytes = aeroc_path.read_bytes()
+
+    session_id = "test-session-aeroc-upload"
+    status, body = _post_bytes(
+        server + f"/api/upload-aeroc?session_id={session_id}",
+        aeroc_bytes,
+        content_type="application/octet-stream",
+    )
+    assert status == 200
+    data = json.loads(body.decode("utf-8"))
+    assert data["status"] == "uploaded"
+    assert data["build"]["success"] is True
+
+    status, body = _get(server + f"/api/files?session_id={session_id}")
+    assert status == 200
+    files_data = json.loads(body.decode("utf-8"))
+    paths = {node["path"] for node in files_data["tree"]["children"]}
+    assert "main.py" in paths
+    assert "workspace.aeroc" not in paths
+
+
+def test_api_download_aeroc_blocked_during_synthesis(server):
+    """download-aeroc returns 409 while LLM materialization is active."""
+    session_id = "test-session-aeroc-guardrail"
+    set_session_blueprint_metadata(session_id, is_synthesizing=True)
+
+    status, body = _post_bytes(
+        server + "/api/workspace/download-aeroc",
+        json.dumps({"session_id": session_id}).encode("utf-8"),
+        content_type="application/json",
+    )
+    data = json.loads(body.decode("utf-8"))
+    assert status == 409
+    assert "materialization" in data["error"].lower()
+
+
+def test_api_download_aeroc_fails_on_broken_workspace(server, monkeypatch):
+    """download-aeroc returns 422 when the workspace cannot be compiled."""
+    session_id = "test-session-aeroc-broken"
+
+    def _failing_compile(workspace: Path, output_path: Path) -> None:
+        raise RuntimeError("simulated compile failure")
+
+    import aero_forge.server as server_module
+    monkeypatch.setattr(server_module, "_compile_workspace_aeroc", _failing_compile)
+
+    status, body = _post_bytes(
+        server + "/api/workspace/download-aeroc",
+        json.dumps({"session_id": session_id}).encode("utf-8"),
+        content_type="application/json",
+    )
+    data = json.loads(body.decode("utf-8"))
+    assert status == 422
+    assert "compilation" in data["error"].lower() or "validation" in data["error"].lower()

@@ -262,26 +262,29 @@ def _session_path(session_id: str) -> Path:
 
 
 def get_session_metadata(session_id: str) -> Dict[str, Any]:
-    """Return blueprint provenance metadata for a session."""
+    """Return blueprint provenance and runtime metadata for a session."""
     path = _session_path(session_id)
     if not path.exists():
-        return {"blueprint_source": "unknown", "auto_initialized": False}
+        return {"blueprint_source": "unknown", "auto_initialized": False, "is_building": False, "is_synthesizing": False}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return {"blueprint_source": "unknown", "auto_initialized": False}
-    return {
-        "blueprint_source": data.get("blueprint_source", "unknown"),
-        "auto_initialized": data.get("auto_initialized", False),
-    }
+        return {"blueprint_source": "unknown", "auto_initialized": False, "is_building": False, "is_synthesizing": False}
+    data.setdefault("blueprint_source", "unknown")
+    data.setdefault("auto_initialized", False)
+    data.setdefault("is_building", False)
+    data.setdefault("is_synthesizing", False)
+    return data
 
 
 def set_session_blueprint_metadata(
     session_id: str,
     source: Optional[str] = None,
     auto_initialized: Optional[bool] = None,
+    is_building: Optional[bool] = None,
+    is_synthesizing: Optional[bool] = None,
 ) -> None:
-    """Update blueprint provenance metadata for a session."""
+    """Update blueprint provenance and runtime metadata for a session."""
     path = _session_path(session_id)
     data: Dict[str, Any] = {}
     if path.exists():
@@ -293,6 +296,10 @@ def set_session_blueprint_metadata(
         data["blueprint_source"] = source
     if auto_initialized is not None:
         data["auto_initialized"] = auto_initialized
+    if is_building is not None:
+        data["is_building"] = is_building
+    if is_synthesizing is not None:
+        data["is_synthesizing"] = is_synthesizing
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")

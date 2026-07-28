@@ -57,10 +57,12 @@ from aero_forge.healing.orchestrator import HealingOrchestrator
 from aero_forge.healing.router import try_auto_fix
 from aero_forge.healing.structural_merger import apply_overlay, MergeConflictError
 from aero_forge.orchestrator.router import toolchains_for_intent
+from aero_forge._native import run_aeroc
 from aero_forge.builder.aeroc_compiler import (
     compile_blueprint_to_aeroc,
     compile_directory_to_aeroc,
 )
+from aero_forge.materializer import unpack_aeroc_file
 from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_CPP_PYTHON,
     INTENT_HYBRID_CPP_RUST,
@@ -238,6 +240,7 @@ async def _handle_build_async(request: web.Request) -> web.Response:
 
     session_id = body.get("session_id") or str(uuid.uuid4())
     session_dir = _session_dir(session_id)
+    set_session_blueprint_metadata(session_id, is_building=True)
     variants = 3 if body.get("variants") else 1
     target_language = body.get("target_language", "auto")
     acceleration_policy = body.get("acceleration_policy", "selective")
@@ -330,6 +333,7 @@ async def _handle_build_async(request: web.Request) -> web.Response:
             await heartbeat_task
         except asyncio.CancelledError:
             pass
+        set_session_blueprint_metadata(session_id, is_building=False)
 
 
 def _send_json(handler: BaseHTTPRequestHandler, status: int, data: Any) -> None:
@@ -463,6 +467,8 @@ def _is_interesting_file(rel: Path) -> bool:
         return False
     if name == "Cargo.lock":
         return False
+    if name.endswith(".aeroc") or name.endswith(".aerozip"):
+        return False
     if parts[0] == "dist":
         return True
     ext = rel.suffix.lower()
@@ -485,6 +491,29 @@ def _is_binary_file(path: Path) -> bool:
     if ext:
         return False
     return sample and not all(32 <= b < 127 or b in (9, 10, 13) for b in sample)
+
+
+def _compile_workspace_aeroc(workspace: Path, output_path: Path) -> None:
+    """Compile a workspace tree into a ``workspace.aeroc`` binary IR container."""
+    blueprint_path = workspace / "blueprint.aero"
+    if blueprint_path.is_file():
+        try:
+            data = yaml.safe_load(blueprint_path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            data = {}
+        if str(data.get("metadata", {}).get("schema_version")) == "3.0.0":
+            blueprint = BlueprintV3.load(blueprint_path)
+            compile_blueprint_to_aeroc(blueprint, output_path, workspace=workspace)
+            return
+    compile_directory_to_aeroc(workspace, output_path)
+
+
+def _run_workspace_build(session_id: str, workspace: Path, jobs: int = 4) -> Dict[str, Any]:
+    """Compile the workspace to ``workspace.aeroc`` and execute it with the native daemon."""
+    aeroc_path = workspace / "workspace.aeroc"
+    _compile_workspace_aeroc(workspace, aeroc_path)
+    run_aeroc(str(aeroc_path), str(workspace), jobs)
+    return {"success": True, "aeroc": str(aeroc_path)}
 
 
 def _build_tree(directory: Path, rel: Optional[Path] = None) -> Dict[str, Any]:
@@ -644,6 +673,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_blueprint_synthesize()
             if path == "/api/upload-zip":
                 return self._handle_upload_zip()
+            if path == "/api/upload-aeroc":
+                return self._handle_upload_aeroc()
             if path == "/api/files/upload":
                 return self._handle_files_upload()
             if path == "/api/save-file":
@@ -713,6 +744,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
 
             session_id = body.get("session_id") or str(uuid.uuid4())
             session_dir = _session_dir(session_id)
+            set_session_blueprint_metadata(session_id, is_building=True)
 
             variants = 3 if body.get("variants") else 1
             target_language = body.get("target_language", "auto")
@@ -778,6 +810,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     {"build": {"success": False, "error": str(exc)}},
                 ),
             )
+        finally:
+            set_session_blueprint_metadata(session_id, is_building=False)
 
     def _handle_aeroc_exec(self) -> None:
         """Execute a workspace.aeroc container (or compile blueprint.aero first) with the native daemon."""
@@ -862,6 +896,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
         self,
         workspace: Path,
         config: ConfigOverride,
+        session_id: Optional[str] = None,
     ) -> bool:
         """Run LLM blueprint synthesis when the workspace blueprint is still raw."""
         blueprint_path = workspace / "blueprint.aero"
@@ -876,6 +911,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
         if bp.llm_context.state != "raw":
             return False
 
+        if session_id:
+            set_session_blueprint_metadata(session_id, is_synthesizing=True)
         try:
             provider = config.llm_provider or _resolve_llm_provider({})
             synthesizer = LLMBlueprintSynthesizer(
@@ -890,6 +927,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             logger.warning("JIT blueprint synthesis failed for %s: %s", workspace, exc)
             return False
+        finally:
+            if session_id:
+                set_session_blueprint_metadata(session_id, is_synthesizing=False)
 
     def _handle_chat(self) -> None:
         try:
@@ -923,7 +963,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
 
             # If the workspace blueprint has not been synthesized yet, run the
             # LLM synthesis pipeline before building the copilot context.
-            self._synthesize_if_raw(workspace_dir, config)
+            self._synthesize_if_raw(workspace_dir, config, session_id=session_id)
 
             chat = ChatSession(
                 workspace_dir,
@@ -1008,6 +1048,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             body = _parse_json_body(self)
             session_id = body.get("session_id") or str(uuid.uuid4())
             session_dir = _session_dir(session_id)
+            set_session_blueprint_metadata(session_id, is_synthesizing=True)
             workspace_dir = body.get("workspace_dir")
             if workspace_dir:
                 workspace_arg = Path(workspace_dir)
@@ -1055,6 +1096,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             logger.exception("Blueprint synthesize endpoint failed")
             return _send_json(self, 500, {"status": "failed", "error": str(exc)})
+        finally:
+            set_session_blueprint_metadata(session_id, is_synthesizing=False)
 
     def _handle_blueprint_status(self, query: Dict[str, List[str]]) -> None:
         session_id = _first(query, "session_id")
@@ -1248,6 +1291,81 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             return _send_json(self, 400, {"error": str(exc)})
         except Exception as exc:  # pragma: no cover
             logger.exception("Upload endpoint failed")
+            return _send_json(self, 500, {"error": str(exc)})
+
+    def _handle_upload_aeroc(self) -> None:
+        """Accept a raw ``workspace.aeroc`` binary IR upload, unpack it, and build."""
+        try:
+            body = _read_body(self)
+            if not body:
+                return _send_json(self, 400, {"error": "Empty body"})
+
+            content_type = self.headers.get("Content-Type", "")
+            if "multipart/form-data" in content_type:
+                match = re.search(r'boundary=([^;\s]+)', content_type)
+                if not match:
+                    return _send_json(self, 400, {"error": "Missing multipart boundary"})
+                boundary = match.group(1).encode("utf-8")
+                aeroc_bytes = _parse_multipart(body, boundary)
+                if aeroc_bytes is None:
+                    return _send_json(self, 400, {"error": "No file found in multipart body"})
+            else:
+                aeroc_bytes = body
+
+            if len(aeroc_bytes) < 8 or aeroc_bytes[:8] != b"AEROFOG\0":
+                return _send_json(self, 400, {"error": "Invalid .aeroc file: missing AEROFOG magic"})
+
+            parsed = urlparse(self.path)
+            query = parse_qs(parsed.query)
+            session_id = _first(query, "session_id") or str(uuid.uuid4())
+            target_path = (_first(query, "target_path") or "").strip()
+            jobs = int(_first(query, "jobs") or "4")
+            session_dir = _session_dir(session_id)
+
+            if target_path:
+                if any(part == ".." for part in Path(target_path).parts):
+                    return _send_json(self, 400, {"error": "Invalid target_path"})
+                target_dir = session_dir / target_path
+            else:
+                target_dir = session_dir
+            target_dir.mkdir(parents=True, exist_ok=True)
+
+            aeroc_path = target_dir / "workspace.aeroc"
+            aeroc_path.write_bytes(aeroc_bytes)
+
+            try:
+                unpack_aeroc_file(str(aeroc_path), str(target_dir))
+            except Exception as exc:
+                return _send_json(self, 400, {"error": f"Could not unpack .aeroc: {exc}"})
+            finally:
+                try:
+                    aeroc_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+            build_result: Dict[str, Any] = {"success": True}
+            try:
+                build_result = _run_workspace_build(session_id, target_dir, jobs=jobs)
+            except Exception as exc:
+                build_result = {"success": False, "error": str(exc)}
+                logger.warning("Auto-build after .aeroc upload failed: %s", exc)
+
+            _notify_tree_changed(session_id)
+            return _send_json(
+                self,
+                200,
+                {
+                    "session_id": session_id,
+                    "status": "uploaded",
+                    "build": build_result,
+                    "files": _build_tree(session_dir),
+                    "message": "Aeroc extracted and build pipeline triggered",
+                },
+            )
+        except ValueError as exc:
+            return _send_json(self, 400, {"error": str(exc)})
+        except Exception as exc:  # pragma: no cover
+            logger.exception("Aeroc upload endpoint failed")
             return _send_json(self, 500, {"error": str(exc)})
 
     def _handle_create_node(self) -> None:
@@ -1738,7 +1856,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
         """Serve the compiled binary IR container ``workspace.aeroc`` directly.
 
         If the container does not exist, compile it from ``blueprint.aero``,
-        ``blueprint.py``, or the entire workspace tree.
+        ``blueprint.py``, or the entire workspace tree. Build/materialization
+        in progress or compilation failures block the export.
         """
         try:
             body = _parse_json_body(self)
@@ -1755,18 +1874,24 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     {"error": f"Sandbox for session '{session_id}' does not exist"},
                 )
 
+            metadata = get_session_metadata(session_id)
+            if metadata.get("is_building") or metadata.get("is_synthesizing"):
+                return _send_json(
+                    self,
+                    409,
+                    {"error": "Workspace build or LLM materialization is in progress; cannot export .aeroc now."},
+                )
+
             aeroc_path = session_dir / "workspace.aeroc"
-            if not aeroc_path.is_file():
-                blueprint_path = session_dir / "blueprint.aero"
-                if blueprint_path.is_file():
-                    data = yaml.safe_load(blueprint_path.read_text(encoding="utf-8")) or {}
-                    if str(data.get("metadata", {}).get("schema_version")) == "3.0.0":
-                        blueprint = BlueprintV3.load(blueprint_path)
-                        compile_blueprint_to_aeroc(blueprint, aeroc_path, workspace=session_dir)
-                    else:
-                        compile_directory_to_aeroc(session_dir, aeroc_path)
-                else:
-                    compile_directory_to_aeroc(session_dir, aeroc_path)
+            try:
+                _compile_workspace_aeroc(session_dir, aeroc_path)
+            except Exception as exc:
+                logger.exception("download-aeroc compilation failed")
+                return _send_json(
+                    self,
+                    422,
+                    {"error": f"Workspace failed compilation/validation: {exc}"},
+                )
 
             if not aeroc_path.is_file():
                 return _send_json(self, 404, {"error": "workspace.aeroc not found"})
