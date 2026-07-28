@@ -25,10 +25,21 @@ def _make_zip(root: Path) -> bytes:
 class _FakeLLMClient:
     """Deterministic LLM client that emits a valid finalized v3 blueprint."""
 
-    def __init__(self, project_name: str = "synthesized_project") -> None:
+    def __init__(self, project_name: str = "synthesized_project", omit_node_id: bool = False) -> None:
         self.project_name = project_name
+        self.omit_node_id = omit_node_id
 
     def generate(self, prompt: str, **kwargs: Any) -> str:
+        node: Dict[str, Any] = {
+            "command": "python3 main.py",
+            "expected_exit_code": 0,
+            "stdout_match_patterns": ["Hello"],
+            "stderr_prohibited_patterns": ["error"],
+            "metrics": [],
+            "timeout": 30.0,
+        }
+        if not self.omit_node_id:
+            node["node_id"] = "smoke"
         blueprint: Dict[str, Any] = {
             "metadata": {
                 "schema_version": "3.0.0",
@@ -61,17 +72,7 @@ class _FakeLLMClient:
                 "working_dir": "${WORKSPACE_ROOT}",
                 "timeout": 30.0,
             },
-            "verification_nodes": [
-                {
-                    "node_id": "smoke",
-                    "command": "python3 main.py",
-                    "expected_exit_code": 0,
-                    "stdout_match_patterns": ["Hello"],
-                    "stderr_prohibited_patterns": ["error"],
-                    "metrics": [],
-                    "timeout": 30.0,
-                }
-            ],
+            "verification_nodes": [node],
         }
         import json
         return json.dumps(blueprint)
@@ -138,6 +139,28 @@ def test_synthesize_upgrades_draft_to_finalized(tmp_path: Path, monkeypatch: Any
     assert finalized.metadata.generation_method == "llm_synthesized"
     assert finalized.metadata.transferable is True
     BlueprintV3Validator(finalized.model_dump(mode="json"), workspace=workspace).check_exportable()
+
+
+def test_synthesize_fills_missing_verification_node_id(tmp_path: Path, monkeypatch: Any) -> None:
+    """LLM synthesis that omits verification node_id should still produce a valid BlueprintV3."""
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("print('Hello')\n", encoding="utf-8")
+
+    import aero_forge.llm.clients as clients
+    monkeypatch.setattr(clients, "get_llm_client", lambda provider, model=None: _FakeLLMClient(omit_node_id=True))
+
+    synthesizer = LLMBlueprintSynthesizer(provider="fake")
+    synthesizer._client = lambda: _FakeLLMClient(omit_node_id=True)
+    finalized = synthesizer.synthesize(workspace)
+
+    assert finalized.metadata.status == "finalized"
+    assert len(finalized.verification_nodes) == 1
+    assert finalized.verification_nodes[0].node_id.startswith("node_")
+    assert finalized.verification_nodes[0].command == "python3 main.py"
+    BlueprintV3Validator(
+        finalized.model_dump(mode="json"), workspace=workspace
+    ).check_exportable()
 
 
 def test_synthesized_v3_executes_deterministically(tmp_path: Path, monkeypatch: Any) -> None:

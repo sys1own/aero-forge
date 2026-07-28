@@ -12,7 +12,7 @@ from aero_forge.blueprint import (
     InvalidBlueprintError,
     write_v3_blueprint,
 )
-from aero_forge.blueprint.schema import ArtifactType, BuildArtifact, Metadata
+from aero_forge.blueprint.schema import ArtifactType, BuildArtifact, Metadata, VerificationNode
 
 
 def test_v3_schema_validates_complete_polyglot_dag(tmp_path: Path) -> None:
@@ -192,3 +192,21 @@ def test_v3_dag_order_respects_dependencies(tmp_path: Path) -> None:
     )
     order = blueprint._artifact_order()
     assert order.index("lib") < order.index("app")
+
+
+def test_v3_verification_node_defaults_node_id():
+    """A missing node_id on a verification node should be auto-generated, not raise."""
+    node = VerificationNode(command="python3 -m pytest")
+    assert node.node_id.startswith("node_")
+    assert len(node.node_id) == 13  # "node_" + 8 hex chars
+
+
+def test_v3_blueprint_accepts_missing_verification_node_id():
+    """BlueprintV3 should validate when verification_nodes omit node_id."""
+    blueprint = BlueprintV3(
+        verification_nodes=[
+            {"command": "python3 -m pytest"},
+        ]
+    )
+    assert len(blueprint.verification_nodes) == 1
+    assert blueprint.verification_nodes[0].node_id.startswith("node_")

@@ -296,7 +296,7 @@ Your response MUST be a single JSON object matching the BlueprintV3 Pydantic sch
 - build_pipeline: a DAG of artifacts. Each artifact has id, type (one of: shared_library, static_library, binary, cargo_cdylib, python_extension, custom_cmd), source_files (workspace-relative paths), output_path (workspace-relative), compiler_flags, linker_flags, dependencies (artifact ids that must be built first), and commands for custom_cmd artifacts.
 - abi_contracts: cross-language symbol contracts with binding_framework (ctypes, c_abi, cffi, pyo3, cxx), memory_model (caller_allocates, callee_allocates, shared_pyo3), inputs/outputs as name/type pairs.
 - execution_strategy: primary_entrypoint (workspace-relative path), runtime (e.g. python3, cargo, node, ./binary), args, env map using ${WORKSPACE_ROOT} placeholders, working_dir using ${WORKSPACE_ROOT}, timeout in seconds.
-- verification_nodes: list of integration tests with command, expected_exit_code, stdout_match_patterns, stderr_prohibited_patterns.
+- verification_nodes: list of integration tests. Each node MUST include a unique string node_id, plus command, expected_exit_code, stdout_match_patterns, and stderr_prohibited_patterns. Example: {{"node_id": "test_suite_v1", "command": "python3 -m pytest", "expected_exit_code": 0, "stdout_match_patterns": [], "stderr_prohibited_patterns": []}}.
 - llm_context: object with:
   - state: "synthesized"
   - repository_summary: a concise 1-3 sentence semantic summary of the project's purpose and architecture.

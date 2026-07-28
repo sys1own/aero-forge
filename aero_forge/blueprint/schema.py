@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import uuid
 from collections import defaultdict
 from enum import Enum
 from pathlib import Path
@@ -141,8 +142,12 @@ class VerificationMetric(BaseModel):
     tolerance: float = 1e-9
 
 
+def _default_node_id() -> str:
+    return f"node_{uuid.uuid4().hex[:8]}"
+
+
 class VerificationNode(BaseModel):
-    node_id: str
+    node_id: str = Field(default_factory=_default_node_id)
     command: str = ""
     expected_exit_code: int = 0
     stdout_match_patterns: List[str] = Field(default_factory=list)
