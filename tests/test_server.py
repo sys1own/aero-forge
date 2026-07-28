@@ -469,8 +469,8 @@ def test_api_chat_returns_structured_reply_and_action(server, monkeypatch):
     assert status == 200
     assert data["status"] == "success"
     assert data["reply"] == "Use a Rust core."
-    assert data["action"]["type"] == "PROPOSE_BUILD"
-    assert data["action"]["params"]["target"] == "hybrid_cpp_rust"
+    assert data["action"]["type"] == "build"
+    assert data["action"]["parameters"]["target"] == "hybrid_cpp_rust"
     assert "messages" in data
 
 
@@ -511,7 +511,8 @@ def test_api_chat_does_not_dispatch_build_commands(server, monkeypatch):
     assert calls["handle_command"] == 0
     assert calls["reply_structured"] == 1
     assert data["reply"] == "I'll design a high-performance module for you."
-    assert data["action"]["type"] == "PROPOSE_BUILD"
+    assert data["action"]["type"] == "build"
+    assert data["action"]["clean_prompt"]
 
 
 def test_api_chat_returns_suggest_build_prompt_shape(server, monkeypatch):
@@ -553,7 +554,9 @@ def test_api_chat_returns_suggest_build_prompt_shape(server, monkeypatch):
     assert data["has_suggestion"] is True
     assert data["build_prompt"] == "Build a hybrid_rust_python project with a Rust `matmul` kernel and PyO3 wrapper."
     assert "raw" in data
-    assert data["action"]["type"] == "SUGGEST_BUILD_PROMPT"
+    assert data["action"]["type"] == "build"
+    assert "hybrid_rust_python" in data["action"]["clean_prompt"]
+    assert data["action"]["parameters"]["target"] == "hybrid_rust_python"
     # New clean-separated prompt designer fields.
     assert data["has_prompt"] is True
     assert data["suggested_build_prompt"] == data["build_prompt"]

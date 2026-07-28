@@ -27,8 +27,12 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from aero_forge.build_summary import format_build_summary
 from aero_forge.bundle_repo import bundle_to_xml, bundle_workspace, format_context_block
 from aero_forge.config import ConfigOverride, Tier
-from aero_forge.copilot.action_parser import parse_action_from_text
-from aero_forge.copilot.agent import format_copilot_response
+from aero_forge.copilot.action_parser import ActionParser, _has_build_intent, parse_action_from_text
+from aero_forge.copilot.agent import (
+    _has_markdown_heading,
+    _legacy_action_type,
+    format_copilot_response,
+)
 from aero_forge.prompts import AERO_FORGE_COPILOT_SYSTEM_PROMPT
 from aero_forge.error_explainer import explain_error
 from aero_forge.healing.router import try_auto_fix
@@ -813,50 +817,76 @@ class ChatSession:
                 response = ""
 
         if not response:
-            fallback_action = parse_action_from_text(text)
-            fallback_prompt = None
-            if fallback_action and fallback_action.get("params"):
-                fallback_prompt = fallback_action["params"].get("prompt")
-            fallback = {
-                "reply": "I didn't receive a response from the language model. Please check your provider/API key and try rephrasing.",
-                "action": fallback_action,
-                "explanation": "I didn't receive a response from the language model.",
-                "has_suggestion": bool(fallback_action),
-                "build_prompt": fallback_prompt,
-                "raw": "",
-            }
+            fallback_action = self._fallback_build_action(text) if _has_build_intent(text) else None
+            fallback = self._build_result(
+                "I didn't receive a response from the language model. Please check your provider/API key and try rephrasing.",
+                action=fallback_action,
+                raw="",
+            )
             self.messages.append({"role": "assistant", "content": json.dumps(fallback)})
             self._save_session()
             return fallback
 
-        reply, action = self._parse_chat_response(response, text)
-        self.messages.append({"role": "assistant", "content": reply or response})
+        parsed = ActionParser().parse(response)
+        display_text = parsed.get("display_text", "")
+        action = parsed.get("action")
+
+        # If the model returned nothing at all, recover a build action from the user text.
+        if not response.strip() and not action and _has_build_intent(text):
+            action = self._fallback_build_action(text)
+
+        result = self._build_result(display_text or response.strip(), action=action, raw=response)
+        self.messages.append({"role": "assistant", "content": result["display_text"] or response})
         self._save_session()
-        build_prompt = None
-        if action and action.get("params"):
-            build_prompt = action["params"].get("prompt") or action["params"].get("build_prompt")
+        return result
+
+    def _build_result(self, display_text: str, action: Optional[Dict[str, Any]], raw: str) -> Dict[str, Any]:
+        """Build a structured chat result compatible with both old and new UI fields."""
+        clean_prompt = action.get("clean_prompt") if action else None
+        parameters = action.get("parameters") if action else {}
+        legacy_action = None
+        if action:
+            legacy_action = {
+                "type": _legacy_action_type(action),
+                "params": {
+                    "prompt": clean_prompt,
+                    "target": parameters.get("target", "pure_python"),
+                    "acceleration": parameters.get("acceleration", "Selective Acceleration (Auto-Detect Heavy Compute)"),
+                    "parameters": parameters,
+                },
+            }
+        # Wrap a heading around the conversational text when an action is attached
+        # and the model did not supply one, but never hide a plain informational reply.
+        if action and display_text and not _has_markdown_heading(display_text):
+            display_text = "### Architecture Overview\n\n" + display_text
+
         return {
-            "reply": reply,
-            "action": action,
-            "explanation": reply or "",
+            "type": "chat_message",
+            "display_text": display_text,
+            "reply": display_text,
+            "message": display_text,
+            "action": legacy_action,
+            "clean_action": action,
+            "explanation": display_text,
             "has_suggestion": bool(action),
-            "build_prompt": build_prompt,
-            "raw": response,
+            "has_prompt": bool(clean_prompt),
+            "build_prompt": clean_prompt,
+            "suggested_build_prompt": clean_prompt,
+            "clean_prompt": clean_prompt,
+            "parameters": parameters,
+            "raw": raw,
         }
 
-    def _parse_chat_response(
-        self, response: str, user_text: str
-    ) -> Tuple[str, Optional[Dict[str, Any]]]:
-        """Extract a Markdown reply and optional action from an LLM response.
-
-        Uses the centralized copilot response formatter which guarantees
-        Markdown output with an optional YAML build contract, and converts
-        any raw JSON fallback into a human-readable Markdown explanation.
-        """
-        reply, action = format_copilot_response(response)
-        if not action:
-            action = parse_action_from_text(reply or user_text)
-        return reply or response.strip(), action
+    def _fallback_build_action(self, text: str) -> Dict[str, Any]:
+        """Create a sanitized build action from plain user text when the LLM fails."""
+        parsed = ActionParser().parse(text)
+        return parsed.get("action") or {
+            "type": "build",
+            "source": "plain_text",
+            "clean_prompt": text.strip(),
+            "parameters": {"target": "pure_python", "acceleration": "Selective Acceleration (Auto-Detect Heavy Compute)"},
+            "blueprint": None,
+        }
 
     def handle_command(self, text: str) -> Optional[Dict[str, Any]]:
         """Detect action verbs and optionally execute a build/optimize step."""

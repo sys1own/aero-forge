@@ -1,8 +1,7 @@
 """Co-pilot response post-processor.
 
 Guarantees that every Co-pilot reply sent to the UI is human-readable
-Markdown with an optional YAML build contract, even when the underlying
-model emits raw JSON.
+Markdown with an isolated, sanitized action payload.
 """
 
 from __future__ import annotations
@@ -12,17 +11,88 @@ import logging
 import re
 from typing import Any, Dict, Optional, Tuple
 
-import yaml
-
 from aero_forge.copilot.action_parser import (
+    ActionParser,
     _infer_target_from_text,
     _normalize_acceleration,
     _normalize_target,
-    parse_action_from_text,
-    parse_copilot_response,
 )
 
 logger = logging.getLogger("aero_forge.copilot.agent")
+
+
+def _legacy_action_type(action: Dict[str, Any]) -> str:
+    """Map the canonical ActionParser type to the legacy UI action type."""
+    new_type = action.get("type", "build")
+    source = action.get("source", "")
+    if action.get("contract") or source in ("blueprint_contract", "legacy_json", "plain_text") or new_type in ("apply_blueprint", "PROPOSE_BUILD"):
+        return "PROPOSE_BUILD"
+    if new_type == "suggest_build_prompt" or source in ("build_prompt_fence", "xml_tag", "structured_json"):
+        return "SUGGEST_BUILD_PROMPT"
+    return "SUGGEST_BUILD_PROMPT"
+
+
+def _to_legacy_action(parsed: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Convert an ActionParser result to the historical action shape used by the UI."""
+    action = parsed.get("action")
+    if not action:
+        return None
+
+    params = action.get("parameters") or {}
+    clean = action.get("clean_prompt", "")
+    return {
+        "type": _legacy_action_type(action),
+        "params": {
+            "prompt": clean,
+            "target": params.get("target") or _normalize_target(clean) or _infer_target_from_text(clean),
+            "acceleration": params.get("acceleration") or _normalize_acceleration(clean),
+            "explanation": parsed.get("display_text", ""),
+            "parameters": params,
+        },
+    }
+
+
+def _has_markdown_heading(text: str) -> bool:
+    """Return True if the text already contains a Markdown heading."""
+    return bool(re.search(r"^#{1,4} ", text, re.MULTILINE))
+
+
+def format_copilot_response(response: str) -> Tuple[str, Optional[Dict[str, Any]]]:
+    """Return a Markdown-formatted reply and an optional action.
+
+    The action payload is isolated, meta-preamble-free, and never wrapped in a
+    YAML/JSON code block inside the Markdown reply.
+    """
+    if not response or not response.strip():
+        return "", None
+
+    parsed = ActionParser().parse(response)
+    display_text = parsed.get("display_text", "")
+    legacy_action = _to_legacy_action(parsed)
+
+    # If the model returned raw JSON without a human display_text, pretty-print it
+    # for the chat timeline but do not expose it as an action.
+    if not display_text and _looks_like_json(response):
+        try:
+            data = json.loads(response.strip())
+            display_text = "### Response\n```json\n" + json.dumps(data, indent=2) + "\n```"
+        except json.JSONDecodeError:
+            display_text = response.strip()
+
+    if legacy_action:
+        # Avoid duplicating the executable prompt in the chat bubble.
+        if not display_text or display_text.strip() == legacy_action["params"]["prompt"].strip():
+            target = legacy_action["params"]["target"]
+            target_label = target.replace("_", " ").title()
+            display_text = f"### Architecture Overview\n\nI propose a **{target_label}** build. Use the Action Card to edit or trigger it."
+
+    if not _has_markdown_heading(display_text) and display_text:
+        display_text = "### Architecture Overview\n\n" + display_text
+
+    if not display_text:
+        display_text = parsed.get("display_text", response.strip())
+
+    return display_text.strip(), legacy_action
 
 
 def _looks_like_json(text: str) -> bool:
@@ -31,189 +101,3 @@ def _looks_like_json(text: str) -> bool:
         return False
     stripped = text.strip()
     return stripped.startswith(("{", "["))
-
-
-def _extract_action_from_json(data: Any) -> Optional[Dict[str, Any]]:
-    """Build an action from a parsed JSON payload (legacy or new suggest_build_prompt)."""
-    if not isinstance(data, dict):
-        return None
-
-    # New structured action-card format.
-    if data.get("action") == "suggest_build_prompt" or "build_prompt" in data:
-        build_prompt = str(data.get("build_prompt") or "").strip()
-        if build_prompt:
-            return {
-                "type": "SUGGEST_BUILD_PROMPT",
-                "params": {
-                    "prompt": build_prompt,
-                    "explanation": str(data.get("explanation") or "").strip(),
-                    "target": _normalize_target(build_prompt) or _infer_target_from_text(build_prompt),
-                    "acceleration": _normalize_acceleration(build_prompt),
-                },
-            }
-
-    action_data = data.get("action")
-    if not action_data or not isinstance(action_data, dict):
-        return None
-
-    params = action_data.get("params") or {}
-    prompt = (
-        params.get("prompt")
-        or data.get("reply")
-        or data.get("build_prompt")
-    )
-    target = _normalize_target(
-        params.get("target")
-        or params.get("architecture")
-        or data.get("target")
-        or data.get("architecture")
-    )
-    if not prompt or not target:
-        return None
-
-    return {
-        "type": "PROPOSE_BUILD",
-        "params": {
-            "prompt": str(prompt).strip(),
-            "target": target,
-            "acceleration": _normalize_acceleration(params.get("acceleration")),
-        },
-    }
-
-
-def _build_yaml_contract(action: Dict[str, Any]) -> str:
-    """Render a YAML blueprint contract from a PROPOSE_BUILD action."""
-    params = action.get("params") or {}
-    contract = {
-        "prompt": str(params.get("prompt", "")).strip(),
-        "target": params.get("target", "pure_python"),
-        "acceleration": params.get(
-            "acceleration", "Selective Acceleration (Auto-Detect Heavy Compute)"
-        ),
-    }
-    return yaml.safe_dump(contract, sort_keys=False, default_flow_style=False).strip()
-
-
-def _markdown_reply_from_action(action: Dict[str, Any], fallback_text: str = "") -> str:
-    """Generate a Markdown explanation from a build action."""
-    params = action.get("params") or {}
-    target = params.get("target", "pure_python")
-    prompt = str(params.get("prompt", fallback_text)).strip()
-    explanation = str(params.get("explanation", "")).strip()
-
-    target_label = target.replace("_", " ").title()
-    lines = [
-        "### Architecture Overview",
-    ]
-    if explanation:
-        lines.append(explanation)
-    else:
-        lines.append(f"I propose a **{target_label}** build for this request.")
-
-    # The new SUGGEST_BUILD_PROMPT action renders the exact prompt in a UI
-    # action card; avoid duplicating it as a YAML contract in the reply.
-    if action.get("type") == "SUGGEST_BUILD_PROMPT":
-        return "\n".join(lines)
-
-    lines.extend([
-        "",
-        "#### Components & Strategy",
-        f"- The selected target mode is `{target}`.",
-        f"- The build prompt is designed for the Aero-Forge engine.",
-        "",
-        "#### Build Contract",
-        "```yaml blueprint",
-        _build_yaml_contract(action),
-        "```",
-    ])
-    return "\n".join(lines)
-
-
-def _wrap_raw_json(response: str) -> Tuple[str, Optional[Dict[str, Any]]]:
-    """Convert a raw JSON response into Markdown + YAML blueprint."""
-    try:
-        data = json.loads(response)
-    except json.JSONDecodeError:
-        # Not valid JSON; treat as plain text and best-effort extract an action.
-        action = parse_action_from_text(response)
-        if action:
-            return _markdown_reply_from_action(action, response), action
-        return response.strip(), None
-
-    action = _extract_action_from_json(data) if isinstance(data, dict) else None
-    if action:
-        # Always render a structured Markdown explanation for raw JSON actions.
-        return _markdown_reply_from_action(action, response), action
-
-    # No actionable payload. Prefer a human reply field if present.
-    if isinstance(data, dict):
-        raw_reply = str(data.get("reply", "")).strip()
-        if raw_reply and not _looks_like_json(raw_reply):
-            return raw_reply, None
-
-    # No reply: pretty-print the JSON inside a Markdown code block.
-    return (
-        "### Response\n```json\n" + json.dumps(data, indent=2) + "\n```",
-        None,
-    )
-
-
-def _has_markdown_heading(text: str) -> bool:
-    """Return True if the text already contains a Markdown heading."""
-    return bool(re.search(r"^#{1,4} ", text, re.MULTILINE))
-
-
-def _ensure_yaml_fenced_contract(
-    reply: str, action: Dict[str, Any]
-) -> str:
-    """Append a YAML blueprint code block if the reply is Markdown but lacks one."""
-    if re.search(r"```(?:yaml|json)\s+blueprint", reply, re.IGNORECASE):
-        return reply
-
-    return (
-        reply.rstrip()
-        + "\n\n#### Build Contract\n```yaml blueprint\n"
-        + _build_yaml_contract(action)
-        + "\n```"
-    )
-
-
-def format_copilot_response(response: str) -> Tuple[str, Optional[Dict[str, Any]]]:
-    """Return a Markdown-formatted reply and an optional PROPOSE_BUILD action.
-
-    This function is the single point of sanitization for Co-pilot chat output:
-    - Markdown + YAML code-fenced responses pass through unchanged.
-    - Legacy JSON responses are converted to Markdown + YAML.
-    - Plain text with build intent is wrapped with a Markdown explanation and a
-      YAML build contract.
-    """
-    if not response or not response.strip():
-        return "", None
-
-    if _looks_like_json(response):
-        return _wrap_raw_json(response)
-
-    reply, action = parse_copilot_response(response)
-
-    # If the reply is empty but we extracted an action, synthesize Markdown.
-    if not reply and action:
-        reply = _markdown_reply_from_action(action, response)
-
-    # If there is still no action, try a best-effort parse of the original text.
-    if not action:
-        action = parse_action_from_text(response)
-        if action:
-            reply = _markdown_reply_from_action(action, response)
-
-    # If we have an action and no Markdown heading, replace with our structured
-    # explanation so the UI never shows raw prose for a build proposal.
-    if action and not _has_markdown_heading(reply):
-        reply = _markdown_reply_from_action(action, response)
-
-    # If we have Markdown with an action but no code-fenced contract, append one.
-    # The new SUGGEST_BUILD_PROMPT action renders the prompt in a dedicated UI
-    # card, so do not duplicate it as a YAML contract in the reply.
-    if action and action.get("type") != "SUGGEST_BUILD_PROMPT":
-        reply = _ensure_yaml_fenced_contract(reply or "", action)
-
-    return (reply or response).strip(), action

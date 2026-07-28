@@ -239,7 +239,7 @@ def test_chat_copilot_parses_propose_build_action(tmp_path: Path) -> None:
         result = session.reply_structured("Speed up matrix multiplication")
 
     assert "### Architecture Overview" in result["reply"]
-    assert "```yaml blueprint" in result["reply"]
+    assert "```yaml blueprint" not in result["reply"]
     assert result["action"]["type"] == "PROPOSE_BUILD"
     assert result["action"]["params"]["target"] == "hybrid_cpp_rust"
 

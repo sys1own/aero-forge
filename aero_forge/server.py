@@ -608,6 +608,43 @@ def _resolve_file(session_dir: Path, file_path: str) -> Path:
     return target
 
 
+def _canonicalize_chat_action(result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Convert internal legacy/new action shapes into the canonical API action."""
+    clean = result.get("clean_action")
+    if clean and isinstance(clean, dict):
+        return clean
+
+    legacy = result.get("action")
+    if not isinstance(legacy, dict):
+        return None
+
+    params = legacy.get("params") or {}
+    prompt = (
+        result.get("clean_prompt")
+        or result.get("build_prompt")
+        or result.get("suggested_build_prompt")
+        or params.get("prompt")
+        or params.get("build_prompt")
+        or ""
+    )
+    if not prompt:
+        return None
+
+    parameters = result.get("parameters") or params.get("parameters") or {}
+    target = parameters.get("target") or params.get("target") or "pure_python"
+    acceleration = parameters.get("acceleration") or params.get("acceleration") or "Selective Acceleration (Auto-Detect Heavy Compute)"
+    action_type = "build"
+    if legacy.get("type") == "PROPOSE_BUILD" and params.get("blueprint"):
+        action_type = "apply_blueprint"
+
+    return {
+        "type": action_type,
+        "clean_prompt": prompt,
+        "parameters": {"target": target, "acceleration": acceleration},
+        "blueprint": params.get("blueprint"),
+    }
+
+
 class AeroForgeHandler(BaseHTTPRequestHandler):
     """HTTP request handler for the Aero-Forge web API."""
 
@@ -1023,25 +1060,29 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     error_context=body.get("error_context"),
                 )
 
-            return _send_json(
-                self,
-                200,
-                {
-                    "status": "success",
-                    "session_id": session_id,
-                    "reply": result["reply"],
-                    "action": result["action"],
-                    "explanation": result.get("explanation", result["reply"]),
-                    "has_suggestion": result.get("has_suggestion", bool(result["action"])),
-                    "build_prompt": result.get("build_prompt"),
-                    "raw": result.get("raw", result["reply"]),
-                    "messages": chat.messages,
-                    # New clean-separated fields for the prompt designer
-                    "message": result.get("explanation", result["reply"]),
-                    "suggested_build_prompt": result.get("build_prompt"),
-                    "has_prompt": bool(result.get("build_prompt")),
-                },
-            )
+            canonical_action = _canonicalize_chat_action(result)
+            clean_prompt = (canonical_action or {}).get("clean_prompt") or result.get("build_prompt")
+            response_payload = {
+                "status": "success",
+                "session_id": session_id,
+                "type": result.get("type", "chat_message"),
+                "display_text": result.get("display_text", result.get("reply", "")),
+                "action": canonical_action,
+                "clean_prompt": clean_prompt,
+                "parameters": (canonical_action or {}).get("parameters", {}),
+                # Backward-compatible legacy fields
+                "reply": result.get("reply"),
+                "message": result.get("message", result.get("reply", "")),
+                "legacy_action": result.get("action"),
+                "explanation": result.get("explanation", result.get("reply", "")),
+                "has_suggestion": result.get("has_suggestion", bool(canonical_action)),
+                "has_prompt": result.get("has_prompt", bool(clean_prompt)),
+                "build_prompt": result.get("build_prompt") or clean_prompt,
+                "suggested_build_prompt": result.get("suggested_build_prompt") or clean_prompt,
+                "raw": result.get("raw", result.get("reply", "")),
+                "messages": chat.messages,
+            }
+            return _send_json(self, 200, response_payload)
         except Exception as exc:  # pragma: no cover
             logger.exception("Chat endpoint failed")
             return _send_json(self, 500, {"status": "failed", "error": str(exc)})

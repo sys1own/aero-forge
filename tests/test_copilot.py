@@ -112,7 +112,7 @@ def test_parse_copilot_response_handles_legacy_json() -> None:
 
 
 def test_format_copilot_response_wraps_raw_json_in_markdown() -> None:
-    """A raw top-level JSON action payload is restructured as Markdown + YAML."""
+    """A raw top-level JSON action payload is restructured as clean Markdown + action."""
     response = (
         '{"reply": "Use Rust for the hot loop.", '
         '"action": {"type": "PROPOSE_BUILD", "params": '
@@ -121,18 +121,18 @@ def test_format_copilot_response_wraps_raw_json_in_markdown() -> None:
     )
     reply, action = format_copilot_response(response)
     assert "### Architecture Overview" in reply
-    assert "```yaml blueprint" in reply
+    assert "```yaml blueprint" not in reply
     assert action["type"] == "PROPOSE_BUILD"
     assert action["params"]["target"] == "hybrid_cpp_rust"
     assert action["params"]["acceleration"] == "Force Native Bridge"
 
 
 def test_format_copilot_response_wraps_plain_text_build_intent() -> None:
-    """Plain prose with build intent is wrapped in Markdown and a YAML build contract."""
+    """Plain prose with build intent is wrapped in Markdown with an isolated action card payload."""
     response = "Build a fast Rust Fibonacci core wrapped in Python."
     reply, action = format_copilot_response(response)
     assert "### Architecture Overview" in reply
-    assert "```yaml blueprint" in reply
+    assert "```yaml blueprint" not in reply
     assert action["type"] == "PROPOSE_BUILD"
     assert action["params"]["target"] == "hybrid_rust_python"
 
