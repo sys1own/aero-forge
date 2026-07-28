@@ -10,12 +10,89 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional
+
+import yaml
 
 from aero_forge.blueprint import BlueprintV3
 from aero_forge.blueprint.synthesizer import LLMBlueprintSynthesizer
 
 logger = logging.getLogger("aero_forge.context_bundler")
+
+
+def get_blueprint_status(workspace: Path) -> Dict[str, Any]:
+    """Return existence, freshness, and LLM-initialization status of blueprint.aero."""
+    workspace = Path(workspace).resolve()
+    blueprint_path = workspace / "blueprint.aero"
+    exists = blueprint_path.is_file()
+    stale = False
+    llm_initialized = False
+    source_count = 0
+    status = "missing"
+    generation_method = None
+
+    if not exists:
+        return {
+            "exists": False,
+            "stale": stale,
+            "llm_initialized": llm_initialized,
+            "source_count": source_count,
+            "status": status,
+            "generation_method": generation_method,
+        }
+
+    try:
+        text = blueprint_path.read_text(encoding="utf-8")
+        bp = yaml.safe_load(text) or {}
+    except Exception:
+        bp = {}
+
+    metadata = bp.get("metadata") or {}
+    llm_context = bp.get("llm_context") or {}
+    llm_initialized = bool(
+        llm_context.get("state") == "synthesized"
+        or metadata.get("generation_method") == "llm_synthesized"
+        or metadata.get("llm_initialized")
+    )
+    status = metadata.get("status", "unknown")
+    generation_method = metadata.get("generation_method")
+
+    skip_names = {
+        "target",
+        "dist",
+        "build",
+        "__pycache__",
+        ".pytest_cache",
+        ".aero",
+        ".venv",
+        ".git",
+    }
+    bp_mtime = blueprint_path.stat().st_mtime
+    for path in sorted(workspace.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(workspace)
+        if rel.name == "blueprint.aero":
+            continue
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        if any(part in skip_names for part in rel.parts[:1]):
+            continue
+        try:
+            if path.stat().st_mtime > bp_mtime:
+                stale = True
+        except OSError:
+            continue
+        source_count += 1
+
+    return {
+        "exists": exists,
+        "stale": stale,
+        "llm_initialized": llm_initialized,
+        "source_count": source_count,
+        "status": status,
+        "generation_method": generation_method,
+    }
 
 
 class ContextBundler:
