@@ -27,14 +27,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from aero_forge.build_summary import format_build_summary
 from aero_forge.bundle_repo import bundle_to_xml, bundle_workspace, format_context_block
 from aero_forge.config import ConfigOverride, Tier
-from aero_forge.context_bundler import ContextBundler
+from aero_forge.context_bundler import ContextBundler, get_blueprint_status
 from aero_forge.copilot.action_parser import (
     ActionParser,
     _has_build_intent,
     parse_action_from_text,
     sanitize_builder_prompt,
 )
-
 from aero_forge.copilot.agent import (
     _has_markdown_heading,
     _legacy_action_type,
@@ -582,61 +581,31 @@ class ChatSession:
             )
             self.system_prompt += "\n\n" + terminal_summary
 
-    def _workspace_blueprint_status(self) -> Dict[str, Any]:
-        """Return existence, freshness, and LLM-initialization status of blueprint.aero."""
-        blueprint_path = self.output_dir / "blueprint.aero"
-        exists = blueprint_path.is_file()
-        stale = False
-        llm_initialized = False
-        source_count = 0
-        if exists:
-            harvester = WorkspaceContextHarvester(self.output_dir, max_file_size_kb=50)
-            info = harvester.harvest()
-            source_files = info.get("source_files", {})
-            source_count = len(source_files)
-            llm_initialized = bool(info.get("llm_initialized"))
-            bp_mtime = blueprint_path.stat().st_mtime
-            for rel, content in source_files.items():
-                src_path = self.output_dir / rel
-                if src_path.is_file():
-                    try:
-                        if src_path.stat().st_mtime > bp_mtime:
-                            stale = True
-                            break
-                    except OSError:
-                        continue
-        return {
-            "exists": exists,
-            "stale": stale,
-            "llm_initialized": llm_initialized,
-            "source_count": source_count,
-            "blueprint_path": str(blueprint_path),
-        }
-
-    def _maybe_attach_context_action(self, result: Dict[str, Any]) -> None:
-        """Attach a synthesize-blueprint Action Card when context is missing or stale."""
-        status = self._workspace_blueprint_status()
-        needs = not status["exists"] or status["stale"] or not status["llm_initialized"]
-        if not needs:
-            return
-        reason_parts: List[str] = []
-        if not status["exists"]:
-            reason_parts.append("missing blueprint.aero")
-        elif status["stale"]:
-            reason_parts.append("workspace changed since last blueprint")
-        if not status["llm_initialized"]:
-            reason_parts.append("blueprint not yet LLM-initialized")
-        result["context_action"] = {
-            "type": "synthesize_blueprint",
-            "label": "Synthesize workspace context",
-            "description": "Generate a deep, LLM-contextualized blueprint.aero for this workspace.",
-            "reason": f"Workspace context is {', '.join(reason_parts)}.",
-            "command": "synthesizeBlueprint",
-        }
-
     def _copilot_system_prompt(self) -> str:
         """Build the workspace-aware copilot system prompt used by the web UI."""
         prompt = self.copilot_system_prompt
+        status = get_blueprint_status(self.output_dir)
+        if status["llm_initialized"]:
+            workspace_status = (
+                "Workspace has an initialized blueprint; focus on update/refactor planning that "
+                "integrates with the existing architecture."
+            )
+        elif status["exists"]:
+            workspace_status = (
+                "Workspace blueprint exists but is not LLM-initialized; treat the current "
+                "files as a preliminary snapshot and focus on drafting an initial build prompt."
+            )
+        elif status["source_count"]:
+            workspace_status = (
+                "Workspace has source files but no blueprint; treat the current files as a "
+                "preliminary snapshot and focus on drafting an initial build prompt."
+            )
+        else:
+            workspace_status = (
+                "Workspace is empty; focus on understanding the user's intent and "
+                "drafting an initial build prompt with target and contracts."
+            )
+        prompt += f"\n\n[WORKSPACE STATUS]\n{workspace_status}"
         if self.project_context:
             prompt += "\n\n" + self.project_context
         if self.last_terminal_log:
@@ -900,7 +869,6 @@ class ChatSession:
                 action=fallback_action,
                 raw="",
             )
-            self._maybe_attach_context_action(fallback)
             self.messages.append({"role": "assistant", "content": json.dumps(fallback)})
             self._save_session()
             return fallback
@@ -914,7 +882,6 @@ class ChatSession:
             action = self._fallback_build_action(text)
 
         result = self._build_result(display_text, action=action, raw=response)
-        self._maybe_attach_context_action(result)
         self.messages.append({"role": "assistant", "content": result["display_text"] or response})
         self._save_session()
         return result

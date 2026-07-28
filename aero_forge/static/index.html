@@ -265,6 +265,12 @@
     .chat-action-bar .actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
     .chat-action-bar .btn { padding: 0.25rem 0.5rem; border-radius: 3px; border: 1px solid var(--border); background: var(--panel-3); color: var(--text); cursor: pointer; font-size: 0.75rem; }
     .chat-action-bar .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .chat-status-bar { display: flex; align-items: center; gap: 0.6rem; background: rgba(25,25,25,0.7); border: 1px solid rgba(255,255,255,0.08); border-radius: 4px; padding: 0.35rem 0.65rem; margin-bottom: 0.5rem; font-size: 0.78rem; color: var(--muted); flex-wrap: wrap; }
+    .chat-status-bar.synced { border-color: rgba(34,197,94,0.4); color: rgba(34,197,94,0.9); }
+    .chat-status-bar.warning { border-color: rgba(234,179,8,0.4); color: rgba(234,179,8,0.9); }
+    .chat-status-bar .status-label { flex: 1; }
+    .chat-status-bar .btn { padding: 0.25rem 0.5rem; border-radius: 3px; border: 1px solid var(--border); background: var(--panel-3); color: var(--text); cursor: pointer; font-size: 0.75rem; }
+    .chat-status-bar .btn-primary { background: var(--accent); color: #fff; border-color: var(--accent); }
     .action-card { background: rgba(0,0,0,0.25); border: 1px solid var(--accent); border-radius: 6px; padding: 0.65rem; margin-top: 0.5rem; }
     .action-card .action-title { font-weight: 600; color: var(--accent); margin-bottom: 0.4rem; }
     .action-card .action-meta { font-size: 0.78rem; color: var(--muted); margin-bottom: 0.5rem; }
@@ -555,6 +561,10 @@
             </div>
 
             <div id="chat-panel" class="deck-panel">
+              <div id="chat-status-bar" class="chat-status-bar" style="display:none;">
+                <span class="status-label" id="chat-status-label">Workspace status unknown</span>
+                <button id="chat-status-action" class="btn btn-primary" style="display:none;">⚡ LLM Initialize Blueprint</button>
+              </div>
               <div id="chat-feed" class="chat-feed">
                 <div class="msg system">Welcome to the Aero Forge co-pilot. Ask for builds, optimizations, or explanations.</div>
               </div>
@@ -761,6 +771,9 @@
       chatInput: document.getElementById('chat-input'),
       chatSend: document.getElementById('chat-send'),
       chatFeed: document.getElementById('chat-feed'),
+      chatStatusBar: document.getElementById('chat-status-bar'),
+      chatStatusLabel: document.getElementById('chat-status-label'),
+      chatStatusAction: document.getElementById('chat-status-action'),
       logLines: document.getElementById('log-lines'),
       statusDot: document.getElementById('status-dot'),
       statusText: document.getElementById('status-text'),
@@ -1794,10 +1807,33 @@
           ui.blueprintStatusBadge.classList.remove('visible');
           if (ui.blueprintDraftBanner) ui.blueprintDraftBanner.style.display = 'none';
         }
+
+        // Update the Copilot chat panel status badge based on LLM initialization.
+        if (ui.chatStatusBar && ui.chatStatusLabel && ui.chatStatusAction) {
+          const needsInit = !data.llm_initialized || data.stale || !data.present;
+          if (needsInit) {
+            ui.chatStatusBar.style.display = 'flex';
+            ui.chatStatusBar.className = 'chat-status-bar warning';
+            if (!data.present) {
+              ui.chatStatusLabel.textContent = 'No blueprint.aero — initialize to get workspace-aware planning.';
+            } else if (data.stale) {
+              ui.chatStatusLabel.textContent = 'Workspace context is out of date.';
+            } else {
+              ui.chatStatusLabel.textContent = 'Blueprint not LLM-initialized.';
+            }
+            ui.chatStatusAction.style.display = 'inline-block';
+          } else {
+            ui.chatStatusBar.style.display = 'flex';
+            ui.chatStatusBar.className = 'chat-status-bar synced';
+            ui.chatStatusLabel.textContent = 'Blueprint synced';
+            ui.chatStatusAction.style.display = 'none';
+          }
+        }
       } catch (e) {
         // Non-fatal; hide the badge if status cannot be determined.
         ui.blueprintStatusBadge.classList.remove('visible');
         if (ui.blueprintDraftBanner) ui.blueprintDraftBanner.style.display = 'none';
+        if (ui.chatStatusBar) ui.chatStatusBar.style.display = 'none';
       }
     }
 
@@ -2211,7 +2247,6 @@
       const displayText = data.display_text || data.reply || '';
       const action = data.action || null;
       const msgCleanPrompt = data.clean_prompt || '';
-      const contextAction = data.context_action || null;
       const msg = document.createElement('div');
       msg.className = 'msg assistant';
 
@@ -2277,35 +2312,6 @@
         triggerBtn.className = 'btn btn-primary';
         triggerBtn.textContent = 'Send to Builder & Run';
         triggerBtn.addEventListener('click', () => triggerBuildFromChat(getLivePrompt(card), target, acceleration));
-        buttons.appendChild(triggerBtn);
-
-        card.appendChild(buttons);
-        msg.appendChild(card);
-      }
-
-      if (contextAction && contextAction.command === 'synthesizeBlueprint') {
-        const card = document.createElement('div');
-        card.className = 'action-card context-action-card';
-
-        const title = document.createElement('div');
-        title.className = 'action-title';
-        title.textContent = contextAction.label || 'Synthesize workspace context';
-        card.appendChild(title);
-
-        if (contextAction.reason) {
-          const meta = document.createElement('div');
-          meta.className = 'action-meta';
-          meta.textContent = contextAction.reason;
-          card.appendChild(meta);
-        }
-
-        const buttons = document.createElement('div');
-        buttons.className = 'action-buttons';
-
-        const triggerBtn = document.createElement('button');
-        triggerBtn.className = 'btn btn-primary';
-        triggerBtn.textContent = 'Synthesize Blueprint';
-        triggerBtn.addEventListener('click', () => synthesizeBlueprint());
         buttons.appendChild(triggerBtn);
 
         card.appendChild(buttons);
@@ -2521,6 +2527,7 @@
     ui.promptInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runBuild(); } });
     ui.chatSend.addEventListener('click', sendChat);
     ui.chatInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); } });
+    if (ui.chatStatusAction) ui.chatStatusAction.addEventListener('click', synthesizeBlueprint);
 
     // Run
     ui.runBtn.addEventListener('click', runCurrentFile);

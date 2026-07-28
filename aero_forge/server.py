@@ -46,6 +46,7 @@ from aero_forge.chat import (
     get_session_metadata,
     set_session_blueprint_metadata,
 )
+from aero_forge.context_bundler import get_blueprint_status
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
 from aero_forge import runner as sandbox_runner
@@ -1073,7 +1074,6 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 "clean_prompt": clean_prompt,
                 "parameters": (canonical_action or {}).get("parameters", {}),
                 "suggested_prompt": clean_prompt,
-                "context_action": result.get("context_action"),
                 # Backward-compatible legacy fields
                 "reply": result.get("reply"),
                 "message": result.get("message", result.get("reply", "")),
@@ -1154,52 +1154,34 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             return _send_json(self, 400, {"error": "Missing 'session_id'"})
 
         session_dir = _session_dir(session_id)
-        blueprint_path = session_dir / "blueprint.aero"
-        if not blueprint_path.is_file():
-            return _send_json(
-                self,
-                200,
-                {
-                    "session_id": session_id,
-                    "present": False,
-                    "status": "missing",
-                    "transferable": False,
-                    "schema_version": None,
-                    "generation_method": None,
-                },
-            )
+        status = get_blueprint_status(session_dir)
+        from aero_forge.blueprint import BlueprintV3
 
         try:
-            from aero_forge.blueprint import BlueprintV3
-
-            bp = BlueprintV3.load(blueprint_path)
-            return _send_json(
-                self,
-                200,
-                {
-                    "session_id": session_id,
-                    "present": True,
-                    "status": bp.metadata.status,
-                    "transferable": bp.metadata.transferable,
-                    "schema_version": bp.metadata.schema_version,
-                    "generation_method": bp.metadata.generation_method,
-                },
-            )
+            blueprint_path = session_dir / "blueprint.aero"
+            transferable = False
+            if blueprint_path.is_file():
+                bp = BlueprintV3.load(blueprint_path)
+                transferable = bp.metadata.transferable
         except Exception as exc:
-            logger.exception("Failed to parse blueprint status")
-            return _send_json(
-                self,
-                200,
-                {
-                    "session_id": session_id,
-                    "present": True,
-                    "status": "unknown",
-                    "transferable": False,
-                    "schema_version": None,
-                    "generation_method": None,
-                    "error": str(exc),
-                },
-            )
+            logger.exception("Failed to load blueprint for status")
+            transferable = False
+
+        return _send_json(
+            self,
+            200,
+            {
+                "session_id": session_id,
+                "present": status["exists"],
+                "status": status["status"] if status["exists"] else "missing",
+                "transferable": transferable,
+                "schema_version": "3.0.0" if status["exists"] else None,
+                "generation_method": status["generation_method"],
+                "llm_initialized": status["llm_initialized"],
+                "stale": status["stale"],
+                "source_count": status["source_count"],
+            },
+        )
 
     def _handle_files(self, query: Dict[str, List[str]]) -> None:
         session_id = _first(query, "session_id")
