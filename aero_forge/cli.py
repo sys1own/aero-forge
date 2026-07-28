@@ -637,6 +637,7 @@ def build(
         distributed=distribute,
         dry_run=dry_run,
         progress=progress,
+        blueprint_path=Path(blueprint),
     )
 
     try:

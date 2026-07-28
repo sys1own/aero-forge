@@ -217,10 +217,20 @@ class BlueprintV3(BaseModel):
                         except Exception as exc:
                             logger.warning("Could not discover functions in %s: %s", src_path, exc)
 
+        output_dir = (
+            workspace / ".aero" / "sandbox" / "dist"
+            if self.metadata.status == BlueprintStatus.draft
+            else workspace / "dist"
+        )
+
         metadata_v2: Dict[str, str] = {
-            "schema_version": "2.0.0",
+            "schema_version": self.metadata.schema_version,
             "project_name": self.metadata.project_name,
             "domain_target": architecture,
+            "status": self.metadata.status,
+            "generation_method": self.metadata.generation_method,
+            "transferable": str(self.metadata.transferable),
+            "workspace_root": str(workspace),
         }
 
         return Blueprint(
@@ -230,7 +240,7 @@ class BlueprintV3(BaseModel):
             manifest=manifest,
             functions=functions,
             metadata=metadata_v2,
-            output_dir=workspace / "dist",
+            output_dir=output_dir,
             llm=LLMConfig(provider="none"),
         )
 
@@ -462,8 +472,15 @@ class BlueprintV3(BaseModel):
             if not compiler:
                 return {"artifact": artifact.id, "success": False, "error": "No C/C++ compiler found"}
             obj_files: List[Path] = []
+            build_dir = workspace / "build"
+            build_dir.mkdir(parents=True, exist_ok=True)
             for src in srcs:
-                obj = src.with_suffix(".o")
+                try:
+                    rel = src.relative_to(workspace)
+                except ValueError:
+                    rel = src.name
+                obj = build_dir / rel.with_suffix(".o")
+                obj.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     subprocess.run(
                         [compiler, "-c", str(src), "-o", str(obj)] + artifact.compiler_flags,

@@ -614,6 +614,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_download_zip(query)
             if path == "/api/blueprint-templates":
                 return self._handle_blueprint_templates()
+            if path == "/api/blueprint/status":
+                return self._handle_blueprint_status(query)
             if path in ("/favicon.ico", "/static/logo.png"):
                 return self._serve_static("/logo.png")
 
@@ -955,6 +957,59 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             logger.exception("Blueprint synthesize endpoint failed")
             return _send_json(self, 500, {"status": "failed", "error": str(exc)})
+
+    def _handle_blueprint_status(self, query: Dict[str, List[str]]) -> None:
+        session_id = _first(query, "session_id")
+        if not session_id:
+            return _send_json(self, 400, {"error": "Missing 'session_id'"})
+
+        session_dir = _session_dir(session_id)
+        blueprint_path = session_dir / "blueprint.aero"
+        if not blueprint_path.is_file():
+            return _send_json(
+                self,
+                200,
+                {
+                    "session_id": session_id,
+                    "present": False,
+                    "status": "missing",
+                    "transferable": False,
+                    "schema_version": None,
+                    "generation_method": None,
+                },
+            )
+
+        try:
+            from aero_forge.blueprint import BlueprintV3
+
+            bp = BlueprintV3.load(blueprint_path)
+            return _send_json(
+                self,
+                200,
+                {
+                    "session_id": session_id,
+                    "present": True,
+                    "status": bp.metadata.status,
+                    "transferable": bp.metadata.transferable,
+                    "schema_version": bp.metadata.schema_version,
+                    "generation_method": bp.metadata.generation_method,
+                },
+            )
+        except Exception as exc:
+            logger.exception("Failed to parse blueprint status")
+            return _send_json(
+                self,
+                200,
+                {
+                    "session_id": session_id,
+                    "present": True,
+                    "status": "unknown",
+                    "transferable": False,
+                    "schema_version": None,
+                    "generation_method": None,
+                    "error": str(exc),
+                },
+            )
 
     def _handle_files(self, query: Dict[str, List[str]]) -> None:
         session_id = _first(query, "session_id")

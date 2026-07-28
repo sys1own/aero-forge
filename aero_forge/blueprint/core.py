@@ -458,8 +458,24 @@ def parse_blueprint(path: Path) -> Blueprint:
     if not isinstance(data, dict):
         raise ValueError(f"Blueprint {path} did not parse to a mapping")
 
-    # Normalize functions to absolute paths relative to the blueprint directory.
     base = path.parent
+
+    # Convert Blueprint v3.0.0 to the v2 runner blueprint.
+    if str(data.get("metadata", {}).get("schema_version")) == "3.0.0":
+        from aero_forge.blueprint.schema import BlueprintV3
+
+        v3 = BlueprintV3.model_validate(data)
+        blueprint = v3.to_runner_blueprint(base)
+        # Normalize any function paths the conversion produced.
+        for func in data.get("functions", []):
+            if not isinstance(func, dict):
+                continue
+            func["file"] = str(base / Path(func["file"]))
+            if "tests" in func:
+                func["tests"] = [str(base / Path(t)) for t in func["tests"]]
+        return blueprint
+
+    # Normalize functions to absolute paths relative to the blueprint directory.
     for func in data.get("functions", []):
         if not isinstance(func, dict):
             continue
