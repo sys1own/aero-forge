@@ -2199,7 +2199,7 @@
         try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
         ui.settingSession.value = state.sessionId;
         state.messages = data.messages || [];
-        addAssistantMessage(data.reply, data.action);
+        addAssistantMessage(data.display_text || data.reply, data.action);
       } catch (e) { addChat('assistant', `Chat error: ${e.message}`, true); }
       finally {
         if (pulseCard.parentNode) pulseCard.remove();
@@ -2207,34 +2207,36 @@
       }
     }
 
-    function addAssistantMessage(reply, action) {
+    function addAssistantMessage(displayText, action) {
       const msg = document.createElement('div');
       msg.className = 'msg assistant';
 
+      // Support both the new canonical action shape and legacy action.params.
       const type = (action && action.type) ? action.type : '';
-      const p = (action && action.params) ? action.params : {};
-      const prompt = p.prompt || '';
-      const target = p.target || '';
-      const acceleration = p.acceleration || '';
-      const explanation = reply || p.explanation || '';
+      const parameters = (action && action.parameters) ? action.parameters : ((action && action.params && action.params.parameters) ? action.params.parameters : {});
+      const legacyParams = (action && action.params) ? action.params : {};
+      const cleanPrompt = (action && action.clean_prompt) ? action.clean_prompt : (legacyParams.prompt || '');
+      const target = parameters.target || legacyParams.target || '';
+      const acceleration = parameters.acceleration || legacyParams.acceleration || '';
 
       const content = document.createElement('div');
       content.className = 'msg-content';
-      content.innerHTML = renderMarkdown(explanation);
+      content.innerHTML = renderMarkdown(displayText || '');
       msg.appendChild(content);
 
       function getLivePrompt(card) {
         const editor = card.querySelector('.build-prompt-editor');
-        return editor ? editor.value : prompt;
+        return editor ? editor.value : cleanPrompt;
       }
 
-      if (type === 'SUGGEST_BUILD_PROMPT' && prompt) {
+      const isBuildAction = type === 'build' || type === 'build_workflow' || type === 'SUGGEST_BUILD_PROMPT' || type === 'PROPOSE_BUILD';
+      if (isBuildAction && cleanPrompt) {
         const card = document.createElement('div');
         card.className = 'action-card';
 
         const title = document.createElement('div');
         title.className = 'action-title';
-        title.textContent = '⚡ Suggested Builder Prompt';
+        title.textContent = 'Suggested Builder Prompt';
         card.appendChild(title);
 
         const meta = document.createElement('div');
@@ -2244,7 +2246,7 @@
 
         const editor = document.createElement('textarea');
         editor.className = 'build-prompt-editor';
-        editor.value = prompt;
+        editor.value = cleanPrompt;
         editor.spellcheck = false;
         card.appendChild(editor);
 
@@ -2253,7 +2255,7 @@
 
         const copyBtn = document.createElement('button');
         copyBtn.className = 'btn';
-        copyBtn.textContent = '📋 Copy';
+        copyBtn.textContent = 'Copy';
         copyBtn.addEventListener('click', () => {
           const livePrompt = getLivePrompt(card);
           if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -2264,51 +2266,18 @@
 
         const editBtn = document.createElement('button');
         editBtn.className = 'btn';
-        editBtn.textContent = '✏️ Edit in Builder';
+        editBtn.textContent = 'Edit in Builder';
         editBtn.addEventListener('click', () => populateBuildTab(getLivePrompt(card), target, acceleration));
         buttons.appendChild(editBtn);
 
         const triggerBtn = document.createElement('button');
         triggerBtn.className = 'btn btn-primary';
-        triggerBtn.textContent = '🚀 Trigger Build';
+        triggerBtn.textContent = 'Send to Builder & Run';
         triggerBtn.addEventListener('click', () => triggerBuildFromChat(getLivePrompt(card), target, acceleration));
         buttons.appendChild(triggerBtn);
 
         card.appendChild(buttons);
         msg.appendChild(card);
-      } else if (type === 'PROPOSE_BUILD' && prompt) {
-        const pShort = prompt.slice(0, 80) + (prompt.length > 80 ? '...' : '');
-
-        const bar = document.createElement('div');
-        bar.className = 'chat-action-bar';
-
-        const badge = document.createElement('span');
-        badge.className = 'badge';
-        badge.textContent = '🎯 ' + (target || 'auto');
-        bar.appendChild(badge);
-
-        const preview = document.createElement('span');
-        preview.className = 'prompt-preview';
-        preview.textContent = '"' + pShort + '"';
-        bar.appendChild(preview);
-
-        const actions = document.createElement('div');
-        actions.className = 'actions';
-
-        const triggerBtn = document.createElement('button');
-        triggerBtn.className = 'btn btn-primary';
-        triggerBtn.textContent = '🚀 Trigger Build';
-        triggerBtn.addEventListener('click', () => triggerBuildFromChat(prompt, target, acceleration));
-        actions.appendChild(triggerBtn);
-
-        const editBtn = document.createElement('button');
-        editBtn.className = 'btn';
-        editBtn.textContent = '📝 Edit';
-        editBtn.addEventListener('click', () => populateBuildTab(prompt, target, acceleration));
-        actions.appendChild(editBtn);
-
-        bar.appendChild(actions);
-        msg.appendChild(bar);
       }
 
       ui.chatFeed.appendChild(msg);
