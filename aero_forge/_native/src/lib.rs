@@ -5,6 +5,8 @@ use pyo3::exceptions::{PyOSError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyString;
 
+mod aeroc_compiler;
+
 /// A BLAKE3 incremental hasher exposed to Python.
 #[pyclass(name = "Hasher")]
 struct Hasher {
@@ -395,6 +397,13 @@ impl WavefrontEngine {
     }
 }
 
+/// Compile an aeroc JSON spec into a `workspace.aeroc` binary container.
+#[pyfunction]
+fn compile_aeroc(spec_json: &str, output_path: &str) -> PyResult<String> {
+    aeroc_compiler::compile_aeroc_json(spec_json, output_path)
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 #[pymodule(name = "aero_forge_native")]
 fn aero_forge_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Hasher>()?;
@@ -402,5 +411,6 @@ fn aero_forge_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<WavefrontEngine>()?;
     m.add_function(wrap_pyfunction!(hash_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(hash_file, m)?)?;
+    m.add_function(wrap_pyfunction!(compile_aeroc, m)?)?;
     Ok(())
 }
