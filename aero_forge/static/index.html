@@ -86,6 +86,8 @@
     #accelerate-btn:hover { filter: brightness(1.05); }
     #accelerate-badge { display: none; }
     #accelerate-badge.visible { display: inline-flex; align-items: center; gap: 0.25rem; font-size: 0.7rem; color: var(--warning); border: 1px solid var(--warning); padding: 0.15rem 0.4rem; border-radius: 999px; }
+    #blueprint-status-badge { display: none; font-size: 0.7rem; padding: 0.15rem 0.4rem; border-radius: 999px; border: 1px solid var(--danger); color: var(--danger); }
+    #blueprint-status-badge.visible { display: inline-flex; align-items: center; gap: 0.25rem; }
 
     /* App layout */
     html, body, .app { height: 100vh; width: 100vw; margin: 0; padding: 0; overflow: hidden; }
@@ -395,6 +397,7 @@
       </div>
     </div>
     <div class="header-actions">
+      <span id="blueprint-status-badge">[ DRAFT - NOT TRANSFERABLE ]</span>
       <span id="accelerate-badge">&#9889; Accelerated</span>
       <button id="accelerate-btn" class="run-btn" title="Accelerate workspace" aria-label="Accelerate workspace">
         <span>&#9889;</span> Accelerate
@@ -674,6 +677,9 @@
   <div id="accelerate-modal" class="modal-overlay">
     <div class="modal">
       <h2>Accelerate Workspace</h2>
+      <div id="blueprint-draft-banner" style="display:none;margin:0.8rem 0;padding:0.5rem;background:rgba(255,180,0,0.1);border:1px solid var(--warning);border-radius:4px;font-size:0.8rem;color:var(--warning)">
+        <strong>Draft blueprint detected.</strong> It cannot be exported or remotely executed until finalized.
+      </div>
       <div class="form-group" style="margin:0.8rem 0">
         <label class="export-option" style="align-items:flex-start">
           <input type="radio" name="accelerate-mode" value="runtime" checked style="margin-top:0.2rem">
@@ -687,6 +693,13 @@
           <div>
             <span>Inject PyO3/Rust Source Crate (Export Ready)</span>
             <small>Scaffolds Cargo.toml and PyO3 glue into the repo for standalone native compilation and exports.</small>
+          </div>
+        </label>
+        <label class="export-option" style="align-items:flex-start;margin-top:0.5rem">
+          <input type="radio" name="accelerate-mode" value="synthesize" style="margin-top:0.2rem">
+          <div>
+            <span>&#10024; Synthesize Blueprint (LLM Finalize)</span>
+            <small>Send the draft blueprint, manifests, and source context to the LLM to produce a finalized, transferable v3.0 build contract.</small>
           </div>
         </label>
       </div>
@@ -760,7 +773,9 @@
       statusText: document.getElementById('status-text'),
       accelerateBtn: document.getElementById('accelerate-btn'),
       accelerateBadge: document.getElementById('accelerate-badge'),
+      blueprintStatusBadge: document.getElementById('blueprint-status-badge'),
       accelerateModal: document.getElementById('accelerate-modal'),
+      blueprintDraftBanner: document.getElementById('blueprint-draft-banner'),
       cancelAccelerate: document.getElementById('cancel-accelerate'),
       confirmAccelerate: document.getElementById('confirm-accelerate'),
       targetLanguage: document.getElementById('target-language'),
@@ -963,6 +978,7 @@
         if (selected) setTreeActive(selected);
         ui.fileTree.scrollTop = scrollTop;
         renderBlueprintBanner(data.tree);
+        updateBlueprintStatus();
       } catch (e) {
         if (!ui.fileTree.querySelector('.tree-node')) {
           ui.fileTree.innerHTML = `<div class="placeholder" style="padding:1rem;color:var(--danger)">${e.message}</div>`;
@@ -1712,6 +1728,11 @@
       if (!state.sessionId) { log('No session; create or load a workspace first', 'error'); return; }
       const selected = document.querySelector('input[name="accelerate-mode"]:checked');
       const mode = selected ? selected.value : 'runtime';
+
+      if (mode === 'synthesize') {
+        return synthesizeBlueprint();
+      }
+
       ui.acceleratorLog.innerHTML = '<div class="placeholder" style="color:var(--muted);padding:0.5rem 0">Acceleration progress will appear here.</div>';
       switchBottomTab('accelerator');
       setBusy(true);
@@ -1768,6 +1789,55 @@
       } catch (e) {
         appendAccelLog(`Acceleration failed: ${escapeHtml(e.message)}`, 'error');
         log(`Acceleration failed: ${e.message}`, 'error');
+      } finally {
+        setBusy(false);
+        ui.accelerateModal.classList.remove('open');
+      }
+    }
+
+    async function updateBlueprintStatus() {
+      if (!state.sessionId) return;
+      try {
+        const res = await fetch(`/api/blueprint/status?session_id=${encodeURIComponent(state.sessionId)}`);
+        const data = await res.json();
+        if (data.present && data.status === 'draft') {
+          ui.blueprintStatusBadge.classList.add('visible');
+          ui.blueprintStatusBadge.textContent = `[ DRAFT${data.transferable ? '' : ' - NOT TRANSFERABLE'} ]`;
+          if (ui.blueprintDraftBanner) ui.blueprintDraftBanner.style.display = 'block';
+        } else {
+          ui.blueprintStatusBadge.classList.remove('visible');
+          if (ui.blueprintDraftBanner) ui.blueprintDraftBanner.style.display = 'none';
+        }
+      } catch (e) {
+        // Non-fatal; hide the badge if status cannot be determined.
+        ui.blueprintStatusBadge.classList.remove('visible');
+        if (ui.blueprintDraftBanner) ui.blueprintDraftBanner.style.display = 'none';
+      }
+    }
+
+    async function synthesizeBlueprint() {
+      if (!state.sessionId) { log('No session; create or load a workspace first', 'error'); return; }
+      ui.acceleratorLog.innerHTML = '<div class="placeholder" style="color:var(--muted);padding:0.5rem 0">Synthesizing finalized blueprint with LLM...</div>';
+      switchBottomTab('accelerator');
+      setBusy(true);
+      try {
+        const res = await fetch('/api/blueprint/synthesize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildBody({}))
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.status !== 'finalized') {
+          throw new Error(data.error || 'Blueprint synthesis did not finalize');
+        }
+        appendAccelLog('Blueprint synthesized and finalized.', 'success');
+        log(`Blueprint synthesized: ${data.path}`, 'success');
+        ui.blueprintStatusBadge.classList.remove('visible');
+        if (ui.blueprintDraftBanner) ui.blueprintDraftBanner.style.display = 'none';
+        loadTree();
+      } catch (e) {
+        appendAccelLog(`Synthesis failed: ${escapeHtml(e.message)}`, 'error');
+        log(`Synthesis failed: ${e.message}`, 'error');
       } finally {
         setBusy(false);
         ui.accelerateModal.classList.remove('open');
@@ -2252,7 +2322,7 @@
     ui.cancelRegenerate.addEventListener('click', () => ui.regenerateModal.classList.remove('open'));
     ui.confirmRegenerate.addEventListener('click', () => { ui.regenerateModal.classList.remove('open'); regenerateFromBlueprint(); });
     if (ui.blueprintInitBanner) ui.blueprintInitBanner.addEventListener('click', () => ui.regenerateModal.classList.add('open'));
-    ui.accelerateBtn.addEventListener('click', () => ui.accelerateModal.classList.add('open'));
+    ui.accelerateBtn.addEventListener('click', () => { ui.accelerateModal.classList.add('open'); updateBlueprintStatus(); });
     ui.cancelAccelerate.addEventListener('click', () => ui.accelerateModal.classList.remove('open'));
     ui.confirmAccelerate.addEventListener('click', () => { ui.accelerateModal.classList.remove('open'); accelerateWorkspace(); });
     ui.settingTier.addEventListener('change', () => {

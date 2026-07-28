@@ -220,8 +220,10 @@ class BuildRunner:
         dry_run: bool = False,
         progress: bool = False,
         config_override: Optional[ConfigOverride] = None,
+        blueprint_path: Optional[Path] = None,
     ):
         self.blueprint = blueprint
+        self.blueprint_path = Path(blueprint_path) if blueprint_path else None
         self.max_workers = max(1, max_workers)
         self.llm_provider = llm_provider or blueprint.llm.provider
         self.model = model or blueprint.llm.model
@@ -258,6 +260,11 @@ class BuildRunner:
         output_dir = self.blueprint.output_dir.resolve()
         if not self.dry_run:
             output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Draft Blueprint v3 builds must be executed in an isolated sandbox with
+        # read-only source directories so the original workspace is never mutated.
+        if self._is_v3_draft():
+            return self._run_draft_sandbox_build(output_dir)
 
         expanded = self._expand_specs()
         grouped = self._group_by_source(expanded)
@@ -343,6 +350,51 @@ class BuildRunner:
                 return self._summarize(results + [failure])
 
         return self._summarize(results)
+
+    def _is_v3_draft(self) -> bool:
+        """Return True when the blueprint is a draft Blueprint v3.0.0."""
+        meta = self.blueprint.metadata or {}
+        return (
+            str(meta.get("schema_version")) == "3.0.0"
+            or str(meta.get("status")).lower() == "draft"
+        )
+
+    def _workspace_root(self) -> Path:
+        """Resolve the workspace root from the blueprint path or metadata."""
+        if self.blueprint_path and self.blueprint_path.is_file():
+            return self.blueprint_path.parent.resolve()
+        workspace = self.blueprint.metadata.get("workspace_root")
+        if workspace:
+            return Path(workspace).resolve()
+        if self.blueprint.output_dir.name == "dist":
+            return self.blueprint.output_dir.parent.resolve()
+        return self.blueprint.output_dir.resolve()
+
+    def _run_draft_sandbox_build(self, output_dir: Path) -> Dict[str, Any]:
+        """Execute a draft Blueprint v3 in an isolated sandbox builder."""
+        from aero_forge.blueprint.schema import BlueprintV3
+        from aero_forge.builder.sandbox import DraftSandboxBuilder
+
+        workspace = self._workspace_root()
+        blueprint_path = self.blueprint_path or (workspace / "blueprint.aero")
+        if not blueprint_path.is_file():
+            raise UserError(
+                f"Draft v3 build requires a blueprint file, not found: {blueprint_path}"
+            )
+
+        blueprint_v3 = BlueprintV3.load(blueprint_path)
+        if blueprint_v3.metadata.status.value != "draft":
+            raise UserError(
+                f"Expected draft blueprint, got status={blueprint_v3.metadata.status}"
+            )
+
+        builder = DraftSandboxBuilder(
+            blueprint_v3,
+            workspace,
+            output_dir,
+            env=None,
+        )
+        return builder.build()
 
     def _safe_build_source(
         self,
