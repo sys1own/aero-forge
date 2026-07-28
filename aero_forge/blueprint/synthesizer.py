@@ -27,7 +27,9 @@ from aero_forge.blueprint.schema import (
     write_v3_blueprint,
 )
 from aero_forge.builder.aeroc_compiler import compile_blueprint_to_aeroc
+from aero_forge.bundle_repo import bundle_workspace, format_context_block
 from aero_forge.llm.clients import BaseLLMClient, get_llm_client
+from aero_forge.overlay.manager import OverlayManager
 
 logger = logging.getLogger("aero_forge.blueprint.synthesizer")
 
@@ -146,40 +148,27 @@ class LLMBlueprintSynthesizer:
         spec: Optional[str],
     ) -> Dict[str, str]:
         project_name = workspace.name or "synthesized_project"
-        files_summary: List[str] = []
-        manifests: List[str] = []
 
-        for pattern in ("Cargo.toml", "pyproject.toml", "setup.py", "CMakeLists.txt", "Makefile", "package.json", "go.mod"):
-            for manifest in workspace.rglob(pattern):
-                rel = manifest.relative_to(workspace)
-                manifests.append(str(rel))
-                if manifest.name in ("Cargo.toml", "pyproject.toml"):
-                    try:
-                        content = manifest.read_text(encoding="utf-8")
-                        # Trim large manifests for context window management.
-                        files_summary.append(f"--- {rel} ---\n{content[:2000]}")
-                    except OSError:
-                        pass
+        # Commit any in-memory overlay edits so the bundle reflects the latest workspace state.
+        try:
+            OverlayManager(workspace).flush_to_workspace(workspace)
+        except Exception:
+            pass
 
-        source_files: List[str] = []
-        for ext in ("*.py", "*.rs", "*.cpp", "*.c", "*.h", "*.hpp", "*.toml"):
-            for src in workspace.rglob(ext):
-                rel = src.relative_to(workspace)
-                if "/target/" in str(rel) or "/node_modules/" in str(rel):
-                    continue
-                source_files.append(str(rel))
-
-        draft_yaml = ""
+        # Build a comprehensive, LLM-friendly repository bundle with full source contents,
+        # manifests, dependencies, and the current blueprint (if any).
+        bundle = bundle_workspace(workspace, max_file_size_kb=50)
         if draft:
-            draft_yaml = yaml.safe_dump(draft.model_dump(mode="json"), sort_keys=False)
+            bundle["draft_blueprint"] = yaml.safe_dump(draft.model_dump(mode="json"), sort_keys=False)
+        else:
+            bundle["draft_blueprint"] = ""
+
+        repo_bundle = format_context_block(bundle, fmt="xml")
 
         return {
             "project_name": project_name,
             "workspace_root": str(workspace),
-            "manifests": "\n".join(manifests) or "none",
-            "manifest_contents": "\n".join(files_summary) or "none",
-            "source_files": "\n".join(source_files) or "none",
-            "draft_blueprint": draft_yaml or "none",
+            "repo_bundle": repo_bundle,
             "spec": spec or "none",
         }
 

@@ -1,16 +1,13 @@
-You are an expert build-system architect. Inspect the project described below and produce a complete, valid Blueprint v3.0.0 (JSON) that can be used to deterministically build and run the project.
+You are an expert build-system architect. Inspect the full project context below and produce a complete, valid Blueprint v3.0.0 (JSON) that can be used to deterministically build and run the project.
 
 Project context:
 - Project name: {{ project_name }}
 - Workspace root: {{ workspace_root }}
-- Detected manifests: {{ manifests }}
-- Manifest contents:
-{{ manifest_contents }}
-- Source files:
-{{ source_files }}
-- Draft blueprint (if any):
-{{ draft_blueprint }}
-- Additional specification:
+
+Full repository bundle (source files, manifests, dependencies, and current blueprint if any):
+{{ repo_bundle }}
+
+Additional specification:
 {{ spec }}
 
 Your response MUST be a single JSON object matching the BlueprintV3 Pydantic schema with these exact rules:
@@ -27,7 +24,9 @@ Your response MUST be a single JSON object matching the BlueprintV3 Pydantic sch
 - llm_context: object with:
   - state: "synthesized"
   - repository_summary: a concise 1-3 sentence semantic summary of the project's purpose and architecture.
-  - dependency_graph: mapping of each source file to the list of files it directly depends on (e.g. {"src/main.py": ["src/utils.py"], "src/lib.rs": ["src/ffi.rs"]}).
+  - dependency_graph: detailed mapping of each source file to the files/modules/crates it directly depends on, including internal crates and external packages. Example: {"src/main.py": ["src/utils.py", "numpy"], "src/lib.rs": ["src/ffi.rs", "crate:pyo3"]}.
+  - exported_api_signatures: for each public module, list exported functions, structs, methods, and types with full signatures. Example: {"src/lib.rs": ["pub fn compute(input: &[f64], output: &mut [f64])"] , "src/main.py": ["def process(data: list[float]) -> list[float]"]}
+  - polyglot_boundaries: list of PyO3 / C++ ABI / ctypes integration points, with source file pairs, shared data structures, and memory ownership. Example: {"python_file": "src/main.py", "native_file": "src/lib.rs", "binding": "pyo3", "shared_struct": "ComputeInput", "memory_model": "caller_allocates"}
   - compute_hotspots: list of heavy-compute functions/classes with keys: name, file, complexity (e.g. "O(n^2)"), acceleration_candidate (true/false), reason (why it should be accelerated).
 - All file paths must be relative to the workspace root. Do NOT include absolute paths. Use ${WORKSPACE_ROOT} for workspace-relative placeholders if needed.
 
