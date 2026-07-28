@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from aero_forge.blueprint import Blueprint, ContractEntry, ManifestEntry, write_blueprint
+from aero_forge.builder.aeroc_compiler import compile_directory_to_aeroc
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
 from aero_forge.monorepo import generate_monorepo
@@ -634,6 +635,14 @@ def build_universal_project(
             for p in output_dir.rglob("*")
             if p.is_file()
         )
+
+    # Produce a portable standalone ``workspace.aeroc`` artifact from the materialized tree.
+    try:
+        compile_directory_to_aeroc(output_dir, output_dir / "workspace.aeroc")
+        result["aeroc_path"] = str(output_dir / "workspace.aeroc")
+    except Exception as exc:
+        logger.warning("Failed to compile workspace.aeroc: %s", exc)
+
     return result
 
 

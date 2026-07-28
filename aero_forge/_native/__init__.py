@@ -11,6 +11,7 @@ try:
         hash_bytes,
         hash_file,
         run_aeroc,
+        unpack_aeroc,
     )
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
@@ -18,4 +19,4 @@ except ImportError as exc:  # pragma: no cover
         "Run 'cargo build --release' in aero_forge/_native."
     ) from exc
 
-__all__ = ["Hasher", "GraphEngine", "compile_aeroc", "run_aeroc", "hash_bytes", "hash_file"]
+__all__ = ["Hasher", "GraphEngine", "compile_aeroc", "run_aeroc", "unpack_aeroc", "hash_bytes", "hash_file"]

@@ -7,6 +7,7 @@ use pyo3::types::PyString;
 
 mod aeroc_compiler;
 mod aeroc_daemon;
+mod aeroc_unpacker;
 
 /// A BLAKE3 incremental hasher exposed to Python.
 #[pyclass(name = "Hasher")]
@@ -412,6 +413,13 @@ fn run_aeroc(aeroc_path: &str, workspace: &str, max_workers: usize) -> PyResult<
         .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// Extract a `workspace.aeroc` container into *output_dir*.
+#[pyfunction]
+fn unpack_aeroc(aeroc_path: &str, output_dir: &str) -> PyResult<usize> {
+    aeroc_unpacker::unpack_aeroc(aeroc_path, output_dir)
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 #[pymodule(name = "aero_forge_native")]
 fn aero_forge_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Hasher>()?;
@@ -421,5 +429,6 @@ fn aero_forge_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hash_file, m)?)?;
     m.add_function(wrap_pyfunction!(compile_aeroc, m)?)?;
     m.add_function(wrap_pyfunction!(run_aeroc, m)?)?;
+    m.add_function(wrap_pyfunction!(unpack_aeroc, m)?)?;
     Ok(())
 }

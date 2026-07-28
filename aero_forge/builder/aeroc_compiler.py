@@ -110,3 +110,49 @@ def compile_blueprint_to_aeroc(
     }
 
     return compile_aeroc(json.dumps(spec), str(output_path))
+
+
+def compile_directory_to_aeroc(
+    directory: str | Path,
+    output_path: str | Path,
+    exclude: set[str] | None = None,
+) -> str:
+    """Compile an on-disk workspace tree into a binary ``workspace.aeroc`` container.
+
+    The resulting container carries every file under *directory* (minus common
+    build/cache directories) in the compressed payload and source map, so it can
+    be unpacked later by the native ``aeroc_unpacker``.
+    """
+    directory = Path(directory).resolve()
+    output_path = Path(output_path).resolve()
+    exclude = set(exclude or {
+        ".aero", ".git", ".aero_core", "target", "__pycache__", "*.egg-info", ".pytest_cache"
+    })
+
+    def _keep(path: Path) -> bool:
+        if path.resolve() == output_path:
+            return False
+        rel = path.relative_to(directory)
+        parts = rel.parts
+        if any(p in exclude or p.endswith(".egg-info") or p == "__pycache__" for p in parts):
+            return False
+        return path.is_file()
+
+    sources: List[Dict[str, Any]] = []
+    for path in sorted(directory.rglob("*")):
+        if _keep(path):
+            rel = path.relative_to(directory).as_posix().lstrip("/")
+            sources.append({
+                "path": rel,
+                "content_base64": base64.b64encode(path.read_bytes()).decode("ascii"),
+            })
+
+    spec = {
+        "nodes": ["workspace"],
+        "edges": {},
+        "instructions": [{"op": "HALT"}],
+        "sources": sources,
+        "flags": 0,
+    }
+
+    return compile_aeroc(json.dumps(spec), str(output_path))

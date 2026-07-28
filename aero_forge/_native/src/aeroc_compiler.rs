@@ -205,13 +205,18 @@ impl AerocHeader {
         write_le!(self.data, u32, 92, v);
     }
 
-    pub fn reserved(&self) -> [u8; 16] {
-        let mut r = [0u8; 16];
-        r.copy_from_slice(&self.data[96..112]);
-        r
+    pub fn source_map_offset(&self) -> u64 {
+        read_le!(self.data, u64, 96)
     }
-    pub fn set_reserved(&mut self, v: [u8; 16]) {
-        self.data[96..112].copy_from_slice(&v);
+    pub fn set_source_map_offset(&mut self, v: u64) {
+        write_le!(self.data, u64, 96, v);
+    }
+
+    pub fn source_map_len(&self) -> u64 {
+        read_le!(self.data, u64, 104)
+    }
+    pub fn set_source_map_len(&mut self, v: u64) {
+        write_le!(self.data, u64, 104, v);
     }
 
     pub fn content_hash(&self) -> [u8; 16] {
@@ -245,6 +250,16 @@ impl PayloadBlockHeader {
         write_le!(buf, u32, 12, self.block_hash);
         buf
     }
+}
+
+/// 16-byte directory entry mapping a source path to its payload block range.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct SourceMapEntry {
+    pub path_ref: u32,
+    pub start_block: u32,
+    pub block_count: u32,
+    pub reserved: u32,
 }
 
 /// 32-bit byte offset into the interned string table.
@@ -668,9 +683,10 @@ pub fn compile_project(spec: &ProjectSpec, output_path: &Path) -> Result<String,
         .map(|(i, n)| (n, i))
         .collect();
 
-    // Intern source paths and instruction strings.
+    // Intern source paths and instruction strings, keeping source refs for the map.
+    let mut source_refs: Vec<StringRef> = Vec::with_capacity(spec.sources.len());
     for src in &spec.sources {
-        table.insert(&canonicalize_path(&src.path));
+        source_refs.push(table.insert(&canonicalize_path(&src.path)));
     }
 
     let mut instructions: Vec<Instruction> = Vec::with_capacity(spec.instructions.len());
@@ -696,14 +712,23 @@ pub fn compile_project(spec: &ProjectSpec, output_path: &Path) -> Result<String,
         }
     }
 
+    // Intern source paths and keep their string-table offsets for the source map.
+    let mut source_refs: Vec<StringRef> = Vec::with_capacity(spec.sources.len());
+    for src in &spec.sources {
+        source_refs.push(table.insert(&canonicalize_path(&src.path)));
+    }
+
     // Train a 64 KiB Zstd dictionary from source contents and compress chunks.
     let samples: Vec<&[u8]> = spec.sources.iter().map(|s| s.content.as_slice()).collect();
     let dictionary = build_dictionary(&samples);
 
     let mut payload = Vec::new();
-    for src in &spec.sources {
-        let chunks = src.content.chunks(CHUNK_SIZE);
-        for chunk in chunks {
+    let mut source_map_entries: Vec<SourceMapEntry> = Vec::with_capacity(spec.sources.len());
+    let mut block_index = 0u32;
+    for (src_idx, src) in spec.sources.iter().enumerate() {
+        let start_block = block_index;
+        let chunks: Vec<&[u8]> = src.content.chunks(CHUNK_SIZE).collect();
+        for chunk in &chunks {
             let compressed = compress_chunk(chunk, &dictionary);
             let uncompressed_size = chunk.len() as u32;
             let compressed_size = compressed.len() as u32;
@@ -717,7 +742,22 @@ pub fn compile_project(spec: &ProjectSpec, output_path: &Path) -> Result<String,
             };
             payload.extend_from_slice(&header.as_bytes());
             payload.extend_from_slice(&compressed);
+            block_index += 1;
         }
+        source_map_entries.push(SourceMapEntry {
+            path_ref: source_refs[src_idx].0,
+            start_block,
+            block_count: chunks.len() as u32,
+            reserved: 0,
+        });
+    }
+
+    // Build the source map (array of SourceMapEntry records, 16 bytes each).
+    let mut source_map = Vec::with_capacity(
+        source_map_entries.len() * std::mem::size_of::<SourceMapEntry>(),
+    );
+    for entry in &source_map_entries {
+        source_map.extend_from_slice(bytemuck::bytes_of(entry));
     }
 
     let string_table_bytes = table.as_bytes().to_vec();
@@ -730,6 +770,9 @@ pub fn compile_project(spec: &ProjectSpec, output_path: &Path) -> Result<String,
     let bytecode_offset = dag_matrix_offset + dag_bytes.len() as u64;
     let payload_offset = bytecode_offset + bytecode.len() as u64;
     let zstd_dict_offset = payload_offset + payload.len() as u64;
+    let align = |v: u64| ((v + 15) / 16) * 16;
+    let source_map_offset = align(zstd_dict_offset + zstd_dict.len() as u64);
+    let pad_before_source_map = (source_map_offset - (zstd_dict_offset + zstd_dict.len() as u64)) as usize;
 
     // Build body for content hashing (everything after the header).
     let mut body = Vec::new();
@@ -738,6 +781,8 @@ pub fn compile_project(spec: &ProjectSpec, output_path: &Path) -> Result<String,
     body.extend_from_slice(&bytecode);
     body.extend_from_slice(&payload);
     body.extend_from_slice(&zstd_dict);
+    body.extend_from_slice(&vec![0u8; pad_before_source_map]);
+    body.extend_from_slice(&source_map);
 
     let content_hash = blake3::hash(&body);
     let mut header = AerocHeader::default();
@@ -753,6 +798,8 @@ pub fn compile_project(spec: &ProjectSpec, output_path: &Path) -> Result<String,
     header.set_payload_len(payload.len() as u64);
     header.set_zstd_dict_offset(zstd_dict_offset);
     header.set_zstd_dict_len(zstd_dict.len() as u32);
+    header.set_source_map_offset(source_map_offset);
+    header.set_source_map_len(source_map.len() as u64);
     header.set_content_hash(content_hash.as_bytes()[..16].try_into().unwrap());
 
     let mut file = header.data.to_vec();
@@ -785,7 +832,7 @@ fn compress_chunk(chunk: &[u8], dictionary: &[u8]) -> Vec<u8> {
     }
 }
 
-fn xxhash32(data: &[u8]) -> u32 {
+pub fn xxhash32(data: &[u8]) -> u32 {
     xxhash_rust::xxh32::xxh32(data, 0)
 }
 
