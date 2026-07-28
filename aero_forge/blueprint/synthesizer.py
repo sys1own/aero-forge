@@ -26,6 +26,7 @@ from aero_forge.blueprint.schema import (
     VerificationNode,
     write_v3_blueprint,
 )
+from aero_forge.builder.aeroc_compiler import compile_blueprint_to_aeroc
 from aero_forge.llm.clients import BaseLLMClient, get_llm_client
 
 logger = logging.getLogger("aero_forge.blueprint.synthesizer")
@@ -118,6 +119,15 @@ class LLMBlueprintSynthesizer:
         blueprint = self._parse_and_normalize(raw, workspace)
         if output_path:
             write_v3_blueprint(blueprint, output_path)
+
+        # Emit the compiled binary IR container immediately so the workspace is
+        # usable as a standalone `.aeroc` artifact.
+        aeroc_path = workspace / "workspace.aeroc"
+        try:
+            compile_blueprint_to_aeroc(blueprint, aeroc_path, workspace=workspace)
+        except Exception as exc:
+            logger.warning("Could not compile workspace.aeroc during synthesis: %s", exc)
+
         return blueprint
 
     def synthesize_from_text(

@@ -237,3 +237,7 @@ def test_build_draft_then_synthesize_then_finalize(tmp_path: Path, monkeypatch: 
     assert finalized.metadata.status == BlueprintStatus.finalized
     assert finalized.metadata.transferable is True
     assert finalized.metadata.generation_method == GenerationMethod.llm_synthesized
+
+    aeroc_path = tmp_path / "workspace.aeroc"
+    assert aeroc_path.is_file()
+    assert aeroc_path.read_bytes().startswith(b"AEROFOG\x00")

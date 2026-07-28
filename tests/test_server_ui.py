@@ -140,7 +140,7 @@ def test_export_standalone_aeroc(server):
     assert status == 200
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
         names = zf.namelist()
-        assert any(name.endswith(".aeroc") for name in names)
+        assert any(name.endswith(".aerozip") for name in names)
 
 
 def test_export_all_options(server):
@@ -162,4 +162,34 @@ def test_export_all_options(server):
         assert "main.py" in names
         assert "crates/native_core/Cargo.toml" in names
         assert "crates/aero_core/Cargo.toml" in names
-        assert any(name.endswith(".aeroc") for name in names)
+        assert any(name.endswith(".aerozip") for name in names)
+
+
+def test_download_aeroc_is_raw_binary_not_zip(server):
+    """/api/workspace/download-aeroc returns the compiled binary IR container."""
+    session_id = "test-download-aeroc"
+    _save_file(server, session_id, "main.py", "print('hello')\n")
+    client = _make_client(server)
+    status, data = _post_json(
+        server, client, "/api/workspace/download-aeroc", {"session_id": session_id}
+    )
+    assert status == 200
+    assert data.startswith(b"AEROFOG\x00")
+    assert not data.startswith(b"PK")
+
+
+def test_export_scaffold_is_zip(server):
+    """/api/workspace/export-scaffold returns a .aerozip zip bundle."""
+    session_id = "test-export-scaffold"
+    _save_file(server, session_id, "main.py", "print('hello')\n")
+    client = _make_client(server)
+    status, data = _post_json(
+        server, client, "/api/workspace/export-scaffold", {"session_id": session_id}
+    )
+    assert status == 200
+    assert zipfile.is_zipfile(io.BytesIO(data))
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        names = zf.namelist()
+        assert "main.py" in names
+        assert "aeroc/aero_core/Cargo.toml" in names
+        assert "pyproject.toml" in names
