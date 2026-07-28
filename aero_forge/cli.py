@@ -512,6 +512,12 @@ def build(
     _setup_logging(verbose, json_output)
     start = time.perf_counter()
 
+    # Auto-materialize an empty workspace that contains a standalone workspace.aeroc.
+    workspace_root = Path(blueprint).parent if blueprint and blueprint != "blueprint.aero" else Path(".")
+    from aero_forge.materializer import auto_materialize
+    if auto_materialize(workspace_root):
+        click.echo(f"Auto-materialized workspace from {workspace_root / 'workspace.aeroc'}")
+
     if project_dir or upload_zip:
         from .project_builder import ProjectBuilder, build_from_upload
 
@@ -1613,6 +1619,37 @@ def validate_blueprint(blueprint_path: str, json_output: bool, export_check: boo
         click.echo(json.dumps(result, default=str))
     else:
         click.echo(f"Blueprint is valid{' and exportable' if export_check else ''}: {blueprint_path}")
+
+
+@main.group("aeroc")
+def aeroc_group() -> None:
+    """Native workspace.aeroc container commands."""
+
+
+@aeroc_group.command("unpack")
+@click.argument("aeroc_path", type=click.Path(exists=True, dir_okay=False, path_type=str))
+@click.argument("output_dir", type=click.Path(file_okay=False, path_type=str), default=".")
+@click.option("--verbose", "-v", is_flag=True)
+def unpack_aeroc_cmd(aeroc_path: str, output_dir: str, verbose: bool) -> None:
+    """Extract a workspace.aeroc container into OUTPUT_DIR."""
+    _setup_logging(verbose)
+    from aero_forge.materializer import unpack_aeroc_file
+
+    count = unpack_aeroc_file(aeroc_path, output_dir)
+    click.echo(f"Unpacked {count} source files to {output_dir}")
+
+
+@aeroc_group.command("compile")
+@click.argument("workspace", type=click.Path(file_okay=False, path_type=str), default=".")
+@click.argument("output", type=click.Path(dir_okay=False, path_type=str), default="workspace.aeroc")
+@click.option("--verbose", "-v", is_flag=True)
+def compile_aeroc_cmd(workspace: str, output: str, verbose: bool) -> None:
+    """Compile an on-disk workspace tree into a workspace.aeroc container."""
+    _setup_logging(verbose)
+    from aero_forge.builder.aeroc_compiler import compile_directory_to_aeroc
+
+    compile_directory_to_aeroc(workspace, output)
+    click.echo(f"Compiled {workspace} -> {output}")
 
 
 if __name__ == "__main__":

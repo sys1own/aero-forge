@@ -87,7 +87,9 @@ class TestAerocCompiler:
             pl_len,
             dict_off,
             dict_len,
-        ) = struct.unpack_from("<QQQIIQQQQQI", raw, 20)
+            sm_off,
+            sm_len,
+        ) = struct.unpack_from("<QQQIIQQQQQIQQ", raw, 20)
 
         assert st_off == 128
         assert dag_off == st_off + st_len
@@ -95,6 +97,9 @@ class TestAerocCompiler:
         assert pl_off == bc_off + bc_len
         assert dict_off == pl_off + pl_len
         assert dict_len <= 64 * 1024
+        assert sm_off >= dict_off + dict_len
+        assert sm_off % 16 == 0
+        assert sm_len % 16 == 0
 
     def test_compile_aeroc_deterministic(self, tmp_path: Path) -> None:
         """Two compilations of the same spec yield identical bytes."""

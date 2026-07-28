@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from aero_forge.blueprint import Blueprint, ContractEntry, ManifestEntry, write_blueprint
+from aero_forge.builder.aeroc_compiler import compile_directory_to_aeroc
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
 from aero_forge.orchestrator.orchestrator import plan_workspace
@@ -609,6 +610,12 @@ def generate_monorepo(
             "pytest_error": pytest.stderr,
         }
 
+    # Produce a portable standalone ``workspace.aeroc`` artifact.
+    try:
+        compile_directory_to_aeroc(output_dir, output_dir / "workspace.aeroc")
+    except Exception as exc:
+        logger.warning("Failed to compile workspace.aeroc: %s", exc)
+
     return {
         "success": success,
         "project_name": safe_project,
@@ -616,6 +623,7 @@ def generate_monorepo(
         "primary_function": primary,
         "files": files,
         "blueprint_path": str(output_dir / "blueprint.aero"),
+        "aeroc_path": str(output_dir / "workspace.aeroc"),
         "core_build": build,
         "test_total": test_total,
         "test_passed": test_passed,
