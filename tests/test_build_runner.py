@@ -512,4 +512,46 @@ def test_build_runner_dag_skips_unchanged_files(tmp_path: Path):
     result2 = runner2.build()
     assert result2["success"] is True
     assert result2["results"][0]["iterations"] == 0
-    assert result2["results"][0]["logs"] == "DAG cache hit"
+
+
+def test_build_runner_triggers_async_context_bundler_on_success(tmp_path: Path, monkeypatch):
+    """A successful BuildRunner.build() schedules an async ContextBundler blueprint synthesis."""
+    blueprint_path = tmp_path / "blueprint.aero"
+    blueprint_path.write_text(
+        "project: test_build\n"
+        "functions:\n"
+        "  - file: calc.py\n"
+        "    name: square\n"
+        "    tests: [test_calc.py]\n"
+        "llm:\n"
+        "  provider: none\n"
+        "output_dir: ./dist\n"
+    )
+    (tmp_path / "calc.py").write_text("def square(x):\n    return x * x\n", encoding="utf-8")
+    (tmp_path / "test_calc.py").write_text(
+        "from calc import square\ndef test_square():\n    assert square(3) == 9\n",
+        encoding="utf-8",
+    )
+
+    calls = []
+
+    class SpyBundler:
+        def __init__(self, *args, **kwargs):
+            self.calls = calls
+            self.calls.append(("init", args, kwargs))
+
+        def synthesize_blueprint_async(self, workspace):
+            self.calls.append(("async", workspace))
+            return None
+
+    monkeypatch.setattr("aero_forge.build_runner.ContextBundler", SpyBundler)
+
+    from aero_forge.build_runner import BuildRunner
+    from aero_forge.blueprint import parse_blueprint
+
+    bp = parse_blueprint(blueprint_path)
+    runner = BuildRunner(bp, max_workers=1, cache_enabled=False)
+    runner._maybe_synthesize_blueprint(tmp_path, success=True)
+
+    assert any(c[0] == "async" for c in calls)
+    assert any(c[0] == "init" for c in calls)

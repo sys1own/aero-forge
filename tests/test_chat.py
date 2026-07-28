@@ -474,3 +474,71 @@ def test_chat_copilot_parses_suggest_build_prompt_json(tmp_path: Path) -> None:
     assert "hybrid_rust_python" in result["build_prompt"]
     assert result["action"]["type"] == "SUGGEST_BUILD_PROMPT"
     assert result["raw"] == fake_response
+
+
+def test_chat_attaches_synthesize_context_action_when_missing(tmp_path: Path) -> None:
+    """Copilot attaches a synthesize-blueprint Action Card when blueprint.aero is missing."""
+    fake_response = '{"display_text": "Hello!", "action": null}'
+
+    class FakeClient:
+        def generate(self, messages, temperature=0.2, **kwargs):
+            return fake_response
+
+    session = ChatSession(tmp_path)
+    with patch("aero_forge.chat.get_llm_client", return_value=FakeClient()):
+        result = session.reply_structured("What is this workspace?")
+
+    assert "context_action" in result
+    assert result["context_action"]["type"] == "synthesize_blueprint"
+    assert result["context_action"]["command"] == "synthesizeBlueprint"
+    assert "missing blueprint.aero" in result["context_action"]["reason"]
+
+
+def test_chat_attaches_synthesize_context_action_when_not_llm_initialized(tmp_path: Path) -> None:
+    """Copilot attaches a synthesize-blueprint Action Card when blueprint exists but is not LLM-initialized."""
+    (tmp_path / "blueprint.aero").write_text(
+        "metadata:\n  schema_version: '3.0.0'\n  generation_method: static_heuristic\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "main.py").write_text("print('hello')\n", encoding="utf-8")
+
+    fake_response = '{"display_text": "Got it.", "action": null}'
+
+    class FakeClient:
+        def generate(self, messages, temperature=0.2, **kwargs):
+            return fake_response
+
+    session = ChatSession(tmp_path)
+    with patch("aero_forge.chat.get_llm_client", return_value=FakeClient()):
+        result = session.reply_structured("What is this workspace?")
+
+    assert result.get("context_action", {}).get("command") == "synthesizeBlueprint"
+    assert "not yet LLM-initialized" in result["context_action"]["reason"]
+
+
+def test_chat_skips_context_action_for_fresh_llm_initialized_blueprint(tmp_path: Path) -> None:
+    """No context action is attached when blueprint.aero is fresh and LLM-initialized."""
+    import yaml
+
+    blueprint = {
+        "metadata": {
+            "schema_version": "3.0.0",
+            "generation_method": "llm_synthesized",
+            "llm_initialized": True,
+        },
+        "llm_context": {"state": "synthesized"},
+    }
+    (tmp_path / "blueprint.aero").write_text(yaml.safe_dump(blueprint), encoding="utf-8")
+    (tmp_path / "main.py").write_text("print('hello')\n", encoding="utf-8")
+
+    fake_response = '{"display_text": "Ready.", "action": null}'
+
+    class FakeClient:
+        def generate(self, messages, temperature=0.2, **kwargs):
+            return fake_response
+
+    session = ChatSession(tmp_path)
+    with patch("aero_forge.chat.get_llm_client", return_value=FakeClient()):
+        result = session.reply_structured("What is this workspace?")
+
+    assert result.get("context_action") is None
