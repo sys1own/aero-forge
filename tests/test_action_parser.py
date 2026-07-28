@@ -86,6 +86,50 @@ Build a hybrid_rust_python project with a Rust `matmul` kernel and PyO3 wrapper.
     assert parsed["action"]["clean_prompt"] == "Build a hybrid_rust_python project with a Rust `matmul` kernel and PyO3 wrapper."
 
 
+def test_extract_clean_prompt_builder_prompt_tag(parser: ActionParser) -> None:
+    """The new <builder_prompt> delimiter isolates the inner prompt from surrounding chitchat."""
+    response = """I'll give you a ready-to-use prompt for an AI assistant.
+
+<builder_prompt>
+You are an expert systems builder. Implement a pure Python weighted decision matrix evaluator with the signature: def weighted_decision_matrix(scores, weights, criteria_types) -> list[float].
+</builder_prompt>
+
+You can paste this directly into your builder.
+"""
+    parsed = parser.parse(response)
+    clean = parsed["action"]["clean_prompt"]
+    assert clean.startswith("You are an expert systems builder")
+    assert "paste" not in clean
+    assert "<builder_prompt>" not in clean
+    assert "weighted_decision_matrix" in clean
+    assert parsed["action"]["parameters"]["target"] == "pure_python"
+
+
+def test_extract_clean_prompt_aggressive_intro_outro_stripping(parser: ActionParser) -> None:
+    """Without tags, common meta-preambles and postambles are stripped from the clean prompt."""
+    response = """I'll give you a ready-to-use prompt.
+
+You are an expert systems builder. Build a hybrid_rust_python matrix kernel with PyO3 bindings.
+
+You can paste this directly into your builder."""
+    clean = parser.extract_clean_prompt(response)
+    assert clean is not None
+    assert "I'll give you" not in clean
+    assert "You can paste this" not in clean
+    assert clean.startswith("You are an expert systems builder")
+    assert clean.endswith("PyO3 bindings.")
+
+
+def test_extract_action_returns_structured_packet(parser: ActionParser) -> None:
+    """The module-level extract_action helper returns a full display/action packet."""
+    from aero_forge.copilot.action_parser import extract_action
+    response = """<builder_prompt>Build a wasm image filter.</builder_prompt>"""
+    packet = extract_action(response)
+    assert packet["display_text"] == ""
+    assert packet["action"]["clean_prompt"] == "Build a wasm image filter."
+    assert packet["action"]["parameters"]["target"] == "wasm"
+
+
 def test_extract_clean_prompt_yaml_contract_returns_inner_prompt(parser: ActionParser) -> None:
     """A ```yaml blueprint contract block is parsed and only the prompt field is returned."""
     response = """## Overview

@@ -2199,7 +2199,7 @@
         try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
         ui.settingSession.value = state.sessionId;
         state.messages = data.messages || [];
-        addAssistantMessage(data.display_text || data.reply, data.action);
+        addAssistantMessage(data.display_text || data.reply, data.action, data.clean_prompt);
       } catch (e) { addChat('assistant', `Chat error: ${e.message}`, true); }
       finally {
         if (pulseCard.parentNode) pulseCard.remove();
@@ -2207,17 +2207,16 @@
       }
     }
 
-    function addAssistantMessage(displayText, action) {
+    function addAssistantMessage(displayText, action, msgCleanPrompt) {
       const msg = document.createElement('div');
       msg.className = 'msg assistant';
 
-      // Support both the new canonical action shape and legacy action.params.
+      // Bind the action card strictly to the sanitized clean_prompt returned by the parser.
       const type = (action && action.type) ? action.type : '';
-      const parameters = (action && action.parameters) ? action.parameters : ((action && action.params && action.params.parameters) ? action.params.parameters : {});
-      const legacyParams = (action && action.params) ? action.params : {};
-      const cleanPrompt = (action && action.clean_prompt) ? action.clean_prompt : (legacyParams.prompt || '');
-      const target = parameters.target || legacyParams.target || '';
-      const acceleration = parameters.acceleration || legacyParams.acceleration || '';
+      const parameters = (action && action.parameters) ? action.parameters : {};
+      const cleanPrompt = (action && action.clean_prompt) ? action.clean_prompt : (msgCleanPrompt || '');
+      const target = parameters.target || '';
+      const acceleration = parameters.acceleration || '';
 
       const content = document.createElement('div');
       content.className = 'msg-content';

@@ -27,7 +27,14 @@ _BUILD_PROMPT_FENCE_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
-_BUILD_PROMPT_TAG_RE = re.compile(
+# New strict delimiter preferred by the system prompt.
+_BUILDER_PROMPT_TAG_RE = re.compile(
+    r"<builder_prompt>(.*?)</builder_prompt>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# Legacy XML tag alias.
+_LEGACY_BUILD_PROMPT_TAG_RE = re.compile(
     r"<build_prompt>(.*?)</build_prompt>",
     re.DOTALL | re.IGNORECASE,
 )
@@ -37,10 +44,16 @@ _EXPLANATION_TAG_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+# Generic prompt/markdown fences used by some LLMs.
+_PROMPT_FENCE_RE = re.compile(
+    r"```(?:prompt|markdown)\s*\n(.*?)```",
+    re.DOTALL | re.IGNORECASE,
+)
+
 # Meta wrappers and conversational preambles that must not leak into a build prompt.
 _META_PROMPT_PATTERNS = [
-    re.compile(r"^\s*Here(?:'s| is)?\s+(?:a\s+)?(?:detailed\s+)?prompt[^\n]*\n*", re.IGNORECASE | re.MULTILINE),
-    re.compile(r"^\s*You\s+can\s+paste(?:\s+this)?(?:\s+into|\s+in)?(?:\s+the\s+(?:builder|prompt))?[^\n]*\n*", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*Here(?:'s| is)?\s+(?:a\s+)?(?:detailed\s+)?(?:ready-to-use\s+)?prompt[^\n]*\n*", re.IGNORECASE | re.MULTILINE),
+    re.compile(r"^\s*You\s+can\s+paste(?:\s+this)?(?:\s+directly)?(?:\s+into|\s+in)?(?:\s+the\s+(?:builder|prompt))?[^\n]*\n*", re.IGNORECASE | re.MULTILINE),
     re.compile(r"^\s*Below\s+is\s+(?:the\s+)?(?:build\s+)?prompt[^\n]*\n*", re.IGNORECASE | re.MULTILINE),
     re.compile(r"^\s*Build\s+Contract\s*[:\-]?[^\n]*\n*", re.IGNORECASE | re.MULTILINE),
     re.compile(r"^\s*Build\s+Prompt\s*[:\-]?[^\n]*\n*", re.IGNORECASE | re.MULTILINE),
@@ -49,6 +62,22 @@ _META_PROMPT_PATTERNS = [
     re.compile(r"^\s* target\s*[:=]\s*[^\n]+\n*", re.IGNORECASE | re.MULTILINE),
     re.compile(r'^\s*["\']{1,2}', re.MULTILINE),
     re.compile(r'["\']{1,2}\s*$', re.MULTILINE),
+]
+
+# Intro / outro phrases that may wrap a prompt when the LLM ignores the strict delimiters.
+_INTRO_PATTERNS = [
+    re.compile(r"^\s*(?:I['’]ll\s+give\s+you\s+a\s+(?:ready-to-use\s+)?(?:build\s+)?prompt[^\n]*(?:\n\n|\n))", re.IGNORECASE),
+    re.compile(r"^\s*(?:Here(?:'s| is)?\s+(?:a\s+)?(?:detailed\s+)?(?:ready-to-use\s+)?(?:build\s+)?prompt[^\n]*(?:\n\n|\n))", re.IGNORECASE),
+    re.compile(r"^\s*(?:Below\s+is\s+(?:the\s+)?(?:build\s+)?(?:ready-to-use\s+)?prompt[^\n]*(?:\n\n|\n))", re.IGNORECASE),
+    re.compile(r"^\s*(?:You\s+can\s+use\s+this\s+(?:build\s+)?prompt[^\n]*(?:\n\n|\n))", re.IGNORECASE),
+    re.compile(r"^\s*(?:This\s+(?:build\s+)?prompt[^\n]*(?:\n\n|\n))", re.IGNORECASE),
+]
+
+_OUTRO_PATTERNS = [
+    re.compile(r"\n\s*(?:You\s+can\s+paste\s+(?:this\s+)?(?:directly\s+)?(?:into|in)\s+(?:the\s+)?(?:builder|prompt)[^\n]*)\s*$", re.IGNORECASE),
+    re.compile(r"\n\s*(?:Let\s+me\s+know\s+if[^\n]*)\s*$", re.IGNORECASE),
+    re.compile(r"\n\s*(?:Suggested\s+Builder\s+Prompt|Copy|Edit\s+in\s+Builder)[^\n]*\s*$", re.IGNORECASE),
+    re.compile(r"\n\s*(?:Here\s+is\s+the\s+full\s+prompt[^\n]*)\s*$", re.IGNORECASE),
 ]
 
 
@@ -97,6 +126,8 @@ def _normalize_acceleration(raw: Any) -> str:
 def _infer_target_from_text(text: str) -> Optional[str]:
     """Infer a build target from prose when no explicit contract is present."""
     lowered = text.lower()
+    if "wasm" in lowered:
+        return "wasm"
     has_python = "python" in lowered or "pyo3" in lowered
     has_rust = "rust" in lowered or "cargo" in lowered or "pyo3" in lowered
     has_cpp = (
@@ -156,12 +187,26 @@ class ActionParser:
 
     def __init__(self) -> None:
         self.meta_patterns = _META_PROMPT_PATTERNS
+        self.intro_patterns = _INTRO_PATTERNS
+        self.outro_patterns = _OUTRO_PATTERNS
+
+    def _strip_intro_outro(self, text: str) -> str:
+        """Remove common conversational wrappers around the prompt body."""
+        if not text:
+            return ""
+        cleaned = text
+        for pattern in self.intro_patterns:
+            cleaned = pattern.sub("", cleaned)
+        for pattern in self.outro_patterns:
+            cleaned = pattern.sub("", cleaned)
+        return cleaned
 
     def sanitize(self, text: str) -> str:
         """Remove meta wrappers and collapse surrounding whitespace."""
         if not text:
             return ""
         cleaned = _strip_outer_quotes(text)
+        cleaned = self._strip_intro_outro(cleaned)
         for pattern in self.meta_patterns:
             cleaned = pattern.sub("", cleaned)
         cleaned = cleaned.strip()
@@ -272,15 +317,23 @@ class ActionParser:
             if candidate:
                 return self.sanitize(candidate)
 
-        # 2. New ```build_prompt fence format.
+        # 2. New <builder_prompt> XML delimiter (preferred by the system prompt).
+        tag = _BUILDER_PROMPT_TAG_RE.search(text)
+        if tag:
+            return self.sanitize(tag.group(1))
+
+        # 3. New ```build_prompt fence format.
         fence = _BUILD_PROMPT_FENCE_RE.search(text)
         if fence:
             return self.sanitize(fence.group(1))
 
-        # 3. XML-style <build_prompt> fallback.
-        tag = _BUILD_PROMPT_TAG_RE.search(text)
+        # 4. Legacy <build_prompt> XML alias and generic prompt/markdown fences.
+        tag = _LEGACY_BUILD_PROMPT_TAG_RE.search(text)
         if tag:
             return self.sanitize(tag.group(1))
+        fence = _PROMPT_FENCE_RE.search(text)
+        if fence:
+            return self.sanitize(fence.group(1))
 
         # 4. YAML/JSON blueprint contract block: return the builder prompt inside it.
         contract_match = _CODE_FENCE_RE.search(text)
@@ -414,23 +467,24 @@ class ActionParser:
                 },
             }
 
-        # XML-style <build_prompt> fallback.
-        tag = _BUILD_PROMPT_TAG_RE.search(text)
-        if tag:
-            clean = self.sanitize(tag.group(1))
-            display_text = _BUILD_PROMPT_TAG_RE.sub("", display_text)
-            display_text = self.sanitize(display_text)
-            params = self._extract_parameters(clean, {})
-            return {
-                "display_text": display_text,
-                "action": {
-                    "type": "build",
-                    "source": "xml_tag",
-                    "clean_prompt": clean,
-                    "parameters": params,
-                    "blueprint": None,
-                },
-            }
+        # XML-style <builder_prompt> / <build_prompt> fallback.
+        for tag_re in (_BUILDER_PROMPT_TAG_RE, _LEGACY_BUILD_PROMPT_TAG_RE):
+            tag = tag_re.search(text)
+            if tag:
+                clean = self.sanitize(tag.group(1))
+                display_text = tag_re.sub("", display_text)
+                display_text = self.sanitize(display_text)
+                params = self._extract_parameters(clean, {})
+                return {
+                    "display_text": display_text,
+                    "action": {
+                        "type": "build",
+                        "source": "xml_tag",
+                        "clean_prompt": clean,
+                        "parameters": params,
+                        "blueprint": None,
+                    },
+                }
 
         # YAML/JSON blueprint contract block.
         contract_match = _CODE_FENCE_RE.search(text)
@@ -489,6 +543,11 @@ def extract_clean_prompt(text: str) -> Optional[str]:
     return ActionParser().extract_clean_prompt(text)
 
 
+def extract_action(text: str) -> Dict[str, Any]:
+    """Module-level helper that returns a full structured action packet."""
+    return ActionParser().parse(text)
+
+
 def extract_build_prompt(text: str) -> Tuple[str, Optional[str]]:
     """Split a copilot response into conversational reply and build prompt.
 
@@ -531,7 +590,7 @@ def extract_build_prompt(text: str) -> Tuple[str, Optional[str]]:
                 return reply, extracted
 
     # 3. XML-style fallback tags.
-    bp_match = _BUILD_PROMPT_TAG_RE.search(stripped)
+    bp_match = _BUILDER_PROMPT_TAG_RE.search(stripped) or _LEGACY_BUILD_PROMPT_TAG_RE.search(stripped)
     if bp_match:
         extracted = bp_match.group(1).strip()
         reply = ""
@@ -539,7 +598,7 @@ def extract_build_prompt(text: str) -> Tuple[str, Optional[str]]:
         if ex_match:
             reply = ex_match.group(1).strip()
         if not reply:
-            reply = _BUILD_PROMPT_TAG_RE.sub("", stripped).strip()
+            reply = _BUILDER_PROMPT_TAG_RE.sub("", _LEGACY_BUILD_PROMPT_TAG_RE.sub("", stripped)).strip()
         return reply, extracted
 
     # 4. No prompt found.
