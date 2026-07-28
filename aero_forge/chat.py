@@ -28,7 +28,13 @@ from aero_forge.build_summary import format_build_summary
 from aero_forge.bundle_repo import bundle_to_xml, bundle_workspace, format_context_block
 from aero_forge.config import ConfigOverride, Tier
 from aero_forge.context_bundler import ContextBundler
-from aero_forge.copilot.action_parser import ActionParser, _has_build_intent, parse_action_from_text
+from aero_forge.copilot.action_parser import (
+    ActionParser,
+    _has_build_intent,
+    parse_action_from_text,
+    sanitize_builder_prompt,
+)
+
 from aero_forge.copilot.agent import (
     _has_markdown_heading,
     _legacy_action_type,
@@ -915,7 +921,7 @@ class ChatSession:
 
     def _build_result(self, display_text: str, action: Optional[Dict[str, Any]], raw: str) -> Dict[str, Any]:
         """Build a structured chat result compatible with both old and new UI fields."""
-        clean_prompt = action.get("clean_prompt") if action else None
+        clean_prompt = sanitize_builder_prompt(action.get("clean_prompt", "")) if action else None
         parameters = action.get("parameters") if action else {}
         legacy_action = None
         if action:
@@ -959,13 +965,15 @@ class ChatSession:
     def _fallback_build_action(self, text: str) -> Dict[str, Any]:
         """Create a sanitized build action from plain user text when the LLM fails."""
         parsed = ActionParser().parse(text)
-        return parsed.get("action") or {
+        action = parsed.get("action") or {
             "type": "build",
             "source": "plain_text",
             "clean_prompt": text.strip(),
             "parameters": {"target": "pure_python", "acceleration": "Selective Acceleration (Auto-Detect Heavy Compute)"},
             "blueprint": None,
         }
+        action["clean_prompt"] = sanitize_builder_prompt(action.get("clean_prompt", ""))
+        return action
 
     def handle_command(self, text: str) -> Optional[Dict[str, Any]]:
         """Detect action verbs and optionally execute a build/optimize step."""
