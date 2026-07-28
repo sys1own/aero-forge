@@ -52,6 +52,12 @@ class OverlayStore:
             return None
         return path.read_text(encoding="utf-8")
 
+    def read_cache_for_key(self, key: str):
+        path = self.build_cache_dir / key
+        if not path.is_file():
+            return None
+        return path.read_text(encoding="utf-8")
+
     def save_overlay(self, file: _PathLike, patch: str) -> Path:
         path = self.overlay_path(file)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -60,6 +66,12 @@ class OverlayStore:
 
     def read_overlay(self, file: _PathLike):
         path = self.overlay_path(file)
+        if not path.is_file():
+            return None
+        return path.read_text(encoding="utf-8")
+
+    def read_overlay_for_key(self, key: str):
+        path = self.overlays_dir / (key + ".patch")
         if not path.is_file():
             return None
         return path.read_text(encoding="utf-8")

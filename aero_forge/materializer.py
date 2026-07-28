@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from aero_forge._native import unpack_aeroc
+from aero_forge.scaffold.module_guard import reify_missing_modules
 
 if TYPE_CHECKING:
     from os import PathLike
@@ -19,7 +20,9 @@ def unpack_aeroc_file(aeroc_path: str | Path, output_dir: str | Path) -> int:
 
     Returns the number of source files reconstructed.
     """
-    return unpack_aeroc(str(aeroc_path), str(output_dir))
+    count = unpack_aeroc(str(aeroc_path), str(output_dir))
+    reify_missing_modules(Path(output_dir))
+    return count
 
 
 def workspace_requires_materialization(workspace: str | Path) -> bool:

@@ -16,6 +16,7 @@ from aero_forge.bundle_repo import (
     create_project_zip,
 )
 from aero_forge.orchestrator.orchestrator import validate_blueprint_for_export
+from aero_forge.overlay import OverlayManager
 from aero_forge.scaffold.aeroc_export import export_aeroc_project, package_aeroc
 
 
@@ -69,6 +70,12 @@ def export_workspace(
     include_native = options.get("include_native_crate", False)
     include_wavefront = options.get("include_wavefront_runtime", False)
     standalone_aeroc = options.get("standalone_aeroc", False)
+
+    # Flush in-memory overlay edits so the export contains the real file tree.
+    try:
+        OverlayManager(session_dir).flush_to_workspace(session_dir)
+    except Exception:
+        pass
 
     # Enforce Blueprint v3 transferability for any export that includes a blueprint.
     blueprint_path = session_dir / "blueprint.aero"
