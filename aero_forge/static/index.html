@@ -72,11 +72,7 @@
     .run-btn { display: inline-flex; align-items: center; gap: 0.35rem; background: var(--accent); color: #fff; border: none; border-radius: 4px; padding: 0.35rem 0.75rem; font-size: 0.8rem; font-weight: 600; cursor: pointer; }
     .run-btn:hover { background: #1177bb; }
     .run-btn:disabled { opacity: 0.6; cursor: not-allowed; }
-    .tier-badge {
-      font-size: 0.65rem; font-weight: 600; text-transform: uppercase; padding: 0.15rem 0.45rem;
-      border-radius: 999px; border: 1px solid var(--border); color: var(--muted);
-    }
-    .tier-badge.lifetime { color: var(--accent); border-color: var(--accent); background: rgba(0,122,204,0.1); }
+    .drop-zone, .drop-zone * { cursor: pointer !important; user-select: none; }
     button.icon-btn {
       background: transparent; border: 1px solid transparent; color: var(--text); border-radius: 4px;
       width: 28px; height: 28px; display: grid; place-items: center; cursor: pointer; font-size: 0.9rem;
@@ -405,9 +401,6 @@
       <button id="run-btn" class="run-btn" title="Run current file (Ctrl+Enter)" aria-label="Run">
         <span>&#9654;</span> Run
       </button>
-      <button id="settings-btn" class="icon-btn" title="Settings" aria-label="Settings">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-      </button>
     </div>
   </header>
 
@@ -623,13 +616,6 @@
     <div class="modal">
       <h2>Settings</h2>
       <div class="form-group">
-        <label for="setting-tier">Membership Tier</label>
-        <select id="setting-tier">
-          <option value="free">Free (bring your own key)</option>
-          <option value="lifetime">Lifetime (managed DeepSeek)</option>
-        </select>
-      </div>
-      <div class="form-group">
         <label for="setting-provider">Provider</label>
         <select id="setting-provider">
           <option value="deepseek">DeepSeek</option>
@@ -715,13 +701,12 @@
 
   <script>
     const LS = window.localStorage;
-    const LS_KEYS = { apiKey: 'aero_forge_api_key', provider: 'aero_forge_provider', tier: 'aero_forge_tier', session: 'aero_forge_session', sidebarWidth: 'aero_forge_sidebar_width', promptWidth: 'aero_forge_prompt_width', bottomHeight: 'aero_forge_bottom_height', treeExpanded: 'aero_forge_tree_expanded' };
+    const LS_KEYS = { apiKey: 'aero_forge_api_key', provider: 'aero_forge_provider', session: 'aero_forge_session', sidebarWidth: 'aero_forge_sidebar_width', promptWidth: 'aero_forge_prompt_width', bottomHeight: 'aero_forge_bottom_height', treeExpanded: 'aero_forge_tree_expanded' };
 
     const state = {
       sessionId: '',
       provider: 'deepseek',
       apiKey: '',
-      tier: 'free',
       messages: [],
       busy: false,
       editor: null,
@@ -788,15 +773,12 @@
       templateSelect: document.getElementById('template-select'),
       loadTemplate: document.getElementById('load-template'),
       acceleratorLog: document.getElementById('accelerator-log'),
-      settingsBtn: document.getElementById('settings-btn'),
       settingsModal: document.getElementById('settings-modal'),
       saveSettings: document.getElementById('save-settings'),
       cancelSettings: document.getElementById('cancel-settings'),
       settingProvider: document.getElementById('setting-provider'),
       settingApiKey: document.getElementById('setting-api-key'),
-      settingTier: document.getElementById('setting-tier'),
       settingSession: document.getElementById('setting-session'),
-      keyGroup: document.getElementById('key-group'),
       deckTabs: document.querySelectorAll('.deck-tab'),
       deckPanels: document.querySelectorAll('.deck-panel'),
       bottomTabs: document.querySelectorAll('.bottom-tab'),
@@ -832,7 +814,6 @@
       try {
         state.apiKey = LS.getItem(LS_KEYS.apiKey) || '';
         state.provider = LS.getItem(LS_KEYS.provider) || 'deepseek';
-        state.tier = LS.getItem(LS_KEYS.tier) || 'free';
         state.sessionId = LS.getItem(LS_KEYS.session) || '';
         const expanded = LS.getItem(LS_KEYS.treeExpanded);
         if (expanded) expanded.split('\n').forEach(p => { if (p) state.treeExpanded.add(p); });
@@ -872,14 +853,12 @@
     }
 
     function saveSettings() {
-      state.tier = ui.settingTier.value;
       state.provider = ui.settingProvider.value;
       state.apiKey = ui.settingApiKey.value.trim();
       state.sessionId = ui.settingSession.value.trim() || generateId();
       try {
-        LS.setItem(LS_KEYS.tier, state.tier);
         LS.setItem(LS_KEYS.provider, state.provider);
-        if (state.tier === 'free') LS.setItem(LS_KEYS.apiKey, state.apiKey); else LS.removeItem(LS_KEYS.apiKey);
+        LS.setItem(LS_KEYS.apiKey, state.apiKey);
         LS.setItem(LS_KEYS.session, state.sessionId);
       } catch (e) {
         log('localStorage unavailable; settings not persisted', 'info');
@@ -889,17 +868,9 @@
     }
 
     function applySettingsUI() {
-      ui.settingTier.value = state.tier;
       ui.settingProvider.value = state.provider;
       ui.settingApiKey.value = state.apiKey;
       ui.settingSession.value = state.sessionId;
-      if (state.tier === 'lifetime') {
-        ui.keyGroup.classList.add('hidden');
-        ui.settingProvider.value = 'deepseek';
-        state.provider = 'deepseek';
-      } else {
-        ui.keyGroup.classList.remove('hidden');
-      }
     }
 
     function generateId() {
@@ -957,7 +928,7 @@
 
     function buildBody(extra={}) {
       const body = { session_id: state.sessionId, provider: state.provider, ...extra };
-      if (state.tier === 'free' && state.apiKey) body.api_key = state.apiKey;
+      if (state.apiKey) body.api_key = state.apiKey;
       return body;
     }
 
@@ -2458,7 +2429,6 @@
     ui.bottomTabs.forEach(tab => tab.addEventListener('click', () => switchBottomTab(tab.dataset.bottom)));
 
     // Settings modal
-    ui.settingsBtn.addEventListener('click', () => { applySettingsUI(); ui.settingsModal.classList.add('open'); });
     ui.cancelSettings.addEventListener('click', () => ui.settingsModal.classList.remove('open'));
     ui.saveSettings.addEventListener('click', () => { saveSettings(); ui.settingsModal.classList.remove('open'); loadTree(); });
     ui.cleanWorkspace.addEventListener('click', () => ui.cleanModal.classList.add('open'));
@@ -2471,10 +2441,6 @@
     ui.accelerateBtn.addEventListener('click', () => { ui.accelerateModal.classList.add('open'); updateBlueprintStatus(); });
     ui.cancelAccelerate.addEventListener('click', () => ui.accelerateModal.classList.remove('open'));
     ui.confirmAccelerate.addEventListener('click', () => { ui.accelerateModal.classList.remove('open'); accelerateWorkspace(); });
-    ui.settingTier.addEventListener('change', () => {
-      if (ui.settingTier.value === 'lifetime') { ui.keyGroup.classList.add('hidden'); ui.settingProvider.value = 'deepseek'; }
-      else ui.keyGroup.classList.remove('hidden');
-    });
 
     // Upload / drag and drop
     ui.uploadInput.addEventListener('change', e => { handleFiles(e.target.files, _dragTarget || '.'); _dragTarget = null; e.target.value = ''; });
