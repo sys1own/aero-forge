@@ -29,6 +29,7 @@ from aero_forge.builder.spec import (
     set_type,
     spec_from_python,
     struct,
+    with_gil_release,
 )
 
 __all__ = [
@@ -59,4 +60,5 @@ __all__ = [
     "get_type",
     "set_type",
     "spec_from_python",
+    "with_gil_release",
 ]

@@ -33,9 +33,11 @@ from aero_forge.builder import (
     return_node,
     spec_from_python,
     struct,
+    with_gil_release,
 )
 from aero_forge.builder.emitters.base import EmitterError
 from aero_forge.builder.language_router import is_cpp_friendly, should_accelerate_with_native
+from aero_forge.scaffold.cargo_manifest import infer_dependencies
 
 
 @pytest.fixture
@@ -729,3 +731,83 @@ def test_tri_polyglot_materializer_honors_module_graph_paths(tmp_path: Path) -> 
     assert "--strike" in help_result.stdout
 
     assert updated.architecture == "tri_polyglot_rust_cpp_python"
+
+
+def test_rust_emitter_pyo3_array_and_submodules() -> None:
+    """PyO3/NumPy signatures, submodules, GIL release, and dependency inference work end-to-end."""
+    ops = module(
+        name="ops",
+        children=[
+            function(
+                "matrix_multiply",
+                params=[param("a", "&PyArray2<f64>"), param("b", "&PyArray2<f64>")],
+                return_type="PyResult<&PyArray2<f64>>",
+                body=[
+                    with_gil_release([
+                        binding("out", literal(0.0), "f64"),
+                    ]),
+                    return_node(reference("out")),
+                ],
+            ),
+        ],
+    )
+    spec = EngineSpec(
+        name="array_bridge",
+        root=module(
+            name="array_bridge",
+            children=[
+                function(
+                    "sum_arrays",
+                    params=[param("py", "Python"), param("x", "&PyArray2<f64>")],
+                    return_type="PyResult<f64>",
+                    body=[
+                        with_gil_release([
+                            return_node(literal(0.0)),
+                        ]),
+                    ],
+                ),
+            ],
+        ),
+        metadata={
+            "module_files": [
+                {"path": "src/ops.rs", "root": ops},
+            ],
+            "pyo3": True,
+            "numpy": True,
+        },
+    )
+
+    output = build_engine(spec, target_language="rust")
+    source = output.source
+
+    assert "use pyo3::prelude::*;" in source
+    assert "use numpy::PyArray2;" in source
+    assert "pub mod ops;" in source
+    assert "&PyArray2<f64>" in source
+    assert "Python" in source
+    assert "PyResult<f64>" in source
+    assert "#[pyfunction" in source
+    assert "#[pymodule]" in source
+    assert "py.allow_threads" in source
+    assert "wrap_pyfunction!(ops::matrix_multiply)" in source
+
+    artifact_paths = {a.path for a in output.artifacts.artifacts}
+    assert "src/ops.rs" in artifact_paths
+    ops_artifact = next(a for a in output.artifacts.artifacts if a.path == "src/ops.rs")
+    assert "pub fn matrix_multiply" in ops_artifact.content
+    assert "&PyArray2<f64>" in ops_artifact.content
+
+    deps = infer_dependencies(source + ops_artifact.content)
+    assert "pyo3" in deps
+    assert "numpy" in deps
+
+
+def test_cargo_manifest_infers_rayon_for_par_iter() -> None:
+    source = (
+        "use rayon::prelude::*;\n"
+        "fn compute(v: Vec<f64>) -> f64 {\n"
+        "    v.par_iter().fold(|| 0.0, |a, b| a + b).reduce(|| 0.0, |a, b| a + b)\n"
+        "}\n"
+    )
+    deps = infer_dependencies(source)
+    assert "rayon" in deps
