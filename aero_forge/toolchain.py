@@ -70,8 +70,22 @@ class ToolchainManager:
             pass
         return None
 
+    def _host_package_metadata_dirs(self, package: str, package_dir: Path) -> List[Path]:
+        """Locate host metadata directories (dist-info / egg-info) for *package*."""
+        candidates = []
+        parent = package_dir.parent
+        for item in parent.iterdir():
+            lower = item.name.lower()
+            if lower == package.lower() or lower.replace("-", "_") == package.lower():
+                continue
+            if lower.startswith(package.lower()) and (
+                lower.endswith(".dist-info") or lower.endswith(".egg-info")
+            ):
+                candidates.append(item)
+        return candidates
+
     def _symlink_host_package(self, package: str) -> None:
-        """Symlink a host Python package into the venv site-packages."""
+        """Symlink a host Python package and its metadata into the venv site-packages."""
         src = self._host_package_dir(package)
         if not src or not src.is_dir():
             self._log("warning", "TOOLCHAIN", f"Host package {package} not found; cannot symlink")
@@ -89,6 +103,21 @@ class ToolchainManager:
             self._log("warning", "TOOLCHAIN", f"Could not symlink {package}: {exc}; copying instead")
             shutil.copytree(src, dest, dirs_exist_ok=True)
             self._log("info", "TOOLCHAIN", f"Copied host {package} package into {dest}")
+
+        # Also link metadata so ``pip show`` recognizes the package and avoids
+        # redundant (and permission-prone) installs.
+        for meta in self._host_package_metadata_dirs(package, src):
+            meta_dest = self._venv_site_packages() / meta.name
+            if meta_dest.is_symlink() or meta_dest.exists():
+                if meta_dest.is_symlink() or meta_dest.is_file():
+                    meta_dest.unlink()
+                elif meta_dest.is_dir():
+                    shutil.rmtree(meta_dest)
+            try:
+                os.symlink(meta, meta_dest, target_is_directory=True)
+                self._log("info", "TOOLCHAIN", f"Linked host {package} metadata into {meta_dest}")
+            except OSError as exc:
+                self._log("warning", "TOOLCHAIN", f"Could not symlink {package} metadata: {exc}")
 
     def _write_wrapper(self, name: str, module: str, command: Optional[str] = None) -> None:
         """Write a ``.venv/bin`` wrapper that invokes ``python -m <module>``."""

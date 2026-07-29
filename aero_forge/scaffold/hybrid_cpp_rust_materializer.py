@@ -495,8 +495,12 @@ class HybridCppRustMaterializer:
         blueprint: Blueprint,
         *,
         build: bool = False,
+        force_overwrite: bool = False,
     ) -> Blueprint:
         """Write the hybrid C++/Rust workspace and optionally build the binary."""
+        from aero_forge.scaffold.polyglot_materializer import guard_materialization
+
+        guard_materialization(self.workspace, blueprint, force_overwrite=force_overwrite)
         project = blueprint.project or "hybrid_cpp_rust_project"
         crate_name = _sanitize_module_name(project).replace("_", "_")
         if crate_name[0].isdigit():

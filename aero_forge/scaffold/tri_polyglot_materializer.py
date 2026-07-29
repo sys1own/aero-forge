@@ -588,8 +588,12 @@ class TriPolyglotMaterializer:
         blueprint: Blueprint,
         *,
         build: bool = False,
+        force_overwrite: bool = False,
     ) -> Blueprint:
         """Write the tri-polyglot workspace files and optionally build everything."""
+        from aero_forge.scaffold.polyglot_materializer import guard_materialization
+
+        guard_materialization(self.workspace, blueprint, force_overwrite=force_overwrite)
         project = blueprint.project or "tri_polyglot_project"
         pkg_name = _sanitize_module_name(project)
         rust_crate_name = f"aero_forge_native_{pkg_name}"

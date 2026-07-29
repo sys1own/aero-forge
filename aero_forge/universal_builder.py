@@ -396,7 +396,7 @@ def _run_polyglot_materializer(
         materializer = PolyglotMaterializer(output_dir)
         materializer_name = "PolyglotMaterializer"
     try:
-        updated = materializer.materialize(blueprint, build=True)
+        updated = materializer.materialize(blueprint, build=True, force_overwrite=True)
     except Exception as exc:
         return {
             "success": False,
@@ -456,7 +456,7 @@ def _run_hybrid_cpp_rust_materializer(
     output_dir.mkdir(parents=True, exist_ok=True)
     materializer = HybridCppRustMaterializer(output_dir)
     try:
-        updated = materializer.materialize(blueprint, build=True)
+        updated = materializer.materialize(blueprint, build=True, force_overwrite=True)
     except Exception as exc:
         return {
             "success": False,

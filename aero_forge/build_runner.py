@@ -370,7 +370,7 @@ class BuildRunner:
         meta = self.blueprint.metadata or {}
         return (
             str(meta.get("schema_version")) == "3.0.0"
-            or str(meta.get("status")).lower() == "draft"
+            and str(meta.get("status")).lower() == "draft"
         )
 
     def _workspace_root(self) -> Path:
