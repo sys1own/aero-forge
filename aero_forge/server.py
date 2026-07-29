@@ -2495,21 +2495,23 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             if not target.is_file():
                 return _send_json(self, 404, {"error": "Entry file not found"})
 
-            env = os.environ.copy()
-            env["AERO_FORGE_SESSION"] = session_id
-            env["AERO_FORGE_SESSION_DIR"] = str(session_dir)
-            env["AERO_FORGE_ACCEL_LOG"] = str(session_dir / ".aero_forge_accel.log")
-            env["PYTHONUNBUFFERED"] = "1"
-            existing_pythonpath = env.get("PYTHONPATH", "")
-            env["PYTHONPATH"] = (
-                f"{session_dir}{':' + existing_pythonpath if existing_pythonpath else ''}"
-            )
+            from aero_forge.toolchain import ToolchainManager
+
+            manager = ToolchainManager(session_dir)
+            manager.env = os.environ.copy()
+            manager.env["AERO_FORGE_SESSION"] = session_id
+            manager.env["AERO_FORGE_SESSION_DIR"] = str(session_dir)
+            manager.env["AERO_FORGE_ACCEL_LOG"] = str(session_dir / ".aero_forge_accel.log")
+            manager.env["PYTHONUNBUFFERED"] = "1"
+            manager.prepare_environment("python")
+            env = manager.env
+            python_exe = manager._venv_python()
 
             start = time.time()
             max_duration = float(os.environ.get("AERO_FORGE_RUN_TIMEOUT", "120"))
 
             proc = subprocess.Popen(
-                [sys.executable, "-u", str(target)],
+                [python_exe, "-u", str(target)],
                 cwd=str(session_dir),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -2708,15 +2710,20 @@ async def _handle_terminal(websocket: Any) -> None:
         master_fd, slave_fd = pty.openpty()
         os.set_blocking(master_fd, False)
 
-        env = os.environ.copy()
-        env["TERM"] = "xterm-256color"
-        env["AERO_FORGE_SESSION"] = session_id
-        env["AERO_FORGE_SESSION_DIR"] = str(session_dir)
+        from aero_forge.toolchain import ToolchainManager
+
+        manager = ToolchainManager(session_dir)
+        manager.env["TERM"] = "xterm-256color"
+        manager.env["AERO_FORGE_SESSION"] = session_id
+        manager.env["AERO_FORGE_SESSION_DIR"] = str(session_dir)
 
         # Ensure the shell's `python` resolves to the same interpreter that built
         # native extensions. If pyenv is active, force the system version (the
         # one running this server) so compiled C-ABI artifacts load correctly.
-        env["PYENV_VERSION"] = "system"
+        manager.env["PYENV_VERSION"] = "system"
+
+        await loop.run_in_executor(None, manager.prepare_environment, "python")
+        env = manager.env
 
         process = await asyncio.create_subprocess_exec(
             shell,

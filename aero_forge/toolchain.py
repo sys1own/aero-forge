@@ -25,6 +25,7 @@ class ToolchainManager:
         self.env: Dict[str, str] = os.environ.copy()
         self._prepared = False
         self._maturin_available = False
+        self._workspace_package_installed = False
 
     def _log(self, level: str, prefix: str, message: str) -> None:
         self.log_callback(level, prefix, message)
@@ -57,6 +58,45 @@ class ToolchainManager:
             check=True,
         )
         return Path(proc.stdout.strip())
+
+    def _inject_pythonpath(self) -> None:
+        """Prepend workspace root and ``src/`` to ``PYTHONPATH`` in ``self.env``."""
+        parts: List[str] = [str(self.sandbox_dir)]
+        src_dir = self.sandbox_dir / "src"
+        if src_dir.is_dir():
+            parts.append(str(src_dir))
+        existing = self.env.get("PYTHONPATH", "")
+        if existing:
+            parts.append(existing)
+        self.env["PYTHONPATH"] = os.pathsep.join(p for p in parts if p).strip(os.pathsep)
+        self._log("info", "ENV", f"Injected PYTHONPATH: {self.env['PYTHONPATH']}")
+
+    def _workspace_package_manifest(self) -> Optional[Path]:
+        """Return the first packaging manifest found in the workspace root, if any."""
+        for name in ("pyproject.toml", "setup.py", "setup.cfg"):
+            path = self.sandbox_dir / name
+            if path.is_file():
+                return path
+        return None
+
+    def _ensure_workspace_package_installed(self) -> None:
+        """Install the workspace package in editable mode when a manifest exists."""
+        if self._workspace_package_installed:
+            return
+        manifest = self._workspace_package_manifest()
+        if not manifest:
+            return
+        self._log("info", "ENV", f"Installing workspace package in editable mode from {manifest.name}...")
+        proc = self._run_pip(["install", "-e", ".", "--no-deps"], check=False)
+        if proc.returncode == 0:
+            self._workspace_package_installed = True
+            self._log("info", "ENV", "Workspace package installed in editable mode (ok)")
+        else:
+            self._log(
+                "warning",
+                "ENV",
+                f"Editable install failed; falling back to PYTHONPATH. stderr: {proc.stderr.strip()[-500:]}",
+            )
 
     def _host_package_dir(self, package: str) -> Optional[Path]:
         """Locate the host installation directory of ``package``."""
@@ -182,10 +222,10 @@ class ToolchainManager:
         return self._run_subprocess([self._venv_python(), "-m", "pip", *args], check=check)
 
     def _create_venv(self, python: str) -> None:
-        """Create the virtual environment with ``--without-pip``."""
+        """Create a virtual environment that can see host packages and has no bundled pip."""
         venv_path = self._venv_path()
         proc = self._run_subprocess(
-            [python, "-m", "venv", "--without-pip", str(venv_path)],
+            [python, "-m", "venv", "--system-site-packages", "--without-pip", str(venv_path)],
             check=False,
         )
         if proc.returncode != 0:
@@ -365,10 +405,8 @@ class ToolchainManager:
             if not has_rust:
                 self._log("warning", "TOOLCHAIN", "Rust toolchain (cargo) is not available; proceeding with Python-only fallback")
 
-        if any(
-            lowered.startswith(prefix)
-            for prefix in ("python ", "python3 ", "pytest", "maturin ", "pip ")
-        ) or any(tool in lowered for tool in ("pytest", "maturin", "pip")):
+        python_like = lowered in ("python", "python3") or lowered.startswith(("python ", "python3 ", "pytest", "maturin ", "pip "))
+        if python_like or any(tool in lowered for tool in ("pytest", "maturin", "pip")):
             self.ensure_virtualenv()
 
         packages: List[str] = []
@@ -392,6 +430,10 @@ class ToolchainManager:
                 "TOOLCHAIN",
                 "maturin skipped because Rust toolchain is unavailable; will rewrite command to a cargo fallback.",
             )
+
+        if Path(self._venv_python()).is_file():
+            self._ensure_workspace_package_installed()
+        self._inject_pythonpath()
 
         self._prepared = True
         self._log("info", "ENV", "Environment ready for command execution.")
