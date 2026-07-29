@@ -486,6 +486,39 @@ _BINARY_EXTS = {
     ".xz",
 }
 
+_SOURCE_EXTS = {
+    ".py",
+    ".rs",
+    ".cpp",
+    ".cc",
+    ".cxx",
+    ".c",
+    ".h",
+    ".hpp",
+    ".ts",
+    ".js",
+    ".go",
+    ".java",
+    ".kt",
+    ".rb",
+}
+
+
+def _has_materialized_sources(workspace: Path) -> bool:
+    """Return True when *workspace* contains actual source code files (not just blueprints)."""
+    skip_names = {"blueprint.aero", "workspace_blueprint.yaml"}
+    for path in workspace.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.name in skip_names:
+            continue
+        rel = path.relative_to(workspace)
+        if any(part in SKIP_DIRS or part.startswith(".") for part in rel.parts):
+            continue
+        if path.suffix.lower() in _SOURCE_EXTS:
+            return True
+    return False
+
 
 def _is_interesting_file(rel: Path) -> bool:
     """Return True for source files and final package outputs; skip build artifacts."""
@@ -1252,17 +1285,20 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
 
         session_dir = _session_dir(session_id)
         status = get_blueprint_status(session_dir)
-        from aero_forge.blueprint import BlueprintV3
+        from aero_forge.blueprint import BlueprintV3, is_blueprint_ready
 
         try:
             blueprint_path = session_dir / "blueprint.aero"
             transferable = False
+            ready = False
             if blueprint_path.is_file():
                 bp = BlueprintV3.load(blueprint_path)
                 transferable = bp.metadata.transferable
+                ready = is_blueprint_ready(bp.model_dump())
         except Exception as exc:
             logger.exception("Failed to load blueprint for status")
             transferable = False
+            ready = False
 
         return _send_json(
             self,
@@ -1272,6 +1308,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 "present": status["exists"],
                 "status": status["status"] if status["exists"] else "missing",
                 "transferable": transferable,
+                "ready": ready,
                 "schema_version": "3.0.0" if status["exists"] else None,
                 "generation_method": status["generation_method"],
                 "llm_initialized": status["llm_initialized"],
@@ -1386,6 +1423,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             # Synthesize a v3.0 draft blueprint if none exists.
             blueprint_generated = False
             blueprint_path = session_dir / "blueprint.aero"
+            has_sources = _has_materialized_sources(session_dir)
             if not blueprint_path.is_file():
                 try:
                     from aero_forge.blueprint.schema import write_v3_blueprint
@@ -1395,17 +1433,28 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     logger.warning("Could not auto-generate v3 blueprint for upload: %s", exc)
 
+            # If the archive already contained source files, treat the workspace as
+            # materialized so the frontend does not prompt to "initialize from blueprint".
+            source_first = has_sources and not blueprint_generated
+            auto_initialized = blueprint_generated or source_first
+            blueprint_source = "zip_archive" if source_first else "auto_generated"
+
             # Refresh the chat session context with a compact workspace bundle so
             # subsequent chat turns can see the uploaded source tree.
             chat = ChatSession(session_dir, session_id=session_id)
-            chat.blueprint_source = "auto_generated"
-            chat.auto_initialized = blueprint_generated
+            chat.blueprint_source = blueprint_source
+            chat.auto_initialized = auto_initialized
             chat._save_session()
 
             _notify_tree_changed(session_id)
 
             commands = detect_runnable_commands(session_dir)
 
+            message = (
+                "Workspace loaded from ZIP archive"
+                if source_first
+                else "ZIP extracted & normalized to blueprint.aero"
+            )
             return _send_json(
                 self,
                 200,
@@ -1415,9 +1464,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     "files": _build_tree(session_dir),
                     "commands": commands,
                     "runnable_commands": commands,
-                    "blueprint_source": "auto_generated",
-                    "auto_initialized": blueprint_generated,
-                    "message": "ZIP extracted & normalized to blueprint.aero",
+                    "blueprint_source": blueprint_source,
+                    "auto_initialized": auto_initialized,
+                    "message": message,
                 },
             )
         except ValueError as exc:
@@ -1476,15 +1525,31 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 except OSError:
                     pass
 
-            build_result: Dict[str, Any] = {"success": True}
-            try:
-                build_result = _run_workspace_build(session_id, target_dir, jobs=jobs)
-            except Exception as exc:
-                build_result = {"success": False, "error": str(exc)}
-                logger.warning("Auto-build after .aeroc upload failed: %s", exc)
+            has_sources = _has_materialized_sources(target_dir)
+            source_first = has_sources
+
+            build_result: Dict[str, Any] = {"success": True, "skipped": source_first}
+            if not source_first:
+                try:
+                    build_result = _run_workspace_build(session_id, target_dir, jobs=jobs)
+                except Exception as exc:
+                    build_result = {"success": False, "error": str(exc)}
+                    logger.warning("Auto-build after .aeroc upload failed: %s", exc)
+
+            # If the .aeroc already contained source code, treat it as a loaded
+            # workspace and suppress the "initialize from blueprint" prompt.
+            chat = ChatSession(target_dir, session_id=session_id)
+            chat.blueprint_source = "aeroc_archive" if source_first else "user_drop"
+            chat.auto_initialized = source_first
+            chat._save_session()
 
             _notify_tree_changed(session_id)
             commands = detect_runnable_commands(target_dir)
+            message = (
+                "Workspace loaded from .aeroc archive"
+                if source_first
+                else "Aeroc extracted and build pipeline triggered"
+            )
             return _send_json(
                 self,
                 200,
@@ -1495,7 +1560,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     "files": _build_tree(session_dir),
                     "commands": commands,
                     "runnable_commands": commands,
-                    "message": "Aeroc extracted and build pipeline triggered",
+                    "blueprint_source": chat.blueprint_source,
+                    "auto_initialized": chat.auto_initialized,
+                    "message": message,
                 },
             )
         except ValueError as exc:
@@ -1813,6 +1880,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 workspace_path,
                 keep_backup=bool(body.get("keep_backup", False)),
                 run_build=bool(body.get("run_build", False)),
+                force_overwrite=bool(body.get("force_overwrite", False)),
                 llm_provider=config.llm_provider,
                 model=config.model,
                 config_override=config,

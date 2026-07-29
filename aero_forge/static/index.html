@@ -773,6 +773,7 @@
       treeExpanded: new Set(),
       blueprintSource: 'unknown',
       autoInitialized: false,
+      blueprintReady: false,
       commands: [],
       commandFilter: 'all',
     };
@@ -1021,11 +1022,31 @@
     function renderBlueprintBanner(tree) {
       if (!ui.blueprintInitBanner) return;
       const hasBlueprint = Array.from(ui.fileTree.querySelectorAll('.tree-node.file')).some(n => (n.querySelector('.node-name')?.textContent || '') === 'blueprint.aero');
-      // Suppress the banner for auto-generated ZIP blueprints and for already-initialized workspaces.
-      if (!hasBlueprint || state.blueprintSource === 'auto_generated' || state.autoInitialized) {
+      if (!hasBlueprint) {
         ui.blueprintInitBanner.style.display = 'none';
-      } else {
+        return;
+      }
+
+      const archiveSources = ['aeroc_archive', 'zip_archive'];
+      const isArchive = archiveSources.includes(state.blueprintSource);
+      if (isArchive || state.autoInitialized) {
+        // Materialized code came from an uploaded archive; show a non-clickable confirmation.
         ui.blueprintInitBanner.style.display = 'block';
+        ui.blueprintInitBanner.innerHTML = '&#128230; <strong>Workspace Loaded from .aeroc Archive</strong><br><small>Runnable commands are available above the terminal</small>';
+        ui.blueprintInitBanner.style.pointerEvents = 'none';
+        ui.blueprintInitBanner.style.cursor = 'default';
+      } else if (!state.blueprintReady) {
+        // Uninitialized draft blueprint: do not offer to regenerate.
+        ui.blueprintInitBanner.style.display = 'block';
+        ui.blueprintInitBanner.innerHTML = '&#9888; <strong>Draft Blueprint - LLM Prompting Required</strong><br><small>Regeneration is disabled until the blueprint is finalized</small>';
+        ui.blueprintInitBanner.style.pointerEvents = 'none';
+        ui.blueprintInitBanner.style.cursor = 'default';
+      } else {
+        // Confirmed, ready blueprint: offer initialization.
+        ui.blueprintInitBanner.style.display = 'block';
+        ui.blueprintInitBanner.innerHTML = '&#128260; <strong>Initialize Project from Blueprint</strong><br><small>blueprint.aero detected in workspace</small>';
+        ui.blueprintInitBanner.style.pointerEvents = 'auto';
+        ui.blueprintInitBanner.style.cursor = 'pointer';
       }
     }
 
@@ -1130,7 +1151,19 @@
       ui.contextMenu.querySelectorAll('.context-menu-item').forEach(item => {
         const action = item.dataset.action;
         if (action === 'regenerate-blueprint') {
-          item.style.display = isBlueprint ? 'block' : 'none';
+          if (!isBlueprint) {
+            item.style.display = 'none';
+          } else if (!state.blueprintReady) {
+            item.style.display = 'block';
+            item.style.opacity = '0.4';
+            item.style.pointerEvents = 'none';
+            item.title = 'Blueprint is uninitialized — LLM prompting required';
+          } else {
+            item.style.display = 'block';
+            item.style.opacity = '1';
+            item.style.pointerEvents = 'auto';
+            item.title = '';
+          }
           return;
         }
         if (action === 'build-aeroc') {
@@ -1907,9 +1940,20 @@
       try {
         const res = await fetch(`/api/blueprint/status?session_id=${encodeURIComponent(state.sessionId)}`);
         const data = await res.json();
-        if (data.present && data.status === 'draft') {
+        state.blueprintReady = !!data.ready;
+
+        // Enable/disable destructive regeneration depending on blueprint readiness.
+        if (ui.regenerateBlueprintRoot) {
+          ui.regenerateBlueprintRoot.disabled = !state.blueprintReady;
+          ui.regenerateBlueprintRoot.style.opacity = state.blueprintReady ? '1' : '0.4';
+          ui.regenerateBlueprintRoot.title = state.blueprintReady
+            ? 'Regenerate workspace from blueprint'
+            : 'Blueprint is uninitialized — LLM prompting required';
+        }
+
+        if (data.present && !data.ready) {
           ui.blueprintStatusBadge.classList.add('visible');
-          ui.blueprintStatusBadge.textContent = data.transferable ? '&#10024; Finalized' : '&#9889; Draft Spec';
+          ui.blueprintStatusBadge.textContent = 'Draft Blueprint - LLM Prompting Required';
           if (ui.blueprintDraftBanner) ui.blueprintDraftBanner.style.display = 'block';
         } else {
           ui.blueprintStatusBadge.classList.remove('visible');
@@ -2168,11 +2212,15 @@
 
     async function regenerateFromBlueprint() {
       if (!state.sessionId) return;
+      if (!state.blueprintReady) {
+        log('Blueprint is uninitialized. Please run LLM blueprint generation first.', 'error');
+        return;
+      }
       setBusy(true);
       ui.statusText.textContent = 'Regenerating workspace from blueprint...';
       try {
         log('[1/4] Backing up workspace and reading blueprint.aero...', 'info');
-        const data = await api('POST', '/api/workspace/regenerate_blueprint', buildBody({ run_build: false }));
+        const data = await api('POST', '/api/workspace/regenerate_blueprint', buildBody({ run_build: false, force_overwrite: true }));
         state.blueprintSource = data.blueprint_source || state.blueprintSource;
         state.autoInitialized = !!data.auto_initialized;
         log('[2/4] Purged generated files and re-scaffolded directories.', 'info');
@@ -2569,7 +2617,10 @@
     ui.regenerateBlueprintRoot.addEventListener('click', () => ui.regenerateModal.classList.add('open'));
     ui.cancelRegenerate.addEventListener('click', () => ui.regenerateModal.classList.remove('open'));
     ui.confirmRegenerate.addEventListener('click', () => { ui.regenerateModal.classList.remove('open'); regenerateFromBlueprint(); });
-    if (ui.blueprintInitBanner) ui.blueprintInitBanner.addEventListener('click', () => ui.regenerateModal.classList.add('open'));
+    if (ui.blueprintInitBanner) ui.blueprintInitBanner.addEventListener('click', () => {
+      if (!state.blueprintReady || ['aeroc_archive', 'zip_archive'].includes(state.blueprintSource)) return;
+      ui.regenerateModal.classList.add('open');
+    });
     ui.accelerateBtn.addEventListener('click', () => { ui.accelerateModal.classList.add('open'); updateBlueprintStatus(); });
     ui.cancelAccelerate.addEventListener('click', () => ui.accelerateModal.classList.remove('open'));
     ui.confirmAccelerate.addEventListener('click', () => { ui.accelerateModal.classList.remove('open'); accelerateWorkspace(); });

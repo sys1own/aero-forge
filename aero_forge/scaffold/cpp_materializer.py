@@ -1021,9 +1021,11 @@ class CppPolyglotMaterializer:
         rel = rel.with_suffix("") if rel.suffix == ".py" else rel
         return ".".join(rel.parts)
 
-    def materialize(self, blueprint: Blueprint, *, build: bool = False) -> Blueprint:
+    def materialize(self, blueprint: Blueprint, *, build: bool = False, force_overwrite: bool = False) -> Blueprint:
         """Write the C++ workspace files and optionally build the shared library."""
-        from aero_forge.scaffold.polyglot_materializer import _contracts_from_abi, _render_pyproject
+        from aero_forge.scaffold.polyglot_materializer import _contracts_from_abi, _render_pyproject, guard_materialization
+
+        guard_materialization(self.workspace, blueprint, force_overwrite=force_overwrite)
 
         project = blueprint.project or "polyglot_cpp_project"
         pkg_name = _sanitize_module_name(project)

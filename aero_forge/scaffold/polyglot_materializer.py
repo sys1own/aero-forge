@@ -21,8 +21,10 @@ from aero_forge.blueprint import (
     ContractEntry,
     FunctionSpec,
     ManifestEntry,
+    is_blueprint_ready,
     write_blueprint,
 )
+from aero_forge.errors import UserError
 from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_CPP_RUST,
     INTENT_HYBRID_RUST_PYTHON,
@@ -57,6 +59,34 @@ _DEFAULT_CONTRACTS = [
         purpose="Engine health/status metadata",
     ),
 ]
+
+
+def _blueprint_dict(blueprint: Any) -> Dict[str, Any]:
+    """Convert a Pydantic Blueprint model or mapping to a plain dict."""
+    if isinstance(blueprint, dict):
+        return blueprint
+    if hasattr(blueprint, "model_dump"):
+        return blueprint.model_dump()  # type: ignore[union-attr]
+    if hasattr(blueprint, "dict"):
+        return blueprint.dict()  # type: ignore[union-attr]
+    return {}
+
+
+def guard_materialization(workspace: Path, blueprint: Any, force_overwrite: bool = False) -> None:
+    """Fail fast when a workspace is non-empty or its blueprint is uninitialized."""
+    if not is_blueprint_ready(_blueprint_dict(blueprint)):
+        raise UserError(
+            "Cannot materialize: Blueprint is uninitialized. "
+            "Please run LLM blueprint generation first."
+        )
+    workspace = Path(workspace)
+    if workspace.exists() and not force_overwrite and any(
+        p.name not in {"blueprint.aero", "workspace_blueprint.yaml"} and not p.name.startswith(".")
+        for p in workspace.iterdir()
+    ):
+        raise UserError(
+            "Workspace is not empty. Use force_overwrite to materialize."
+        )
 
 
 def _annotation_to_str(node: Optional[ast.AST]) -> str:
@@ -741,8 +771,10 @@ class PolyglotMaterializer:
         blueprint: Blueprint,
         *,
         build: bool = False,
+        force_overwrite: bool = False,
     ) -> Blueprint:
         """Create every missing file declared in *blueprint* and return the updated blueprint."""
+        guard_materialization(self.workspace, blueprint, force_overwrite=force_overwrite)
         project = blueprint.project or "polyglot_project"
         crate_name = f"aero_forge_native_{sanitize_crate_name(project)}"
         pkg_name = _sanitize_module_name(project)

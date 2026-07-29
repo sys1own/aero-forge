@@ -301,7 +301,9 @@ def test_update_returns_command_list(server):
         "metadata:\n"
         "  schema_version: \"3.0.0\"\n"
         "  project_name: demo\n"
-        "  status: draft\n"
+        "  status: finalized\n"
+        "  generation_method: llm_synthesized\n"
+        "  llm_initialized: true\n"
         "manifest:\n"
         "  - path: main.py\n"
         "    lang: python\n"
@@ -317,7 +319,7 @@ def test_update_returns_command_list(server):
         server,
         client,
         "/api/update",
-        {"session_id": session_id, "run_build": False},
+        {"session_id": session_id, "run_build": False, "force_overwrite": True},
     )
     assert status == 200, data.decode("utf-8", errors="ignore")
     payload = json.loads(data)

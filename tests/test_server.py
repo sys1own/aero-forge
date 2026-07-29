@@ -606,7 +606,7 @@ def test_api_regenerate_blueprint_success(server):
 
     status, data = _post_json(
         server + "/api/workspace/regenerate_blueprint",
-        {"session_id": session_id, "run_build": False},
+        {"session_id": session_id, "run_build": False, "force_overwrite": True},
     )
     assert status == 200
     assert data["status"] == "success"

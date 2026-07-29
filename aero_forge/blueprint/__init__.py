@@ -4,6 +4,10 @@ This package exposes the legacy v2 Blueprint model and helpers alongside the
 new v3.0.0 schema, validator, synthesizer, and conversion utilities.
 """
 
+from aero_forge.blueprint.blueprint_parser import (
+    is_blueprint_ready,
+    load_blueprint,
+)
 from aero_forge.blueprint.core import (
     ABIContract,
     Blueprint,
@@ -47,8 +51,10 @@ __all__ = [
     "ExecutionStrategy",
     "FunctionSpec",
     "InvalidBlueprintError",
+    "is_blueprint_ready",
     "LLMBlueprintSynthesizer",
     "LLMConfig",
+    "load_blueprint",
     "ManifestEntry",
     "_contracts_to_abi_contracts",
     "discover_functions",

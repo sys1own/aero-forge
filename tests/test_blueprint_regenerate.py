@@ -59,7 +59,7 @@ def test_regenerator_requires_blueprint(tmp_path: Path) -> None:
 
 def test_regenerator_re_scaffolds_python_workspace(tmp_path: Path) -> None:
     workspace = _make_workspace(tmp_path)
-    reg = BlueprintRegenerator(workspace, keep_backup=True, run_build=False)
+    reg = BlueprintRegenerator(workspace, keep_backup=True, run_build=False, force_overwrite=True)
     result = reg.run()
 
     assert result["status"] == "success"
@@ -88,7 +88,7 @@ def test_regenerator_creates_backup(tmp_path: Path) -> None:
     workspace = _make_workspace(tmp_path)
     original_core = (workspace / "src" / "testproj" / "core.py").read_text(encoding="utf-8")
 
-    reg = BlueprintRegenerator(workspace, keep_backup=True, run_build=False)
+    reg = BlueprintRegenerator(workspace, keep_backup=True, run_build=False, force_overwrite=True)
     reg.run()
 
     backup = workspace / ".aero_backup" / "src" / "testproj" / "core.py"

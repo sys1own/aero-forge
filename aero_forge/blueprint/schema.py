@@ -223,19 +223,27 @@ class BlueprintV3(BaseModel):
 
             if artifact.type == ArtifactType.cargo_cdylib:
                 architecture = "hybrid_rust_python"
-                manifest.append(ManifestEntry(path=f"{artifact.id}/Cargo.toml", lang="toml", purpose="cargo cdylib"))
+                crate_root = Path(artifact.id)
+                manifest.append(ManifestEntry(path=str(crate_root / "Cargo.toml"), lang="toml", purpose="cargo cdylib"))
                 for src in artifact.source_files:
-                    manifest.append(ManifestEntry(path=src, lang="rust", purpose="rust source"))
+                    rel = str(crate_root / src)
+                    if not (workspace / rel).is_file():
+                        continue
+                    manifest.append(ManifestEntry(path=rel, lang="rust", purpose="rust source"))
             elif any(Path(f).suffix in {".cpp", ".c", ".h", ".hpp"} for f in artifact.source_files):
                 if "rust" in architecture or architecture == "hybrid_rust_python":
                     architecture = "hybrid_cpp_rust"
                 elif architecture == "pure_python":
                     architecture = "hybrid_cpp_python"
                 for src in artifact.source_files:
+                    if not (workspace / src).is_file():
+                        continue
                     manifest.append(ManifestEntry(path=src, lang=Path(src).suffix.lstrip("."), purpose="c/c++ source"))
             else:
                 # Treat as Python / generic binary artifact.
                 for src in artifact.source_files:
+                    if not (workspace / src).is_file():
+                        continue
                     manifest.append(ManifestEntry(path=src, lang="python", purpose="python source"))
                     if self._looks_like_python_artifact(artifact):
                         from aero_forge.blueprint.core import discover_functions as _discover

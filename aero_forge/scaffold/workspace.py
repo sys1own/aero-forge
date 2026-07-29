@@ -292,6 +292,7 @@ class BlueprintRegenerator:
         *,
         keep_backup: bool = False,
         run_build: bool = False,
+        force_overwrite: bool = False,
         llm_provider: Optional[str] = None,
         model: Optional[str] = None,
         config_override: Optional[Any] = None,
@@ -299,6 +300,7 @@ class BlueprintRegenerator:
         self.workspace = Path(workspace).resolve()
         self.keep_backup = keep_backup
         self.run_build = run_build
+        self.force_overwrite = force_overwrite
         self.llm_provider = llm_provider
         self.model = model
         self.config_override = config_override
@@ -306,6 +308,17 @@ class BlueprintRegenerator:
         self.backup_dir = self.workspace / ".aero_backup"
         self.logs: List[str] = []
         self.errors: List[str] = []
+
+    def _is_workspace_non_empty(self) -> bool:
+        """Return True when the workspace contains files other than protected metadata."""
+        protected = {"blueprint.aero", "workspace_blueprint.yaml", ".aero_backup"}
+        for item in self.workspace.iterdir():
+            if item.name in protected:
+                continue
+            if item.is_dir() and item.name.startswith("."):
+                continue
+            return True
+        return False
 
     def _log(self, level: str, message: str) -> None:
         log_func = getattr(logger, level, logger.info)
@@ -518,11 +531,22 @@ members = ["rust_core"]
         if not self.blueprint_path.is_file():
             raise FileNotFoundError(f"blueprint.aero not found in {self.workspace}")
 
-        from aero_forge.blueprint import parse_aero
+        from aero_forge.blueprint import is_blueprint_ready, parse_aero
 
         blueprint = parse_aero(self.blueprint_path.read_text(encoding="utf-8"))
         if not isinstance(blueprint, dict):
             raise ValueError("blueprint.aero did not parse to a mapping")
+
+        if not is_blueprint_ready(blueprint):
+            raise ValueError(
+                "Cannot materialize: Blueprint is uninitialized. "
+                "Please run LLM blueprint generation first."
+            )
+
+        if not self.force_overwrite and self._is_workspace_non_empty():
+            raise ValueError(
+                "Workspace is not empty. Use force_overwrite to regenerate."
+            )
 
         self._backup_workspace()
         self._purge_generated()
