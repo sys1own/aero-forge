@@ -47,6 +47,22 @@ from aero_forge.chat import (
     get_session_metadata,
     set_session_blueprint_metadata,
 )
+
+
+def CopilotAgent(*args, **kwargs):
+    """Workspace-aware Copilot agent entrypoint used by the web server.
+
+    This is a thin dispatcher to the current ``ChatSession`` class so that
+    server-side tests and callers can refer to ``CopilotAgent`` while still
+    monkeypatching ``ChatSession`` when needed.  ``workspace_path`` and
+    ``workspace_id`` are mapped to the positional ``output_dir`` argument.
+    """
+    workspace_path = kwargs.pop("workspace_path", kwargs.pop("workspace_id", None))
+    if not args and workspace_path is not None:
+        args = (workspace_path,)
+    return ChatSession(*args, **kwargs)
+
+
 from aero_forge.context_bundler import get_blueprint_status
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
@@ -988,7 +1004,11 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
 
             session_id = body.get("session_id") or str(uuid.uuid4())
             session_dir = _session_dir(session_id)
-            workspace_dir = body.get("workspace_dir")
+            workspace_dir = (
+                body.get("workspace_path")
+                or body.get("workspace_dir")
+                or body.get("workspace_id")
+            )
             if workspace_dir:
                 workspace_arg = Path(workspace_dir)
                 if not workspace_arg.is_absolute():
@@ -1009,8 +1029,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             # LLM synthesis pipeline before building the copilot context.
             self._synthesize_if_raw(workspace_dir, config, session_id=session_id)
 
-            chat = ChatSession(
-                workspace_dir,
+            chat = CopilotAgent(
+                workspace_path=workspace_dir,
                 llm_provider=config.llm_provider,
                 model=config.model,
                 api_key=config.api_key,
