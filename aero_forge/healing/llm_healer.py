@@ -45,6 +45,8 @@ class RuleBasedFallback:
             return cls._dependency_conflict_directives(context, log_text)
         if error_type == "cargo_manifest_syntax":
             return cls._manifest_syntax_directives(context, log_text)
+        if error_type in ("cargo_manifest_path", "cargo_workspace_error"):
+            return cls._cargo_manifest_path_directives(context, log_text)
         if "missing" in error_type and "import" in error_type:
             return cls._missing_import_directives(context, log_text)
         if error_type in ("python_name_error",):
@@ -195,6 +197,85 @@ class RuleBasedFallback:
             "action": "update_manifest",
             "reason": "Cargo.toml workspace members array is malformed; rewrite it cleanly.",
             "instructions": "Replace the [workspace] section with a valid members array including crates/native_core.",
+            "content": fixed,
+        }]
+
+    @classmethod
+    def _cargo_manifest_path_directives(cls, context: Dict[str, Any], log_text: str) -> List[Dict[str, Any]]:
+        """Create or update a workspace root Cargo.toml so nested crates are reachable.
+
+        Looks for any ``Cargo.toml`` that is not at the workspace root. If one is
+        found and the root lacks a workspace table, write a root ``Cargo.toml``
+        that declares the nested crate as a workspace member.
+        """
+        workspace = Path(context["workspace"])
+        root_manifest = workspace / "Cargo.toml"
+
+        # Locate the first nested Cargo.toml (excluding build dirs).
+        exclude = {"target", ".cargo"}
+        nested = None
+        for path in workspace.rglob("Cargo.toml"):
+            if any(part in exclude for part in path.parts):
+                continue
+            if path.resolve() == root_manifest.resolve():
+                continue
+            nested = path
+            break
+        if not nested:
+            return []
+
+        nested_dir = nested.parent.relative_to(workspace).as_posix()
+        if root_manifest.is_file():
+            try:
+                import tomllib
+            except ImportError:
+                import tomli as tomllib  # type: ignore
+            try:
+                with open(root_manifest, "rb") as fh:
+                    data = tomllib.load(fh)
+            except Exception:
+                return []
+            members = list(data.get("workspace", {}).get("members", []))
+            if nested_dir in members:
+                return []
+            members.append(nested_dir)
+            resolver = data.get("workspace", {}).get("resolver", "2")
+            original = root_manifest.read_text(encoding="utf-8")
+            # Try to splice a fresh [workspace] section in place of an existing one.
+            if "[workspace]" in original:
+                ws_start = original.index("[workspace]")
+                ws_end = original.find("[", ws_start + 1)
+                if ws_end == -1:
+                    ws_end = len(original)
+                before = original[:ws_start]
+                after = original[ws_end:]
+            else:
+                before = original
+                after = ""
+            lines = ["[workspace]", "members = ["]
+            for idx, member in enumerate(members):
+                suffix = "" if idx == len(members) - 1 else ","
+                lines.append(f'    "{member}"{suffix}')
+            lines.append("]")
+            lines.append(f'resolver = "{resolver}"')
+            fixed = before.rstrip() + "\n" + "\n".join(lines) + "\n" + after.lstrip()
+            return [{
+                "target_file": "Cargo.toml",
+                "action": "update_manifest",
+                "reason": f"Cargo workspace manifest missing member '{nested_dir}'; adding it resolves path mismatch errors.",
+                "instructions": f"Add '{nested_dir}' to the [workspace] members list.",
+                "content": fixed,
+            }]
+
+        # No root Cargo.toml; create a minimal workspace pointing at the nested crate.
+        fixed = (
+            f'[workspace]\nmembers = ["{nested_dir}"]\nresolver = "2"\n'
+        )
+        return [{
+            "target_file": "Cargo.toml",
+            "action": "update_manifest",
+            "reason": f"No root Cargo.toml found; creating a workspace that includes '{nested_dir}'.",
+            "instructions": "Create a root Cargo.toml with a [workspace] members entry for the nested crate.",
             "content": fixed,
         }]
 

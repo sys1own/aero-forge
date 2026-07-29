@@ -80,9 +80,31 @@ def _unwrap_single_root(workspace: Path) -> Path:
     return workspace
 
 
-def _cargo_bins(workspace: Path) -> List[str]:
-    """Return executable target names declared in Cargo.toml [[bin]] sections."""
-    cargo_toml = workspace / "Cargo.toml"
+def _find_cargo_manifests(workspace: Path) -> List[Path]:
+    """Return all ``Cargo.toml`` paths under *workspace*, sorted and deduplicated.
+
+    Common build directories such as ``target`` and ``.cargo`` are excluded.
+    """
+    manifests: set[Path] = set()
+    exclude = {"target", ".cargo"}
+    for path in workspace.rglob("Cargo.toml"):
+        if any(part in exclude for part in path.parts):
+            continue
+        manifests.add(path.resolve().parent)
+    return sorted(manifests, key=lambda p: str(p))
+
+
+def _manifest_opt(manifest_dir: Path, workspace: Path) -> str:
+    """Return a ``--manifest-path`` option when the manifest is not at the root."""
+    if manifest_dir == workspace:
+        return ""
+    rel = manifest_dir.relative_to(workspace).as_posix()
+    return f" --manifest-path {rel}/Cargo.toml"
+
+
+def _cargo_bins(manifest_dir: Path) -> List[str]:
+    """Return executable target names declared in a Cargo.toml [[bin]] section."""
+    cargo_toml = manifest_dir / "Cargo.toml"
     if not cargo_toml.is_file():
         return []
     try:
@@ -96,21 +118,21 @@ def _cargo_bins(workspace: Path) -> List[str]:
         if isinstance(section, dict) and section.get("name"):
             bins.append(str(section["name"]))
     # If no explicit bin but src/main.rs exists, the package name is the default bin.
-    if not bins and (workspace / "src" / "main.rs").is_file():
+    if not bins and (manifest_dir / "src" / "main.rs").is_file():
         package = data.get("package", {})
         if package.get("name"):
             bins.append(str(package["name"]))
     return bins
 
 
-def _cargo_examples(workspace: Path) -> List[str]:
+def _cargo_examples(manifest_dir: Path) -> List[str]:
     """Return example names from examples/*.rs or [[example]] declarations."""
-    examples_dir = workspace / "examples"
+    examples_dir = manifest_dir / "examples"
     names: List[str] = []
     if examples_dir.is_dir():
         for path in sorted(examples_dir.glob("*.rs")):
             names.append(path.stem)
-    cargo_toml = workspace / "Cargo.toml"
+    cargo_toml = manifest_dir / "Cargo.toml"
     if cargo_toml.is_file():
         try:
             with cargo_toml.open("rb") as fh:
@@ -322,37 +344,42 @@ def detect_runnable_commands(workspace: Path) -> List[Dict[str, Any]]:
     primary_build = False
 
     # Rust
-    cargo_bins = _cargo_bins(workspace)
-    if cargo_bins:
-        for i, name in enumerate(cargo_bins):
+    cargo_manifests = _find_cargo_manifests(workspace)
+    if not cargo_manifests and list(workspace.rglob("*.rs")):
+        # No manifest discovered but Rust source exists; offer a plain cargo test.
+        cargo_manifests = [workspace]
+    for manifest_dir in cargo_manifests:
+        manifest_opt = _manifest_opt(manifest_dir, workspace)
+        for i, name in enumerate(_cargo_bins(manifest_dir)):
             commands.append(_command(
                 name=f"Run {name}",
-                cmd=f"cargo run --bin {name}",
+                cmd=f"cargo run{manifest_opt} --bin {name}",
                 category="run",
                 primary=(i == 0 and not primary_run),
             ))
-            primary_run = True
-    for example in _cargo_examples(workspace):
-        commands.append(_command(
-            name=f"Run example {example}",
-            cmd=f"cargo run --example {example}",
-            category="run",
-        ))
-    if (workspace / "Cargo.toml").is_file() or list(workspace.rglob("*.rs")):
-        commands.append(_command(
-            name="Cargo test",
-            cmd="cargo test",
-            category="test",
-            primary=not primary_test,
-        ))
-        primary_test = True
-        commands.append(_command(
-            name="Cargo build",
-            cmd="cargo build",
-            category="build",
-            primary=not primary_build,
-        ))
-        primary_build = True
+            if i == 0:
+                primary_run = True
+        for example in _cargo_examples(manifest_dir):
+            commands.append(_command(
+                name=f"Run example {example}",
+                cmd=f"cargo run{manifest_opt} --example {example}",
+                category="run",
+            ))
+        if (manifest_dir / "Cargo.toml").is_file():
+            commands.append(_command(
+                name=f"Cargo test{(' (' + manifest_dir.relative_to(workspace).as_posix() + ')') if manifest_dir != workspace else ''}".strip(),
+                cmd=f"cargo test{manifest_opt}",
+                category="test",
+                primary=not primary_test,
+            ))
+            primary_test = True
+            commands.append(_command(
+                name=f"Cargo build{(' (' + manifest_dir.relative_to(workspace).as_posix() + ')') if manifest_dir != workspace else ''}".strip(),
+                cmd=f"cargo build{manifest_opt}",
+                category="build",
+                primary=not primary_build,
+            ))
+            primary_build = True
 
     # Python
     py_entrypoints = _python_entrypoints(workspace)

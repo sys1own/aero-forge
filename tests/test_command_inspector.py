@@ -89,3 +89,39 @@ def test_unwraps_single_nested_zip_root(tmp_path: Path) -> None:
     cmds = detect_runnable_commands(tmp_path)
     assert any(c["cmd"] == "python main.py" for c in cmds)
     assert any(c["cmd"] == "pytest" for c in cmds)
+
+
+def test_detects_nested_cargo_manifest(tmp_path: Path) -> None:
+    """Rust crates under a subdirectory get commands with --manifest-path."""
+    (tmp_path / "README.md").write_text("# project\n")
+    crate = tmp_path / "rust_core"
+    crate.mkdir()
+    (crate / "Cargo.toml").write_text(
+        '[package]\nname = "native"\nversion = "0.1.0"\n\n[[bin]]\nname = "native"\n',
+        encoding="utf-8",
+    )
+    (crate / "src").mkdir()
+    (crate / "src" / "main.rs").write_text("fn main() {}")
+    (crate / "examples").mkdir()
+    (crate / "examples" / "bench.rs").write_text("fn main() {}")
+    cmds = detect_runnable_commands(tmp_path)
+    assert any(
+        c["cmd"] == "cargo run --manifest-path rust_core/Cargo.toml --bin native"
+        and c["category"] == "run"
+        for c in cmds
+    )
+    assert any(
+        c["cmd"] == "cargo test --manifest-path rust_core/Cargo.toml"
+        and c["category"] == "test"
+        for c in cmds
+    )
+    assert any(
+        c["cmd"] == "cargo build --manifest-path rust_core/Cargo.toml"
+        and c["category"] == "build"
+        for c in cmds
+    )
+    assert any(
+        c["cmd"] == "cargo run --manifest-path rust_core/Cargo.toml --example bench"
+        and c["category"] == "run"
+        for c in cmds
+    )

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from aero_forge.errors import UserError
 from aero_forge.scaffold.workspace import BlueprintRegenerator
 
 
@@ -94,3 +95,37 @@ def test_regenerator_creates_backup(tmp_path: Path) -> None:
     backup = workspace / ".aero_backup" / "src" / "testproj" / "core.py"
     assert backup.exists()
     assert backup.read_text(encoding="utf-8") == original_core
+
+
+def _make_uninitialized_workspace(tmp_path: Path) -> Path:
+    (tmp_path / "src" / "testproj").mkdir(parents=True)
+    (tmp_path / "tests").mkdir(parents=True)
+    source = tmp_path / "src" / "testproj" / "core.py"
+    source.write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    (tmp_path / "blueprint.aero").write_text(
+        "metadata:\n  status: draft\n  schema_version: 3.0.0\nmanifest: []\n",
+        encoding="utf-8",
+    )
+    return tmp_path
+
+
+def test_regenerator_blocks_uninitialized_blueprint(tmp_path: Path) -> None:
+    workspace = _make_uninitialized_workspace(tmp_path)
+    reg = BlueprintRegenerator(workspace, force_overwrite=True)
+    with pytest.raises(UserError):
+        reg.run()
+    assert (workspace / "src" / "testproj" / "core.py").exists()
+
+
+def test_regenerator_blocks_uninitialized_without_force_overwrite(tmp_path: Path) -> None:
+    workspace = _make_uninitialized_workspace(tmp_path)
+    (workspace / "blueprint.aero").write_text(
+        "metadata:\n  status: finalized\n  schema_version: 3.0.0\n  generation_method: llm_synthesized\n"
+        "manifest:\n  - path: src/testproj/core.py\n    lang: python\n"
+        "contracts:\n  - name: add\n    language: python\n    signature: 'def add(a, b):'\n",
+        encoding="utf-8",
+    )
+    reg = BlueprintRegenerator(workspace, force_overwrite=False)
+    with pytest.raises(UserError):
+        reg.run()
+    assert (workspace / "src" / "testproj" / "core.py").exists()

@@ -9,6 +9,7 @@ import pytest
 
 from aero_forge.blueprint.blueprint_parser import is_blueprint_ready, load_blueprint
 from aero_forge.builder.aeroc_compiler import compile_directory_to_aeroc
+from aero_forge.errors import UserError
 from aero_forge.scaffold.workspace import BlueprintRegenerator
 
 
@@ -149,7 +150,7 @@ class TestSafeMaterialization:
         )
 
         regenerator = BlueprintRegenerator(workspace)
-        with pytest.raises(ValueError, match="Cannot materialize: Blueprint is uninitialized"):
+        with pytest.raises(UserError, match="Cannot materialize: Blueprint is uninitialized"):
             regenerator.run()
 
         # Ensure the existing source file was not touched.
@@ -174,7 +175,7 @@ class TestSafeMaterialization:
         )
 
         regenerator = BlueprintRegenerator(workspace, force_overwrite=False)
-        with pytest.raises(ValueError, match="Workspace is not empty"):
+        with pytest.raises(UserError, match="Workspace is not empty"):
             regenerator.run()
 
         # With force_overwrite the regeneration proceeds (and creates a backup).

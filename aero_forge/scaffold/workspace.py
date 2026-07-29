@@ -11,6 +11,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from aero_forge.errors import UserError
+
 TOOL_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -315,7 +317,7 @@ class BlueprintRegenerator:
         for item in self.workspace.iterdir():
             if item.name in protected:
                 continue
-            if item.is_dir() and item.name.startswith("."):
+            if item.name.startswith("."):
                 continue
             return True
         return False
@@ -538,13 +540,13 @@ members = ["rust_core"]
             raise ValueError("blueprint.aero did not parse to a mapping")
 
         if not is_blueprint_ready(blueprint):
-            raise ValueError(
+            raise UserError(
                 "Cannot materialize: Blueprint is uninitialized. "
                 "Please run LLM blueprint generation first."
             )
 
         if not self.force_overwrite and self._is_workspace_non_empty():
-            raise ValueError(
+            raise UserError(
                 "Workspace is not empty. Use force_overwrite to regenerate."
             )
 
