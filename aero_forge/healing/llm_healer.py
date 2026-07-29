@@ -242,6 +242,30 @@ class LLMHealer:
             self._log("warning", "LLM", f"Could not create LLM client: {exc}")
             return None
 
+    def repair_blueprint_output(self, raw_output: str) -> Optional[str]:
+        """Ask the LLM to repair a malformed Blueprint v3.0.0 response.
+
+        Returns the raw corrected text, or ``None`` if no client is available
+        or the LLM call fails.
+        """
+        client = self._get_client()
+        if client is None:
+            return None
+
+        prompt = (
+            "You are a recovery assistant. The text below is a malformed "
+            "Blueprint v3.0.0 response from an LLM. Return ONLY a single valid "
+            "Blueprint v3.0.0 YAML or JSON object, with no markdown fences and "
+            "no commentary.\n\nMalformed response:\n```\n"
+            + raw_output
+            + "\n```\n\nCorrected blueprint:"
+        )
+        try:
+            return client.generate(prompt, temperature=0.1)
+        except Exception as exc:
+            self._log("warning", "HEAL_LLM", f"Blueprint repair LLM call failed: {exc}")
+            return None
+
     def heal(
         self,
         workspace: Union[str, Path],

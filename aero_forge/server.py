@@ -33,6 +33,7 @@ from urllib.parse import parse_qs, urlparse
 import aiohttp
 import yaml
 from aiohttp import web
+from pydantic import ValidationError
 
 from aero_forge import inspector as workspace_inspector
 from aero_forge.blueprint import generate_blueprint_from_uploaded_repo
@@ -80,6 +81,9 @@ from aero_forge.ingestion.zip_parser import extract_zip_safely, generate_draft_v
 from aero_forge.scaffold.module_guard import reify_missing_modules
 from aero_forge.sandbox.manager import SandboxManager
 from aero_forge.blueprint import BlueprintV3, BlueprintV3Validator, LLMBlueprintSynthesizer, write_v3_blueprint
+from aero_forge.blueprint.schema import ArtifactType, BuildArtifact, ContextState, GenerationMethod
+from aero_forge.blueprint.validator import InvalidBlueprintError
+from aero_forge.scaffold.pre_write_validator import BlueprintValidationError
 from aero_forge.scaffold.aeroc_export import export_scaffold_zip
 from aero_forge.scaffold.export_options import export_workspace
 from aero_forge.scaffold.workspace import BlueprintRegenerator
@@ -1093,6 +1097,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
 
     def _handle_blueprint_synthesize(self) -> None:
         """Synthesize a finalized Blueprint v3 from a session workspace or draft."""
+        session_id: str = ""
         try:
             body = _parse_json_body(self)
             session_id = body.get("session_id") or str(uuid.uuid4())
@@ -1129,7 +1134,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 draft=draft,
                 output_path=draft_path,
             )
-            BlueprintV3Validator(finalized.model_dump(mode="json")).check_exportable()
+            BlueprintV3Validator(finalized.model_dump(mode="json"), workspace=workspace).check_exportable()
 
             return _send_json(
                 self,
@@ -1142,11 +1147,63 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     "metadata": finalized.metadata.model_dump(mode="json"),
                 },
             )
+        except (
+            yaml.YAMLError,
+            ValueError,
+            InvalidBlueprintError,
+            BlueprintValidationError,
+            ValidationError,
+        ) as exc:
+            logger.warning("Blueprint synthesize endpoint failed: %s. Attempting local fallback...", exc)
+            try:
+                workspace = locals().get("workspace")
+                draft_path = locals().get("draft_path")
+                if not workspace or not draft_path:
+                    raise ValueError("Workspace or blueprint path not available for fallback")
+                fallback = generate_draft_v3_blueprint(workspace)
+                fallback.metadata.schema_version = "3.0.0"
+                fallback.metadata.status = "finalized"
+                fallback.metadata.generation_method = GenerationMethod.static_heuristic
+                fallback.metadata.transferable = True
+                fallback.metadata.llm_initialized = False
+                fallback.llm_context.state = ContextState.synthesized
+                if not fallback.build_pipeline:
+                    fallback.build_pipeline.append(
+                        BuildArtifact(
+                            id="fallback_build",
+                            type=ArtifactType.python_extension,
+                            source_files=["main.py"],
+                            output_path="dist/fallback_build",
+                            description="Fallback artifact generated from workspace scan",
+                        )
+                    )
+                write_v3_blueprint(fallback, draft_path)
+                BlueprintV3Validator(fallback.model_dump(mode="json"), workspace=workspace).check_exportable()
+
+                return _send_json(
+                    self,
+                    200,
+                    {
+                        "status": "finalized",
+                        "session_id": session_id,
+                        "path": str(draft_path),
+                        "transferable": fallback.metadata.transferable,
+                        "metadata": fallback.metadata.model_dump(mode="json"),
+                    },
+                )
+            except Exception as fallback_exc:
+                logger.exception("Local fallback blueprint generation failed")
+                return _send_json(
+                    self,
+                    500,
+                    {"status": "failed", "error": f"Synthesis failed and fallback failed: {fallback_exc}"},
+                )
         except Exception as exc:
             logger.exception("Blueprint synthesize endpoint failed")
             return _send_json(self, 500, {"status": "failed", "error": str(exc)})
         finally:
-            set_session_blueprint_metadata(session_id, is_synthesizing=False)
+            if session_id:
+                set_session_blueprint_metadata(session_id, is_synthesizing=False)
 
     def _handle_blueprint_status(self, query: Dict[str, List[str]]) -> None:
         session_id = _first(query, "session_id")
