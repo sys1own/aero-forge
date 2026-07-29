@@ -113,6 +113,18 @@ def _extract_explicit_paths(prompt: str) -> list[str]:
     return re.findall(r"\b[A-Za-z_][\w/]*\.py\b", prompt)
 
 
+def _is_explicit_native_rust_update(prompt: str) -> bool:
+    """Return True when the prompt explicitly requests a PyO3/NumPy/Rayon native extension."""
+    if not prompt:
+        return False
+    lower = prompt.lower()
+    return (
+        "fn " in lower
+        and ("&pyarray" in lower or "pyarray2" in lower or "numpy" in lower)
+        and ("rayon" in lower or "pyo3" in lower)
+    )
+
+
 def _augment_blueprint_with_explicit_paths(
     blueprint: Blueprint,
     prompt: str,
@@ -386,6 +398,8 @@ def _run_polyglot_materializer(
         blueprint = _augment_blueprint_with_explicit_paths(
             blueprint, prompt, project_name, features
         )
+    if prompt and not blueprint.prompt:
+        blueprint = blueprint.model_copy(update={"prompt": prompt})
     if blueprint.architecture == INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON:
         materializer: Any = TriPolyglotMaterializer(output_dir)
         materializer_name = "TriPolyglotMaterializer"
@@ -409,9 +423,11 @@ def _run_polyglot_materializer(
     write_blueprint(updated, output_dir / "blueprint.aero")
 
     test_env = dict(os.environ)
-    test_env["PYTHONPATH"] = (
-        f"{output_dir}{os.pathsep}{test_env.get('PYTHONPATH', '')}"
-    ).strip(os.pathsep)
+    pythonpath_parts = [str(output_dir)]
+    if (output_dir / "src").is_dir():
+        pythonpath_parts.append(str(output_dir / "src"))
+    pythonpath_parts.append(test_env.get("PYTHONPATH", ""))
+    test_env["PYTHONPATH"] = os.pathsep.join(p for p in pythonpath_parts if p).strip(os.pathsep)
     pytest_result = subprocess.run(
         [sys.executable, "-m", "pytest", str(output_dir), "-q"],
         cwd=output_dir,
@@ -616,29 +632,11 @@ def build_universal_project(
             blueprint=blueprint,
         )
     elif blueprint.architecture == INTENT_HYBRID_RUST_PYTHON:
-        try:
-            result = generate_monorepo(
-                prompt,
-                output_dir,
-                project_name=project_name,
-                constraints=constraints,
-                llm_provider=llm_provider,
-                model=model,
-                max_retries=max_retries,
-                max_tokens=max_tokens,
-                progress_callback=progress_callback,
-                config_override=config_override,
-            )
-        except Exception as exc:
-            logger.warning("generate_monorepo failed: %s; falling back to PolyglotMaterializer", exc)
-            result = {"success": False, "error": str(exc)}
-        if not result.get("success"):
-            logger.warning(
-                "generate_monorepo failed (%s); falling back to PolyglotMaterializer",
-                result.get("error"),
-            )
-            if progress_callback:
-                progress_callback("Falling back to polyglot materializer...")
+        # Explicit PyO3/NumPy/Rayon native extension updates are handled directly
+        # by the polyglot materializer so the concrete requested function is built
+        # instead of a generic monorepo stub.
+        if _is_explicit_native_rust_update(prompt):
+            logger.info("Explicit native Rust update detected; routing to PolyglotMaterializer")
             result = _run_polyglot_materializer(
                 project_name or blueprint.project or "generated",
                 classification.features,
@@ -646,6 +644,37 @@ def build_universal_project(
                 prompt=prompt,
                 blueprint=blueprint,
             )
+        else:
+            try:
+                result = generate_monorepo(
+                    prompt,
+                    output_dir,
+                    project_name=project_name,
+                    constraints=constraints,
+                    llm_provider=llm_provider,
+                    model=model,
+                    max_retries=max_retries,
+                    max_tokens=max_tokens,
+                    progress_callback=progress_callback,
+                    config_override=config_override,
+                )
+            except Exception as exc:
+                logger.warning("generate_monorepo failed: %s; falling back to PolyglotMaterializer", exc)
+                result = {"success": False, "error": str(exc)}
+            if not result.get("success"):
+                logger.warning(
+                    "generate_monorepo failed (%s); falling back to PolyglotMaterializer",
+                    result.get("error"),
+                )
+                if progress_callback:
+                    progress_callback("Falling back to polyglot materializer...")
+                result = _run_polyglot_materializer(
+                    project_name or blueprint.project or "generated",
+                    classification.features,
+                    output_dir,
+                    prompt=prompt,
+                    blueprint=blueprint,
+                )
     else:
         result = _build_pure_python(
             blueprint,

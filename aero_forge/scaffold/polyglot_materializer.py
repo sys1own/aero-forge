@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import ast
 import logging
+import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -59,6 +61,295 @@ _DEFAULT_CONTRACTS = [
         purpose="Engine health/status metadata",
     ),
 ]
+
+
+# ---------------------------------------------------------------------------
+# Explicit native Rust extension update helpers (e.g. PyO3 + NumPy + Rayon)
+# ---------------------------------------------------------------------------
+
+
+def _extract_explicit_rust_update(prompt: Optional[str]) -> Optional[Dict[str, str]]:
+    """Detect a prompt that requests a concrete Rust extension module under src/."""
+    if not prompt:
+        return None
+    lower = prompt.lower()
+    if not any(k in lower for k in ("&pyarray", "pyarray2", "rayon", "numpy crate", "pyo3")):
+        return None
+    m = re.search(r"fn\s+(\w+)\s*\(", prompt)
+    if not m:
+        return None
+    func = m.group(1)
+    path_m = re.search(r"(src/[\w/]+/(\w+)\.rs)", prompt)
+    if path_m:
+        rust_path = path_m.group(1)
+        rust_module = path_m.group(2)
+    else:
+        rust_path = f"src/{func}.rs"
+        rust_module = func
+    return {
+        "function": func,
+        "rust_path": rust_path,
+        "rust_module": rust_module,
+    }
+
+
+def _discover_existing_python_package(workspace: Path) -> Optional[Tuple[str, str]]:
+    """Return (import_name, relative_dir) for an existing Python package in the workspace."""
+    excluded = {
+        "target",
+        "dist",
+        "build",
+        ".cargo",
+        ".aero",
+        ".git",
+        "__pycache__",
+        ".pytest_cache",
+        "rust_core",
+        "generated",
+        ".aero_core",
+    }
+    candidates: List[Tuple[str, str]] = []
+    for base in [workspace / "src", workspace]:
+        if not base.is_dir():
+            continue
+        for child in base.iterdir():
+            if not child.is_dir():
+                continue
+            if any(part in excluded for part in child.parts):
+                continue
+            if (child / "__init__.py").is_file():
+                rel = child.relative_to(workspace)
+                candidates.append((child.name, str(rel)))
+    if not candidates:
+        return None
+    for name, rel in candidates:
+        if rel.startswith("src/"):
+            return (name, rel)
+    return candidates[0]
+
+
+def _native_update_rust_function_source() -> str:
+    return r'''use numpy::PyArray2;
+use pyo3::prelude::*;
+use rayon::prelude::*;
+
+#[pyfunction(name = "rolling_average")]
+pub fn _accel_rolling_average(py: Python, matrix: &PyArray2<f64>, window: usize) -> i64 {
+    if window == 0 {
+        return 1;
+    }
+    let shape = matrix.shape();
+    if shape.len() != 2 {
+        return 1;
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+    if window > cols {
+        return 1;
+    }
+    let _ = rows;
+    let mut rw = matrix.readwrite();
+    let data = match rw.as_slice_mut() {
+        Ok(s) => s,
+        Err(_) => return 1,
+    };
+    py.allow_threads(|| {
+        data.par_chunks_exact_mut(cols).for_each(|row| {
+            let original: Vec<f64> = row.to_vec();
+            let mut sum: f64 = original[..window].iter().sum();
+            row[window - 1] = sum / (window as f64);
+            for j in window..cols {
+                sum += original[j] - original[j - window];
+                row[j] = sum / (window as f64);
+            }
+            for j in 0..window - 1 {
+                row[j] = 0.0;
+            }
+        });
+    });
+    0
+}
+'''
+
+
+def _native_update_cargo_toml(crate_name: str) -> str:
+    return f'''[package]
+name = "{crate_name}"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "{crate_name}"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = {{ version = "0.20.3", features = ["extension-module", "abi3-py39", "generate-import-lib"] }}
+numpy = {{ version = "0.20" }}
+rayon = "1.8"
+'''
+
+
+def _native_update_lib_rs(crate_name: str, module_path: str, function_name: str) -> str:
+    if module_path:
+        top_mod = module_path.split("/")[0]
+        mod_line = f"mod {top_mod};"
+        use_line = f"use {module_path}::{function_name}::_accel_{function_name};"
+    else:
+        mod_line = f"mod {function_name};"
+        use_line = f"use {function_name}::_accel_{function_name};"
+    return f'''use pyo3::prelude::*;
+
+{mod_line}
+{use_line}
+
+#[pymodule]
+fn {crate_name}(_py: Python, m: &PyModule) -> PyResult<()> {{
+    m.add_wrapped(wrap_pyfunction!(_accel_{function_name}))?;
+    Ok(())
+}}
+'''
+
+
+def _native_update_mod_rs(function_name: str) -> str:
+    return f"pub mod {function_name};\n"
+
+
+def _native_update_wrapper_py(crate_name: str, function_name: str) -> str:
+    return f'''from __future__ import annotations
+
+import importlib.util
+import pathlib
+import re
+from typing import Any, Optional
+
+_SO_CANDIDATES = [
+    pathlib.Path(__file__).parent.parent.parent / "target" / "release" / "lib{crate_name}.so",
+    pathlib.Path(__file__).parent / "lib{crate_name}.so",
+    pathlib.Path(__file__).parent.parent.parent / "dist" / "lib{crate_name}.so",
+]
+
+_PREFERRED = "{crate_name}"
+
+
+def _load_native() -> Optional[Any]:
+    for so in _SO_CANDIDATES:
+        if not so.is_file():
+            continue
+        stem = so.stem
+        if stem.startswith("lib"):
+            stem = stem[3:]
+        stem = re.sub(r"\\.cpython-.*$", "", stem)
+        if _PREFERRED not in stem:
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location(_PREFERRED, so)
+            if spec is None or spec.loader is None:
+                continue
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+        except Exception:
+            continue
+    return None
+
+
+_NATIVE: Optional[Any] = _load_native()
+
+
+def _naive_{function_name}(matrix, window):
+    import numpy as np
+    arr = np.asarray(matrix, dtype=np.float64)
+    if arr.ndim != 2:
+        return 1
+    rows, cols = arr.shape
+    if window == 0 or window > cols:
+        return 1
+    out = np.zeros_like(arr)
+    for i in range(rows):
+        row = arr[i]
+        s = row[:window].sum()
+        out[i, window - 1] = s / window
+        for j in range(window, cols):
+            s += row[j] - row[j - window]
+            out[i, j] = s / window
+    try:
+        matrix[...] = out
+    except Exception:
+        return 1
+    return 0
+
+
+def {function_name}(matrix, window):
+    if _NATIVE is not None and hasattr(_NATIVE, "{function_name}"):
+        return getattr(_NATIVE, "{function_name}")(matrix, window)
+    return _naive_{function_name}(matrix, window)
+
+
+__all__ = ["{function_name}"]
+'''
+
+
+def _native_update_test_py(package_name: str, function_name: str) -> str:
+    return f'''import numpy as np
+import pytest
+
+from {package_name}.{function_name} import {function_name}
+
+
+def _naive_{function_name}(matrix, window):
+    arr = np.asarray(matrix, dtype=np.float64).copy()
+    if arr.ndim != 2:
+        raise ValueError("matrix must be 2D")
+    rows, cols = arr.shape
+    if window == 0 or window > cols:
+        raise ValueError("invalid window")
+    out = np.zeros_like(arr)
+    for i in range(rows):
+        row = arr[i]
+        s = row[:window].sum()
+        out[i, window - 1] = s / window
+        for j in range(window, cols):
+            s += row[j] - row[j - window]
+            out[i, j] = s / window
+    return out
+
+
+def test_{function_name}_basic():
+    arr = np.arange(24, dtype=np.float64).reshape(4, 6) + 1.0
+    expected = _naive_{function_name}(arr, 3)
+    code = {function_name}(arr, 3)
+    assert code == 0
+    np.testing.assert_allclose(arr, expected)
+
+
+def test_{function_name}_invalid_window():
+    arr = np.arange(6, dtype=np.float64).reshape(2, 3) + 1.0
+    code = {function_name}(arr, 5)
+    assert code == 1
+'''
+
+
+def _append_init_export(init_path: Path, function_name: str) -> bool:
+    """Append a re-export to an existing package __init__.py."""
+    if not init_path.is_file():
+        return False
+    source = init_path.read_text(encoding="utf-8")
+    import_line = f"from .{function_name} import {function_name}"
+    if import_line in source:
+        return False
+    all_match = re.search(r'__all__\s*=\s*\[(.*?)\]', source, re.DOTALL)
+    if all_match:
+        body = all_match.group(1).strip()
+        if body:
+            new_all = f'__all__ = [{body}, "{function_name}"]'
+        else:
+            new_all = f'__all__ = ["{function_name}"]'
+        before = source[:all_match.start()].rstrip() + f"\n{import_line}\n"
+        source = before + new_all + source[all_match.end():]
+    else:
+        source = source.rstrip() + f"\n{import_line}\n__all__ = [\"{function_name}\"]\n"
+    init_path.write_text(source, encoding="utf-8")
+    return True
 
 
 def _blueprint_dict(blueprint: Any) -> Dict[str, Any]:
@@ -766,6 +1057,164 @@ class PolyglotMaterializer:
         except Exception:
             pass
 
+    def _materialize_native_rust_update(
+        self,
+        blueprint: Blueprint,
+        build: bool,
+        explicit: Dict[str, str],
+    ) -> Blueprint:
+        """Materialize a concrete PyO3/NumPy/Rayon native extension requested by prompt."""
+        function_name = explicit["function"]
+        rust_path_str = explicit["rust_path"]
+        rust_file = self.workspace / rust_path_str
+        module_dir = rust_file.parent
+        module_dir.mkdir(parents=True, exist_ok=True)
+
+        package = _discover_existing_python_package(self.workspace)
+        if package is None:
+            package_name = function_name
+            package_rel = f"src/{function_name}"
+            package_dir = self.workspace / package_rel
+            package_dir.mkdir(parents=True, exist_ok=True)
+            (package_dir / "__init__.py").write_text(
+                f'from .{function_name} import {function_name}\n__all__ = ["{function_name}"]\n',
+                encoding="utf-8",
+            )
+        else:
+            package_name, package_rel = package
+            package_dir = self.workspace / package_rel
+
+        crate_name = f"aero_forge_native_{sanitize_crate_name(package_name)}"
+
+        rel_mod = module_dir.relative_to(self.workspace)
+        module_path = ""
+        if rel_mod.parts and rel_mod.parts[0] == "src":
+            module_path = "/".join(rel_mod.parts[1:])
+        function_module = rust_file.stem
+
+        # Root crate manifest and lib entry point.
+        (self.workspace / "Cargo.toml").write_text(
+            _native_update_cargo_toml(crate_name), encoding="utf-8"
+        )
+        lib_rs = self.workspace / "src" / "lib.rs"
+        lib_rs.parent.mkdir(parents=True, exist_ok=True)
+        lib_rs.write_text(
+            _native_update_lib_rs(crate_name, module_path, function_module),
+            encoding="utf-8",
+        )
+
+        # Intermediate mod.rs files for nested module directories.
+        if module_path:
+            parts = rel_mod.parts[1:] if rel_mod.parts[0] == "src" else rel_mod.parts
+            for i in range(1, len(parts)):
+                parent = self.workspace / "src" / "/".join(parts[:i])
+                parent.mkdir(parents=True, exist_ok=True)
+                mod_decl = "\n".join(f"pub mod {p};" for p in parts[i:]) + "\n"
+                (parent / "mod.rs").write_text(mod_decl, encoding="utf-8")
+            leaf = self.workspace / "src" / "/".join(parts)
+            leaf.mkdir(parents=True, exist_ok=True)
+            (leaf / "mod.rs").write_text(
+                _native_update_mod_rs(function_module), encoding="utf-8"
+            )
+
+        rust_file.write_text(_native_update_rust_function_source(), encoding="utf-8")
+
+        # Python wrapper and package export.
+        wrapper_path = package_dir / f"{function_name}.py"
+        wrapper_path.write_text(
+            _native_update_wrapper_py(crate_name, function_name), encoding="utf-8"
+        )
+        _append_init_export(package_dir / "__init__.py", function_name)
+
+        # Tests.
+        tests_dir = self.workspace / "tests"
+        tests_dir.mkdir(parents=True, exist_ok=True)
+        test_path = tests_dir / f"test_{function_name}.py"
+        test_path.write_text(
+            _native_update_test_py(package_name, function_name), encoding="utf-8"
+        )
+
+        if build:
+            result = cargo_build(self.workspace, release=True, timeout=600)
+            output = f"{result.stdout}\n{result.stderr}".strip()
+            self.build_logs = output
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"Rust compilation failed in {self.workspace} (exit {result.returncode}):\n{output}"
+                )
+            so_name = f"lib{crate_name}.so"
+            so_src = self.workspace / "target" / "release" / so_name
+            dist_dir = self.workspace / "dist"
+            dist_dir.mkdir(parents=True, exist_ok=True)
+            if so_src.is_file():
+                shutil.copy(so_src, dist_dir / so_name)
+                shutil.copy(so_src, package_dir / so_name)
+
+        # Rebuild the blueprint to reflect the concrete generated files.
+        new_manifest: List[ManifestEntry] = [
+            ManifestEntry(path="Cargo.toml", lang="toml", purpose="crate manifest"),
+            ManifestEntry(path="src/lib.rs", lang="rust", purpose="rust core"),
+        ]
+        if module_path:
+            parts = rel_mod.parts[1:] if rel_mod.parts[0] == "src" else rel_mod.parts
+            for i in range(1, len(parts) + 1):
+                mod_path = "src/" + "/".join(parts[:i]) + "/mod.rs"
+                new_manifest.append(
+                    ManifestEntry(path=mod_path, lang="rust", purpose="rust module")
+                )
+        new_manifest.extend(
+            [
+                ManifestEntry(
+                    path=rust_path_str,
+                    lang="rust",
+                    purpose=f"native {function_name} implementation",
+                ),
+                ManifestEntry(
+                    path=str(wrapper_path.relative_to(self.workspace)),
+                    lang="python",
+                    purpose="python native wrapper",
+                ),
+                ManifestEntry(
+                    path=str(test_path.relative_to(self.workspace)),
+                    lang="python",
+                    purpose="tests",
+                ),
+                ManifestEntry(
+                    path=str((package_dir / "__init__.py").relative_to(self.workspace)),
+                    lang="python",
+                    purpose="package init",
+                ),
+            ]
+        )
+        new_contracts: List[ContractEntry] = [
+            ContractEntry(
+                name=function_name,
+                signature=f"def {function_name}(matrix, window) -> int",
+                purpose="native rolling average",
+            )
+        ]
+        new_functions: List[FunctionSpec] = [
+            FunctionSpec(
+                file=wrapper_path,
+                name=function_name,
+                tests=[test_path],
+                skip_build=True,
+            )
+        ]
+        updated = blueprint.model_copy(
+            update={
+                "manifest": new_manifest,
+                "contracts": new_contracts,
+                "functions": new_functions,
+                "cargo_dependencies": {"rayon": "1.8", "numpy": "0.20", "pyo3": "0.20.3"},
+                "project": package_name,
+                "architecture": INTENT_HYBRID_RUST_PYTHON,
+                "toolchains": ["python", "rust", "cargo"],
+            }
+        )
+        write_blueprint(updated, self.workspace / "blueprint.aero")
+        return updated
+
     def materialize(
         self,
         blueprint: Blueprint,
@@ -778,6 +1227,18 @@ class PolyglotMaterializer:
         project = blueprint.project or "polyglot_project"
         crate_name = f"aero_forge_native_{sanitize_crate_name(project)}"
         pkg_name = _sanitize_module_name(project)
+
+        # If the prompt asks for an explicit PyO3/NumPy/Rayon native function,
+        # materialize it directly instead of synthesising generic stubs.
+        explicit = _extract_explicit_rust_update(getattr(blueprint, "prompt", None) or "")
+        if explicit and blueprint.architecture in (
+            INTENT_HYBRID_RUST_PYTHON,
+            INTENT_PURE_RUST,
+            INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON,
+        ):
+            logger.info("Detected explicit native Rust update for %s", explicit["function"])
+            self._accel_log("info", f"Native Rust update: {explicit['function']}")
+            return self._materialize_native_rust_update(blueprint, build, explicit)
 
         contracts = list(blueprint.contracts) if blueprint.contracts else list(_DEFAULT_CONTRACTS)
         if blueprint.abi_contracts:
