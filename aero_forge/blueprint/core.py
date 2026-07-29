@@ -190,6 +190,7 @@ class BlueprintSchemaV2(BaseModel):
     abi_contracts: List[ABIContract] = Field(default_factory=list)
     module_graph: List[Dict[str, Any]] = Field(default_factory=list)
     verification_nodes: List[Dict[str, Any]] = Field(default_factory=list)
+    cargo_dependencies: Dict[str, Any] = Field(default_factory=dict)
 
 
 class BlueprintValidator:
@@ -310,6 +311,7 @@ class Blueprint(BaseModel):
     verification_nodes: List[Dict[str, Any]] = Field(default_factory=list)
     metadata: Dict[str, str] = Field(default_factory=lambda: {"schema_version": "2.0.0"})
     module_graph: List[Dict[str, Any]] = Field(default_factory=list)
+    cargo_dependencies: Dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _sync_manifest_and_module_graph(self) -> "Blueprint":

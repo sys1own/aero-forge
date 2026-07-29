@@ -41,9 +41,10 @@ STRICT OPERATIONAL RULES:
 The JSON must conform to BlueprintSchemaV2.0.0 with these top-level keys:
 - metadata: {schema_version: "2.0.0", project_name: "...", domain_target: "..."}
 - execution_strategy: {primary_entrypoint: {path, runtime, wrapper_generation}, cli_contract: {parser_type, flags}, run_spec: {working_dir, env_vars, timeout_seconds}}
-- abi_contracts: list of {contract_id, target_language, binding_framework, export_symbol, c_symbol_alias, header_path, memory_model, signature: {inputs: [{name, type}], outputs: [{name, type}]}}
-- module_graph: list of {path, lang, purpose}
+- abi_contracts: list of {contract_id, target_language, binding_framework, export_symbol, c_symbol_alias, header_path, memory_model, signature: {inputs: [{name, type}], outputs: [{name, type}]}}. For PyO3 bridge functions, use explicit Rust signatures such as "&PyArray2<f64>", "Python", "usize", and "PyResult<...>".
+- module_graph: list of {path, lang, purpose, rust_signature?}. When a hybrid Rust/Python extension is requested, list concrete submodule files under "src/" (e.g. "src/ops.rs", "src/array.rs"), the main "src/lib.rs", Python wrapper files, and test files under "tests/".
 - verification_nodes: list of {test_id, execution_cmd, expected_exit_code, stdout_match_patterns, stderr_prohibited_patterns, numerical_assertions}
+- cargo_dependencies: object mapping crate name to version spec or {version, features}. Always include "pyo3" for PyO3 bindings, "numpy" for numpy-rust array types, and "rayon" when parallel iterators or sliding-window logic are requested. Example: {"pyo3": "0.20.3", "numpy": "0.21", "rayon": "1.10"}.
 """
 
 
@@ -246,6 +247,13 @@ def _normalize_v2_data(data: Any) -> Any:
         normalized_node["lang"] = lang
         normalized_graph.append(normalized_node)
     data["module_graph"] = normalized_graph
+
+    # cargo_dependencies
+    cargo_deps = data.get("cargo_dependencies") or {}
+    if isinstance(cargo_deps, dict):
+        data["cargo_dependencies"] = cargo_deps
+    else:
+        data["cargo_dependencies"] = {}
 
     return data
 
@@ -474,6 +482,7 @@ class IntentCompiler:
                 languages.add(target)
             if abi.binding_framework == "pyo3":
                 languages.add("rust")
+                languages.add("python")
             elif abi.binding_framework == "c_abi":
                 languages.add("cpp")
 
@@ -504,4 +513,5 @@ class IntentCompiler:
             verification_nodes=v2.verification_nodes,
             metadata=v2.metadata,
             module_graph=v2.module_graph,
+            cargo_dependencies=v2.cargo_dependencies,
         )

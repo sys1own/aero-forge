@@ -8,26 +8,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from aero_forge.scaffold.cargo_manifest import (
-    ensure_pyo3_features,
+    infer_dependencies,
     render_manifest,
     sanitize_crate_name,
 )
 from aero_forge.scaffold.cargo_runner import write_cargo_config
-
-_DEFAULT_DEPENDENCY_VERSIONS = {
-    "rug": "1.24",
-    "pyo3": {"version": "0.20.3", "features": list(ensure_pyo3_features({"pyo3": "0.20.3"}).get("pyo3", {}).get("features", []))},
-    "rayon": "1.10",
-}
-
-_RAYON_PARALLEL_PATTERNS = re.compile(
-    r"\.(?:par_iter_mut|par_iter|into_par_iter|par_chunks(?:_mut)?|"
-    r"par_bridge|par_extend|par_sort(?:_\w+)?)\s*\("
-)
-
-
-def _uses_parallel_iterators(source: str) -> bool:
-    return bool(_RAYON_PARALLEL_PATTERNS.search(source))
 
 
 @dataclass
@@ -69,20 +54,6 @@ class GeneratedRepo:
             "files": list(self.files),
             "spec": self.spec.to_dict() if self.spec else None,
         }
-
-
-def infer_dependencies(source: str, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Infer crate dependencies from a Rust source, applying any overrides."""
-    deps: Dict[str, Any] = {}
-    for crate, default in _DEFAULT_DEPENDENCY_VERSIONS.items():
-        if re.search(rf"\b(?:use|extern crate)\s+{re.escape(crate)}\b", source) or re.search(rf"\b{re.escape(crate)}::", source):
-            deps[crate] = default
-    if "rayon" not in deps and _uses_parallel_iterators(source):
-        deps["rayon"] = _DEFAULT_DEPENDENCY_VERSIONS["rayon"]
-    if overrides:
-        deps.update(overrides)
-    deps = ensure_pyo3_features(deps)
-    return deps
 
 
 def detect_pymodule(source: str) -> Optional[str]:

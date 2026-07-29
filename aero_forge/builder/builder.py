@@ -62,6 +62,11 @@ def build_engine(
             output_paths=output_paths,
         )
 
+    # Collect any additional files produced by the emitter (e.g. Rust submodules).
+    if hasattr(emitter, "emit_artifacts"):
+        for artifact in getattr(emitter, "emit_artifacts")().artifacts:
+            artifacts.artifacts.append(artifact)
+
     return BuildOutput(
         language=language,
         source=source,

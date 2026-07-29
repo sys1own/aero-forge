@@ -184,3 +184,54 @@ def test_end_to_end_entrypoint_adapter_and_verification_runner(tmp_path: Path) -
     # Run the deterministic verification runner against the generated CLI.
     runner = DeterministicVerificationRunner(str(tmp_path), blueprint.verification_nodes)
     assert runner.run_all_verifications() is True
+
+
+def test_compile_prompt_extracts_cargo_dependencies_and_module_graph(tmp_path: Path) -> None:
+    """Prompt compilation extracts Cargo dependencies and Rust submodule paths."""
+    prompt_json = {
+        "metadata": {"schema_version": "2.0.0", "project_name": "array_bridge"},
+        "execution_strategy": {
+            "primary_entrypoint": {"path": "src/lib.rs", "runtime": "cargo", "wrapper_generation": True},
+            "cli_contract": {"parser_type": "argparse", "flags": []},
+            "run_spec": {"working_dir": ".", "timeout_seconds": 120},
+        },
+        "abi_contracts": [
+            {
+                "contract_id": "matrix_multiply",
+                "target_language": "rust",
+                "binding_framework": "pyo3",
+                "export_symbol": "matrix_multiply",
+                "c_symbol_alias": "",
+                "header_path": "",
+                "memory_model": "shared_pyo3",
+                "signature": {
+                    "inputs": [
+                        {"name": "a", "type": "&PyArray2<f64>"},
+                        {"name": "b", "type": "&PyArray2<f64>"},
+                    ],
+                    "outputs": [{"name": "result", "type": "&PyArray2<f64>"}],
+                },
+            }
+        ],
+        "module_graph": [
+            {"path": "src/lib.rs", "lang": "rust", "purpose": "PyO3 module entrypoint"},
+            {"path": "src/ops.rs", "lang": "rust", "purpose": "matrix ops submodule"},
+            {"path": "tests/test_ops.rs", "lang": "rust", "purpose": "unit tests"},
+        ],
+        "verification_nodes": [],
+        "cargo_dependencies": {"pyo3": "0.20.3", "numpy": "0.21", "rayon": "1.10"},
+    }
+    client = _make_mock_client([json.dumps(prompt_json)])
+    compiler = IntentCompiler(llm_client=client)
+    blueprint = compiler.compile_prompt(
+        "Build a PyO3 Rust extension with numpy arrays, rayon parallelism, src/ops.rs submodule and tests/test_ops.rs",
+        output_dir=str(tmp_path),
+    )
+
+    assert blueprint.project == "array_bridge"
+    assert blueprint.architecture == "hybrid_rust_python"
+    paths = {m.path for m in blueprint.manifest}
+    assert "src/lib.rs" in paths
+    assert "src/ops.rs" in paths
+    assert "tests/test_ops.rs" in paths
+    assert blueprint.cargo_dependencies == {"pyo3": "0.20.3", "numpy": "0.21", "rayon": "1.10"}

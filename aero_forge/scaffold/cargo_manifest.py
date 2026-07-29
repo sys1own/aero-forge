@@ -19,6 +19,66 @@ PYO3_REQUIRED_FEATURES = (
     "generate-import-lib",
 )
 
+_DEFAULT_DEPENDENCY_VERSIONS = {
+    "rug": "1.24",
+    "pyo3": {
+        "version": "0.20.3",
+        "features": list(PYO3_REQUIRED_FEATURES),
+    },
+    "numpy": "0.21",
+    "rayon": "1.10",
+}
+
+_RAYON_PARALLEL_PATTERNS = re.compile(
+    r"\.(?:par_iter_mut|par_iter|into_par_iter|par_chunks(?:_mut)?|"
+    r"par_bridge|par_extend|par_sort(?:_\w+)?)\s*\("
+)
+
+_PYO3_PATTERNS = re.compile(
+    r"(?:#\[pyfunction|#\[pymethods|#\[pymodule]|pyo3::|&Py|Py<|PyResult|wrap_pyfunction)"
+)
+
+_NUMPY_RUST_PATTERNS = re.compile(r"(?:PyArray\d*|numpy::|ndarray::|Array\d|ArrayView\d)")
+
+
+def _uses_parallel_iterators(source: str) -> bool:
+    return bool(_RAYON_PARALLEL_PATTERNS.search(source))
+
+
+def _uses_pyo3(source: str) -> bool:
+    return bool(_PYO3_PATTERNS.search(source))
+
+
+def _uses_numpy_rust(source: str) -> bool:
+    return bool(_NUMPY_RUST_PATTERNS.search(source))
+
+
+def infer_dependencies(
+    source: str,
+    overrides: Optional[Dict[str, Any]] = None,
+    defaults: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Infer Cargo dependencies from a Rust source string.
+
+    ``overrides`` take precedence over inferred defaults. ``defaults`` replaces
+    the built-in version/feature map.
+    """
+    deps: Dict[str, Any] = {}
+    versions = defaults or _DEFAULT_DEPENDENCY_VERSIONS
+    for crate, default in versions.items():
+        if re.search(rf"\b(?:use|extern crate)\s+{re.escape(crate)}\b", source) or re.search(rf"\b{re.escape(crate)}::", source):
+            deps[crate] = default
+    if "rayon" not in deps and _uses_parallel_iterators(source):
+        deps["rayon"] = versions.get("rayon", _DEFAULT_DEPENDENCY_VERSIONS["rayon"])
+    if "numpy" not in deps and _uses_numpy_rust(source):
+        deps["numpy"] = versions.get("numpy", _DEFAULT_DEPENDENCY_VERSIONS["numpy"])
+    if "pyo3" not in deps and _uses_pyo3(source):
+        deps["pyo3"] = versions.get("pyo3", _DEFAULT_DEPENDENCY_VERSIONS["pyo3"])
+    if overrides:
+        deps.update(overrides)
+    deps = ensure_pyo3_features(deps)
+    return deps
+
 
 DEFAULT_WORKSPACE_CARGO_TOML = '''\
 # Synthesised by aero-forge. Commit this file to take full control.

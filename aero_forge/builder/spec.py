@@ -142,6 +142,10 @@ def block(children: Optional[List[ASTNode]] = None) -> ASTNode:
     return ASTNode(kind="block", children=children or [])
 
 
+def with_gil_release(children: Optional[List[ASTNode]] = None) -> ASTNode:
+    return ASTNode(kind="gil_release", children=children or [])
+
+
 def list_literal(items: List[Any]) -> ASTNode:
     children: List[ASTNode] = []
     for item in items:
