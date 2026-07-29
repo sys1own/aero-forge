@@ -1042,7 +1042,25 @@ def generate_blueprint_from_uploaded_repo(repo_path: Path) -> Path:
                 )
             )
 
-    blueprint = Blueprint(
+    blueprint = _build_autodetected_blueprint(
+        repo_path, architecture, toolchains, languages, features, manifest, contracts, functions
+    )
+    write_blueprint(blueprint, blueprint_path)
+    return blueprint_path
+
+
+def _build_autodetected_blueprint(
+    repo_path: Path,
+    architecture: str,
+    toolchains: List[str],
+    languages: List[str],
+    features: List[str],
+    manifest: List[ManifestEntry],
+    contracts: List[ContractEntry],
+    functions: List[FunctionSpec],
+) -> Blueprint:
+    """Create an in-memory Blueprint from auto-detected workspace artifacts."""
+    return Blueprint(
         project=repo_path.name or "uploaded_project",
         architecture=architecture,
         toolchains=toolchains,
@@ -1053,5 +1071,127 @@ def generate_blueprint_from_uploaded_repo(repo_path: Path) -> Path:
         functions=functions,
         output_dir=repo_path / "dist",
     )
-    write_blueprint(blueprint, blueprint_path)
-    return blueprint_path
+
+
+class BlueprintCore:
+    """Static workspace blueprint introspection helpers."""
+
+    @staticmethod
+    def autodetect(workspace_path: Path) -> Dict[str, Any]:
+        """Return an in-memory blueprint schema for *workspace_path*.
+
+        If no ``blueprint.aero`` exists, infer architecture, manifest, and
+        exported functions by scanning the directory for Python, Rust, and C/C++
+        artifacts.  The result is a JSON-serializable dictionary.
+        """
+        repo_path = Path(workspace_path).resolve()
+        blueprint_path = repo_path / "blueprint.aero"
+        existing_md = repo_path / "BLUEPRINT.md"
+        if blueprint_path.is_file():
+            return parse_blueprint(blueprint_path).model_dump(mode="json")
+        if existing_md.is_file():
+            return BlueprintValidator(existing_md).blueprint.model_dump(mode="json")
+
+        cargo_toml = repo_path / "Cargo.toml"
+        pyproject = repo_path / "pyproject.toml"
+        setup_py = repo_path / "setup.py"
+
+        has_rust = cargo_toml.is_file()
+        has_python = (
+            pyproject.is_file()
+            or setup_py.is_file()
+            or bool(list(repo_path.rglob("*.py")))
+        )
+        cpp_sources = [
+            p for p in repo_path.rglob("*")
+            if p.suffix in {".cpp", ".c", ".h", ".hpp", ".cc", ".cxx"}
+        ]
+        has_cpp = bool(cpp_sources)
+
+        members: List[str] = []
+        if has_rust:
+            cargo_data = _parse_cargo_toml(cargo_toml)
+            members = cargo_data.get("workspace", {}).get("members", [])
+            if not members and "package" in cargo_data:
+                members = [cargo_data["package"].get("name", "rust_core")]
+
+        if has_rust and has_python and has_cpp:
+            architecture = INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON
+        elif has_rust and has_python:
+            architecture = INTENT_HYBRID_RUST_PYTHON
+        elif has_python and has_cpp:
+            architecture = INTENT_HYBRID_CPP_PYTHON
+        elif has_rust and has_cpp:
+            architecture = INTENT_HYBRID_CPP_RUST
+        elif has_rust:
+            architecture = INTENT_PURE_RUST
+        elif has_cpp:
+            architecture = INTENT_HYBRID_CPP_PYTHON
+        else:
+            architecture = INTENT_PURE_PYTHON
+
+        classification = classify_stack(architecture)
+        toolchains = classification.toolchains or ["python"]
+        languages = classification.languages or ["python"]
+        features = classification.features or []
+
+        manifest: List[ManifestEntry] = []
+        if has_rust:
+            manifest.append(
+                ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust workspace manifest")
+            )
+            for member in members:
+                manifest.append(
+                    ManifestEntry(path=f"{member}/Cargo.toml", lang="toml", purpose="Workspace member crate")
+                )
+                manifest.append(
+                    ManifestEntry(path=f"{member}/src/lib.rs", lang="rust", purpose="Rust crate source")
+                )
+        if pyproject.is_file():
+            manifest.append(
+                ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python package metadata")
+            )
+        elif setup_py.is_file():
+            manifest.append(
+                ManifestEntry(path="setup.py", lang="python", purpose="Python package setup")
+            )
+        for src in sorted(repo_path.rglob("*.py")):
+            rel = str(src.relative_to(repo_path)).replace("\\", "/")
+            if src.name.startswith("test_") or "/tests/" in rel:
+                continue
+            if _is_path_inside(src, repo_path):
+                manifest.append(
+                    ManifestEntry(path=rel, lang="python", purpose="Python source")
+                )
+        for hdr in sorted(cpp_sources):
+            if _is_path_inside(hdr, repo_path):
+                manifest.append(
+                    ManifestEntry(
+                        path=str(hdr.relative_to(repo_path)).replace("\\", "/"),
+                        lang=hdr.suffix.lstrip("."),
+                        purpose="C/C++ source",
+                    )
+                )
+
+        functions: List[FunctionSpec] = []
+        try:
+            functions = discover_project(repo_path)
+        except Exception as exc:
+            logger.warning("Could not discover Python functions in %s: %s", repo_path, exc)
+
+        contracts: List[ContractEntry] = []
+        for func in functions:
+            if func.name:
+                contracts.append(
+                    ContractEntry(
+                        name=func.name,
+                        python_name=func.name,
+                        language="python",
+                        purpose=f"Callable exported from {func.file}",
+                    )
+                )
+
+        blueprint = _build_autodetected_blueprint(
+            repo_path, architecture, toolchains, languages, features, manifest, contracts, functions
+        )
+        return blueprint.model_dump(mode="json")

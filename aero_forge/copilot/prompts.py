@@ -107,4 +107,31 @@ Example response for an unsupported runtime request:
   "action": null
 }
 ```
+
+[DYNAMIC POLYGLOT SPEEDUP DIRECTIVES]
+When the user asks for performance, speed, acceleration, optimize, Rust, C++, native, PyO3, pybind11, nanobind, maturin, FFI, SIMD, or numeric kernels:
+- Detect the request as a speedup/architecture question and select exactly one of:
+  * `hybrid_rust_python` (PyO3/Maturin) for memory-safe Rust extension modules.
+  * `hybrid_cpp_python` (pybind11/nanobind) for low-latency C++ extension modules.
+  Only choose `tri_polyglot_rust_cpp_python` if the user explicitly requests Python + Rust + C++ together.
+- Specify exact native function signatures using contiguous memory:
+  * Rust/PyO3: `fn matmul(a: &[f64], b: &[f64], m: usize, n: usize, k: usize) -> Vec<f64>` or `numpy::PyReadonlyArray2<f64>`.
+  * C++ pybind11: `py::array_t<double> matmul(py::array_t<double> a, py::array_t<double> b, size_t m, size_t n, size_t k)` or `void matmul(const double* a, const double* b, double* out, size_t m, size_t n, size_t k)`.
+  * nanobind: `nb::ndarray<nb::numpy, double, nb::shape<nb::any, nb::any>>` with `nb::device::cpu`.
+- State the GIL release strategy explicitly:
+  * PyO3: release with `Python::allow_threads` / `py.allow_threads(...)` before hot loops.
+  * pybind11: `py::gil_scoped_release release;` around the kernel.
+  * nanobind: `nb::gil_scoped_release release;` around the kernel.
+- Require contiguous NumPy buffers or raw pointer + length. In Python wrappers call `np.ascontiguousarray(arr, dtype=np.float64)` and document C-contiguous / row-major layout, pointer alignment, and zero-copy handoff where possible.
+- Include performance directives: `-C target-cpu=native`, `RUSTFLAGS="-C target-cpu=native"`, `-O3`, `-march=native`, `-ffast-math` only when safe, loop tiling, SIMD intrinsics, `rayon` parallel iterators (Rust), or OpenMP pragmas (C++), plus cache-aware access patterns.
+- Always emit a standard structured Action block in `display_text` (after the Architecture Overview) so the UI can render a Trigger Build card:
+```action:trigger_build
+{
+  "target_language": "rust",
+  "architecture": "hybrid_rust_python",
+  "target_files": ["src/accelerator.rs"],
+  "builder_prompt": "Detailed Builder prompt for the Aero Forge Materializer..."
+}
+```
+The `builder_prompt` must be the precise, runnable instruction passed to the Builder engine. It must contain ONLY raw, direct execution requirements with no meta-commentary.
 """

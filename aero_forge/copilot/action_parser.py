@@ -50,6 +50,12 @@ _PROMPT_FENCE_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+# Structured ``action:trigger_build`` speedup card emitted by the Copilot.
+_TRIGGER_BUILD_RE = re.compile(
+    r"```action:trigger_build\s*\n(.*?)```",
+    re.DOTALL | re.IGNORECASE,
+)
+
 # Meta wrappers and conversational preambles that must not leak into a build prompt.
 _META_PROMPT_PATTERNS = [
     re.compile(r"^\s*Here(?:'s| is)?\s+(?:a\s+)?(?:detailed\s+)?(?:ready-to-use\s+)?prompt[^\n]*\n*", re.IGNORECASE | re.MULTILINE),
@@ -94,6 +100,42 @@ _BUILDER_PROMPT_PREAMBLE_RE = re.compile(
     r")\s*(?:[^\n:]*?:\s*|[^\n]*?\n\s*)",
     re.IGNORECASE,
 )
+
+
+def _parse_trigger_build_block(text: str) -> Optional[Dict[str, Any]]:
+    """Parse an ``action:trigger_build`` fenced JSON block if present."""
+    match = _TRIGGER_BUILD_RE.search(text)
+    if not match:
+        return None
+    try:
+        payload = json.loads(match.group(1).strip())
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    builder_prompt = str(payload.get("builder_prompt") or "").strip()
+    if not builder_prompt:
+        return None
+    return {
+        "builder_prompt": builder_prompt,
+        "target_language": str(payload.get("target_language") or "").strip(),
+        "architecture": str(payload.get("architecture") or "").strip(),
+        "target_files": list(payload.get("target_files", []) or []),
+    }
+
+
+def _trigger_build_parameters(block: Dict[str, Any], text: str) -> Dict[str, Any]:
+    """Build a parameter bag from an ``action:trigger_build`` block."""
+    builder_prompt = block["builder_prompt"]
+    architecture = block["architecture"]
+    target = _normalize_target(architecture) or _infer_target_from_text(builder_prompt)
+    return {
+        "target": target or "pure_python",
+        "target_language": block["target_language"] or ("rust" if "rust" in (target or "") else "cpp"),
+        "architecture": _normalize_target(architecture) or target or "pure_python",
+        "target_files": block["target_files"],
+        "acceleration": _normalize_acceleration(builder_prompt),
+    }
 
 
 def _normalize_target(raw: Any) -> Optional[str]:
@@ -457,6 +499,11 @@ class ActionParser:
             if candidate:
                 return sanitize_builder_prompt(self.sanitize(candidate))
 
+        # 1a. Structured ``action:trigger_build`` speedup card.
+        trigger = _parse_trigger_build_block(text)
+        if trigger:
+            return sanitize_builder_prompt(self.sanitize(trigger["builder_prompt"]))
+
         # 2. New <builder_prompt> XML delimiter (preferred by the system prompt).
         tag = _BUILDER_PROMPT_TAG_RE.search(text)
         if tag:
@@ -590,6 +637,24 @@ class ActionParser:
 
         # Markdown/fenced fallback.
         display_text = text
+
+        # ``action:trigger_build`` speedup card (highest priority markdown action).
+        trigger = _parse_trigger_build_block(text)
+        if trigger:
+            clean = sanitize_builder_prompt(self.sanitize(trigger["builder_prompt"]))
+            display_text = _TRIGGER_BUILD_RE.sub("", display_text)
+            display_text = clean_explanation_text(self.sanitize(display_text), clean)
+            params = _trigger_build_parameters(trigger, text)
+            return {
+                "display_text": display_text,
+                "action": {
+                    "type": "trigger_build",
+                    "source": "action_trigger_build",
+                    "clean_prompt": clean,
+                    "parameters": params,
+                    "blueprint": None,
+                },
+            }
 
         # Build prompt fence (new clean format).
         fence = _BUILD_PROMPT_FENCE_RE.search(text)

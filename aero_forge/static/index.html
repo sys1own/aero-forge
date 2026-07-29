@@ -1810,7 +1810,7 @@
 
         // Update the Copilot chat panel status badge based on LLM initialization.
         if (ui.chatStatusBar && ui.chatStatusLabel && ui.chatStatusAction) {
-          const needsInit = !data.llm_initialized || data.stale || !data.present;
+          const needsInit = !data.llm_initialized || !data.present;
           if (needsInit) {
             ui.chatStatusBar.style.display = 'flex';
             ui.chatStatusBar.className = 'chat-status-bar warning';
@@ -2267,14 +2267,14 @@
         return editor ? editor.value : cleanPrompt;
       }
 
-      const isBuildAction = type === 'build' || type === 'build_workflow' || type === 'SUGGEST_BUILD_PROMPT' || type === 'PROPOSE_BUILD';
+      const isBuildAction = type === 'build' || type === 'build_workflow' || type === 'SUGGEST_BUILD_PROMPT' || type === 'PROPOSE_BUILD' || type === 'trigger_build';
       if (isBuildAction && cleanPrompt) {
         const card = document.createElement('div');
         card.className = 'action-card';
 
         const title = document.createElement('div');
         title.className = 'action-title';
-        title.textContent = 'Suggested Builder Prompt';
+        title.textContent = type === 'trigger_build' ? 'Trigger Build' : 'Suggested Builder Prompt';
         card.appendChild(title);
 
         const meta = document.createElement('div');
@@ -2310,7 +2310,7 @@
 
         const triggerBtn = document.createElement('button');
         triggerBtn.className = 'btn btn-primary';
-        triggerBtn.textContent = 'Send to Builder & Run';
+        triggerBtn.textContent = type === 'trigger_build' ? 'Trigger Build' : 'Send to Builder & Run';
         triggerBtn.addEventListener('click', () => triggerBuildFromChat(getLivePrompt(card), target, acceleration));
         buttons.appendChild(triggerBtn);
 

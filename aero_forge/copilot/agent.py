@@ -9,8 +9,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+import yaml
+
+from aero_forge.blueprint.core import BlueprintCore, parse_aero
 from aero_forge.copilot.action_parser import (
     ActionParser,
     _infer_target_from_text,
@@ -29,7 +33,7 @@ def _legacy_action_type(action: Dict[str, Any]) -> str:
     source = action.get("source", "")
     if action.get("contract") or source in ("blueprint_contract", "legacy_json", "plain_text") or new_type in ("apply_blueprint", "PROPOSE_BUILD"):
         return "PROPOSE_BUILD"
-    if new_type == "suggest_build_prompt" or source in ("build_prompt_fence", "xml_tag", "structured_json"):
+    if new_type in ("suggest_build_prompt", "trigger_build") or source in ("build_prompt_fence", "xml_tag", "structured_json", "action_trigger_build"):
         return "SUGGEST_BUILD_PROMPT"
     return "SUGGEST_BUILD_PROMPT"
 
@@ -106,3 +110,44 @@ def _looks_like_json(text: str) -> bool:
         return False
     stripped = text.strip()
     return stripped.startswith(("{", "["))
+
+
+def _load_workspace_blueprint(workspace_path: Path) -> Dict[str, Any]:
+    """Read and parse the workspace blueprint, auto-detecting one if absent.
+
+    Tries ``blueprint.aero`` and ``workspace_blueprint.yaml`` in that order.
+    If neither exists, calls ``BlueprintCore.autodetect`` to build an
+    in-memory schema from the workspace contents.
+    """
+    workspace_path = Path(workspace_path)
+    candidates = [
+        workspace_path / "blueprint.aero",
+        workspace_path / "workspace_blueprint.yaml",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            try:
+                text = candidate.read_text(encoding="utf-8")
+                if candidate.suffix.lower() in (".yaml", ".yml"):
+                    return yaml.safe_load(text) or {}
+                return parse_aero(text)
+            except Exception as exc:
+                logger.warning("Could not parse blueprint %s: %s", candidate, exc)
+                return {}
+    return BlueprintCore.autodetect(workspace_path)
+
+
+def workspace_blueprint_tag(workspace_path: Path) -> str:
+    """Return a formatted ``<workspace_blueprint>`` context tag for prompts.
+
+    The blueprint is rendered as YAML (or JSON as a fallback) so the model
+    can reason about the current workspace contract, manifest, and functions.
+    """
+    blueprint = _load_workspace_blueprint(workspace_path)
+    if not blueprint:
+        return ""
+    try:
+        payload = yaml.safe_dump(blueprint, sort_keys=False, default_flow_style=False)
+    except Exception:
+        payload = json.dumps(blueprint, indent=2, default=str)
+    return f"<workspace_blueprint>\n{payload}</workspace_blueprint>"

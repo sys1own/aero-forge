@@ -38,6 +38,7 @@ from aero_forge.copilot.agent import (
     _has_markdown_heading,
     _legacy_action_type,
     format_copilot_response,
+    workspace_blueprint_tag,
 )
 from aero_forge.prompts import AERO_FORGE_COPILOT_SYSTEM_PROMPT
 from aero_forge.error_explainer import explain_error
@@ -451,8 +452,9 @@ class ChatSession:
 
     def __init__(
         self,
-        output_dir: Path,
+        output_dir: Optional[Path] = None,
         *,
+        workspace_path: Optional[Path] = None,
         llm_provider: Optional[str] = None,
         model: Optional[str] = None,
         api_key: Optional[str] = None,
@@ -463,7 +465,12 @@ class ChatSession:
         progress_callback: Optional[ProgressCallback] = None,
         config_override: Optional[ConfigOverride] = None,
     ):
-        self.output_dir = Path(output_dir)
+        if output_dir is not None:
+            self.output_dir = Path(output_dir)
+        elif workspace_path is not None:
+            self.output_dir = Path(workspace_path)
+        else:
+            self.output_dir = Path(".").resolve()
         self.llm_provider = llm_provider
         self.model = model
         self.api_key = api_key
@@ -608,6 +615,9 @@ class ChatSession:
         prompt += f"\n\n[WORKSPACE STATUS]\n{workspace_status}"
         if self.project_context:
             prompt += "\n\n" + self.project_context
+        blueprint_tag = workspace_blueprint_tag(self.output_dir)
+        if blueprint_tag:
+            prompt += "\n\n" + blueprint_tag
         if self.last_terminal_log:
             prompt += (
                 "\n\n[TERMINAL CONTEXT]\n"
@@ -1650,8 +1660,18 @@ class ChatSession:
         )
 
 
+class CopilotAgent(ChatSession):
+    """Workspace-aware Copilot agent alias.
+
+    This is the public entrypoint used by the web server.  It is a thin
+    subclass of ``ChatSession`` that accepts ``workspace_path`` and exposes the
+    same ``reply_structured`` / ``process`` interface.
+    """
+
+
 __all__ = [
     "ChatSession",
+    "CopilotAgent",
     "SESSION_DIR",
     "get_session_metadata",
     "set_session_blueprint_metadata",
