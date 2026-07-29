@@ -144,6 +144,24 @@
       transition: all 0.15s ease; background: var(--panel-2);
     }
     .drop-zone.drag-over { border-color: var(--accent); background: rgba(0,122,204,0.1); color: var(--text); }
+    #blueprint-init-banner {
+      position: fixed;
+      top: 12px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 1000;
+      min-width: 320px;
+      max-width: 85vw;
+      padding: 0.6rem 1rem;
+      border-radius: 6px;
+      text-align: center;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+      pointer-events: none;
+      cursor: default;
+    }
+    #blueprint-init-banner.interactive { pointer-events: auto; cursor: pointer; }
+    #blueprint-init-banner.toast-archive { background: rgba(0,122,204,0.2); border: 1px solid var(--accent); color: var(--text); }
+    #blueprint-init-banner.toast-draft { background: rgba(245, 209, 136, 0.2); border: 1px solid var(--warning); color: var(--text); }
     .export-popover {
       position: relative; font-size: 0.75rem; color: var(--text);
     }
@@ -1028,6 +1046,16 @@
       }
     }
 
+    function _dismissBlueprintBanner(delay) {
+      if (!ui.blueprintInitBanner) return;
+      if (ui.blueprintInitBanner._dismissTimer) clearTimeout(ui.blueprintInitBanner._dismissTimer);
+      if (delay > 0) {
+        ui.blueprintInitBanner._dismissTimer = setTimeout(() => {
+          if (ui.blueprintInitBanner) ui.blueprintInitBanner.style.display = 'none';
+        }, delay);
+      }
+    }
+
     function renderBlueprintBanner(tree) {
       if (!ui.blueprintInitBanner) return;
       const hasBlueprint = Array.from(ui.fileTree.querySelectorAll('.tree-node.file')).some(n => (n.querySelector('.node-name')?.textContent || '') === 'blueprint.aero');
@@ -1038,24 +1066,25 @@
 
       const archiveSources = ['aeroc_archive', 'zip_archive'];
       const isArchive = archiveSources.includes(state.blueprintSource);
+      ui.blueprintInitBanner.classList.remove('toast-archive', 'toast-draft', 'interactive');
+
       if (isArchive || state.autoInitialized) {
-        // Materialized code came from an uploaded archive; show a non-clickable confirmation.
+        // Materialized code came from an uploaded archive; show a non-blocking toast that auto-dismisses.
         ui.blueprintInitBanner.style.display = 'block';
+        ui.blueprintInitBanner.classList.add('toast-archive');
         ui.blueprintInitBanner.innerHTML = '&#128230; <strong>Workspace Loaded from .aeroc Archive</strong><br><small>Runnable commands are available above the terminal</small>';
-        ui.blueprintInitBanner.style.pointerEvents = 'none';
-        ui.blueprintInitBanner.style.cursor = 'default';
+        _dismissBlueprintBanner(3000);
       } else if (!state.blueprintReady) {
-        // Uninitialized draft blueprint: do not offer to regenerate.
+        // Uninitialized draft blueprint: show a non-blocking warning toast.
         ui.blueprintInitBanner.style.display = 'block';
+        ui.blueprintInitBanner.classList.add('toast-draft');
         ui.blueprintInitBanner.innerHTML = '&#9888; <strong>Draft Blueprint - LLM Prompting Required</strong><br><small>Regeneration is disabled until the blueprint is finalized</small>';
-        ui.blueprintInitBanner.style.pointerEvents = 'none';
-        ui.blueprintInitBanner.style.cursor = 'default';
+        _dismissBlueprintBanner(3000);
       } else {
         // Confirmed, ready blueprint: offer initialization.
         ui.blueprintInitBanner.style.display = 'block';
+        ui.blueprintInitBanner.classList.add('interactive');
         ui.blueprintInitBanner.innerHTML = '&#128260; <strong>Initialize Project from Blueprint</strong><br><small>blueprint.aero detected in workspace</small>';
-        ui.blueprintInitBanner.style.pointerEvents = 'auto';
-        ui.blueprintInitBanner.style.cursor = 'pointer';
       }
     }
 

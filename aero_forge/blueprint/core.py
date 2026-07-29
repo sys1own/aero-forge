@@ -145,8 +145,26 @@ class ABIContract(BaseModel):
         if value is None:
             return "c_abi"
         value = str(value).lower().strip().replace("-", "_")
-        synonyms = {"pyo3": "pyo3", "ctypes": "ctypes", "cabi": "c_abi", "c-abi": "c_abi"}
+        synonyms = {
+            "pyo3": "pyo3",
+            "ctypes": "ctypes",
+            "cabi": "c_abi",
+            "c-abi": "c_abi",
+            "native_c": "c_abi",
+            "native_bridge": "c_abi",
+            "c_abi_bridge": "c_abi",
+            "extern_c": "c_abi",
+            "c_api": "c_abi",
+            "c_ffi": "c_abi",
+        }
         value = synonyms.get(value, value)
+        if value not in {"c_abi", "pyo3", "ctypes"}:
+            if "pyo3" in value:
+                value = "pyo3"
+            elif "ctypes" in value:
+                value = "ctypes"
+            elif any(k in value for k in ("c_abi", "cabi", "native", "extern", "c_api", "c_ffi")):
+                value = "c_abi"
         allowed = {"c_abi", "pyo3", "ctypes"}
         if value not in allowed:
             raise ValueError(f"binding_framework must be one of {allowed}, got {value!r}")
@@ -164,8 +182,26 @@ class ABIContract(BaseModel):
             "owned": "callee_allocates",
             "callee": "callee_allocates",
             "caller": "caller_allocates",
+            "caller_allocated": "caller_allocates",
+            "callee_allocated": "callee_allocates",
+            "c_allocated_by_caller": "caller_allocates",
+            "allocated_by_caller": "caller_allocates",
+            "allocated_by_callee": "callee_allocates",
+            "by_caller": "caller_allocates",
+            "by_callee": "callee_allocates",
+            "c_memory": "caller_allocates",
+            "c_alloc": "caller_allocates",
+            "callee_owned": "callee_allocates",
+            "caller_owned": "caller_allocates",
         }
         value = synonyms.get(value, value)
+        if value not in {"callee_allocates", "caller_allocates", "shared_pyo3"}:
+            if "pyo3" in value or "borrow" in value or "shared" in value:
+                value = "shared_pyo3"
+            elif any(k in value for k in ("callee", "owned", "returned", "rust")) and "caller" not in value:
+                value = "callee_allocates"
+            elif any(k in value for k in ("caller", "c_memory", "c_alloc", "pointer", "buffer", "array", "by_c")):
+                value = "caller_allocates"
         allowed = {"callee_allocates", "caller_allocates", "shared_pyo3"}
         if value not in allowed:
             raise ValueError(f"memory_model must be one of {allowed}, got {value!r}")

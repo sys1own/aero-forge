@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -36,7 +37,12 @@ from aero_forge.builder.spec import (
     return_node,
 )
 from aero_forge.native_bridge import _ctypes_loader_source
-from aero_forge.scaffold.polyglot_materializer import _DEFAULT_CONTRACTS, _parse_signature
+from aero_forge.scaffold.polyglot_materializer import (
+    _DEFAULT_CONTRACTS,
+    _discover_existing_python_package,
+    _parse_signature,
+)
+from aero_forge.orchestrator.stack_classifier import INTENT_HYBRID_CPP_PYTHON
 from aero_forge.scaffold.python_repo_generator import _sanitize_module_name
 
 logger = logging.getLogger("aero_forge.scaffold.cpp")
@@ -47,6 +53,122 @@ def _find_cpp_compiler() -> Optional[str]:
         if shutil.which(name):
             return name
     return None
+
+
+def _extract_explicit_cpp_update(
+    prompt: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """Detect a concrete C-ABI/ctypes native function request in *prompt*."""
+    if not prompt:
+        return None
+    lowered = prompt.lower()
+    cpp_markers = (
+        "hybrid_cpp_python",
+        "c-abi",
+        "extern \"c\"",
+        "extern 'c'",
+        "ctypes",
+        "native bridge",
+        "force native",
+    )
+    if not any(k in lowered for k in cpp_markers):
+        return None
+
+    # Try an explicit C++ signature first.
+    sig_m = re.search(r"(?:fn|function)\s+(\w+)\s*\(([^)]*)\)\s*(?:->\s*(\S+))?", prompt)
+    if sig_m:
+        func = sig_m.group(1)
+        arg_text = sig_m.group(2).strip()
+        ret = (sig_m.group(3) or "float").strip()
+        args = _parse_cpp_arg_text(arg_text) or _infer_cpp_args_from_prompt(prompt)
+        return _make_cpp_update(func, args, ret, prompt)
+
+    # Otherwise infer the function name from phrases like "implementation for X".
+    name_m = re.search(
+        r"(?:for|implement|function|add)\s+([A-Za-z_]\w*)\s+(?:accepting|with|that takes|using|as|to|in)",
+        prompt,
+        re.IGNORECASE,
+    )
+    if not name_m:
+        # Last resort: any identifier that looks like a kernel (e.g. sliding_window_dtw).
+        name_m = re.search(r"\b([a-z_]\w+_dtw|[a-z_]\w+_distance|[a-z_]\w+_kernel)\b", prompt, re.IGNORECASE)
+    if not name_m:
+        return None
+
+    func = name_m.group(1)
+    args = _infer_cpp_args_from_prompt(prompt)
+    ret = _infer_cpp_return_from_prompt(prompt, func)
+    return _make_cpp_update(func, args, ret, prompt)
+
+
+def _parse_cpp_arg_text(arg_text: str) -> Optional[List[Tuple[str, str]]]:
+    """Parse a simple comma-separated argument list like 'a: list[float], window: int'."""
+    if not arg_text:
+        return []
+    args: List[Tuple[str, str]] = []
+    for part in arg_text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" in part:
+            name, typ = part.split(":", 1)
+            args.append((name.strip(), typ.strip()))
+        else:
+            # No type hint; fall back to inference below.
+            return None
+    return args
+
+
+def _infer_cpp_args_from_prompt(prompt: str) -> List[Tuple[str, str]]:
+    """Infer C-ABI argument types from natural-language descriptions."""
+    lower = prompt.lower()
+    args: List[Tuple[str, str]] = []
+    if "two 1d double arrays" in lower or "two one-dimensional double arrays" in lower:
+        args.append(("a", "list[float]"))
+        args.append(("b", "list[float]"))
+    elif "two" in lower and ("array" in lower or "sequence" in lower):
+        args.append(("a", "list[float]"))
+        args.append(("b", "list[float]"))
+    if "window" in lower:
+        args.append(("window", "int"))
+    elif "size" in lower:
+        args.append(("size", "int"))
+    if not args:
+        args = [("a", "list[float]"), ("b", "list[float]"), ("window", "int")]
+    return args
+
+
+def _infer_cpp_return_from_prompt(prompt: str, func: str) -> str:
+    """Infer the C-ABI return type from the prompt or function name."""
+    lowered = prompt.lower()
+    func_lower = func.lower()
+    if " -> " in prompt:
+        m = re.search(r"->\s*(\w+)", prompt)
+        if m:
+            return m.group(1).lower().replace("double", "float").replace("int64", "int")
+    if any(h in func_lower for h in ("dtw", "distance", "sum", "total", "count")):
+        return "float"
+    return "float"
+
+
+def _make_cpp_update(
+    func: str,
+    args: List[Tuple[str, str]],
+    return_type: str,
+    prompt: str,
+) -> Optional[Dict[str, Any]]:
+    """Build the explicit-C++ update metadata dict."""
+    test_m = re.search(r"tests?/(\S+\.py)", prompt)
+    test_path = f"tests/test_{func}.py" if not test_m else f"tests/{test_m.group(1)}"
+    cpp_m = re.search(r"(src/[\w/]+/\w+\.cpp|cpp_core/[\w/]+\.cpp|native\.cpp)", prompt)
+    cpp_path = cpp_m.group(1) if cpp_m else None
+    return {
+        "function": func,
+        "args": args,
+        "return_type": return_type,
+        "cpp_path": cpp_path,
+        "test_path": test_path,
+    }
 
 
 def _map_py_type(type_hint: str) -> str:
@@ -431,6 +553,10 @@ def _is_special_cpp_contract(contract: ContractEntry) -> bool:
         list_args = [a for a, t in args if _is_c_abi_list(t)]
         scalar_args = [a for a, t in args if _is_c_abi_scalar(t)]
         return len(list_args) >= 2 and len(scalar_args) >= 2
+    if "dtw" in name or "sliding_window" in name:
+        list_args = [a for a, t in args if _is_c_abi_list(t)]
+        scalar_args = [a for a, t in args if _is_c_abi_scalar(t)]
+        return len(list_args) == 2 and len(scalar_args) == 1 and _map_py_type(return_type) == "float"
     return False
 
 
@@ -553,6 +679,49 @@ def _special_cpp_source(pkg_name: str, contract: ContractEntry) -> str:
             body_lines.append("    return count_val;")
         body_lines.append("}")
         return sig + " " + "\n".join(body_lines) + "\n"
+    if "dtw" in name or "sliding_window" in name:
+        list_args = [a for a, t in args if _is_c_abi_list(t)]
+        scalar_args = [a for a, t in args if _is_c_abi_scalar(t)]
+        if len(list_args) == 2 and len(scalar_args) == 1 and _map_py_type(return_type) == "float":
+            a_name, b_name = list_args[0], list_args[1]
+            window_name = scalar_args[0]
+            c_params = [
+                _special_cpp_param_decl(a, t)
+                for a, t in args
+            ]
+            sig = f'extern "C" AERO_EXPORT double {name}({", ".join(c_params)})'
+            return f'''{sig} {{
+    if (!{a_name} || !{b_name} || {a_name}_len == 0 || {b_name}_len == 0 || {window_name} <= 0) {{
+        return -1.0;
+    }}
+    int64_t win = static_cast<int64_t>({window_name});
+    int64_t a_len64 = static_cast<int64_t>({a_name}_len);
+    int64_t b_len64 = static_cast<int64_t>({b_name}_len);
+    if (a_len64 - b_len64 > win || b_len64 - a_len64 > win) {{
+        return -2.0;
+    }}
+    const double INF = 1e100;
+    std::vector<double> prev({b_name}_len, INF), cur({b_name}_len, INF);
+    for (size_t j = 0; j < {b_name}_len; ++j) {{
+        if (static_cast<int64_t>(j) > win) continue;
+        prev[j] = std::fabs({a_name}[0] - {b_name}[j]);
+    }}
+    for (size_t i = 1; i < {a_name}_len; ++i) {{
+        cur.assign({b_name}_len, INF);
+        int64_t i64 = static_cast<int64_t>(i);
+        for (size_t j = 0; j < {b_name}_len; ++j) {{
+            int64_t j64 = static_cast<int64_t>(j);
+            if (i64 - j64 > win || j64 - i64 > win) continue;
+            double cost = std::fabs({a_name}[i] - {b_name}[j]);
+            double best = prev[j];
+            if (j > 0 && cur[j - 1] < best) best = cur[j - 1];
+            if (j > 0 && prev[j - 1] < best) best = prev[j - 1];
+            cur[j] = cost + best;
+        }}
+        prev.swap(cur);
+    }}
+    return prev[{b_name}_len - 1];
+}}'''
     return ""
 
 
@@ -953,6 +1122,55 @@ def _generate_cli(pkg_name: str, function_names: List[str], contracts: Optional[
     return "\n".join(lines) + "\n"
 
 
+def _generate_dtw_test_source(pkg_module: str, func: str, args: List[Tuple[str, str]]) -> str:
+    """Return a pytest file that compares the C-ABI DTW to a naive Python reference."""
+    arg_names = [a for a, _ in args]
+    return f'''import math
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+from {pkg_module} import {func}
+
+
+def _naive_dtw(a, b, window):
+    n, m = len(a), len(b)
+    if window <= 0:
+        return -1.0
+    if abs(n - m) > window:
+        return -2.0
+    INF = float("inf")
+    prev = [INF] * m
+    for j in range(m):
+        if j > window:
+            continue
+        prev[j] = abs(a[0] - b[j])
+    for i in range(1, n):
+        cur = [INF] * m
+        for j in range(m):
+            if i - j > window or j - i > window:
+                continue
+            cost = abs(a[i] - b[j])
+            best = prev[j]
+            if j > 0 and cur[j - 1] < best:
+                best = cur[j - 1]
+            if j > 0 and prev[j - 1] < best:
+                best = prev[j - 1]
+            cur[j] = cost + best
+        prev = cur
+    return prev[m - 1]
+
+
+def test_{func}():
+    a = [1.0, 2.0, 3.0, 4.0]
+    b = [1.1, 2.1, 3.1, 4.1, 5.1]
+    expected = _naive_dtw(a, b, 3)
+    got = {func}({', '.join([arg_names[0], arg_names[1], '3'])})
+    assert math.isclose(got, expected, rel_tol=1e-9)
+'''
+
+
 def _generate_tests(blueprint: Blueprint, pkg_module: str) -> str:
     """Generate contract-driven pytest tests for the C++ hybrid package."""
     from aero_forge.scaffold import test_generator
@@ -972,6 +1190,19 @@ def _generate_run_shell(pkg_name: str) -> str:
 
 def _generate_readme(pkg_name: str) -> str:
     return f"# {pkg_name}\n\nC++/ctypes hybrid project generated by aero-forge.\n"
+
+
+def _generate_cmake(pkg_name: str, cpp_rel: str) -> str:
+    """Return a minimal CMakeLists.txt that builds the C-ABI shared library."""
+    return (
+        "cmake_minimum_required(VERSION 3.10)\n"
+        f"project({pkg_name})\n"
+        "set(CMAKE_CXX_STANDARD 17)\n"
+        "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
+        f"add_library({pkg_name} SHARED {cpp_rel})\n"
+        f"set_target_properties({pkg_name} PROPERTIES POSITION_INDEPENDENT_CODE ON)\n"
+        f"target_include_directories({pkg_name} PRIVATE ${{CMAKE_CURRENT_SOURCE_DIR}})\n"
+    )
 
 
 def _function_names(contracts: List[ContractEntry]) -> List[str]:
@@ -1008,24 +1239,147 @@ class CppPolyglotMaterializer:
             self.build_logs = (self.build_logs + "\n" + text).strip()
 
     def _resolve_pkg_dir(self, blueprint: Blueprint, pkg_name: str) -> Path:
-        """Resolve the Python package directory from the manifest."""
+        """Resolve the Python package directory from the manifest or existing source."""
         for e in blueprint.manifest:
             if e.path.endswith("/__init__.py"):
-                return self.workspace / Path(e.path).parent
+                candidate = self.workspace / Path(e.path).parent
+                if (self.workspace / e.path).is_file():
+                    return candidate
         for e in blueprint.manifest:
             if Path(e.path).name in ("main.py", "cli.py"):
-                return self.workspace / Path(e.path).parent
+                candidate = self.workspace / Path(e.path).parent
+                if (self.workspace / e.path).is_file():
+                    return candidate
+        existing = _discover_existing_python_package(self.workspace)
+        if existing:
+            return self.workspace / existing[1]
         return self.workspace / pkg_name
 
     def _dotted_module(self, rel: Path) -> str:
         rel = rel.with_suffix("") if rel.suffix == ".py" else rel
         return ".".join(rel.parts)
 
+    def _materialize_explicit_cpp_update(
+        self,
+        blueprint: Blueprint,
+        build: bool,
+        explicit: Dict[str, Any],
+    ) -> Blueprint:
+        """Materialize a concrete C-ABI/ctypes native function requested by prompt."""
+        func = explicit["function"]
+        args = explicit["args"]
+        return_type = explicit["return_type"]
+        sig = f"def {func}({', '.join(f'{a}: {t}' for a, t in args)}) -> {return_type}"
+        contract = ContractEntry(name=func, signature=sig)
+        contracts = [contract]
+
+        project = blueprint.project or "polyglot_cpp_project"
+        pkg_name = _sanitize_module_name(project)
+        pkg_dir = self._resolve_pkg_dir(blueprint, pkg_name)
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+        pkg_rel = pkg_dir.relative_to(self.workspace)
+        import_name = pkg_dir.name
+        pkg_module = self._dotted_module(pkg_rel)
+
+        cpp_source_path = self.workspace / explicit["cpp_path"] if explicit.get("cpp_path") else pkg_dir / "native.cpp"
+        cpp_source_path.parent.mkdir(parents=True, exist_ok=True)
+        cpp_source_path.write_text(
+            _generate_native_cpp(import_name, contracts),
+            encoding="utf-8",
+        )
+
+        cmake_path = self.workspace / "CMakeLists.txt"
+        if not cmake_path.is_file():
+            cpp_rel = cpp_source_path.relative_to(self.workspace).as_posix()
+            cmake_path.write_text(_generate_cmake(import_name, cpp_rel), encoding="utf-8")
+
+        so_path = (pkg_dir / _so_name(import_name)).resolve()
+        native_bridge_path = pkg_dir / "native_bridge.py"
+        native_bridge_path.write_text(
+            _ctypes_loader_source(
+                f"def {func}({', '.join(f'{a}: {t}' for a, t in args)}) -> {return_type}:\n    pass\n",
+                so_path,
+                [func],
+            ),
+            encoding="utf-8",
+        )
+
+        init_path = pkg_dir / "__init__.py"
+        if init_path.is_file():
+            init_text = init_path.read_text(encoding="utf-8")
+            import_line = f"from .native_bridge import {func}"
+            if import_line not in init_text:
+                if not init_text.endswith("\n"):
+                    init_text += "\n"
+                init_path.write_text(init_text + import_line + "\n", encoding="utf-8")
+        else:
+            init_path.write_text(
+                f"from .native_bridge import {func}\n__all__ = [{func!r}]\n",
+                encoding="utf-8",
+            )
+
+        tests_dir = self.workspace / "tests"
+        tests_dir.mkdir(exist_ok=True)
+        test_path = self.workspace / explicit["test_path"]
+        test_path.write_text(
+            _generate_dtw_test_source(import_name, func, args),
+            encoding="utf-8",
+        )
+
+        if build:
+            compiler = _find_cpp_compiler()
+            if compiler is None:
+                raise RuntimeError("No C++ compiler found (g++, clang++, or c++)")
+            build_cmd = [
+                compiler,
+                "-shared",
+                "-fPIC",
+                "-O2",
+                "-std=c++17",
+                "-o",
+                str(so_path),
+                str(cpp_source_path),
+            ]
+            self._log(f"Compiling C-ABI shared library: {' '.join(build_cmd)}")
+            build_proc = subprocess.run(
+                build_cmd,
+                cwd=self.workspace,
+                capture_output=True,
+                text=True,
+            )
+            self._log(build_proc.stdout)
+            self._log(build_proc.stderr)
+            if build_proc.returncode != 0:
+                raise RuntimeError(f"C++ shared library build failed: {build_proc.stderr}")
+
+        blueprint = blueprint.model_copy(update={
+            "contracts": contracts,
+            "manifest": list(blueprint.manifest) + [
+                ManifestEntry(path=str(cpp_source_path.relative_to(self.workspace)), lang="cpp", purpose="C-ABI shared library source"),
+                ManifestEntry(path=str(native_bridge_path.relative_to(self.workspace)), lang="python", purpose="ctypes native bridge"),
+                ManifestEntry(path=str(init_path.relative_to(self.workspace)), lang="python", purpose="package init"),
+                ManifestEntry(path=str(test_path.relative_to(self.workspace)), lang="python", purpose="pytest tests"),
+            ],
+            "functions": [
+                FunctionSpec(
+                    file=native_bridge_path,
+                    name=func,
+                    tests=[test_path],
+                    skip_build=True,
+                )
+            ],
+        })
+        return blueprint
+
     def materialize(self, blueprint: Blueprint, *, build: bool = False, force_overwrite: bool = False) -> Blueprint:
         """Write the C++ workspace files and optionally build the shared library."""
         from aero_forge.scaffold.polyglot_materializer import _contracts_from_abi, _render_pyproject, guard_materialization
 
         guard_materialization(self.workspace, blueprint, force_overwrite=force_overwrite)
+
+        explicit = _extract_explicit_cpp_update(getattr(blueprint, "prompt", None) or "")
+        if explicit and blueprint.architecture == INTENT_HYBRID_CPP_PYTHON:
+            return self._materialize_explicit_cpp_update(blueprint, build, explicit)
 
         project = blueprint.project or "polyglot_cpp_project"
         pkg_name = _sanitize_module_name(project)
@@ -1102,6 +1456,11 @@ class CppPolyglotMaterializer:
             _generate_native_cpp(pkg_name, contracts, header_includes=[Path(h).name for h in header_paths]),
             encoding="utf-8",
         )
+
+        cmake_path = self.workspace / "CMakeLists.txt"
+        if not cmake_path.is_file() and "CMakeLists.txt" in {e.path for e in blueprint.manifest}:
+            cpp_rel = cpp_source_path.relative_to(self.workspace).as_posix()
+            cmake_path.write_text(_generate_cmake(pkg_name, cpp_rel), encoding="utf-8")
 
         for header_path in header_paths:
             hdr_path = self.workspace / header_path
