@@ -336,19 +336,54 @@
     .accel-line.success { color: var(--terminal-success); }
     .accel-line.error { color: var(--terminal-error); }
 
-    /* Terminal action bar */
+    /* Terminal command bar */
     #action-buttons {
-      display: flex; flex-wrap: wrap; gap: 0.4rem; padding: 0.35rem 0.6rem;
+      display: flex; align-items: center; gap: 0.4rem;
+      height: 40px; min-height: 40px; max-height: 40px;
+      padding: 0 0.6rem;
       border-bottom: 1px solid var(--border); background: var(--panel); flex-shrink: 0;
-      min-height: 0; align-items: center;
+      overflow: hidden;
     }
-    .action-btn {
+    .command-tab {
+      background: transparent; color: var(--muted); border: 1px solid transparent;
+      border-radius: 4px; padding: 0.2rem 0.5rem; font-size: 0.75rem; cursor: pointer;
+      white-space: nowrap;
+    }
+    .command-tab:hover { color: var(--text); background: var(--panel-2); }
+    .command-tab.active { color: var(--text); background: var(--panel-3); border-color: var(--border); }
+    .command-pill {
       display: inline-flex; align-items: center; gap: 0.35rem;
-      background: var(--panel-3); color: var(--text); border: 1px solid var(--border); border-radius: 4px;
-      padding: 0.3rem 0.6rem; font-size: 0.75rem; cursor: pointer;
+      background: var(--accent); color: #fff; border: 1px solid var(--accent); border-radius: 999px;
+      padding: 0.25rem 0.7rem; font-size: 0.75rem; cursor: pointer; white-space: nowrap;
     }
-    .action-btn:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
-    .action-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    .command-pill:hover { filter: brightness(1.1); }
+    .command-pill.test { background: var(--success); border-color: var(--success); color: #1e1e1e; }
+    .command-pill.build { background: var(--warning); border-color: var(--warning); color: #1e1e1e; }
+    .command-overflow {
+      position: relative; display: inline-flex; align-items: center; flex-shrink: 0;
+    }
+    .command-overflow > button {
+      background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 4px;
+      padding: 0.25rem 0.5rem; font-size: 0.75rem; cursor: pointer; white-space: nowrap;
+    }
+    .command-overflow > button:hover { background: var(--panel-3); }
+    .command-search {
+      width: 140px; background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+      border-radius: 4px; padding: 0.25rem 0.5rem; font-size: 0.75rem;
+    }
+    .command-dropdown-list {
+      position: absolute; top: calc(100% + 4px); right: 0; min-width: 180px; max-height: 200px; overflow-y: auto;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 4px; z-index: 100;
+      display: none; flex-direction: column; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    }
+    .command-dropdown-list.open { display: flex; }
+    .command-dropdown-item {
+      padding: 0.35rem 0.6rem; font-size: 0.75rem; color: var(--text); cursor: pointer;
+      border-bottom: 1px solid var(--border); white-space: nowrap;
+    }
+    .command-dropdown-item:last-child { border-bottom: none; }
+    .command-dropdown-item:hover { background: var(--accent); color: #fff; }
+    .command-dropdown-empty { padding: 0.35rem 0.6rem; font-size: 0.75rem; color: var(--muted); }
     #heal-banner { display: none; position: absolute; top: 0; left: 0; right: 0; z-index: 2; padding: 0.4rem 0.6rem; background: rgba(245, 209, 136, 0.15); border-bottom: 1px solid var(--warning); color: var(--text); font-size: 0.8rem; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
     #heal-banner.visible { display: flex; }
     #heal-banner.manual-fix { background: rgba(244, 63, 94, 0.15); border-bottom-color: var(--danger); }
@@ -738,6 +773,8 @@
       treeExpanded: new Set(),
       blueprintSource: 'unknown',
       autoInitialized: false,
+      commands: [],
+      commandFilter: 'all',
     };
 
     let _treeSnapshot = '';
@@ -1671,56 +1708,127 @@
       }
     }
 
+    function mergeCommands(newCommands) {
+      if (!newCommands || !newCommands.length) return;
+      const byId = new Map(state.commands.map(c => [c.id || c.cmd, c]));
+      for (const c of newCommands) {
+        const key = c.id || c.cmd;
+        if (!key) continue;
+        if (!byId.has(key)) {
+          byId.set(key, c);
+        }
+      }
+      state.commands = Array.from(byId.values());
+      renderCommandBar(state.commands);
+    }
+
+    function normalizeCommand(cmd) {
+      if (!cmd) return null;
+      if (typeof cmd === 'string') return { id: cmd.replace(/\W+/g, '-'), name: cmd, cmd, category: 'run', primary: false };
+      return {
+        id: cmd.id || (cmd.name || cmd.cmd || '').replace(/\W+/g, '-') || 'cmd',
+        name: cmd.name || cmd.label || cmd.cmd || 'Command',
+        cmd: cmd.cmd || cmd.execution_cmd || '',
+        category: cmd.category || 'run',
+        primary: !!cmd.primary,
+      };
+    }
+
     async function loadVerificationActions() {
       if (!state.sessionId || !ui.actionButtons) return;
       try {
         const res = await fetch(`/api/blueprint?session_id=${encodeURIComponent(state.sessionId)}`);
-        if (!res.ok) { ui.actionButtons.innerHTML = ''; return; }
+        if (!res.ok) return;
         const data = await res.json();
-        renderVerificationActions(data.verification_nodes || []);
+        const nodes = (data.verification_nodes || []).map(n => normalizeCommand({
+          name: `Test ${n.test_id || n.node_id || n.execution_cmd}`,
+          cmd: n.execution_cmd || n.command,
+          category: 'test',
+          primary: false,
+        })).filter(c => c.cmd);
+        mergeCommands(nodes);
       } catch (e) {
-        ui.actionButtons.innerHTML = '';
+        // Keep existing command bar on blueprint fetch errors.
       }
     }
 
-    function renderVerificationActions(nodes) {
+    function renderCommandBar(commands) {
       if (!ui.actionButtons) return;
+      state.commands = (commands || []).map(normalizeCommand).filter(c => c && c.cmd);
       ui.actionButtons.innerHTML = '';
-      if (!nodes.length) return;
-      const label = document.createElement('span');
-      label.style.cssText = 'color:var(--muted);font-size:0.75rem;margin-right:0.3rem;';
-      label.textContent = 'Run:';
-      ui.actionButtons.appendChild(label);
-      for (const node of nodes) {
-        const cmd = node.execution_cmd;
-        if (!cmd) continue;
-        const btn = document.createElement('button');
-        btn.className = 'action-btn';
-        btn.textContent = `▶ ${node.test_id || cmd}`;
-        btn.title = cmd;
-        btn.addEventListener('click', () => runTerminalCommand(cmd));
-        ui.actionButtons.appendChild(btn);
-      }
-    }
 
-    function renderDetectedCommands(commands) {
-      if (!ui.actionButtons) return;
-      ui.actionButtons.innerHTML = '';
-      if (!commands || !commands.length) return;
-      const label = document.createElement('span');
-      label.style.cssText = 'color:var(--muted);font-size:0.75rem;margin-right:0.3rem;';
-      label.textContent = 'Detected:';
-      ui.actionButtons.appendChild(label);
-      for (const item of commands) {
-        const cmd = item.cmd;
-        if (!cmd) continue;
+      const categories = ['all', 'run', 'test', 'build'];
+      for (const cat of categories) {
+        const tab = document.createElement('button');
+        tab.className = 'command-tab' + (state.commandFilter === cat ? ' active' : '');
+        tab.textContent = cat[0].toUpperCase() + cat.slice(1);
+        tab.addEventListener('click', () => { state.commandFilter = cat; renderCommandBar(state.commands); });
+        ui.actionButtons.appendChild(tab);
+      }
+
+      const primary = state.commands.filter(c => c.primary).slice(0, 3);
+      for (const cmd of primary) {
         const btn = document.createElement('button');
-        btn.className = 'action-btn';
-        btn.textContent = `▶ ${item.label || cmd}`;
-        btn.title = `${item.source ? `[${item.source}] ` : ''}${cmd}`;
-        btn.addEventListener('click', () => runTerminalCommand(cmd));
+        btn.className = 'command-pill' + (cmd.category === 'test' ? ' test' : cmd.category === 'build' ? ' build' : '');
+        const prefix = cmd.category === 'test' ? 'Test ' : cmd.category === 'build' ? 'Build ' : 'Run ';
+        btn.textContent = prefix + cmd.name;
+        btn.title = cmd.cmd;
+        btn.addEventListener('click', () => runTerminalCommand(cmd.cmd));
         ui.actionButtons.appendChild(btn);
       }
+
+      const overflow = document.createElement('div');
+      overflow.className = 'command-overflow';
+      const toggle = document.createElement('button');
+      toggle.textContent = 'Commands... \u25BE';
+      toggle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        list.classList.toggle('open');
+        search.focus();
+      });
+      overflow.appendChild(toggle);
+
+      const search = document.createElement('input');
+      search.type = 'text';
+      search.className = 'command-search';
+      search.placeholder = 'Search...';
+      overflow.appendChild(search);
+
+      const list = document.createElement('div');
+      list.className = 'command-dropdown-list';
+
+      const updateList = () => {
+        list.innerHTML = '';
+        const term = search.value.toLowerCase();
+        const filtered = state.commands.filter(c => {
+          if (primary.some(p => p.id === c.id)) return false;
+          if (state.commandFilter !== 'all' && c.category !== state.commandFilter) return false;
+          if (!term) return true;
+          return (c.name + ' ' + c.cmd).toLowerCase().includes(term);
+        });
+        if (!filtered.length) {
+          const empty = document.createElement('div');
+          empty.className = 'command-dropdown-empty';
+          empty.textContent = 'No commands';
+          list.appendChild(empty);
+        } else {
+          for (const cmd of filtered) {
+            const item = document.createElement('div');
+            item.className = 'command-dropdown-item';
+            item.textContent = cmd.name;
+            item.title = cmd.cmd;
+            item.addEventListener('click', () => { runTerminalCommand(cmd.cmd); list.classList.remove('open'); });
+            list.appendChild(item);
+          }
+        }
+      };
+
+      search.addEventListener('input', updateList);
+      search.addEventListener('click', (e) => { e.stopPropagation(); list.classList.add('open'); });
+      document.addEventListener('click', () => list.classList.remove('open'));
+      updateList();
+      overflow.appendChild(list);
+      ui.actionButtons.appendChild(overflow);
     }
 
     async function accelerateWorkspace() {
@@ -1782,7 +1890,7 @@
         ui.accelerateBadge.textContent = mode === 'scaffold_pyo3'
           ? '⚡ Accelerated (PyO3 Source Injected)'
           : `⚡ Accelerated (${summary.native_active ? 'Runtime Native' : 'Runtime Fallback'})`;
-        renderDetectedCommands(summary.commands || []);
+        renderCommandBar(summary.commands || []);
         log(`Workspace accelerated (${mode})`, 'success');
         if (mode === 'scaffold_pyo3') loadTree();
       } catch (e) {
@@ -1889,6 +1997,7 @@
             sessionId = data.session_id;
             zipUploaded = true;
             if (data.message) zipMessage = data.message;
+            mergeCommands(data.commands || data.runnable_commands || []);
           } catch (e) { log(`Upload failed for ${file.name}: ${e.message}`, 'error'); continue; }
         } else if (lower.endsWith('.aeroc')) {
           try {
@@ -1896,6 +2005,7 @@
             sessionId = data.session_id;
             aerocUploaded = true;
             if (data.message) aerocMessage = data.message;
+            mergeCommands(data.commands || data.runnable_commands || []);
           } catch (e) { log(`Upload failed for ${file.name}: ${e.message}`, 'error'); continue; }
         } else {
           let text;
@@ -1919,6 +2029,7 @@
       }
       reconnectTerminal();
       await loadTree();
+      renderCommandBar(state.commands);
       setBusy(false);
     }
 
@@ -2074,6 +2185,7 @@
           log(`Regeneration finished with errors: ${errs || data.status}`, 'error');
         }
         await loadTree(true);
+        renderCommandBar(data.commands || data.runnable_commands || []);
       } catch (e) {
         log(`Regenerate from blueprint failed: ${e.message}`, 'error');
       } finally {
@@ -2189,6 +2301,7 @@
         addChat('assistant', summary);
         reconnectTerminal();
         await loadTree();
+        renderCommandBar(data.commands || data.runnable_commands || []);
         await loadVerificationActions();
       } catch (e) {
         log(`Build error: ${e.message}`, 'error');

@@ -29,7 +29,7 @@ from aero_forge.blueprint.schema import (
     VerificationNode,
     write_v3_blueprint,
 )
-from aero_forge.ingestion.command_inspector import detect_runnable_commands
+from aero_forge.ingestion.command_inspector import _unwrap_single_root, detect_runnable_commands
 from aero_forge.scaffold.module_guard import reify_missing_modules
 
 logger = logging.getLogger("aero_forge.ingestion.zip_parser")
@@ -83,6 +83,9 @@ def extract_zip_safely(zip_bytes: bytes, dest: Path, archive_name: Optional[str]
             target.parent.mkdir(parents=True, exist_ok=True)
             with zf.open(member) as src, open(target, "wb") as dst:
                 dst.write(src.read())
+
+    # Flatten any remaining single-directory wrapper created by archive tools.
+    _unwrap_single_root(dest)
 
 
 def _detect_manifests(workspace: Path) -> Dict[str, Path]:
@@ -251,4 +254,9 @@ def ingest_zip_archive(
         blueprint = generate_draft_v3_blueprint(dest)
         write_v3_blueprint(blueprint, dest / "blueprint.aero")
     commands = detect_runnable_commands(dest)
-    return {"extracted_to": str(dest), "runnable_commands": commands}, blueprint
+    return {
+        "status": "success",
+        "extracted_to": str(dest),
+        "commands": commands,
+        "runnable_commands": commands,
+    }, blueprint

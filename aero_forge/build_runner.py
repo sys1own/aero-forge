@@ -20,6 +20,7 @@ from aero_forge.cache.build_cache import BuildCache
 from aero_forge.config import ConfigOverride
 from aero_forge.context_bundler import ContextBundler
 from aero_forge.error_explainer import explain_error
+from aero_forge.errors import UserError
 from aero_forge.gpu import compile_gpu_kernel, find_gpu_functions
 from aero_forge.orchestrator.orchestrator import DeterministicVerificationRunner, Orchestrator
 from aero_forge.scaffold.engine import _generate_pyi

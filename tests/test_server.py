@@ -143,7 +143,7 @@ def test_api_upload_zip_and_files(server):
     assert status == 200
     data = json.loads(body.decode("utf-8"))
     assert data["session_id"] == session_id
-    assert data["status"] == "uploaded"
+    assert data["status"] == "success"
 
     status, body = _get(server + f"/api/files?session_id={session_id}")
     assert status == 200
@@ -976,7 +976,7 @@ def test_api_upload_aeroc_extracts_and_builds(server, tmp_path):
     )
     assert status == 200
     data = json.loads(body.decode("utf-8"))
-    assert data["status"] == "uploaded"
+    assert data["status"] == "success"
     assert data["build"]["success"] is True
 
     status, body = _get(server + f"/api/files?session_id={session_id}")

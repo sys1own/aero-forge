@@ -34,6 +34,33 @@ def _make_client(base_url):
     return HTTPConnection(base_url.replace("http://", "").replace("https://", ""))
 
 
+def _post_bytes(base_url, client, path, data, content_type="application/octet-stream", query=""):
+    full_path = f"{path}?{query}" if query else path
+    client.request("POST", full_path, body=data, headers={"Content-Type": content_type})
+    resp = client.getresponse()
+    return resp.status, resp.read()
+
+
+def _post_multipart(base_url, client, path, filename, data, query=""):
+    boundary = "----AeroForgeTestBoundary"
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        f"Content-Type: application/zip\r\n\r\n"
+    ).encode("utf-8")
+    body += data
+    body += f"\r\n--{boundary}--\r\n".encode("utf-8")
+    full_path = f"{path}?{query}" if query else path
+    client.request(
+        "POST",
+        full_path,
+        body=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    resp = client.getresponse()
+    return resp.status, resp.read()
+
+
 @pytest.fixture
 def server():
     import subprocess
@@ -193,3 +220,107 @@ def test_export_scaffold_is_zip(server):
         assert "main.py" in names
         assert "aeroc/aero_core/Cargo.toml" in names
         assert "pyproject.toml" in names
+
+
+def test_upload_zip_returns_populated_commands(server):
+    """POST /api/upload extracts a zip and returns standardized runnable commands."""
+    session_id = "test-upload-commands"
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w") as zf:
+        zf.writestr("main.py", 'if __name__ == "__main__":\n    print("ok")\n')
+        zf.writestr("tests/test_ok.py", "def test_ok(): pass")
+
+    client = _make_client(server)
+    status, data = _post_multipart(
+        server,
+        client,
+        "/api/upload",
+        "project.zip",
+        zip_buf.getvalue(),
+        query=f"session_id={session_id}&target_path=.",
+    )
+    assert status == 200, data.decode("utf-8", errors="ignore")
+    payload = json.loads(data)
+    assert payload["status"] == "success"
+    commands = payload["commands"]
+    assert any(c["cmd"] == "python main.py" and c["category"] == "run" for c in commands)
+    assert any(c["cmd"] == "pytest" and c["category"] == "test" for c in commands)
+
+
+def test_unpack_aeroc_returns_populated_commands(server, tmp_path):
+    """POST /api/unpack extracts a .aeroc container and returns runnable commands."""
+    from aero_forge.builder.aeroc_compiler import compile_directory_to_aeroc
+
+    workspace = tmp_path / "aeroc_src"
+    workspace.mkdir()
+    (workspace / "main.py").write_text('if __name__ == "__main__":\n    print("ok")\n')
+    aeroc = tmp_path / "workspace.aeroc"
+    compile_directory_to_aeroc(workspace, aeroc)
+
+    session_id = "test-unpack-commands"
+    client = _make_client(server)
+    status, data = _post_bytes(
+        server,
+        client,
+        "/api/unpack",
+        aeroc.read_bytes(),
+        query=f"session_id={session_id}&target_path=.",
+    )
+    assert status == 200, data.decode("utf-8", errors="ignore")
+    payload = json.loads(data)
+    assert payload["status"] == "success"
+    commands = payload["commands"]
+    assert any(c["cmd"] == "python main.py" for c in commands)
+
+
+def test_generate_returns_command_list(server):
+    """POST /api/generate returns a standardized command list even when generation fails."""
+    session_id = "test-generate-commands"
+    _save_file(server, session_id, "main.py", 'if __name__ == "__main__":\n    print("ok")\n')
+    _save_file(server, session_id, "tests/test_ok.py", "def test_ok(): pass\n")
+
+    client = _make_client(server)
+    status, data = _post_json(
+        server,
+        client,
+        "/api/generate",
+        {"session_id": session_id, "prompt": "build a demo", "provider": "none"},
+    )
+    assert status == 200, data.decode("utf-8", errors="ignore")
+    payload = json.loads(data)
+    assert "commands" in payload
+    commands = payload["commands"]
+    assert any(c["cmd"] == "python main.py" for c in commands)
+    assert any(c["cmd"] == "pytest" for c in commands)
+
+
+def test_update_returns_command_list(server):
+    """POST /api/update regenerates the workspace and returns runnable commands."""
+    session_id = "test-update-commands"
+    blueprint = (
+        "metadata:\n"
+        "  schema_version: \"3.0.0\"\n"
+        "  project_name: demo\n"
+        "  status: draft\n"
+        "manifest:\n"
+        "  - path: main.py\n"
+        "    lang: python\n"
+        "    purpose: entrypoint\n"
+        "execution_strategy:\n"
+        "  primary_entrypoint: main.py\n"
+        "  runtime: python3\n"
+    )
+    _save_file(server, session_id, "blueprint.aero", blueprint)
+
+    client = _make_client(server)
+    status, data = _post_json(
+        server,
+        client,
+        "/api/update",
+        {"session_id": session_id, "run_build": False},
+    )
+    assert status == 200, data.decode("utf-8", errors="ignore")
+    payload = json.loads(data)
+    assert "commands" in payload
+    commands = payload["commands"]
+    assert any(c["cmd"] == "python main.py" for c in commands)
