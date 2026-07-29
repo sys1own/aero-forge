@@ -397,6 +397,29 @@ class ToolchainManager:
         self._log("info", "ENV", "Environment ready for command execution.")
         return self.env
 
+    def _find_cargo_manifest(self) -> Optional[Path]:
+        """Locate the nearest ``Cargo.toml`` starting at ``self.sandbox_dir``."""
+        root = self.sandbox_dir
+        if (root / "Cargo.toml").is_file():
+            return root / "Cargo.toml"
+        exclude = {"target", ".cargo"}
+        for path in root.rglob("Cargo.toml"):
+            if any(part in exclude for part in path.parts):
+                continue
+            return path
+        return None
+
+    def _cargo_command(self, base: str) -> str:
+        """Return ``base`` with an automatic ``--manifest-path`` if needed."""
+        lowered = base.lower()
+        if "--manifest-path" in lowered:
+            return base
+        manifest = self._find_cargo_manifest()
+        if manifest and manifest.parent != self.sandbox_dir:
+            rel = manifest.parent.relative_to(self.sandbox_dir).as_posix()
+            return f"{base} --manifest-path {rel}/Cargo.toml"
+        return base
+
     def resolve_command(self, command: str) -> str:
         """Rewrite ``command`` so it can run inside the prepared environment.
 
@@ -405,6 +428,8 @@ class ToolchainManager:
         or ``cargo test`` workflow so workspace acceleration is not halted.
         """
         lowered = command.lower().strip()
+        if lowered.startswith("cargo "):
+            return self._cargo_command(command)
         if not lowered.startswith("maturin "):
             return command
 
@@ -424,7 +449,7 @@ class ToolchainManager:
 
         self._log("warning", "TOOLCHAIN", "maturin unavailable; rewriting to cargo fallback")
         if "test" in lowered or "pytest" in lowered:
-            return "cargo test"
+            return self._cargo_command("cargo test")
         if "develop" in lowered or "build" in lowered:
-            return "cargo build --release"
-        return "cargo build"
+            return self._cargo_command("cargo build --release")
+        return self._cargo_command("cargo build")

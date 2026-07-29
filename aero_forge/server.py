@@ -74,6 +74,7 @@ from aero_forge.healing.llm_healer import LLMHealer, run_command
 from aero_forge.healing.orchestrator import HealingOrchestrator
 from aero_forge.healing.router import try_auto_fix
 from aero_forge.healing.structural_merger import apply_overlay, MergeConflictError
+from aero_forge.errors import UserError
 from aero_forge.orchestrator.router import toolchains_for_intent
 from aero_forge._native import run_aeroc
 from aero_forge.builder.aeroc_compiler import (
@@ -96,7 +97,14 @@ from aero_forge.ingestion.command_inspector import detect_runnable_commands
 from aero_forge.ingestion.zip_parser import extract_zip_safely, generate_draft_v3_blueprint
 from aero_forge.scaffold.module_guard import reify_missing_modules
 from aero_forge.sandbox.manager import SandboxManager
-from aero_forge.blueprint import BlueprintV3, BlueprintV3Validator, LLMBlueprintSynthesizer, write_v3_blueprint
+from aero_forge.blueprint import (
+    BlueprintV3,
+    BlueprintV3Validator,
+    LLMBlueprintSynthesizer,
+    is_blueprint_ready,
+    load_blueprint,
+    write_v3_blueprint,
+)
 from aero_forge.blueprint.schema import ArtifactType, BuildArtifact, ContextState, GenerationMethod
 from aero_forge.blueprint.validator import InvalidBlueprintError
 from aero_forge.scaffold.pre_write_validator import BlueprintValidationError
@@ -781,7 +789,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_files_upload()
             if path == "/api/generate" or path == "/api/build":
                 return self._handle_build()
-            if path == "/api/update" or path == "/api/workspace/regenerate_blueprint":
+            if path in ("/api/update", "/api/regenerate", "/api/workspace/regenerate_blueprint"):
                 return self._handle_regenerate_blueprint()
             if path == "/api/save-file":
                 return self._handle_save_file()
@@ -1865,6 +1873,39 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     self, 400, {"error": "blueprint.aero not found in workspace"}
                 )
 
+            blueprint = load_blueprint(blueprint_path)
+            if not blueprint or not is_blueprint_ready(blueprint):
+                return _send_json(
+                    self,
+                    400,
+                    {
+                        "status": "error",
+                        "message": (
+                            "Regeneration blocked: Blueprint is uninitialized. "
+                            "Cannot overwrite existing workspace code."
+                        ),
+                    },
+                )
+
+            force_overwrite = bool(body.get("force_overwrite", False))
+            if not force_overwrite:
+                has_user_files = any(
+                    e.name not in {"blueprint.aero", "workspace_blueprint.yaml", "workspace_blueprint.yml"}
+                    and not e.name.startswith(".")
+                    for e in workspace_path.iterdir()
+                )
+                if has_user_files:
+                    return _send_json(
+                        self,
+                        400,
+                        {
+                            "status": "error",
+                            "message": (
+                                "Workspace is not empty. Use force_overwrite to regenerate."
+                            ),
+                        },
+                    )
+
             # Purge caches, overlays, and healing state before regenerating so
             # stale state cannot corrupt the rebuilt workspace.
             purge_workspace_state(workspace_path)
@@ -1913,6 +1954,12 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             )
         except FileNotFoundError as exc:
             return _send_json(self, 400, {"error": str(exc)})
+        except UserError as exc:
+            return _send_json(
+                self,
+                400,
+                {"status": "error", "message": str(exc)},
+            )
         except Exception as exc:
             logger.exception("Regenerate blueprint endpoint failed")
             return _send_json(self, 500, {"error": str(exc)})

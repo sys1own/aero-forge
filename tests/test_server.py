@@ -1020,3 +1020,44 @@ def test_api_download_aeroc_fails_on_broken_workspace(server, monkeypatch):
     data = json.loads(body.decode("utf-8"))
     assert status == 422
     assert "compilation" in data["error"].lower() or "validation" in data["error"].lower()
+
+
+def test_api_regenerate_uninitialized_blueprint_returns_400(server):
+    """Regenerating from an uninitialized draft blueprint is blocked and leaves files intact."""
+    session_id = "test-regenerate-uninitialized"
+
+    # Seed an existing source file and an uninitialized draft blueprint.
+    status, _ = _post_json(
+        server + "/api/save-file",
+        {"session_id": session_id, "path": "src/core.py", "content": "def add(a, b): return a + b\n"},
+    )
+    assert status == 200
+
+    status, _ = _post_json(
+        server + "/api/save-file",
+        {
+            "session_id": session_id,
+            "path": "blueprint.aero",
+            "content": "metadata:\n  status: draft\n  schema_version: 3.0.0\nmanifest: []\n",
+        },
+    )
+    assert status == 200
+
+    try:
+        status, body = _post_json(
+            server + "/api/regenerate",
+            {"session_id": session_id},
+        )
+    except HTTPError as exc:
+        status = exc.code
+        body = exc.read()
+    assert status == 400, body
+    data = json.loads(body.decode("utf-8"))
+    assert data.get("status") == "error"
+    assert "uninitialized" in data.get("message", "").lower()
+
+    # Ensure the existing source file was not deleted.
+    status, body = _get(server + f"/api/file-content?session_id={session_id}&path=src/core.py")
+    assert status == 200
+    file_data = json.loads(body.decode("utf-8"))
+    assert "def add" in file_data["content"]

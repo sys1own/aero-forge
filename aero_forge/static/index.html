@@ -384,15 +384,17 @@
     .command-dropdown-item:last-child { border-bottom: none; }
     .command-dropdown-item:hover { background: var(--accent); color: #fff; }
     .command-dropdown-empty { padding: 0.35rem 0.6rem; font-size: 0.75rem; color: var(--muted); }
-    #heal-banner { display: none; position: absolute; top: 0; left: 0; right: 0; z-index: 2; padding: 0.4rem 0.6rem; background: rgba(245, 209, 136, 0.15); border-bottom: 1px solid var(--warning); color: var(--text); font-size: 0.8rem; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+    #terminal-panel { display: none; flex-direction: column; position: absolute; inset: 0; overflow: hidden; }
+    #terminal-panel.active { display: flex; }
+    #heal-banner { display: none; flex: 0 0 auto; padding: 0.4rem 0.6rem; background: rgba(245, 209, 136, 0.15); border-bottom: 1px solid var(--warning); color: var(--text); font-size: 0.8rem; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
     #heal-banner.visible { display: flex; }
     #heal-banner.manual-fix { background: rgba(244, 63, 94, 0.15); border-bottom-color: var(--danger); }
     #heal-banner button { font-size: 0.75rem; padding: 0.25rem 0.5rem; }
-    #terminal { position: absolute; top: 0; left: 0; right: 0; bottom: 28px; transition: top 0.15s ease; }
-    #terminal-panel.heal-visible #terminal { top: 36px; }
+    #heal-banner .close { margin-left: auto; font-size: 0.9rem; padding: 0.1rem 0.35rem; background: transparent; border: none; color: var(--text); cursor: pointer; }
+    #heal-banner .close:hover { color: var(--danger); }
+    #terminal { position: relative; flex: 1; min-height: 0; overflow: hidden; }
     #terminal-bar {
-      position: absolute; left: 0; right: 0; bottom: 0; height: 28px;
-      display: flex; align-items: center; gap: 0.4rem;
+      flex: 0 0 28px; display: flex; align-items: center; gap: 0.4rem;
       background: var(--panel); border-top: 1px solid var(--border); padding: 0 0.4rem;
     }
     #terminal-bar label { color: var(--muted); font-size: 0.75rem; white-space: nowrap; }
@@ -774,9 +776,15 @@
       blueprintSource: 'unknown',
       autoInitialized: false,
       blueprintReady: false,
+      sourceCount: 0,
       commands: [],
       commandFilter: 'all',
     };
+
+    function _showHardReset() {
+      const archiveSources = ['aeroc_archive', 'zip_archive'];
+      return state.blueprintReady && !archiveSources.includes(state.blueprintSource);
+    }
 
     let _treeSnapshot = '';
     let _treeSession = '';
@@ -1009,7 +1017,8 @@
         if (selected) setTreeActive(selected);
         ui.fileTree.scrollTop = scrollTop;
         renderBlueprintBanner(data.tree);
-        updateBlueprintStatus();
+        await updateBlueprintStatus();
+        renderBlueprintBanner(data.tree);
       } catch (e) {
         if (!ui.fileTree.querySelector('.tree-node')) {
           ui.fileTree.innerHTML = `<div class="placeholder" style="padding:1rem;color:var(--danger)">${e.message}</div>`;
@@ -1151,13 +1160,10 @@
       ui.contextMenu.querySelectorAll('.context-menu-item').forEach(item => {
         const action = item.dataset.action;
         if (action === 'regenerate-blueprint') {
-          if (!isBlueprint) {
+          const archiveSources = ['aeroc_archive', 'zip_archive'];
+          const isArchive = archiveSources.includes(state.blueprintSource);
+          if (!isBlueprint || !state.blueprintReady || isArchive) {
             item.style.display = 'none';
-          } else if (!state.blueprintReady) {
-            item.style.display = 'block';
-            item.style.opacity = '0.4';
-            item.style.pointerEvents = 'none';
-            item.title = 'Blueprint is uninitialized — LLM prompting required';
           } else {
             item.style.display = 'block';
             item.style.opacity = '1';
@@ -1611,37 +1617,54 @@
       }
     }
 
-    function showHealBanner(summary, targetFile, command, exitCode, logText) {
+    function _renderHealBanner(labelHtml, buttonsHtml, command, exitCode, logText, isManual) {
       if (!ui.healBanner) return;
-      ui.healBanner.innerHTML = `<span>&#9889; Self-Heal Available: AST Overlay Patch (${escapeHtml(targetFile || '')})</span><button id="apply-heal-btn" class="run-btn">&#128295; Apply AST Fix &amp; Re-run</button><button id="hard-reset-btn" class="run-btn">&#128260; Hard Reset &amp; Rebuild Workspace from Blueprint</button>`;
+      const resetButton = _showHardReset()
+        ? '<button id="hard-reset-btn" class="run-btn">&#128260; Hard Reset &amp; Rebuild Workspace from Blueprint</button>'
+        : '';
+      const closeButton = '<button id="heal-banner-close" class="close" title="Dismiss">&#10005;</button>';
+      ui.healBanner.innerHTML = `<span>${labelHtml}</span>${buttonsHtml}${resetButton}${closeButton}`;
       ui.healBanner.classList.add('visible');
-      ui.terminalPanel.classList.add('heal-visible');
-      document.getElementById('apply-heal-btn').addEventListener('click', () => applyHeal(command, exitCode, logText));
-      document.getElementById('hard-reset-btn').addEventListener('click', () => { hideHealBanner(); ui.regenerateModal.classList.add('open'); });
+      if (isManual) ui.healBanner.classList.add('manual-fix');
+      else ui.healBanner.classList.remove('manual-fix');
+      const applyBtn = document.getElementById('apply-heal-btn');
+      if (applyBtn) applyBtn.addEventListener('click', () => applyHeal(command, exitCode, logText));
+      const applyLLMBtn = document.getElementById('apply-llm-heal-btn');
+      if (applyLLMBtn) applyLLMBtn.addEventListener('click', () => applyLLMHeal(command, exitCode, logText));
+      const resetBtn = document.getElementById('hard-reset-btn');
+      if (resetBtn) resetBtn.addEventListener('click', () => { hideHealBanner(); ui.regenerateModal.classList.add('open'); });
+      const closeBtn = document.getElementById('heal-banner-close');
+      if (closeBtn) closeBtn.addEventListener('click', hideHealBanner);
+    }
+
+    function showHealBanner(summary, targetFile, command, exitCode, logText) {
+      _renderHealBanner(
+        `&#9889; Self-Heal Available: AST Overlay Patch (${escapeHtml(targetFile || '')})`,
+        '<button id="apply-heal-btn" class="run-btn">&#128295; Apply AST Fix &amp; Re-run</button>',
+        command, exitCode, logText, false
+      );
     }
 
     function showLLMBanner(summary, targetFile, reason, command, exitCode, logText) {
-      if (!ui.healBanner) return;
-      ui.healBanner.innerHTML = `<span>&#129302; Apply LLM Directive Patch: ${escapeHtml(summary || '')}</span><button id="apply-llm-heal-btn" class="run-btn">&#129302; Apply LLM Fix</button><button id="hard-reset-btn" class="run-btn">&#128260; Hard Reset &amp; Rebuild Workspace from Blueprint</button>`;
-      ui.healBanner.classList.add('visible');
-      ui.terminalPanel.classList.add('heal-visible');
-      document.getElementById('apply-llm-heal-btn').addEventListener('click', () => applyLLMHeal(command, exitCode, logText));
-      document.getElementById('hard-reset-btn').addEventListener('click', () => { hideHealBanner(); ui.regenerateModal.classList.add('open'); });
+      _renderHealBanner(
+        `&#129302; Apply LLM Directive Patch: ${escapeHtml(summary || '')}`,
+        '<button id="apply-llm-heal-btn" class="run-btn">&#129302; Apply LLM Fix</button>',
+        command, exitCode, logText, false
+      );
     }
 
     function showManualFixBanner(reason) {
-      if (!ui.healBanner) return;
-      ui.healBanner.innerHTML = `<span>&#9888; Manual Fix Required: ${escapeHtml(reason || 'unknown error')}</span><button id="hard-reset-btn" class="run-btn">&#128260; Hard Reset &amp; Rebuild Workspace from Blueprint</button>`;
-      ui.healBanner.classList.add('visible', 'manual-fix');
-      ui.terminalPanel.classList.add('heal-visible');
-      document.getElementById('hard-reset-btn').addEventListener('click', () => { hideHealBanner(); ui.regenerateModal.classList.add('open'); });
+      _renderHealBanner(
+        `&#9888; Manual Fix Required: ${escapeHtml(reason || 'unknown error')}`,
+        '',
+        '', null, '', true
+      );
     }
 
     function hideHealBanner() {
       if (!ui.healBanner) return;
       ui.healBanner.classList.remove('visible');
       ui.healBanner.innerHTML = '';
-      ui.terminalPanel.classList.remove('heal-visible');
     }
 
     async function applyHeal(command, exitCode, logText, forceLLM = false) {
@@ -1941,9 +1964,14 @@
         const res = await fetch(`/api/blueprint/status?session_id=${encodeURIComponent(state.sessionId)}`);
         const data = await res.json();
         state.blueprintReady = !!data.ready;
+        state.sourceCount = data.source_count || 0;
 
-        // Enable/disable destructive regeneration depending on blueprint readiness.
+        // Hide the destructive regeneration button when the blueprint is not ready
+        // or when materialized source code was loaded from an archive.
+        const archiveSources = ['aeroc_archive', 'zip_archive'];
+        const isArchive = archiveSources.includes(state.blueprintSource);
         if (ui.regenerateBlueprintRoot) {
+          ui.regenerateBlueprintRoot.style.display = (state.blueprintReady && !isArchive) ? '' : 'none';
           ui.regenerateBlueprintRoot.disabled = !state.blueprintReady;
           ui.regenerateBlueprintRoot.style.opacity = state.blueprintReady ? '1' : '0.4';
           ui.regenerateBlueprintRoot.title = state.blueprintReady

@@ -47,3 +47,12 @@ def test_ensure_rust_toolchain_reports_status(monkeypatch, tmp_path: Path) -> No
     monkeypatch.setattr("shutil.which", fake_which)
     assert manager.ensure_rust_toolchain() is True
     assert any(prefix == "TOOLCHAIN" and "Cargo" in msg for _level, prefix, msg in logs)
+
+
+def test_resolve_command_adds_manifest_path_for_nested_cargo(tmp_path: Path) -> None:
+    crate = tmp_path / "rust_core"
+    crate.mkdir()
+    (crate / "Cargo.toml").write_text('[package]\nname = "native"\n', encoding="utf-8")
+    manager = ToolchainManager(tmp_path)
+    assert manager.resolve_command("cargo test") == "cargo test --manifest-path rust_core/Cargo.toml"
+    assert manager.resolve_command("cargo build --release") == "cargo build --release --manifest-path rust_core/Cargo.toml"
