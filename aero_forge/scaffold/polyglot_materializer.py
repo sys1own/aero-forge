@@ -23,6 +23,12 @@ from aero_forge.blueprint import (
     ManifestEntry,
     write_blueprint,
 )
+from aero_forge.orchestrator.stack_classifier import (
+    INTENT_HYBRID_CPP_RUST,
+    INTENT_HYBRID_RUST_PYTHON,
+    INTENT_PURE_RUST,
+    INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON,
+)
 from aero_forge.scaffold.entrypoint_adapter import EntrypointAdapterEngine
 from aero_forge.builder.language_router import should_accelerate_with_native
 from aero_forge.scaffold.cargo_manifest import sanitize_crate_name
@@ -886,7 +892,7 @@ class PolyglotMaterializer:
                 logger.info("Synthesised %s", path.relative_to(self.workspace))
 
     def _has_accelerable_contract(self, blueprint: Blueprint) -> bool:
-        """Return ``True`` if any contract justifies a native (Rust) build."""
+        """Return ``True`` if the blueprint declares a native Rust build."""
         for contract in blueprint.contracts:
             if not contract.signature:
                 continue
@@ -897,6 +903,17 @@ class PolyglotMaterializer:
             stub_body = _generate_stub_body(name, args, return_type)
             source = f"def {name}({', '.join(f'{a}: {t}' for a, t in args)}) -> {return_type}:\n{stub_body}"
             if should_accelerate_with_native(source):
+                return True
+
+        # If the blueprint explicitly declares a Rust architecture and a Cargo
+        # manifest, treat it as accelerable even when no contracts were inferred.
+        if blueprint.architecture in (
+            INTENT_HYBRID_RUST_PYTHON,
+            INTENT_HYBRID_CPP_RUST,
+            INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON,
+            INTENT_PURE_RUST,
+        ):
+            if any(Path(e.path).name == "Cargo.toml" for e in blueprint.manifest):
                 return True
         return False
 

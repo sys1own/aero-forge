@@ -1159,6 +1159,29 @@ def init(project: str, path: str, fmt: str) -> None:
         sys.exit(1)
 
 
+@main.command("init-blueprint")
+@click.option(
+    "--path",
+    "-p",
+    type=click.Path(file_okay=False, path_type=str),
+    default=".",
+    help="Workspace directory to auto-detect and write blueprint.aero for.",
+)
+@click.option("--verbose", "-v", is_flag=True, help="Show debug logs.")
+def init_blueprint(path: str, verbose: bool) -> None:
+    """Auto-detect workspace architecture and write blueprint.aero."""
+    _setup_logging(verbose)
+    from aero_forge.blueprint import generate_blueprint_from_uploaded_repo
+
+    workspace = Path(path).resolve()
+    try:
+        blueprint_path = generate_blueprint_from_uploaded_repo(workspace)
+        click.echo(f"Initialized blueprint at {blueprint_path}")
+    except OSError as exc:
+        click.echo(f"Failed to initialize blueprint: {exc}", err=True)
+        sys.exit(1)
+
+
 @main.command()
 @click.option(
     "--output-dir",
@@ -1498,6 +1521,23 @@ def web(port: int, no_browser: bool, verbose: bool) -> None:
     from .server import run_server
 
     run_server(port=port, open_browser=not no_browser)
+
+
+@main.command("serve")
+@click.option(
+    "--port",
+    "-p",
+    default=None,
+    help="Port to bind the web server (default: $PORT or 8080).",
+    type=int,
+)
+@click.option(
+    "--no-browser", is_flag=True, help="Do not automatically open the browser."
+)
+@click.option("--verbose", "-v", is_flag=True, help="Show debug logs.")
+def serve(port: int, no_browser: bool, verbose: bool) -> None:
+    """Alias for ``aero-forge web``."""
+    web.callback(port=port, no_browser=no_browser, verbose=verbose)
 
 
 @main.command(name="reset")
