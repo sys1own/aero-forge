@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from aero_forge.blueprint import Blueprint, ContractEntry, ManifestEntry, write_blueprint
+from aero_forge.blueprint import Blueprint, ContractEntry, ManifestEntry, parse_blueprint, write_blueprint
 from aero_forge.builder.aeroc_compiler import compile_directory_to_aeroc
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
@@ -514,14 +514,32 @@ def build_universal_project(
     progress_callback: Optional[Any] = None,
     architecture: Optional[str] = None,
     acceleration_policy: Optional[str] = None,
+    workspace_path: Optional[Path | str] = None,
 ) -> Dict[str, Any]:
     """Classify *prompt*, write ``blueprint.aero``, and build the workspace.
+
+    If *workspace_path* points to an existing workspace, any contracts from an
+    existing ``blueprint.aero`` are merged into the planned blueprint so the
+    materializer has concrete functions to accelerate.
 
     Returns a dictionary with ``success``, ``blueprint_path``, ``files``, and
     the underlying build result.
     """
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Seed the planner with contracts from an existing workspace blueprint.
+    existing_contracts: List[ContractEntry] = []
+    existing_manifest: List[ManifestEntry] = []
+    if workspace_path:
+        existing_path = Path(workspace_path).resolve() / "blueprint.aero"
+        if existing_path.is_file():
+            try:
+                existing = parse_blueprint(existing_path)
+                existing_contracts = list(existing.contracts or [])
+                existing_manifest = list(existing.manifest or [])
+            except Exception as exc:
+                logger.warning("Could not read existing workspace blueprint %s: %s", existing_path, exc)
 
     if progress_callback:
         progress_callback("Planning workspace...")
@@ -549,6 +567,14 @@ def build_universal_project(
         config_override=config_override,
         architecture=architecture,
     )
+
+    # If the planned blueprint has no concrete contracts/manifest but an
+    # existing workspace blueprint does, merge them so the materializer has
+    # real functions to accelerate.
+    if not blueprint.contracts and existing_contracts:
+        blueprint = blueprint.model_copy(update={"contracts": existing_contracts})
+    if not blueprint.manifest and existing_manifest:
+        blueprint = blueprint.model_copy(update={"manifest": existing_manifest})
 
     if progress_callback:
         progress_callback(f"Architecture: {blueprint.architecture}; building...")

@@ -257,16 +257,22 @@ async def _handle_build_async(request: web.Request) -> web.Response:
     except Exception:
         return web.json_response({"error": "Invalid JSON"}, status=400)
 
-    prompt = body.get("prompt", "").strip()
+    prompt = body.get("builder_prompt", body.get("prompt", "")).strip()
     if not prompt:
-        return web.json_response({"error": "Missing 'prompt'"}, status=400)
+        return web.json_response({"error": "Missing 'prompt' or 'builder_prompt'"}, status=400)
 
     session_id = body.get("session_id") or str(uuid.uuid4())
-    session_dir = _session_dir(session_id)
+    workspace_path = body.get("workspace_path") or body.get("output_dir")
+    if workspace_path:
+        output_dir = Path(workspace_path).expanduser().resolve()
+    else:
+        output_dir = _session_dir(session_id)
+    session_dir = output_dir
     set_session_blueprint_metadata(session_id, is_building=True)
     variants = 3 if body.get("variants") else 1
-    target_language = body.get("target_language", "auto")
+    target_language = body.get("target_language", body.get("target", "auto"))
     acceleration_policy = body.get("acceleration_policy", "selective")
+    architecture = body.get("architecture")
     config = ConfigOverride(
         llm_provider=body.get("provider"),
         api_key=_api_key_from_request(request, body),
@@ -312,8 +318,9 @@ async def _handle_build_async(request: web.Request) -> web.Response:
                 max_retries=3,
                 config_override=config,
                 progress_callback=progress_callback,
-                architecture=classification.architecture,
+                architecture=architecture or classification.architecture,
                 acceleration_policy=acceleration_policy,
+                workspace_path=output_dir,
             )
             result: Dict[str, Any] = {
                 "build": universal_result,
@@ -723,7 +730,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             path = parsed.path
 
-            if path == "/api/build":
+            if path == "/api/build" or path == "/api/builder/trigger":
                 return self._handle_build()
             if path == "/api/aeroc/exec":
                 return self._handle_aeroc_exec()
@@ -798,17 +805,23 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
     def _handle_build(self) -> None:
         try:
             body = _parse_json_body(self)
-            prompt = body.get("prompt", "").strip()
+            prompt = body.get("builder_prompt", body.get("prompt", "")).strip()
             if not prompt:
-                return _send_json(self, 400, {"error": "Missing 'prompt'"})
+                return _send_json(self, 400, {"error": "Missing 'prompt' or 'builder_prompt'"})
 
             session_id = body.get("session_id") or str(uuid.uuid4())
-            session_dir = _session_dir(session_id)
+            workspace_path = body.get("workspace_path") or body.get("output_dir")
+            if workspace_path:
+                output_dir = Path(workspace_path).expanduser().resolve()
+            else:
+                output_dir = _session_dir(session_id)
+            session_dir = output_dir
             set_session_blueprint_metadata(session_id, is_building=True)
 
             variants = 3 if body.get("variants") else 1
-            target_language = body.get("target_language", "auto")
+            target_language = body.get("target_language", body.get("target", "auto"))
             acceleration_policy = body.get("acceleration_policy", "selective")
+            architecture = body.get("architecture")
             config = ConfigOverride(
                 llm_provider=body.get("provider"),
                 api_key=self._api_key(body),
@@ -833,8 +846,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     model=config.model,
                     max_retries=3,
                     config_override=config,
-                    architecture=classification.architecture,
+                    architecture=architecture or classification.architecture,
                     acceleration_policy=acceleration_policy,
+                    workspace_path=output_dir,
                 )
                 result: Dict[str, Any] = {
                     "build": universal_result,
@@ -2767,7 +2781,7 @@ async def _aiohttp_http_handler(request: web.Request, port: int) -> web.Response
     _set_event_loop()
     if request.method == "OPTIONS":
         return web.Response(status=204, headers=_CORS_HEADERS)
-    if request.path == "/api/build":
+    if request.path == "/api/build" or request.path == "/api/builder/trigger":
         return await _handle_build_async(request)
     raw = await _build_raw_request(request)
     loop = asyncio.get_event_loop()

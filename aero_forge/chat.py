@@ -829,9 +829,10 @@ class ChatSession:
         self.last_error_context = error_context
         self._refresh_project_context()
 
-        if not self.messages:
-            self.messages.append({"role": "system", "content": self._copilot_system_prompt()})
-        self.messages.append({"role": "user", "content": text})
+        if not self.messages or self.messages[0].get("role") != "system":
+            self.messages.insert(0, {"role": "system", "content": self._copilot_system_prompt()})
+        if not self.messages or self.messages[-1].get("role") != "user" or self.messages[-1].get("content") != text:
+            self.messages.append({"role": "user", "content": text})
         self._save_session()
 
         client = get_llm_client(
