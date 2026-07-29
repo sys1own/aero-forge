@@ -175,8 +175,13 @@ class DeterministicVerificationRunner:
                 cmd = shlex.join(str(x) for x in cmd)
 
             env = os.environ.copy()
-            env["PYTHONPATH"] = (
-                f"{self.project_root}{os.pathsep}{env.get('PYTHONPATH', '')}"
+            pythonpath_parts = [str(self.project_root)]
+            src_dir = Path(self.project_root) / "src"
+            if src_dir.is_dir():
+                pythonpath_parts.append(str(src_dir))
+            pythonpath_parts.append(env.get("PYTHONPATH", ""))
+            env["PYTHONPATH"] = os.pathsep.join(
+                p for p in pythonpath_parts if p
             ).strip(os.pathsep)
 
             proc = subprocess.run(

@@ -313,8 +313,15 @@ class Sandbox:
 
         cmd = [sys.executable, "-m", "pytest", str(self.root), "-v"]
         test_env = os.environ.copy()
-        test_env["PYTHONPATH"] = (
-            f"{self.root}{os.pathsep}{test_env.get('PYTHONPATH', '')}"
+        pythonpath_parts = [str(self.root)]
+        if self.project_root:
+            pythonpath_parts.append(str(self.project_root))
+            src_dir = self.project_root / "src"
+            if src_dir.is_dir():
+                pythonpath_parts.append(str(src_dir))
+        pythonpath_parts.append(test_env.get("PYTHONPATH", ""))
+        test_env["PYTHONPATH"] = os.pathsep.join(
+            p for p in pythonpath_parts if p
         ).strip(os.pathsep)
 
         scheduler = WavefrontScheduler()
@@ -358,8 +365,15 @@ class Sandbox:
             "-v",
         ]
         test_env = os.environ.copy()
-        test_env["PYTHONPATH"] = (
-            f"{self.root}{os.pathsep}{test_env.get('PYTHONPATH', '')}"
+        pythonpath_parts = [str(self.root)]
+        if self.project_root:
+            pythonpath_parts.append(str(self.project_root))
+            src_dir = self.project_root / "src"
+            if src_dir.is_dir():
+                pythonpath_parts.append(str(src_dir))
+        pythonpath_parts.append(test_env.get("PYTHONPATH", ""))
+        test_env["PYTHONPATH"] = os.pathsep.join(
+            p for p in pythonpath_parts if p
         ).strip(os.pathsep)
 
         scheduler = WavefrontScheduler()

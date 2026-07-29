@@ -797,6 +797,10 @@
       sourceCount: 0,
       commands: [],
       commandFilter: 'all',
+      wsReconnectTimer: null,
+      wsReconnectDelay: 1000,
+      wsMaxReconnectDelay: 30000,
+      wsIntentionalClose: false,
     };
 
     function _showHardReset() {
@@ -1449,19 +1453,29 @@
     }
 
     function connectTerminal() {
-      if (state.socket) { try { state.socket.close(); } catch (e) {} state.socket = null; }
+      if (state.wsReconnectTimer) { clearTimeout(state.wsReconnectTimer); state.wsReconnectTimer = null; }
+      if (state.socket) {
+        state.wsIntentionalClose = true;
+        try { state.socket.close(); } catch (e) {}
+        state.socket = null;
+      }
 
       const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${wsProtocol}//${location.host}/ws/terminal?session_id=${encodeURIComponent(state.sessionId)}`;
+      let socket;
       try {
-        state.socket = new WebSocket(wsUrl);
+        socket = new WebSocket(wsUrl);
       } catch (e) {
         state.term.writeln(`\r\nWebSocket error: ${e.message}\r\n`);
+        scheduleTerminalReconnect();
         return;
       }
-      state.socket.binaryType = 'arraybuffer';
-      state.socket.onopen = () => { if (state.term) state.term.writeln('\r\nConnected.\r\n'); };
-      state.socket.onmessage = (event) => {
+      socket.binaryType = 'arraybuffer';
+      socket.onopen = () => {
+        state.wsReconnectDelay = 1000;
+        if (state.term) state.term.writeln('\r\nConnected.\r\n');
+      };
+      socket.onmessage = (event) => {
         const raw = (event.data instanceof ArrayBuffer) ? new Uint8Array(event.data) : event.data;
         if (typeof raw === 'string' && raw.trim().startsWith('{')) {
           try {
@@ -1474,13 +1488,32 @@
         }
         if (state.term) state.term.write(raw);
       };
-      state.socket.onclose = (e) => {
-        if (state.term) state.term.writeln(`\r\nTerminal disconnected (code ${e.code}).\r\n`);
+      socket.onclose = (e) => {
+        if (state.wsIntentionalClose) { state.wsIntentionalClose = false; return; }
+        if (state.term && e.code !== 1000) state.term.writeln(`\r\nTerminal connection lost (code ${e.code}). Reconnecting...\r\n`);
+        state.socket = null;
+        scheduleTerminalReconnect();
       };
-      state.socket.onerror = () => { if (state.term) state.term.writeln(`\r\nTerminal connection error. Check that the WebSocket server is reachable.\r\n`); };
+      socket.onerror = () => {
+        state.socket = null;
+        scheduleTerminalReconnect();
+      };
+      state.socket = socket;
+    }
+
+    function scheduleTerminalReconnect() {
+      if (state.wsReconnectTimer) return;
+      const delay = Math.min(state.wsReconnectDelay, state.wsMaxReconnectDelay);
+      state.wsReconnectDelay = Math.min(state.wsReconnectDelay * 2, state.wsMaxReconnectDelay);
+      state.wsReconnectTimer = setTimeout(() => {
+        state.wsReconnectTimer = null;
+        if (state.term) connectTerminal();
+      }, delay);
     }
 
     function reconnectTerminal() {
+      state.wsReconnectDelay = 1000;
+      if (state.wsReconnectTimer) { clearTimeout(state.wsReconnectTimer); state.wsReconnectTimer = null; }
       if (state.term) connectTerminal();
     }
 
@@ -2762,6 +2795,12 @@
     ui.terminalClear.addEventListener('click', resetTerminal);
     ui.terminalInput.addEventListener('keydown', e => {
       if (e.key === 'Enter') { e.preventDefault(); runTerminalCommand(); }
+    });
+
+    window.addEventListener('beforeunload', () => {
+      state.wsIntentionalClose = true;
+      if (state.wsReconnectTimer) { clearTimeout(state.wsReconnectTimer); state.wsReconnectTimer = null; }
+      if (state.socket) { try { state.socket.close(); } catch (e) {} }
     });
 
     // Init

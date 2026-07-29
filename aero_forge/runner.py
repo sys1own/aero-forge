@@ -123,3 +123,46 @@ async def run_wavefront_tasks_async(
     for key in tasks:
         adj.setdefault(key, [])
     return await scheduler.execute(tasks, adj)
+
+
+async def _execute_async(
+    command: str,
+    sandbox_dir: Path,
+    env: Optional[Dict[str, str]],
+    timeout: int,
+) -> Tuple[Dict[str, Any], List[Tuple[str, str, str]]]:
+    """Resolve ``command`` and run it through the wavefront scheduler."""
+    resolved, command_env, logs = await resolve_command(command, env, sandbox_dir)
+    results = await run_wavefront_tasks_async(
+        [resolved],
+        sandbox_dir=sandbox_dir,
+        env=command_env,
+        log_callback=None,
+    )
+    return results[0] if results else {"returncode": -1, "stdout": "", "stderr": "No results"}, logs
+
+
+def execute(
+    command: str,
+    sandbox_dir: Optional[Path] = None,
+    env: Optional[Dict[str, str]] = None,
+    timeout: int = 120,
+) -> Dict[str, Any]:
+    """Synchronously resolve and execute ``command`` inside a prepared sandbox."""
+    sandbox_dir = Path(sandbox_dir or os.environ.get("AERO_FORGE_SESSION_DIR", "."))
+    env = env or os.environ.copy()
+    result, _logs = asyncio.run(_execute_async(command, sandbox_dir, env, timeout))
+    return result
+
+
+async def execute_async(
+    command: str,
+    sandbox_dir: Optional[Path] = None,
+    env: Optional[Dict[str, str]] = None,
+    timeout: int = 120,
+) -> Dict[str, Any]:
+    """Asynchronously resolve and execute ``command`` inside a prepared sandbox."""
+    sandbox_dir = Path(sandbox_dir or os.environ.get("AERO_FORGE_SESSION_DIR", "."))
+    env = env or os.environ.copy()
+    result, _logs = await _execute_async(command, sandbox_dir, env, timeout)
+    return result
