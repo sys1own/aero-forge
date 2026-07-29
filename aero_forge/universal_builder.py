@@ -37,6 +37,7 @@ from aero_forge.orchestrator.stack_classifier import (
     INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON,
     StackClassification,
     classify_stack,
+    default_manifest_for_architecture,
 )
 from aero_forge.scaffold.cpp_materializer import CppPolyglotMaterializer
 from aero_forge.scaffold.hybrid_cpp_rust_materializer import HybridCppRustMaterializer
@@ -575,6 +576,15 @@ def build_universal_project(
         blueprint = blueprint.model_copy(update={"contracts": existing_contracts})
     if not blueprint.manifest and existing_manifest:
         blueprint = blueprint.model_copy(update={"manifest": existing_manifest})
+
+    # Force the manifest to the deterministic default for the chosen architecture
+    # so emitted files match the planner's declarations and pre-write validation
+    # does not fail on LLM-invented paths.
+    deterministic_manifest = [
+        ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
+        for e in default_manifest_for_architecture(blueprint.architecture, project_name or blueprint.project or "generated")
+    ]
+    blueprint = blueprint.model_copy(update={"manifest": deterministic_manifest, "module_graph": []})
 
     if progress_callback:
         progress_callback(f"Architecture: {blueprint.architecture}; building...")

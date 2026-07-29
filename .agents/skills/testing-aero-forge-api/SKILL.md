@@ -1,6 +1,6 @@
 ---
 name: Testing the Aero-Forge copilot / builder API
-scope: When testing aero-forge chat, blueprint synthesis, or the /api/build endpoint
+scope: When testing aero-forge chat, blueprint synthesis, /api/build, or /api/builder/trigger
 description: How to run the manual E2E verification workflow for aero-forge PRs involving copilot responses, polyglot speedup actions, and trigger_build cards.
 ---
 
@@ -12,7 +12,7 @@ description: How to run the manual E2E verification workflow for aero-forge PRs 
 
 ## Environment assumptions
 - Rust toolchain with `cargo` and `rustup` is installed.
-- `aero-forge` repo is checked out on the branch under test, usually `main` after a PR is merged.
+- `aero-forge` repo is checked out on the branch under test.
 - Native `.so` extension is built:
   ```bash
   (cd aero_forge/_native && cargo build --release)
@@ -23,26 +23,21 @@ description: How to run the manual E2E verification workflow for aero-forge PRs 
   pip install -e ".[dev]"
   ```
 
-## Command equivalents (current CLI is not exactly the one in the verification script)
-- `aero-forge init-blueprint --path <dir>` is **not implemented**. Use:
-  ```bash
-  aero-forge blueprint synthesize --workspace <dir> --provider deepseek --output <dir>/blueprint.aero
-  ```
-- `aero-forge serve --port 8000` is **not implemented**. Use:
-  ```bash
-  aero-forge web --port 8000 --no-browser
-  # or
-  python -m aero_forge.server --port 8000 --no-browser
-  ```
+## CLI commands
+- `aero-forge init-blueprint --path <dir>` works on recent branches. It auto-detects the workspace and writes `blueprint.aero`, reusing an existing blueprint if present.
+- `aero-forge serve --port 8000 --no-browser` is an alias for `aero-forge web`, but some branches have a click wiring bug that causes `TypeError: Context.__init__() got an unexpected keyword argument 'port'`. If `serve` fails, fall back to `aero-forge web --port 8000 --no-browser`.
+- `aero-forge web --port 8000 --no-browser` reliably starts the aiohttp server on port 8000.
 
-## API endpoints (current implementation)
+## API endpoints
 - `POST /api/chat` — workspace-aware copilot chat.
-  - If you use the `"message"` shorthand, the server **overwrites `chat.messages`** with only the user message, dropping the system prompt. This causes DeepSeek's JSON-mode request to fail and the model to fall back to plain text. To test the intended structured response, send the full `messages` array including the copilot system prompt.
-- `POST /api/builder/trigger` — **does not exist**. It returns `404 {"error": "Not found"}`.
-- `POST /api/build` — the actual trigger used by the web UI. It expects `prompt`, `provider`, `api_key`, and optionally `target_language` / `acceleration_policy`. It builds into a session sandbox (`~/.cache/aero-forge/sessions/` or `/tmp/aero-forge-sandboxes/<session_id>`), not directly into the supplied `workspace_path`.
+  - Sending only `"message"` should now preserve the copilot system prompt and return structured JSON with `display_text` containing an Architecture Overview and a build action.
+  - The response shape includes `action` (canonical, may have `type: "build"`), `clean_prompt`, and `legacy_action` (often `type: "SUGGEST_BUILD_PROMPT"`).
+- `POST /api/builder/trigger` — alias for `POST /api/build` on recent branches.
+  - Accepts `builder_prompt` (and also `prompt`) plus `workspace_path`, `provider`, `api_key`, `target_language`, `acceleration_policy`, `architecture`, and `session_id`.
+  - When `workspace_path` is supplied, the builder uses it as the output directory and seeds contracts from `<workspace_path>/blueprint.aero`.
+- `POST /api/build` — the original trigger, still used by the web UI.
 
-## Typical validation curl
-
+## Typical validation curl flow
 ```bash
 export DEEPSEEK_API_KEY=$DEEPSEEK_API_KEY
 
@@ -52,37 +47,40 @@ curl -s -X POST http://localhost:8000/api/chat \
     \"workspace_path\": \"/tmp/test_workspace\",
     \"provider\": \"deepseek\",
     \"api_key\": \"$DEEPSEEK_API_KEY\",
-    \"messages\": [
-      {\"role\": \"system\", \"content\": \"<copilot system prompt>\"},
-      {\"role\": \"user\", \"content\": \"Analyze blueprint.aero and recommend a high-performance C++ or Rust extension to accelerate array operations and matrix computations in this project.\"}
-    ]
-  }"
+    \"message\": \"Analyze blueprint.aero and recommend a high-performance C++ or Rust extension to accelerate array operations and matrix computations in this project.\"
+  }" | tee /tmp/chat_response.json
 ```
 
-Then to build:
-
+Then build:
 ```bash
-curl -s -X POST http://localhost:8000/api/build \
+BUILDER_PROMPT=$(jq -r '.clean_prompt // .action.clean_prompt // empty' /tmp/chat_response.json)
+TARGET=$(jq -r '.action.parameters.target // .legacy_action.params.target // "auto"' /tmp/chat_response.json)
+ACCEL=$(jq -r '.action.parameters.acceleration // .legacy_action.params.acceleration // "selective"' /tmp/chat_response.json)
+ARCH=$(jq -r '.action.parameters.architecture // .legacy_action.params.parameters.architecture // empty' /tmp/chat_response.json)
+
+curl -s -X POST http://localhost:8000/api/builder/trigger \
   -H "Content-Type: application/json" \
   -d "{
-    \"session_id\": \"<session_id from chat>\",
-    \"prompt\": \"<clean_prompt from chat action>\",
+    \"workspace_path\": \"/tmp/test_workspace\",
     \"provider\": \"deepseek\",
     \"api_key\": \"$DEEPSEEK_API_KEY\",
-    \"target_language\": \"hybrid_rust_python\",
-    \"acceleration_policy\": \"selective\"
-  }"
+    \"builder_prompt\": \"$BUILDER_PROMPT\",
+    \"target_language\": \"$TARGET\",
+    \"acceleration_policy\": \"$ACCEL\",
+    \"architecture\": \"$ARCH\"
+  }" | tee /tmp/builder_trigger_response.json
 ```
 
 ## What to check after a build
-- The response `status` should be `success`.
-- `result.build.success` should be `true`.
-- `result.build.test_passed` should equal `result.build.test_total`.
-- A compiled `.so` must exist in the session sandbox (`target/release/*.so` or `rust_core/target/release/*.so`).
-- If the build "skips Rust crate build" with `No accelerable contracts found`, the blueprint's ABI contracts likely contain `memory_model` values the validator rejects, or the signatures use unsupported C-pointer syntax. Inspect `/tmp/aero-forge-sandboxes/<session>/blueprint.aero`.
+- HTTP `200` and `result.build.success == true`.
+- `result.build.test_passed == result.build.test_total`.
+- A compiled native artifact (`*.so`, `*.pyd`, or `*.dylib`) exists in the build directory.
+- `pytest` passes in the workspace.
 
 ## Common failure signatures
-- `"Prompt must contain the word 'json' ... 'json_object'"` in server logs → the copilot system prompt was not sent to the LLM (message-list overwrite bug).
-- `Intent JSON schema validation failed: memory_model must be one of ...` → the LLM emitted an invalid `memory_model` value in the generated blueprint.
-- `generate_monorepo failed; falling back to PolyglotMaterializer` then `No accelerable contracts found` → the materializer cannot match the generated contracts to an accelerable Rust function and skips the crate build.
-- `matmul` returns `None` in tests → the `.so` was never built or the Python wrapper could not load it.
+- `TypeError: Context.__init__() got an unexpected keyword argument 'port'` when running `aero-forge serve` → the CLI alias is calling a click `Command` as a plain function.
+- `"Prompt must contain the word 'json' ... 'json_object'"` in server logs → the copilot system prompt was dropped before the LLM call.
+- `Intent JSON schema validation failed: memory_model must be one of ...` or `binding_framework must be one of ...` → the LLM emitted blueprint contract values that the schema does not accept.
+- `generate_monorepo failed; falling back to PolyglotMaterializer` followed by `Missing declared file src/native_ops/Cargo.toml from blueprint.aero` (or similar) → the planner's `module_graph` and the materializer's generated file paths disagree.
+- `assert None is not None` in generated tests → the Rust functions are stubs returning `()` and the Python wrapper returns `None` for all calls, including functions the tests expect to return a value.
+- `ModuleNotFoundError: No module named 'accelerator'` when running workspace tests → the workspace's package is not installed in editable mode (`pip install -e /tmp/test_workspace`) before `pytest`.

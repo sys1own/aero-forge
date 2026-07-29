@@ -1537,7 +1537,7 @@ def web(port: int, no_browser: bool, verbose: bool) -> None:
 @click.option("--verbose", "-v", is_flag=True, help="Show debug logs.")
 def serve(port: int, no_browser: bool, verbose: bool) -> None:
     """Alias for ``aero-forge web``."""
-    web(port=port, no_browser=no_browser, verbose=verbose)
+    web.callback(port=port, no_browser=no_browser, verbose=verbose)
 
 
 @main.command(name="reset")
