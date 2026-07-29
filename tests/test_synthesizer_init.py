@@ -7,7 +7,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from aero_forge.blueprint.schema import BlueprintStatus, BlueprintV3, write_v3_blueprint
-from aero_forge.blueprint.synthesizer import LLMBlueprintSynthesizer, synthesize_v3_blueprint
+from aero_forge.blueprint.synthesizer import (
+    LLMBlueprintSynthesizer,
+    sanitize_llm_blueprint_output,
+    synthesize_v3_blueprint,
+)
 
 
 def test_synthesizer_falls_back_to_default_provider(monkeypatch: Any) -> None:
@@ -116,3 +120,84 @@ def test_synthesize_v3_blueprint_passes_api_key_and_override(monkeypatch: Any, t
     assert captured["api_key"] == "sk-test"
     assert captured["config_override"] == {"dummy": "value"}
     assert output.is_file()
+
+
+def test_synthesizer_parses_toml_output(tmp_path: Path) -> None:
+    """Synthesize a blueprint from TOML-formatted LLM output."""
+    fake_client = MagicMock()
+    fake_client.generate.return_value = (
+        'metadata = { schema_version = "3.0.0", project_name = "toml_project", '
+        'status = "finalized", generation_method = "llm_synthesized", transferable = true }\n'
+        "toolchains = []\n"
+        "build_pipeline = []\n"
+        "abi_contracts = []\n"
+        "execution_strategy = {}\n"
+        "verification_nodes = []\n"
+    )
+
+    (tmp_path / "main.py").write_text("print('hello')\n")
+    synthesizer = LLMBlueprintSynthesizer(llm=fake_client)
+    result = synthesizer.synthesize(tmp_path, output_path=tmp_path / "blueprint.aero")
+
+    assert result.metadata.project_name == "toml_project"
+    assert result.metadata.status == BlueprintStatus.finalized
+    assert (tmp_path / "blueprint.aero").is_file()
+
+
+def test_synthesizer_parses_markdown_yaml_output(tmp_path: Path) -> None:
+    """Synthesize a blueprint from markdown-wrapped YAML output with scalar lines."""
+    raw = (
+        "Here is the blueprint you requested:\n"
+        "```yaml\n"
+        "metadata:\n"
+        '  schema_version: "3.0.0"\n'
+        '  project_name: "yaml_project"\n'
+        '  status: "finalized"\n'
+        '  generation_method: "llm_synthesized"\n'
+        "  transferable: true\n"
+        "toolchains: []\n"
+        "build_pipeline: []\n"
+        "abi_contracts: []\n"
+        "execution_strategy: {}\n"
+        "verification_nodes: []\n"
+        "```\n"
+        "Hope this helps!\n"
+    )
+
+    fake_client = MagicMock()
+    fake_client.generate.return_value = raw
+
+    (tmp_path / "main.py").write_text("print('hello')\n")
+    synthesizer = LLMBlueprintSynthesizer(llm=fake_client)
+    result = synthesizer.synthesize(tmp_path, output_path=tmp_path / "blueprint.aero")
+
+    assert result.metadata.project_name == "yaml_project"
+    assert result.metadata.status == BlueprintStatus.finalized
+    assert (tmp_path / "blueprint.aero").is_file()
+
+
+def test_synthesizer_fallback_on_garbage_output(tmp_path: Path) -> None:
+    """Fallback to a workspace-scanned blueprint when the LLM returns garbage."""
+    fake_client = MagicMock()
+    fake_client.generate.return_value = "This is complete garbage, not a blueprint."
+
+    (tmp_path / "main.py").write_text("print('hello')\n")
+    synthesizer = LLMBlueprintSynthesizer(llm=fake_client)
+    result = synthesizer.synthesize(tmp_path, output_path=tmp_path / "blueprint.aero")
+
+    assert (tmp_path / "blueprint.aero").is_file()
+    assert result.metadata.status == BlueprintStatus.finalized
+    assert result.metadata.transferable is True
+    assert result.build_pipeline
+
+
+def test_sanitize_llm_blueprint_output_parses_toml_and_yaml() -> None:
+    """The sanitizer strips fences and parses TOML and YAML variants."""
+    toml_text = (
+        'project_name = "sanitized"\n'
+        "toolchains = []\n"
+    )
+    assert sanitize_llm_blueprint_output(toml_text)["project_name"] == "sanitized"
+
+    yaml_text = "```yaml\nproject_name: fenced\n```\n"
+    assert sanitize_llm_blueprint_output(yaml_text)["project_name"] == "fenced"
