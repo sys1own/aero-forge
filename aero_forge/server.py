@@ -603,9 +603,10 @@ def _build_web_response(
     session_dir: Path,
     result: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Wrap a generation/build result with structured file updates and tree changes."""
+    """Wrap a generation/build result with structured file updates, tree changes, and runnable commands."""
     files = _build_file_list(session_dir)
     tree = _build_tree(session_dir)
+    commands = detect_runnable_commands(session_dir)
     build = result.get("build") or {}
     variants = result.get("variants", [])
     if variants:
@@ -626,6 +627,7 @@ def _build_web_response(
         "status": status,
         "files": files,
         "tree": tree,
+        "commands": commands,
         "result": result,
         **metadata,
     }
@@ -738,12 +740,16 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_chat()
             if path == "/api/blueprint/synthesize":
                 return self._handle_blueprint_synthesize()
-            if path == "/api/upload-zip":
+            if path == "/api/upload" or path == "/api/upload-zip":
                 return self._handle_upload_zip()
-            if path == "/api/upload-aeroc":
+            if path == "/api/unpack" or path == "/api/upload-aeroc":
                 return self._handle_upload_aeroc()
             if path == "/api/files/upload":
                 return self._handle_files_upload()
+            if path == "/api/generate" or path == "/api/build":
+                return self._handle_build()
+            if path == "/api/update" or path == "/api/workspace/regenerate_blueprint":
+                return self._handle_regenerate_blueprint()
             if path == "/api/save-file":
                 return self._handle_save_file()
             if path == "/api/create-node":
@@ -1398,16 +1404,17 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
 
             _notify_tree_changed(session_id)
 
-            runnable_commands = detect_runnable_commands(session_dir)
+            commands = detect_runnable_commands(session_dir)
 
             return _send_json(
                 self,
                 200,
                 {
                     "session_id": session_id,
-                    "status": "uploaded",
+                    "status": "success",
                     "files": _build_tree(session_dir),
-                    "runnable_commands": runnable_commands,
+                    "commands": commands,
+                    "runnable_commands": commands,
                     "blueprint_source": "auto_generated",
                     "auto_initialized": blueprint_generated,
                     "message": "ZIP extracted & normalized to blueprint.aero",
@@ -1477,16 +1484,17 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 logger.warning("Auto-build after .aeroc upload failed: %s", exc)
 
             _notify_tree_changed(session_id)
-            runnable_commands = detect_runnable_commands(target_dir)
+            commands = detect_runnable_commands(target_dir)
             return _send_json(
                 self,
                 200,
                 {
                     "session_id": session_id,
-                    "status": "uploaded",
+                    "status": "success",
                     "build": build_result,
                     "files": _build_tree(session_dir),
-                    "runnable_commands": runnable_commands,
+                    "commands": commands,
+                    "runnable_commands": commands,
                     "message": "Aeroc extracted and build pipeline triggered",
                 },
             )
@@ -1720,15 +1728,18 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     set_session_blueprint_metadata(session_id, source="user_drop", auto_initialized=False)
 
             _notify_tree_changed(session_id)
+            commands = detect_runnable_commands(session_dir)
 
             return _send_json(
                 self,
                 200,
                 {
                     "session_id": session_id,
-                    "status": "uploaded",
+                    "status": "success",
                     "path": str(dest.relative_to(session_dir)),
                     "tree": _build_tree(session_dir),
+                    "commands": commands,
+                    "runnable_commands": commands,
                 },
             )
         except ValueError as exc:
@@ -1814,6 +1825,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             )
 
             _notify_tree_changed(session_id)
+            commands = detect_runnable_commands(workspace_path)
 
             return _send_json(
                 self,
@@ -1825,6 +1837,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     "logs": result.get("logs", []),
                     "backup_dir": result.get("backup_dir"),
                     "tree": _build_tree(workspace_path),
+                    "commands": commands,
+                    "runnable_commands": commands,
                     "blueprint_source": "user_drop",
                     "auto_initialized": True,
                 },

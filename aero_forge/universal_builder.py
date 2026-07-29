@@ -573,9 +573,9 @@ def build_universal_project(
     # existing workspace blueprint does, merge them so the materializer has
     # real functions to accelerate.
     if not blueprint.contracts and existing_contracts:
-        blueprint = blueprint.model_copy(update={"contracts": existing_contracts})
+        blueprint.contracts = existing_contracts
     if not blueprint.manifest and existing_manifest:
-        blueprint = blueprint.model_copy(update={"manifest": existing_manifest})
+        blueprint.manifest = existing_manifest
 
     # Force the manifest to the deterministic default for the chosen architecture
     # so emitted files match the planner's declarations and pre-write validation
@@ -584,7 +584,8 @@ def build_universal_project(
         ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
         for e in default_manifest_for_architecture(blueprint.architecture, project_name or blueprint.project or "generated")
     ]
-    blueprint = blueprint.model_copy(update={"manifest": deterministic_manifest, "module_graph": []})
+    blueprint.manifest = deterministic_manifest
+    blueprint.module_graph = []
 
     if progress_callback:
         progress_callback(f"Architecture: {blueprint.architecture}; building...")
