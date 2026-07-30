@@ -81,6 +81,7 @@ from aero_forge.builder.aeroc_compiler import (
     compile_blueprint_to_aeroc,
     compile_directory_to_aeroc,
 )
+from aero_forge.builder.executor import is_artifact_path, should_report_path
 from aero_forge.materializer import unpack_aeroc_file
 from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_CPP_PYTHON,
@@ -444,9 +445,17 @@ SKIP_DIRS = {
     ".variant_0",
     ".variant_1",
     ".variant_2",
+    ".aero_backup",
+    ".venv",
+    "venv",
     "target",
     ".cargo",
     ".pytest_cache",
+    ".mypy_cache",
+    ".tox",
+    "dist",
+    "build",
+    "node_modules",
 }
 
 _HUMAN_RELEVANT_EXTS = {
@@ -540,8 +549,6 @@ def _is_interesting_file(rel: Path) -> bool:
         return False
     if name.endswith(".aeroc") or name.endswith(".aerozip"):
         return False
-    if parts[0] == "dist":
-        return True
     ext = rel.suffix.lower()
     if ext in _HUMAN_RELEVANT_EXTS or ext in _BINARY_EXTS:
         return True
@@ -600,11 +607,11 @@ def _build_tree(directory: Path, rel: Optional[Path] = None) -> Dict[str, Any]:
     for path in sorted(directory.iterdir()):
         child_rel = rel / path.name
         if path.is_dir():
-            if path.name in SKIP_DIRS:
+            if path.name in SKIP_DIRS or is_artifact_path(child_rel):
                 continue
             node["children"].append(_build_tree(path, child_rel))
         else:
-            if not _is_interesting_file(child_rel):
+            if not _is_interesting_file(child_rel) or not should_report_path(child_rel, directory):
                 continue
             node["children"].append(
                 {
@@ -627,7 +634,7 @@ def _build_file_list(directory: Path) -> List[Dict[str, Any]]:
             rel = path.relative_to(directory)
         except ValueError:
             continue
-        if not _is_interesting_file(rel):
+        if not _is_interesting_file(rel) or not should_report_path(rel, directory):
             continue
         files.append(
             {

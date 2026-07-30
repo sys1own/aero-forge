@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from aero_forge.build_summary import format_build_summary
+from aero_forge.builder.executor import ExecutionReport
 from aero_forge.bundle_repo import bundle_to_xml, bundle_workspace, format_context_block
 from aero_forge.config import ConfigOverride, Tier
 from aero_forge.context_bundler import ContextBundler, get_blueprint_status
@@ -1320,7 +1321,9 @@ class ChatSession:
                 self._progress(f"Healed {path.relative_to(self.output_dir)}")
             cargo_result, pytest_rc, pytest_stdout, pytest_stderr, tests_passed = self._build_and_test_workspace()
 
-        file_list = sorted(str(p.relative_to(self.output_dir)) for p in self.output_dir.rglob("*") if p.is_file())
+        file_list = ExecutionReport(self.output_dir).filter_paths(
+            sorted(str(p.relative_to(self.output_dir)) for p in self.output_dir.rglob("*") if p.is_file())
+        )
         result = {
             "success": tests_passed,
             "build": {

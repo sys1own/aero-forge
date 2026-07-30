@@ -253,6 +253,8 @@ Use a Rust matrix core.
     assert action["type"] == "SUGGEST_BUILD_PROMPT"
     assert action["params"]["target"] == "hybrid_rust_python"
     assert "matmul" in action["params"]["prompt"]
+    assert "Target:" not in action["params"]["prompt"]
+    assert "Acceleration:" not in action["params"]["prompt"]
 
 
 def test_format_copilot_response_wraps_suggest_build_prompt() -> None:
@@ -268,6 +270,8 @@ def test_format_copilot_response_wraps_suggest_build_prompt() -> None:
     assert action is not None
     assert action["type"] == "SUGGEST_BUILD_PROMPT"
     assert "Force Native Bridge" in action["params"]["acceleration"]
+    assert "Target:" not in action["params"]["prompt"]
+    assert "Acceleration:" not in action["params"]["prompt"]
 
 
 def test_format_copilot_response_extracts_build_prompt_fence() -> None:
@@ -285,6 +289,8 @@ Build a hybrid_rust_python project with a Rust `sum` kernel and PyO3 wrapper. Ta
     assert action is not None
     assert action["type"] == "SUGGEST_BUILD_PROMPT"
     assert "sum" in action["params"]["prompt"]
+    assert "Target:" not in action["params"]["prompt"]
+    assert "Acceleration:" not in action["params"]["prompt"]
 
 
 def test_copilot_system_prompt_mandates_build_prompt_block() -> None:

@@ -37,6 +37,8 @@ STRICT OPERATIONAL RULES:
 3. MAP ALL CLI FLAGS EXPLICITLY IN 'execution_strategy.cli_contract'. YOU MUST INFER ARGUMENT TYPES, SHORT FLAGS, DEFAULT VALUES, AND DESTINATION VARIABLES.
 4. MAP ALL CROSS-LANGUAGE FUNCTION CALLS TO EXPLICIT 'abi_contracts'. DEFINE INPUT/OUTPUT DATA TYPES USING C-ABI PRESERVED KEYWORDS (u32, i32, usize, f64, double*, int32_t).
 5. CREATE AT LEAST TWO 'verification_nodes' THAT TEST CLI ARGUMENT PARSING AND NUMERICAL OUTPUT METRICS.
+6. FILE BOUNDARY CONSTRAINT: ONLY list files in 'module_graph' that are explicitly required by the prompt or are minimal build config files (e.g. 'Cargo.toml', 'pyproject.toml', 'CMakeLists.txt'). DO NOT rewrite, regenerate, or reference unrelated source files, CLI files, tests, or documentation unless the user explicitly asks for them.
+7. ARTIFACT HYGIENE: NEVER stage, commit, or list generated binary targets ('*.so', '*.pyd', '*.dll', '*.dylib', '*.wasm', '*.whl'), virtual environments ('.venv/', 'venv/', 'pyvenv.cfg'), distribution metadata ('*.egg-info/', 'dist/', 'build/'), or package archives ('*.aeroc', '*.aerozip', '*.zip', '*.tar*') as project deliverables.
 
 The JSON must conform to BlueprintSchemaV2.0.0 with these top-level keys:
 - metadata: {schema_version: "2.0.0", project_name: "...", domain_target: "..."}
@@ -208,7 +210,7 @@ def _normalize_v2_data(data: Any) -> Any:
         if c_alias is None:
             normalized_abi["c_symbol_alias"] = ""
 
-        memory = str(normalized_abi.get("memory_model") or "").lower().strip().replace("-", "_")
+        memory = re.sub(r"[^a-z0-9_]", "_", str(normalized_abi.get("memory_model") or "").lower().strip())
         memory_synonyms = {
             "owned": "callee_allocates",
             "owned_results": "callee_allocates",
@@ -218,6 +220,10 @@ def _normalize_v2_data(data: Any) -> Any:
             "callee": "callee_allocates",
             "manual": "caller_allocates",
             "auto": "callee_allocates",
+            "automatic": "callee_allocates",
+            "stack": "callee_allocates",
+            "stack_automatic": "callee_allocates",
+            "stack_automatic_conversion": "callee_allocates",
             "python_gc": "callee_allocates",
             "gc": "callee_allocates",
             "ptr_with_length": "caller_allocates",
@@ -226,7 +232,10 @@ def _normalize_v2_data(data: Any) -> Any:
             "c_owned": "callee_allocates",
             "rust_owned": "callee_allocates",
         }
-        normalized_abi["memory_model"] = memory_synonyms.get(memory, memory) or "caller_allocates"
+        memory = memory_synonyms.get(memory, memory) or "caller_allocates"
+        if memory not in {"callee_allocates", "caller_allocates", "shared_pyo3"}:
+            memory = "caller_allocates"
+        normalized_abi["memory_model"] = memory
         normalized_abis.append(normalized_abi)
     data["abi_contracts"] = normalized_abis
 

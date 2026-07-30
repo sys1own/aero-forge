@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from aero_forge.blueprint import Blueprint, ContractEntry, ManifestEntry, parse_blueprint, write_blueprint
 from aero_forge.builder.aeroc_compiler import compile_directory_to_aeroc
+from aero_forge.builder.executor import ExecutionReport
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
 from aero_forge.monorepo import generate_monorepo
@@ -443,7 +444,9 @@ def _run_polyglot_materializer(
         f"--- Python test output ---\n"
         f"{pytest_result.stdout}\n{pytest_result.stderr}"
     ).strip()
-    files = sorted(str(p.relative_to(output_dir)) for p in output_dir.rglob("*") if p.is_file())
+    files = ExecutionReport(output_dir).filter_paths(
+        sorted(str(p.relative_to(output_dir)) for p in output_dir.rglob("*") if p.is_file())
+    )
     return {
         "success": pytest_result.returncode == 0,
         "project_name": project_name,
@@ -483,7 +486,9 @@ def _run_hybrid_cpp_rust_materializer(
             "materializer": "HybridCppRustMaterializer",
         }
     write_blueprint(updated, output_dir / "blueprint.aero")
-    files = sorted(str(p.relative_to(output_dir)) for p in output_dir.rglob("*") if p.is_file())
+    files = ExecutionReport(output_dir).filter_paths(
+        sorted(str(p.relative_to(output_dir)) for p in output_dir.rglob("*") if p.is_file())
+    )
     return {
         "success": "BUILD: hybrid C++/Rust binary compiled successfully" in materializer.build_logs
         or (
@@ -696,10 +701,12 @@ def build_universal_project(
         "features": classification.features,
     }
     if not result.get("files"):
-        result["files"] = sorted(
-            str(p.relative_to(output_dir))
-            for p in output_dir.rglob("*")
-            if p.is_file()
+        result["files"] = ExecutionReport(output_dir).filter_paths(
+            sorted(
+                str(p.relative_to(output_dir))
+                for p in output_dir.rglob("*")
+                if p.is_file()
+            )
         )
 
     # Produce a portable standalone ``workspace.aeroc`` artifact from the materialized tree.
