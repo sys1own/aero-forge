@@ -273,19 +273,34 @@ def _session_path(session_id: str) -> Path:
     return SESSION_DIR / f"{session_id}.json"
 
 
-def get_session_metadata(session_id: str) -> Dict[str, Any]:
+def get_session_metadata(session_id: str, workspace: Optional[Path] = None) -> Dict[str, Any]:
     """Return blueprint provenance and runtime metadata for a session."""
     path = _session_path(session_id)
     if not path.exists():
-        return {"blueprint_source": "unknown", "auto_initialized": False, "is_building": False, "is_synthesizing": False}
+        defaults = {"blueprint_source": "unknown", "auto_initialized": False, "is_building": False, "is_synthesizing": False, "has_aeroc": False, "initialized_from_aeroc": False}
+        if workspace:
+            defaults["has_aeroc"] = (workspace / "workspace.aeroc").is_file()
+        return defaults
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return {"blueprint_source": "unknown", "auto_initialized": False, "is_building": False, "is_synthesizing": False}
+        data = {}
     data.setdefault("blueprint_source", "unknown")
     data.setdefault("auto_initialized", False)
     data.setdefault("is_building", False)
     data.setdefault("is_synthesizing", False)
+    source = data.get("blueprint_source", "unknown")
+    data["initialized_from_aeroc"] = source == "aeroc_archive"
+    data["has_aeroc"] = False
+    if workspace:
+        data["has_aeroc"] = (workspace / "workspace.aeroc").is_file()
+    else:
+        try:
+            from aero_forge.sandbox.manager import SandboxManager
+            workspace = SandboxManager().create_session_sandbox(session_id)
+            data["has_aeroc"] = (workspace / "workspace.aeroc").is_file()
+        except Exception:
+            data["has_aeroc"] = False
     return data
 
 

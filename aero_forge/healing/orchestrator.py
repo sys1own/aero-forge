@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from aero_forge.bundle_repo import bundle_workspace
+from aero_forge.builder.feedback import FeedbackParser
+from aero_forge.builder.orchestration import ensure_typing_imports
 from aero_forge.healing.evaluator import HealingStrategy, LogEvaluator
 from aero_forge.healing.llm_healer import LLMHealer
 from aero_forge.healing.router import try_auto_fix
@@ -225,6 +227,26 @@ class HealingOrchestrator:
             }
 
         original = target_path.read_text(encoding="utf-8")
+
+        # Fast-path: missing typing symbols such as Any/List/Dict/Optional.
+        if target_path.suffix == ".py":
+            parser = FeedbackParser(self.workspace)
+            parsed = parser.parse_traceback(error_logs)
+            if parsed.get("missing_symbol") in {"Any", "List", "Dict", "Optional"}:
+                guarded = ensure_typing_imports(original)
+                if guarded != original:
+                    target_path.write_text(guarded, encoding="utf-8")
+                    self.log_callback("info", "HEAL", f"Injected typing imports into {target}")
+                    return {
+                        "status": "success",
+                        "strategy_used": HealingStrategy.AST.value,
+                        "patched_files": [target],
+                        "error_message": None,
+                        "target_file": target,
+                        "diff": "",
+                        "diagnosis": diagnosis,
+                    }
+
         try:
             patched = try_auto_fix(error_logs, original)
         except Exception as exc:  # pragma: no cover - defensive
@@ -298,6 +320,15 @@ class HealingOrchestrator:
         previous_attempts: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         self.log_callback("info", "HEAL", "Building full-workspace context for LLM healing...")
+        from aero_forge.builder.orchestration import tag_files_for_feedback
+
+        parser = FeedbackParser(self.workspace)
+        normalized_logs = parser.normalize_paths(error_logs)
+        file_tags = tag_files_for_feedback(self.workspace, normalized_logs)
+        tag_block = "\n".join(file_tags) if file_tags else ""
+        if tag_block:
+            normalized_logs = f"### Required file actions\n{tag_block}\n\n{normalized_logs}"
+
         workspace_context = bundle_workspace(self.workspace)
         healer = LLMHealer(
             provider=self.llm_provider,
@@ -306,7 +337,7 @@ class HealingOrchestrator:
         )
         result = healer.heal(
             self.workspace,
-            error_logs,
+            normalized_logs,
             command=command,
             exit_code=exit_code,
             diagnosis=diagnosis,

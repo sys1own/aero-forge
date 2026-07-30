@@ -669,7 +669,7 @@ def _build_web_response(
             status = "failure"
     else:
         status = "success" if build.get("success") else "failure"
-    metadata = get_session_metadata(session_id)
+    metadata = get_session_metadata(session_id, session_dir)
     return {
         "session_id": session_id,
         "status": status,
@@ -767,6 +767,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_blueprint_templates()
             if path == "/api/blueprint/status":
                 return self._handle_blueprint_status(query)
+            if path == "/api/workspace/status":
+                return self._handle_workspace_status(query)
             if path in ("/favicon.ico", "/static/logo.png"):
                 return self._serve_static("/logo.png")
 
@@ -822,7 +824,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_workspace_evaluate_error()
             if path == "/api/workspace/heal":
                 return self._handle_workspace_heal()
-            if path == "/api/workspace/heal/llm":
+            if path == "/api/workspace/heal/llm" or path == "/api/build/feedback":
                 return self._handle_workspace_heal_llm()
             if path == "/api/workspace/clean":
                 return self._handle_workspace_clean()
@@ -1332,13 +1334,31 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             },
         )
 
+    def _handle_workspace_status(self, query: Dict[str, List[str]]) -> None:
+        session_id = _first(query, "session_id")
+        if not session_id:
+            return _send_json(self, 400, {"error": "Missing 'session_id'"})
+
+        session_dir = _session_dir(session_id)
+        metadata = get_session_metadata(session_id, session_dir)
+        return _send_json(
+            self,
+            200,
+            {
+                "session_id": session_id,
+                "workspace": str(session_dir),
+                "status": "ok",
+                **metadata,
+            },
+        )
+
     def _handle_files(self, query: Dict[str, List[str]]) -> None:
         session_id = _first(query, "session_id")
         if not session_id:
             return _send_json(self, 400, {"error": "Missing 'session_id'"})
 
         session_dir = _session_dir(session_id)
-        metadata = get_session_metadata(session_id)
+        metadata = get_session_metadata(session_id, session_dir)
 
         return _send_json(
             self,
@@ -2138,7 +2158,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     {"error": f"Sandbox for session '{session_id}' does not exist"},
                 )
 
-            metadata = get_session_metadata(session_id)
+            metadata = get_session_metadata(session_id, session_dir)
             if metadata.get("is_building") or metadata.get("is_synthesizing"):
                 return _send_json(
                     self,
@@ -2316,6 +2336,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             command = body.get("command", "")
             exit_code = body.get("exit_code", 1)
             log_text = body.get("log_text", "")
+            prompt = body.get("prompt", "")
             if not session_id:
                 return _send_json(self, 400, {"error": "Missing 'session_id'"})
 
@@ -2332,9 +2353,6 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             env["AERO_FORGE_SESSION_DIR"] = str(session_dir)
             env["AERO_FORGE_ACCEL_LOG"] = str(session_dir / ".aero_forge_accel.log")
 
-            evaluator = LogEvaluator()
-            diagnosis = evaluator.evaluate_log(command, exit_code, log_text)
-
             logs: list[str] = []
 
             def _log(level: str, prefix: str, message: str) -> None:
@@ -2346,19 +2364,32 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 except OSError:
                     pass
 
-            failure_context = {
-                "command": command,
-                "exit_code": exit_code,
-                "log_text": log_text,
-                "diagnosis": diagnosis,
-            }
+            from aero_forge.builder.context import WorkspaceContext
+            from aero_forge.builder.feedback import FeedbackParser
+            from aero_forge.builder.orchestration import tag_files_for_feedback
 
-            _log("info", "HEAL_LLM", "Building workspace context...")
-            ContextBuilder(session_dir).build_failure_context(command, exit_code, log_text, diagnosis)
-            _log("info", "HEAL_LLM", "Workspace context packaged.")
+            ctx = WorkspaceContext(session_dir)
+            failure_ctx = ctx.failure_context(command, exit_code, log_text)
+            feedback = FeedbackParser(session_dir).parse_traceback(log_text)
+            tags = tag_files_for_feedback(session_dir, log_text, user_prompt=prompt)
+            _log("info", "HEAL_LLM", f"Workspace context packaged; tags: {tags}")
 
-            healer = LLMHealer(log_callback=_log)
-            fix_result = healer.generate_and_apply_fix(session_dir, failure_context)
+            provider = _resolve_llm_provider(body)
+            model = body.get("model") or os.getenv("AERO_FORGE_MODEL")
+            orchestrator = HealingOrchestrator(
+                session_dir,
+                llm_provider=provider,
+                llm_model=model,
+                log_callback=_log,
+            )
+            fix_result = orchestrator.heal(
+                error_logs=log_text,
+                command=command,
+                exit_code=exit_code,
+                target_file=body.get("target_file") or failure_ctx.get("affected_files", [None])[0] or None,
+                force_llm=bool(body.get("force_llm", False)),
+            )
+
             if fix_result.get("status") != "success":
                 return _send_json(
                     self,
@@ -2367,13 +2398,15 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                         "session_id": session_id,
                         "status": "failed",
                         "verified": False,
-                        "reason": fix_result.get("reason", "No directives generated."),
-                        "diagnosis": diagnosis,
+                        "reason": fix_result.get("error_message", "No directives generated."),
+                        "diagnosis": fix_result.get("diagnosis", {}),
+                        "tags": tags,
+                        "feedback": feedback,
                         "logs": logs,
                     },
                 )
 
-            _log("info", "HEAL_LLM", f"Applied {len(fix_result['applied'])} directive(s).")
+            _log("info", "HEAL_LLM", f"Applied patches to {fix_result.get('patched_files', [])}.")
 
             resolved, proc_env, _ = asyncio.run(
                 sandbox_runner.resolve_command(
@@ -2396,9 +2429,10 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                         "status": "success",
                         "verified": True,
                         "output": run_result["output"],
-                        "directives": fix_result["directives"],
-                        "applied": fix_result["applied"],
-                        "diagnosis": diagnosis,
+                        "patched_files": fix_result.get("patched_files", []),
+                        "tags": tags,
+                        "feedback": feedback,
+                        "diagnosis": fix_result.get("diagnosis", {}),
                         "logs": logs,
                     },
                 )
@@ -2411,10 +2445,11 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     "status": "failed",
                     "verified": False,
                     "output": run_result["output"],
-                    "reason": "Re-run still failed after applying LLM directives.",
-                    "directives": fix_result["directives"],
-                    "applied": fix_result["applied"],
-                    "diagnosis": diagnosis,
+                    "reason": "Re-run still failed after applying directives.",
+                    "patched_files": fix_result.get("patched_files", []),
+                    "tags": tags,
+                    "feedback": feedback,
+                    "diagnosis": fix_result.get("diagnosis", {}),
                     "logs": logs,
                 },
             )
@@ -2969,6 +3004,17 @@ async def _aiohttp_ws_handler(request: web.Request) -> web.WebSocketResponse:
     query = parse_qs(request.query_string)
     session_id = _first(query, "session_id") or str(uuid.uuid4())
     _register_websocket(session_id, ws)
+    session_dir = _session_dir(session_id)
+    try:
+        metadata = get_session_metadata(session_id, session_dir)
+        await ws.send_str(json.dumps({
+            "type": "status",
+            "has_aeroc": metadata.get("has_aeroc", False),
+            "initialized_from_aeroc": metadata.get("initialized_from_aeroc", False),
+            "is_building": metadata.get("is_building", False),
+        }))
+    except Exception as exc:
+        logger.debug("Could not send initial status on WS: %s", exc)
     adapter = _AioWSAdapter(request, ws)
     try:
         await _handle_terminal(adapter)

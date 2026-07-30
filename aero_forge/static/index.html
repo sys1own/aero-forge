@@ -793,6 +793,9 @@
       treeExpanded: new Set(),
       blueprintSource: 'unknown',
       autoInitialized: false,
+      initializedFromAeroc: false,
+      hasAeroc: false,
+      isBuilding: false,
       blueprintReady: false,
       sourceCount: 0,
       commands: [],
@@ -1033,12 +1036,18 @@
         _treeSnapshot = snapshot;
         state.blueprintSource = data.blueprint_source || 'unknown';
         state.autoInitialized = !!data.auto_initialized;
+        state.initializedFromAeroc = !!data.initialized_from_aeroc;
+        state.hasAeroc = !!data.has_aeroc;
+        state.isBuilding = !!data.is_building;
         const scrollTop = ui.fileTree.scrollTop;
         const selected = state.activeTab ? state.activeTab.path : null;
-        ui.fileTree.innerHTML = '';
-        ui.fileTree.appendChild(renderNode(data.tree, true));
-        if (selected) setTreeActive(selected);
-        ui.fileTree.scrollTop = scrollTop;
+        const rootNode = renderNode(data.tree, true);
+        requestAnimationFrame(() => {
+          ui.fileTree.innerHTML = '';
+          if (rootNode) ui.fileTree.appendChild(rootNode);
+          if (selected) setTreeActive(selected);
+          ui.fileTree.scrollTop = scrollTop;
+        });
         renderBlueprintBanner(data.tree);
         await updateBlueprintStatus();
         renderBlueprintBanner(data.tree);
@@ -1063,17 +1072,16 @@
 
     function renderBlueprintBanner(tree) {
       if (!ui.blueprintInitBanner) return;
-      const hasBlueprint = Array.from(ui.fileTree.querySelectorAll('.tree-node.file')).some(n => (n.querySelector('.node-name')?.textContent || '') === 'blueprint.aero');
-      if (!hasBlueprint) {
+      const hasBlueprint = tree && Array.isArray(tree.children) && tree.children.some(n => n.type === 'file' && n.name === 'blueprint.aero');
+      if (!hasBlueprint && !state.hasAeroc) {
         ui.blueprintInitBanner.style.display = 'none';
         return;
       }
 
-      const archiveSources = ['aeroc_archive', 'zip_archive'];
-      const isArchive = archiveSources.includes(state.blueprintSource);
       ui.blueprintInitBanner.classList.remove('toast-archive', 'toast-draft', 'interactive');
 
-      if (isArchive || state.autoInitialized) {
+      const isArchive = state.initializedFromAeroc === true || state.blueprintSource === 'aeroc_archive' || state.blueprintSource === 'zip_archive';
+      if (isArchive && state.hasAeroc) {
         // Materialized code came from an uploaded archive; show a non-blocking toast that auto-dismisses.
         ui.blueprintInitBanner.style.display = 'block';
         ui.blueprintInitBanner.classList.add('toast-archive');
@@ -1486,6 +1494,12 @@
         if (typeof raw === 'string' && raw.trim().startsWith('{')) {
           try {
             const msg = JSON.parse(raw);
+            if (msg.type === 'status') {
+              if (typeof msg.has_aeroc === 'boolean') state.hasAeroc = msg.has_aeroc;
+              if (typeof msg.initialized_from_aeroc === 'boolean') state.initializedFromAeroc = msg.initialized_from_aeroc;
+              if (typeof msg.is_building === 'boolean') state.isBuilding = msg.is_building;
+              return;
+            }
             if (msg.type === 'tree_updated' || msg.status === 'building') {
               if (msg.type === 'tree_updated') refreshTree();
               return;
