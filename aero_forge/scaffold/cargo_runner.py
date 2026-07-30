@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -10,7 +11,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 logger = logging.getLogger("aero_forge.cargo")
 
@@ -325,3 +326,144 @@ def maturin_build(
         env=env,
         timeout=timeout,
     )
+
+
+def _crate_name(crate_root: Path) -> str:
+    """Read the crate name from ``Cargo.toml`` (``[lib]`` name, then ``[package]``)."""
+    cargo_toml = crate_root / "Cargo.toml"
+    if cargo_toml.is_file():
+        text = cargo_toml.read_text(encoding="utf-8")
+        lib_match = re.search(r"\[lib\][^\[]*?name\s*=\s*\"([^\"]+)\"", text, re.DOTALL)
+        if lib_match:
+            return lib_match.group(1)
+        pkg_match = re.search(r"\[package\][^\[]*?name\s*=\s*\"([^\"]+)\"", text, re.DOTALL)
+        if pkg_match:
+            return pkg_match.group(1)
+    return crate_root.name
+
+
+def _discover_pyo3_functions(crate_root: Path) -> List[Tuple[str, str, str]]:
+    """Scan ``src/**/*.rs`` for ``#[pyfunction(name = ...)]`` declarations.
+
+    Returns a list of ``(module_path, rust_name, python_name)`` tuples.  The
+    module path is the Rust path relative to ``src`` (e.g. ``ops::matmul``).
+    """
+    src = crate_root / "src"
+    functions: List[Tuple[str, str, str]] = []
+    if not src.is_dir():
+        return functions
+    for rs in src.rglob("*.rs"):
+        if rs.name == "lib.rs" or rs.name == "mod.rs":
+            continue
+        rel = rs.relative_to(src)
+        mod_path = "::".join(rel.with_suffix("").parts)
+        text = rs.read_text(encoding="utf-8")
+        # Find every #[pyfunction(...)] attribute and the function it decorates.
+        for m in re.finditer(r"#\[pyfunction(?:\s*\((.*?)\))?\]", text, re.DOTALL):
+            attr_body = m.group(1) or ""
+            py_name = ""
+            name_m = re.search(r'name\s*=\s*"([^"]+)"', attr_body)
+            if name_m:
+                py_name = name_m.group(1)
+            fn_m = re.search(r"(?:pub\s+)?fn\s+(\w+)\s*\(", text[m.end():])
+            if not fn_m:
+                continue
+            rust_name = fn_m.group(1)
+            if not py_name:
+                py_name = rust_name
+            functions.append((mod_path, rust_name, py_name))
+    return functions
+
+
+def _regenerate_lib_rs(crate_root: Path, crate_name: str, functions: List[Tuple[str, str, str]]) -> Path:
+    """Rewrite ``src/lib.rs`` so it references the real exported function symbols."""
+    lib_rs = crate_root / "src" / "lib.rs"
+    lib_rs.parent.mkdir(parents=True, exist_ok=True)
+    top_mods = sorted({path.split("::")[0] for path, _, _ in functions if path})
+    mod_lines = [f"mod {m};" for m in top_mods]
+    use_lines = [f"use {path}::{rust_name};" for path, rust_name, _ in functions]
+    reg_lines = [f"    m.add_wrapped(wrap_pyfunction!({rust_name}));?" for _, rust_name, _ in functions]
+    source = "use pyo3::prelude::*;\n\n"
+    if mod_lines:
+        source += "\n".join(mod_lines) + "\n\n"
+    if use_lines:
+        source += "\n".join(use_lines) + "\n\n"
+    source += f"""#[pymodule]
+fn {crate_name}(_py: Python, m: &PyModule) -> PyResult<()> {{
+"""
+    if reg_lines:
+        source += "\n".join(reg_lines) + "\n"
+    source += "    Ok(())\n}\n"
+    lib_rs.write_text(source, encoding="utf-8")
+    return lib_rs
+
+
+def cargo_check_and_repair(
+    crate_root: Union[str, Path],
+    *,
+    max_retries: int = 2,
+    env: Optional[Dict[str, str]] = None,
+    timeout: float = 600,
+) -> subprocess.CompletedProcess[str]:
+    """Run ``cargo check --message-format=json`` and repair ``src/lib.rs`` for E0432/E0425.
+
+    If an unresolved import or symbol error is detected, ``src/lib.rs`` is
+    regenerated from the actual ``#[pyfunction]`` functions found in the crate
+    source, and ``cargo check`` is retried up to *max_retries* additional times.
+    """
+    root = Path(crate_root).resolve()
+    lib_rs = root / "src" / "lib.rs"
+    last_result: Optional[subprocess.CompletedProcess[str]] = None
+    for attempt in range(max_retries + 1):
+        result = run_cargo(
+            ["cargo", "check", "--message-format=json"],
+            cwd=root,
+            env=env,
+            timeout=timeout,
+            retries=1,
+        )
+        last_result = result
+        if result.returncode == 0:
+            return result
+
+        messages: List[Dict[str, Any]] = []
+        for line in (result.stdout + "\n" + result.stderr).splitlines():
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("reason") == "compiler-message":
+                msg = obj.get("message", obj)
+                if msg.get("level") == "error":
+                    messages.append(msg)
+            elif obj.get("level") == "error":
+                messages.append(obj)
+
+        has_unresolved = any(
+            _resolve_error_code(msg) in ("E0432", "E0425")
+            for msg in messages
+        )
+        if not has_unresolved or not lib_rs.is_file():
+            return result
+
+        functions = _discover_pyo3_functions(root)
+        if not functions:
+            return result
+        crate_name = _crate_name(root)
+        _regenerate_lib_rs(root, crate_name, functions)
+        logger.info("Repaired src/lib.rs on attempt %d (E0432/E0425) in %s", attempt, root)
+
+    assert last_result is not None
+    return last_result
+
+
+def _resolve_error_code(msg: Dict[str, Any]) -> Optional[str]:
+    code = msg.get("code")
+    if isinstance(code, dict):
+        return code.get("code")
+    if isinstance(code, str):
+        return code
+    return None
