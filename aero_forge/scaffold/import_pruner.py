@@ -1,14 +1,27 @@
-"""Static import pruning for generated Python modules."""
+"""Static import pruning and typing-import injection for generated Python modules."""
 
 from __future__ import annotations
 
 import ast
 import re
 from dataclasses import dataclass, field
-from typing import List, Sequence, Set
+from typing import List, Optional, Sequence, Set, Tuple
 
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_]\w*")
 _DYNAMIC_SENTINELS = frozenset({"__import__", "eval", "exec", "globals", "vars"})
+
+TYPING_NAMES = frozenset({
+    "Any",
+    "Callable",
+    "Dict",
+    "Iterable",
+    "List",
+    "Optional",
+    "Sequence",
+    "Tuple",
+    "TypeVar",
+    "Union",
+})
 
 
 @dataclass
@@ -122,6 +135,115 @@ def prune_source(source: str) -> PruneOutcome:
     else:
         outcome.source = source
     return outcome
+
+
+def _annotation_nodes(tree: ast.Module) -> List[ast.AST]:
+    """Yield every AST node that is a Python type annotation in *tree*."""
+    nodes: List[ast.AST] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AnnAssign) and node.annotation:
+            nodes.append(node.annotation)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.returns:
+                nodes.append(node.returns)
+            for arg in node.args.posonlyargs + node.args.args + node.args.kwonlyargs:
+                if arg.annotation:
+                    nodes.append(arg.annotation)
+            if node.args.vararg and node.args.vararg.annotation:
+                nodes.append(node.args.vararg.annotation)
+            if node.args.kwarg and node.args.kwarg.annotation:
+                nodes.append(node.args.kwarg.annotation)
+        if isinstance(node, ast.arg) and node.annotation:
+            nodes.append(node.annotation)
+    return nodes
+
+
+def _collect_typing_names(node: ast.AST) -> Set[str]:
+    """Recursively collect ``typing`` names referenced in an annotation node."""
+    found: Set[str] = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Name) and child.id in TYPING_NAMES:
+            found.add(child.id)
+        elif isinstance(child, ast.Constant) and isinstance(child.value, str):
+            # ``from __future__ import annotations`` stores annotations as strings.
+            try:
+                expr = ast.parse(child.value, mode="eval")
+            except SyntaxError:
+                continue
+            found |= _collect_typing_names(expr)
+    return found
+
+
+def _typing_imports_in_source(source: str) -> Set[str]:
+    """Return the typing names already available in *source*."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+    imported: Set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module == "typing":
+            for alias in node.names:
+                if alias.name == "*":
+                    return set(TYPING_NAMES)
+                imported.add(alias.asname or alias.name)
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "typing" or alias.asname == "typing":
+                    return set(TYPING_NAMES)
+    return imported
+
+
+def _insert_import_line(source: str, import_line: str) -> str:
+    """Insert *import_line* after the shebang / module docstring / leading comments."""
+    lines = source.splitlines(keepends=True)
+    insert_at = 0
+    if lines and lines[0].startswith("#!"):
+        insert_at = 1
+    while insert_at < len(lines) and lines[insert_at].strip().startswith("#"):
+        insert_at += 1
+    if insert_at < len(lines) and lines[insert_at].startswith('"""'):
+        single_line_doc = lines[insert_at].strip().endswith('"""') and lines[insert_at].count('"""') == 2
+        if not single_line_doc:
+            insert_at += 1
+            while insert_at < len(lines) and '"""' not in lines[insert_at]:
+                insert_at += 1
+            insert_at += 1
+        else:
+            insert_at += 1
+    if insert_at > 0 and insert_at < len(lines) and lines[insert_at - 1].strip() == "":
+        insert_at -= 1
+    lines.insert(insert_at, import_line + "\n")
+    return "".join(lines)
+
+
+def ensure_typing_imports(source: str, extra_names: Optional[Set[str]] = None) -> str:
+    """Inject ``from typing import ...`` for any typing symbols used but not imported.
+
+    Scans function annotations, variable type hints, argument types, and type
+    aliases (including stringified annotations under ``from __future__ import
+    annotations``).
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+
+    used: Set[str] = set()
+    for ann in _annotation_nodes(tree):
+        used |= _collect_typing_names(ann)
+    if extra_names:
+        used |= extra_names
+    if not used:
+        return source
+
+    imported = _typing_imports_in_source(source)
+    missing = used - imported
+    if not missing:
+        return source
+
+    import_line = "from typing import " + ", ".join(sorted(missing))
+    return _insert_import_line(source, import_line)
 
 
 def render_imports(nodes: Sequence[ast.stmt]) -> List[str]:

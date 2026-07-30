@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from aero_forge.scaffold.syntax_guard import repair_file, repair_source, repair_workspace
+from aero_forge.scaffold.syntax_guard import (
+    ensure_typing_imports,
+    repair_file,
+    repair_source,
+    repair_workspace,
+)
 
 
 def test_repair_missing_closing_brace() -> None:
@@ -49,3 +54,34 @@ def test_repair_workspace(tmp_path: Path) -> None:
     changed = repair_workspace(tmp_path)
     assert len(changed) == 2
     assert all(p.suffix in {".rs", ".cpp"} for p in changed)
+
+
+def test_ensure_typing_imports_injects_any_from_annotation() -> None:
+    source = "x: Any = 1\n"
+    result = ensure_typing_imports(source)
+    assert "from typing import Any" in result
+
+
+def test_ensure_typing_imports_injects_multiple_used_names() -> None:
+    source = (
+        "def process(items: List[Dict[str, Any]], callback: Callable[[int], Optional[str]]) -> Tuple[int, ...]:\n"
+        "    return (0,)\n"
+    )
+    result = ensure_typing_imports(source)
+    assert "from typing import" in result
+    for name in ("Any", "Callable", "Dict", "List", "Optional", "Tuple"):
+        assert name in result
+
+
+def test_ensure_typing_imports_no_duplicate_when_already_imported() -> None:
+    source = "from typing import Any, List\nx: Any = 1\ny: List[int] = []\n"
+    result = ensure_typing_imports(source)
+    assert result.count("from typing import") == 1
+    assert "Any" in result
+    assert "List" in result
+
+
+def test_ensure_typing_imports_does_not_add_unused_names() -> None:
+    source = "x = 1\n"
+    result = ensure_typing_imports(source)
+    assert "from typing import" not in result

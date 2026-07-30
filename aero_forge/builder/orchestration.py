@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import List
 
 from aero_forge.builder.feedback import FeedbackParser
+from aero_forge.scaffold.import_pruner import TYPING_NAMES, ensure_typing_imports
 
-TYPING_NAMES = {"Any", "List", "Dict", "Optional"}
 _CREATE_RE = re.compile(r"\[CREATE:\s*([^\]]+)\]")
 _MODIFY_RE = re.compile(r"\[MODIFY:\s*([^\]]+)\]")
 _DELETE_RE = re.compile(r"\[DELETE:\s*([^\]]+)\]")
@@ -57,42 +57,3 @@ def _default_python_target(workspace: Path) -> str:
         if (workspace / candidate).is_file():
             return candidate
     return "main.py"
-
-
-def ensure_typing_imports(source: str) -> str:
-    """Inject missing ``typing`` imports if the source uses Any/List/Dict/Optional."""
-    used = {name for name in TYPING_NAMES if re.search(rf"\b{name}\b", source)}
-    if not used:
-        return source
-
-    existing: set = set()
-    for match in re.finditer(r"from\s+typing\s+import\s+([^#\n]+)", source):
-        for part in match.group(1).split(","):
-            existing.add(part.strip().split(" ")[0])
-    for match in re.finditer(r"import\s+typing(?:\s+as\s+\w+)?", source):
-        existing.update(TYPING_NAMES)
-
-    missing = used - existing
-    if not missing:
-        return source
-
-    import_line = "from typing import " + ", ".join(sorted(missing))
-    lines = source.splitlines(keepends=True)
-    insert_at = 0
-    if lines and lines[0].startswith("#!"):
-        insert_at = 1
-    while insert_at < len(lines) and lines[insert_at].strip().startswith("#"):
-        insert_at += 1
-    if insert_at < len(lines) and lines[insert_at].startswith('"""'):
-        # Skip a module docstring (possibly multi-line).
-        if not lines[insert_at].strip().endswith('"""') or lines[insert_at].count('"""') == 1:
-            insert_at += 1
-            while insert_at < len(lines) and '"""' not in lines[insert_at]:
-                insert_at += 1
-            insert_at += 1
-        else:
-            insert_at += 1
-    if insert_at > 0 and insert_at < len(lines) and lines[insert_at - 1].strip() == "":
-        insert_at -= 1
-    lines.insert(insert_at, import_line + "\n")
-    return "".join(lines)

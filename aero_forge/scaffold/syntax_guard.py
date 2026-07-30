@@ -304,3 +304,15 @@ def repair_workspace(workspace: Path) -> List[Path]:
             if repair_file(path):
                 changed.append(path)
     return changed
+
+
+def ensure_typing_imports(source: str) -> str:
+    """Python syntax guard: inject missing ``typing`` imports for annotation symbols.
+
+    This delegates to :func:`aero_forge.scaffold.import_pruner.ensure_typing_imports`
+    so the Python syntax guard and the import pruner share the same AST-based
+    implementation.
+    """
+    from aero_forge.scaffold.import_pruner import ensure_typing_imports as _ensure
+
+    return _ensure(source)

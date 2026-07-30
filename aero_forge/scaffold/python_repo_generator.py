@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 from aero_forge.scaffold.cli_normalizer import normalize_workspace
+from aero_forge.scaffold.import_pruner import ensure_typing_imports
 
 _STDLIB_ROOTS = {
     "abc", "aifc", "argparse", "array", "ast", "asyncio", "base64", "binascii",
@@ -197,6 +198,13 @@ def render_pyproject(spec: PythonRepoSpec) -> str:
     if spec.dependencies:
         lines = ",\n".join(f'    "{dep}"' for dep in spec.dependencies)
         deps_block = f"\ndependencies = [\n{lines},\n]\n"
+    entry = Path(spec.entry_filename)
+    if entry.parent.parts:
+        package_dir = entry.parent.as_posix()
+        packages_block = f'packages = ["{spec.module_name}"]\n'
+    else:
+        package_dir = "."
+        packages_block = f'py-modules = ["{spec.module_name}"]\n'
     return (
         "[build-system]\n"
         'requires = ["setuptools>=61"]\n'
@@ -209,8 +217,8 @@ def render_pyproject(spec: PythonRepoSpec) -> str:
         'requires-python = ">=3.9"\n'
         f"{deps_block}\n"
         "[tool.setuptools]\n"
-        'package-dir = {"" = "src"}\n'
-        f'packages = ["{spec.module_name}"]\n'
+        f'package-dir = {{"" = "{package_dir}"}}\n'
+        f"{packages_block}"
     )
 
 
@@ -264,13 +272,14 @@ def generate_python_repo(spec: PythonRepoSpec, dest_dir: Path) -> PythonGenerate
 
     entry = spec.entry_filename
     source = spec.source if spec.source.endswith("\n") else spec.source + "\n"
+    source = ensure_typing_imports(source)
     module = spec.module_name
     _write(entry, source)
     _write("pyproject.toml", render_pyproject(spec))
     _write("requirements.txt", render_requirements(spec))
     _write(".gitignore", render_python_gitignore())
     _write("README.md", render_python_readme(spec))
-    _write(f"tests/test_{module}.py", _render_python_tests(spec))
+    _write(f"tests/test_{module}.py", ensure_typing_imports(_render_python_tests(spec)))
 
     # Expose public functions/classes from the generated module at package root.
     names = _detect_public_names(spec.source)
@@ -279,7 +288,9 @@ def generate_python_repo(spec: PythonRepoSpec, dest_dir: Path) -> PythonGenerate
         init_lines.append("__all__ = [" + ", ".join(f'"{n}"' for n in names) + "]")
     else:
         init_lines = ["# Generated Aero-Forge module"]
-    _write("src/__init__.py", "\n".join(init_lines) + "\n")
+    package_dir = Path(entry).parent
+    if package_dir.as_posix() not in (".", ""):
+        _write(str(package_dir / "__init__.py"), "\n".join(init_lines) + "\n")
 
     # Ensure package __init__.py re-exports public functions from any native/cli modules.
     normalize_workspace(root)

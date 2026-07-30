@@ -91,10 +91,12 @@ class InvisibleConfigEngine:
             raise ValueError("lean blueprint 'source' extra is required for repo generation")
 
         self._generator = UniversalRepoGenerator(output_dir)
+        entry_filename = blueprint.extras.get("entry", blueprint.extras.get("entry_filename", ""))
         result = self._generator.generate(
             source_seed,
             target_language=language,
             project_name=blueprint.project,
+            entry_filename=entry_filename,
         )
         return result.to_dict()
 

@@ -13,6 +13,7 @@ from aero_forge.scaffold.cargo_manifest import sanitize_crate_name
 from aero_forge.scaffold.cli_normalizer import normalize_workspace
 from aero_forge.scaffold.python_repo_generator import (
     PythonRepoSpec,
+    _derive_module_name_from_source,
     build_python_spec,
     generate_python_repo,
     sanitize_project_name,
@@ -62,6 +63,25 @@ class UniversalRepoGenerator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self._overlay_managers: Dict[Path, OverlayManager] = {}
 
+    @staticmethod
+    def _infer_python_entry_filename(prompt: str, source: str, project_name: str) -> str:
+        """Respect explicit package directory hints like ``cpp_native/`` or ``src/``."""
+        module = _derive_module_name_from_source(source, project_name)
+        if not module:
+            return ""
+        # Look for explicit directory directives first.
+        dir_match = re.search(
+            r"(?:\bin\b|under|directory|folder|package dir|module path|path)\s+([A-Za-z_][\w/]*)",
+            prompt,
+            re.IGNORECASE,
+        )
+        if dir_match:
+            return f"{dir_match.group(1).strip('/').replace('.', '')}/{module}.py"
+        for marker in ("cpp_native", "engine", "native", "src"):
+            if re.search(rf"\b{marker}\b", prompt, re.IGNORECASE):
+                return f"{marker}/{module}.py"
+        return ""
+
     def _build(
         self,
         prompt: str,
@@ -90,6 +110,8 @@ class UniversalRepoGenerator:
 
         if target_language == "python":
             dest = self.output_dir / sanitize_project_name(name)
+            if not entry_filename:
+                entry_filename = self._infer_python_entry_filename(prompt, build_output.source, name)
             repo_spec = build_python_spec(
                 name=name,
                 source=build_output.source,
