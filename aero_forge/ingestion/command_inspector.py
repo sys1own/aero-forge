@@ -44,6 +44,34 @@ def _command(
     }
 
 
+_TEMPLATE_DIR_NAMES = frozenset({"templates", "template", ".templates"})
+_TEMPLATE_EXTENSIONS = frozenset({".jinja", ".jinja2", ".j2", ".tmpl"})
+_JINJA_PATTERN = re.compile(r"\{\{|\{%")
+
+
+def _is_jinja_or_template_path(path: Path) -> bool:
+    """Return True when *path* lives in a template directory or has a template extension."""
+    lower_parts = {part.lower() for part in path.parts}
+    if lower_parts & _TEMPLATE_DIR_NAMES:
+        return True
+    if path.suffix.lower() in _TEMPLATE_EXTENSIONS:
+        return True
+    return False
+
+
+def _is_jinja_file(path: Path) -> bool:
+    """Return True for Jinja/Template files or files containing mustache syntax."""
+    if _is_jinja_or_template_path(path):
+        return True
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if _JINJA_PATTERN.search(text):
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def _unwrap_single_root(workspace: Path) -> Path:
     """Recursively flatten a single nested wrapper directory into *workspace*.
 
@@ -83,12 +111,15 @@ def _unwrap_single_root(workspace: Path) -> Path:
 def _find_cargo_manifests(workspace: Path) -> List[Path]:
     """Return all ``Cargo.toml`` paths under *workspace*, sorted and deduplicated.
 
-    Common build directories such as ``target`` and ``.cargo`` are excluded.
+    Common build directories such as ``target`` and ``.cargo`` are excluded, as
+    are Jinja/template manifests.
     """
     manifests: set[Path] = set()
     exclude = {"target", ".cargo"}
     for path in workspace.rglob("Cargo.toml"):
         if any(part in exclude for part in path.parts):
+            continue
+        if _is_jinja_file(path):
             continue
         manifests.add(path.resolve().parent)
     return sorted(manifests, key=lambda p: str(p))
@@ -105,7 +136,7 @@ def _manifest_opt(manifest_dir: Path, workspace: Path) -> str:
 def _cargo_bins(manifest_dir: Path) -> List[str]:
     """Return executable target names declared in a Cargo.toml [[bin]] section."""
     cargo_toml = manifest_dir / "Cargo.toml"
-    if not cargo_toml.is_file():
+    if not cargo_toml.is_file() or _is_jinja_file(cargo_toml):
         return []
     try:
         with cargo_toml.open("rb") as fh:
@@ -131,9 +162,11 @@ def _cargo_examples(manifest_dir: Path) -> List[str]:
     names: List[str] = []
     if examples_dir.is_dir():
         for path in sorted(examples_dir.glob("*.rs")):
+            if _is_jinja_or_template_path(path):
+                continue
             names.append(path.stem)
     cargo_toml = manifest_dir / "Cargo.toml"
-    if cargo_toml.is_file():
+    if cargo_toml.is_file() and not _is_jinja_file(cargo_toml):
         try:
             with cargo_toml.open("rb") as fh:
                 data = tomllib.load(fh) or {}
@@ -389,7 +422,7 @@ def detect_runnable_commands(workspace: Path) -> List[Dict[str, Any]]:
             if script.endswith(".py"):
                 cmd = f"python {script}"
             else:
-                cmd = f"python -m {script}"
+                cmd = f"python -m {script} --help"
             commands.append(_command(
                 name=ep["label"],
                 cmd=cmd,

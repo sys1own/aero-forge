@@ -813,6 +813,7 @@
     let _treeLoading = false;
     let _treeRefreshTimer = null;
     let _dragTarget = null;
+    const TREE_IGNORE_DIRS = new Set(['.venv', '__pycache__', '.git', '.pytest_cache']);
 
     const ui = {
       sidebar: document.getElementById('sidebar'),
@@ -1105,10 +1106,11 @@
     }
 
     function renderNode(node, isRoot=false) {
+      const isDir = node.type === 'directory';
+      if (!isRoot && isDir && TREE_IGNORE_DIRS.has(node.name)) return null;
       const ul = document.createElement('ul');
       const li = document.createElement('li');
       const div = document.createElement('div');
-      const isDir = node.type === 'directory';
       const expanded = isRoot || state.treeExpanded.has(node.path);
       div.className = 'tree-node' + (isDir ? ' directory' : ' file');
       div.dataset.path = node.path;
@@ -1144,8 +1146,12 @@
         if (node.children) {
           const childUl = document.createElement('ul');
           childUl.className = 'tree-children' + (expanded ? '' : ' collapsed');
-          for (const child of node.children) childUl.appendChild(renderNode(child));
-          li.appendChild(childUl);
+          for (const child of node.children) {
+            if (child.type === 'directory' && TREE_IGNORE_DIRS.has(child.name)) continue;
+            const rendered = renderNode(child);
+            if (rendered) childUl.appendChild(rendered);
+          }
+          if (childUl.children.length) li.appendChild(childUl);
         }
       } else {
         div.addEventListener('click', e => { if (!e.target.closest('.node-btn')) openFile(node.path); });
