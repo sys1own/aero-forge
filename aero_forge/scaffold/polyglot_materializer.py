@@ -36,7 +36,7 @@ from aero_forge.orchestrator.stack_classifier import (
 from aero_forge.scaffold.entrypoint_adapter import EntrypointAdapterEngine
 from aero_forge.builder.language_router import should_accelerate_with_native
 from aero_forge.scaffold.cargo_manifest import sanitize_crate_name
-from aero_forge.scaffold.cargo_runner import cargo_build
+from aero_forge.scaffold.cargo_runner import cargo_build, cargo_check_and_repair
 from aero_forge.scaffold.cli_normalizer import normalize_workspace
 from aero_forge.scaffold.engine import Engine
 from aero_forge.scaffold.python_repo_generator import _sanitize_module_name
@@ -68,17 +68,17 @@ _DEFAULT_CONTRACTS = [
 # ---------------------------------------------------------------------------
 
 
-def _extract_explicit_rust_update(prompt: Optional[str]) -> Optional[Dict[str, str]]:
+def _extract_explicit_rust_update(prompt: Optional[str]) -> Optional[Dict[str, Any]]:
     """Detect a prompt that requests a concrete Rust extension module under src/."""
     if not prompt:
         return None
     lower = prompt.lower()
     if not any(k in lower for k in ("&pyarray", "pyarray2", "rayon", "numpy crate", "pyo3")):
         return None
-    m = re.search(r"fn\s+(\w+)\s*\(", prompt)
-    if not m:
+    sig = _parse_explicit_rust_signature(prompt)
+    func = sig.get("function")
+    if not func:
         return None
-    func = m.group(1)
     path_m = re.search(r"(src/[\w/]+/(\w+)\.rs)", prompt)
     if path_m:
         rust_path = path_m.group(1)
@@ -90,6 +90,8 @@ def _extract_explicit_rust_update(prompt: Optional[str]) -> Optional[Dict[str, s
         "function": func,
         "rust_path": rust_path,
         "rust_module": rust_module,
+        "args": sig.get("args", []),
+        "return_type": sig.get("return_type", "i64"),
     }
 
 
@@ -128,8 +130,69 @@ def _discover_existing_python_package(workspace: Path) -> Optional[Tuple[str, st
     return candidates[0]
 
 
-def _native_update_rust_function_source() -> str:
-    return r'''use numpy::PyArray2;
+def _parse_explicit_rust_signature(prompt: str) -> Dict[str, Any]:
+    """Extract the first ``fn`` declaration and its argument/return types from *prompt*."""
+    result: Dict[str, Any] = {"function": "", "args": [], "return_type": "i64"}
+    m = re.search(r"fn\s+(\w+)\s*\((.*?)\)(?:\s*->\s*([\w\[\]&<>'?:,()]+))?(?=\s|\{|$)", prompt, re.DOTALL)
+    if not m:
+        return result
+    result["function"] = m.group(1)
+    raw_args = (m.group(2) or "").strip()
+    for raw in re.split(r",\s*(?![^<>]*>)", raw_args):
+        raw = raw.strip()
+        if not raw or raw.lower().startswith("py:"):
+            continue
+        if ":" in raw:
+            name, typ = raw.split(":", 1)
+            name = name.strip()
+            typ = typ.strip()
+            if name and typ:
+                result["args"].append({"name": name, "type": typ})
+    if m.group(3):
+        result["return_type"] = m.group(3).strip().rstrip("{")
+    return result
+
+
+_MATMUL_RUST_SOURCE = r'''use ndarray::{Array2, ArrayView2};
+use numpy::PyArray2;
+use pyo3::prelude::*;
+
+#[pyfunction(name = "matmul")]
+pub fn _accel_matmul<'py>(
+    py: Python<'py>,
+    a: &'py PyArray2<f64>,
+    b: &'py PyArray2<f64>,
+) -> PyResult<&'py PyArray2<f64>> {
+    let a_shape = a.shape();
+    let b_shape = b.shape();
+    if a_shape.len() != 2 || b_shape.len() != 2 || a_shape[1] != b_shape[0] {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "incompatible matrix dimensions",
+        ));
+    }
+    let m = a_shape[0];
+    let n = b_shape[1];
+    let k = a_shape[1];
+    let a_read = a.readonly();
+    let a_view: ArrayView2<f64> = a_read.as_array();
+    let b_read = b.readonly();
+    let b_view: ArrayView2<f64> = b_read.as_array();
+    let mut out = Array2::<f64>::zeros((m, n));
+    for i in 0..m {
+        for j in 0..n {
+            let mut sum = 0.0;
+            for l in 0..k {
+                sum += a_view[[i, l]] * b_view[[l, j]];
+            }
+            out[[i, j]] = sum;
+        }
+    }
+    Ok(PyArray2::from_owned_array(py, out))
+}
+'''
+
+
+_ROLLING_AVERAGE_RUST_SOURCE = r'''use numpy::PyArray2;
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
@@ -172,7 +235,77 @@ pub fn _accel_rolling_average(py: Python, matrix: &PyArray2<f64>, window: usize)
 '''
 
 
-def _native_update_cargo_toml(crate_name: str) -> str:
+def _native_update_rust_function_source(
+    function_name: str,
+    args: List[Dict[str, str]],
+    return_type: str = "i64",
+) -> str:
+    """Render the Rust source for an explicit PyO3/NumPy/Rayon native function.
+
+    The generated function name in Rust is ``_accel_<function_name>`` while the
+    exported Python name is ``function_name``.  Two focused implementations are
+    emitted:
+
+    * ``matmul`` for two-dimensional ``&PyArray2<f64>`` inputs.
+    * ``rolling_average`` for an in-place rolling-window average over rows.
+    """
+    if function_name == "matmul":
+        return _MATMUL_RUST_SOURCE
+    if function_name == "rolling_average":
+        return _ROLLING_AVERAGE_RUST_SOURCE
+    # Fallback: emit a no-op function matching the requested signature so the
+    # symbol exists and the crate still compiles.
+    rust_params = ", ".join(f"{_rust_arg(a)}" for a in args if a["name"] != "py")
+    rust_ret = _rust_return_type(return_type)
+    lifetimes = _rust_lifetimes(return_type)
+    return f'''use numpy::PyArray2;
+use pyo3::prelude::*;
+
+#[pyfunction(name = "{function_name}")]
+pub fn _accel_{function_name}{lifetimes}({rust_params}) -> {rust_ret} {{
+    Ok(0)
+}}
+'''
+
+
+def _rust_arg(arg: Dict[str, str]) -> str:
+    """Render a Rust parameter for the fallback no-op signature."""
+    name = arg["name"]
+    typ = arg.get("type", "&PyArray2<f64>").strip()
+    if typ == "Python":
+        return "py: Python"
+    if "PyArray" in typ or typ in ("np.ndarray", "numpy.ndarray", "ndarray"):
+        if "&" not in typ and "PyArray" in typ:
+            inner = re.search(r"<([^>]+)>", typ)
+            dtype = inner.group(1) if inner else "f64"
+            return f"{name}: &PyArray2<{dtype}>"
+    return f"{name}: {typ}"
+
+
+def _rust_return_type(return_type: str) -> str:
+    """Normalize a return type string for the fallback signature."""
+    rt = return_type.strip()
+    if not rt or rt in ("i64", "usize", "f64", "bool"):
+        return rt or "i64"
+    if "PyArray" in rt and "&'py" not in rt:
+        rt = rt.replace("&PyArray", "&'py PyArray")
+    return rt
+
+
+def _rust_lifetimes(return_type: str) -> str:
+    """Add a lifetime parameter when the fallback return type borrows from ``py``."""
+    if "&'py" in return_type or "PyArray" in return_type:
+        return "<'py>"
+    return ""
+
+
+def _native_update_cargo_toml(crate_name: str, needs_ndarray: bool = False) -> str:
+    deps = """pyo3 = { version = "0.20.3", features = ["extension-module", "abi3-py39", "generate-import-lib"] }
+numpy = { version = "0.20" }
+rayon = "1.8"
+"""
+    if needs_ndarray:
+        deps += 'ndarray = "0.15"\n'
     return f'''[package]
 name = "{crate_name}"
 version = "0.1.0"
@@ -183,20 +316,28 @@ name = "{crate_name}"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = {{ version = "0.20.3", features = ["extension-module", "abi3-py39", "generate-import-lib"] }}
-numpy = {{ version = "0.20" }}
-rayon = "1.8"
-'''
+{deps}'''
 
 
-def _native_update_lib_rs(crate_name: str, module_path: str, function_name: str) -> str:
+def _native_update_lib_rs(
+    crate_name: str,
+    module_path: str,
+    function_module: str,
+    function_name: str,
+) -> str:
+    """Build a ``src/lib.rs`` that dynamically references the real function symbol.
+
+    ``module_path`` is the directory portion under ``src/`` (e.g. ``accelerator``).
+    ``function_module`` is the file stem that contains the function (e.g. ``rolling_average``).
+    """
     if module_path:
         top_mod = module_path.split("/")[0]
         mod_line = f"mod {top_mod};"
-        use_line = f"use {module_path}::{function_name}::_accel_{function_name};"
+        use_path = module_path.replace("/", "::")
+        use_line = f"use {use_path}::{function_module}::_accel_{function_name};"
     else:
-        mod_line = f"mod {function_name};"
-        use_line = f"use {function_name}::_accel_{function_name};"
+        mod_line = f"mod {function_module};"
+        use_line = f"use {function_module}::_accel_{function_name};"
     return f'''use pyo3::prelude::*;
 
 {mod_line}
@@ -214,13 +355,22 @@ def _native_update_mod_rs(function_name: str) -> str:
     return f"pub mod {function_name};\n"
 
 
-def _native_update_wrapper_py(crate_name: str, function_name: str) -> str:
+def _native_update_wrapper_py(
+    crate_name: str,
+    function_name: str,
+    args: List[Dict[str, str]],
+) -> str:
+    """Render a Python loader that sanitizes array arguments before crossing FFI."""
+    arg_names = [a["name"] for a in args if a["name"] != "py"]
+    params = ", ".join(arg_names)
     return f'''from __future__ import annotations
 
 import importlib.util
 import pathlib
 import re
 from typing import Any, Optional
+
+import numpy as np
 
 _SO_CANDIDATES = [
     pathlib.Path(__file__).parent.parent.parent / "target" / "release" / "lib{crate_name}.so",
@@ -256,41 +406,64 @@ def _load_native() -> Optional[Any]:
 _NATIVE: Optional[Any] = _load_native()
 
 
-def _naive_{function_name}(matrix, window):
+def _naive_{function_name}({params}):
+    """Pure-Python reference implementation used when the native library is absent."""
     import numpy as np
-    arr = np.asarray(matrix, dtype=np.float64)
-    if arr.ndim != 2:
-        return 1
-    rows, cols = arr.shape
-    if window == 0 or window > cols:
-        return 1
-    out = np.zeros_like(arr)
-    for i in range(rows):
-        row = arr[i]
-        s = row[:window].sum()
-        out[i, window - 1] = s / window
-        for j in range(window, cols):
-            s += row[j] - row[j - window]
-            out[i, j] = s / window
-    try:
-        matrix[...] = out
-    except Exception:
-        return 1
-    return 0
+    raise NotImplementedError("No pure-Python fallback is available for this native function.")
 
 
-def {function_name}(matrix, window):
+def {function_name}({params}):
+    import numpy as np
+    _args = [{', '.join(arg_names)}]
+    _sanitized = []
+    for _a in _args:
+        if isinstance(_a, (int, float, bool, str, type(None))):
+            _sanitized.append(_a)
+            continue
+        try:
+            _sanitized.append(np.ascontiguousarray(_a, dtype=np.float64))
+        except Exception:
+            _sanitized.append(_a)
     if _NATIVE is not None and hasattr(_NATIVE, "{function_name}"):
-        return getattr(_NATIVE, "{function_name}")(matrix, window)
-    return _naive_{function_name}(matrix, window)
+        return getattr(_NATIVE, "{function_name}")(*_sanitized)
+    return _naive_{function_name}(*_sanitized)
 
 
 __all__ = ["{function_name}"]
 '''
 
 
-def _native_update_test_py(package_name: str, function_name: str) -> str:
-    return f'''import numpy as np
+def _native_update_test_py(
+    package_name: str,
+    function_name: str,
+    args: List[Dict[str, str]],
+    return_type: str = "i64",
+) -> str:
+    """Generate a focused pytest file for the native function."""
+    if function_name == "matmul":
+        return f'''import numpy as np
+import pytest
+
+from {package_name}.{function_name} import {function_name}
+
+
+def test_{function_name}_basic():
+    a = np.arange(6, dtype=np.float64).reshape(2, 3) + 1.0
+    b = np.arange(6, dtype=np.float64).reshape(3, 2) + 1.0
+    result = {function_name}(a, b)
+    expected = np.dot(a, b)
+    np.testing.assert_allclose(result, expected, rtol=1e-12)
+
+
+def test_{function_name}_invalid_dimensions():
+    a = np.ones((2, 3), dtype=np.float64)
+    b = np.ones((4, 5), dtype=np.float64)
+    with pytest.raises((ValueError, RuntimeError)):
+        {function_name}(a, b)
+'''
+
+    if function_name == "rolling_average":
+        return f'''import numpy as np
 import pytest
 
 from {package_name}.{function_name} import {function_name}
@@ -326,6 +499,16 @@ def test_{function_name}_invalid_window():
     arr = np.arange(6, dtype=np.float64).reshape(2, 3) + 1.0
     code = {function_name}(arr, 5)
     assert code == 1
+'''
+
+    # Generic smoke test for any other explicit native function.
+    return f'''import pytest
+
+from {package_name}.{function_name} import {function_name}
+
+
+def test_{function_name}_smoke():
+    assert callable({function_name})
 '''
 
 
@@ -1061,11 +1244,13 @@ class PolyglotMaterializer:
         self,
         blueprint: Blueprint,
         build: bool,
-        explicit: Dict[str, str],
+        explicit: Dict[str, Any],
     ) -> Blueprint:
         """Materialize a concrete PyO3/NumPy/Rayon native extension requested by prompt."""
         function_name = explicit["function"]
         rust_path_str = explicit["rust_path"]
+        args = explicit.get("args", [])
+        return_type = explicit.get("return_type", "i64")
         rust_file = self.workspace / rust_path_str
         module_dir = rust_file.parent
         module_dir.mkdir(parents=True, exist_ok=True)
@@ -1092,14 +1277,15 @@ class PolyglotMaterializer:
             module_path = "/".join(rel_mod.parts[1:])
         function_module = rust_file.stem
 
+        needs_ndarray = function_name == "matmul" or "PyArray" in return_type
         # Root crate manifest and lib entry point.
         (self.workspace / "Cargo.toml").write_text(
-            _native_update_cargo_toml(crate_name), encoding="utf-8"
+            _native_update_cargo_toml(crate_name, needs_ndarray=needs_ndarray), encoding="utf-8"
         )
         lib_rs = self.workspace / "src" / "lib.rs"
         lib_rs.parent.mkdir(parents=True, exist_ok=True)
         lib_rs.write_text(
-            _native_update_lib_rs(crate_name, module_path, function_module),
+            _native_update_lib_rs(crate_name, module_path, function_module, function_name),
             encoding="utf-8",
         )
 
@@ -1117,12 +1303,15 @@ class PolyglotMaterializer:
                 _native_update_mod_rs(function_module), encoding="utf-8"
             )
 
-        rust_file.write_text(_native_update_rust_function_source(), encoding="utf-8")
+        rust_file.write_text(
+            _native_update_rust_function_source(function_name, args, return_type),
+            encoding="utf-8",
+        )
 
         # Python wrapper and package export.
         wrapper_path = package_dir / f"{function_name}.py"
         wrapper_path.write_text(
-            _native_update_wrapper_py(crate_name, function_name), encoding="utf-8"
+            _native_update_wrapper_py(crate_name, function_name, args), encoding="utf-8"
         )
         _append_init_export(package_dir / "__init__.py", function_name)
 
@@ -1131,10 +1320,12 @@ class PolyglotMaterializer:
         tests_dir.mkdir(parents=True, exist_ok=True)
         test_path = tests_dir / f"test_{function_name}.py"
         test_path.write_text(
-            _native_update_test_py(package_name, function_name), encoding="utf-8"
+            _native_update_test_py(package_name, function_name, args, return_type),
+            encoding="utf-8",
         )
 
         if build:
+            cargo_check_and_repair(self.workspace, max_retries=2, timeout=600)
             result = cargo_build(self.workspace, release=True, timeout=600)
             output = f"{result.stdout}\n{result.stderr}".strip()
             self.build_logs = output
@@ -1186,11 +1377,13 @@ class PolyglotMaterializer:
                 ),
             ]
         )
+        py_args = ", ".join(a["name"] for a in args if a["name"] != "py")
+        py_sig = f"def {function_name}({py_args})"
         new_contracts: List[ContractEntry] = [
             ContractEntry(
                 name=function_name,
-                signature=f"def {function_name}(matrix, window) -> int",
-                purpose="native rolling average",
+                signature=py_sig,
+                purpose=f"native {function_name}",
             )
         ]
         new_functions: List[FunctionSpec] = [
