@@ -10,8 +10,10 @@ import pytest
 import json
 
 from aero_forge.errors import ExportVerificationError
+from aero_forge.materializer import unpack_aeroc_file
 from aero_forge.scaffold.aeroc_export import (
     compile_aeroc,
+    compile_hybrid_aeroc,
     export_aeroc_project,
     export_scaffold_zip,
     generate_verification_json,
@@ -135,3 +137,67 @@ def test_export_scaffold_zip_includes_verification_json(tmp_path):
         data = json.loads(zf.read("verification.json"))
         assert "file_hashes" in data
         assert "main.py" in data["file_hashes"]
+
+
+def test_compile_hybrid_aeroc_includes_lineage_json(tmp_path):
+    """A hybrid .aeroc embeds blueprint and healing metadata in lineage.json."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("print('hello')\n", encoding="utf-8")
+    (workspace / "blueprint.aero").write_text(
+        "metadata:\n  schema_version: '3.0.0'\n  description: 'demo prompt'\n",
+        encoding="utf-8",
+    )
+    aero_dir = workspace / ".aero"
+    aero_dir.mkdir()
+    (aero_dir / "healing_attempts.json").write_text(
+        json.dumps([{"strategy": "ast", "success": True}, {"strategy": "llm", "success": False}]),
+        encoding="utf-8",
+    )
+
+    aeroc = tmp_path / "app.aeroc"
+    compile_hybrid_aeroc(workspace, aeroc)
+
+    out = tmp_path / "extracted"
+    out.mkdir()
+    unpack_aeroc_file(aeroc, out)
+
+    assert (out / "lineage.json").is_file()
+    lineage = json.loads((out / "lineage.json").read_text(encoding="utf-8"))
+    assert lineage["blueprint"]["metadata"]["description"] == "demo prompt"
+    assert lineage["healing"]["ast_attempts"] == 1
+    assert lineage["healing"]["llm_attempts"] == 1
+    assert lineage["healing"]["successful"] == 1
+    assert lineage["healing"]["failed"] == 1
+
+
+def test_compile_delta_aeroc_against_base_bundle(tmp_path):
+    """A delta .aeroc contains only changed/added files and a delta manifest."""
+    base_workspace = tmp_path / "base"
+    base_workspace.mkdir()
+    (base_workspace / "main.py").write_text("print('base')\n", encoding="utf-8")
+    (base_workspace / "keep.py").write_text("print('keep')\n", encoding="utf-8")
+    (base_workspace / "remove.py").write_text("print('remove')\n", encoding="utf-8")
+    base_aeroc = tmp_path / "base.aeroc"
+    compile_hybrid_aeroc(base_workspace, base_aeroc)
+
+    new_workspace = tmp_path / "new"
+    shutil.copytree(base_workspace, new_workspace)
+    (new_workspace / "main.py").write_text("print('updated')\n", encoding="utf-8")
+    (new_workspace / "new.py").write_text("print('new')\n", encoding="utf-8")
+    (new_workspace / "remove.py").unlink()
+
+    delta_aeroc = tmp_path / "delta.aeroc"
+    compile_hybrid_aeroc(new_workspace, delta_aeroc, base_bundle=base_aeroc)
+
+    out = tmp_path / "delta_extract"
+    out.mkdir()
+    unpack_aeroc_file(delta_aeroc, out)
+
+    delta_manifest = json.loads((out / "delta.json").read_text(encoding="utf-8"))
+    assert "main.py" in [op["path"] for op in delta_manifest["operations"] if op["op"] == "modify"]
+    assert "new.py" in [op["path"] for op in delta_manifest["operations"] if op["op"] == "add"]
+    assert any(op["op"] == "delete" and op["path"] == "remove.py" for op in delta_manifest["operations"])
+    assert (out / "main.py").read_text(encoding="utf-8") == "print('updated')\n"
+    assert (out / "new.py").is_file()
+    assert not (out / "remove.py").exists()
