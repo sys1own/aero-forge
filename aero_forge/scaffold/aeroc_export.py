@@ -10,16 +10,27 @@ any ``aero_forge`` dependency.
 
 from __future__ import annotations
 
+import datetime
+import hashlib
 import io
+import json
+import re
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional, Union
 
+from aero_forge.errors import AeroForgeError, ExportVerificationError
 from aero_forge.overlay import OverlayManager
 from aero_forge.scaffold.cargo_config import write_cargo_config
+from aero_forge.scaffold.pre_write_validator import (
+    PreWriteValidator,
+    ValidationError,
+)
 
 
 _AERO_CORE_TEMPLATE = Path(__file__).resolve().parent / "embedded" / "aero_core"
@@ -100,6 +111,272 @@ def _copy_template(src: Path, dst: Path) -> None:
             shutil.rmtree(path, ignore_errors=True)
 
 
+def _opt(options: Optional[Any], name: str, default: Any) -> Any:
+    """Return option *name* from a dict or dataclass-like object."""
+    if options is None:
+        return default
+    if isinstance(options, dict):
+        return options.get(name, default)
+    return getattr(options, name, default)
+
+
+def _git_commit_or_version() -> str:
+    """Return the current git commit hash, or ``unknown`` when not in a repo."""
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    except FileNotFoundError:
+        pass
+    return "unknown"
+
+
+def _file_hash(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _hash_project_files(project_dir: Path) -> Dict[str, str]:
+    """Return a mapping of relative file paths to SHA-256 hashes."""
+    hashes: Dict[str, str] = {}
+    for path in sorted(project_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(project_dir).as_posix()
+        if rel == "verification.json":
+            continue
+        try:
+            hashes[rel] = _file_hash(path.read_bytes())
+        except OSError:
+            continue
+    return hashes
+
+
+def _parse_pytest_summary(output: str) -> Dict[str, Any]:
+    """Parse pytest terminal summary for pass/fail/skip counts."""
+    summary: Dict[str, Any] = {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "total": 0,
+        "success": True,
+    }
+    # Match lines like "3 passed, 1 failed, 2 skipped in 1.23s"
+    match = re.search(
+        r"(\d+) passed(?:, (\d+) failed)?(?:, (\d+) skipped)?(?:, (\d+) error)? in ",
+        output,
+    )
+    if match:
+        summary["passed"] = int(match.group(1) or 0)
+        summary["failed"] = int(match.group(2) or 0)
+        summary["skipped"] = int(match.group(3) or 0)
+        summary["error"] = int(match.group(4) or 0)
+        summary["total"] = (
+            summary["passed"] + summary["failed"] + summary["skipped"] + summary["error"]
+        )
+        summary["success"] = summary["failed"] == 0 and summary["error"] == 0
+    return summary
+
+
+def _find_test_files(workspace_dir: Path) -> List[Path]:
+    """Return Python test files under *workspace_dir*, skipping build caches."""
+    excluded = {"target", ".venv", "__pycache__", ".pytest_cache", ".git", ".aero_core"}
+    test_files: List[Path] = []
+    for path in workspace_dir.rglob("test_*.py"):
+        if not path.is_file():
+            continue
+        if any(part in excluded for part in path.parts):
+            continue
+        test_files.append(path)
+    return test_files
+
+
+def _find_cargo_manifest(workspace_dir: Path) -> Optional[Path]:
+    """Return the nearest ``Cargo.toml`` owned by the workspace (not vendored deps)."""
+    excluded = {"target", ".cargo", "vendor", "node_modules"}
+    for path in workspace_dir.rglob("Cargo.toml"):
+        if any(part in excluded for part in path.parts):
+            continue
+        return path
+    return None
+
+
+def verify_workspace_for_export(
+    workspace_dir: Path,
+    options: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Run pre-flight verification and return a verification manifest.
+
+    The manifest contains test telemetry, a performance baseline, and any
+    verification errors encountered.  In ``strict`` mode an
+    ``ExportVerificationError`` is raised when verification fails.
+    """
+    workspace_dir = Path(workspace_dir).resolve()
+    mode = _opt(options, "mode", "strict")
+    run_tests = _opt(options, "run_tests", True)
+    run_compilation = _opt(options, "run_compilation", True)
+
+    start = time.time()
+    errors: List[str] = []
+    test_summary: Dict[str, Any] = {
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "total": 0,
+        "success": True,
+    }
+
+    # Static / syntax validation for Python and Rust workspaces.
+    py_files = [p for p in workspace_dir.rglob("*.py") if p.is_file()]
+    cargo_toml = _find_cargo_manifest(workspace_dir)
+    cpp_files = [p for p in workspace_dir.rglob("*.cpp") if p.is_file()]
+
+    if py_files:
+        try:
+            PreWriteValidator().validate(workspace_dir, language="python")
+        except ValidationError as exc:
+            errors.append(str(exc))
+
+    if cargo_toml is not None and cargo_toml.is_file():
+        if run_compilation and shutil.which("cargo"):
+            try:
+                result = subprocess.run(
+                    ["cargo", "check"],
+                    cwd=str(cargo_toml.parent),
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+                if result.returncode != 0:
+                    errors.append(result.stdout + result.stderr)
+            except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+                errors.append(f"Rust compilation check failed: {exc}")
+
+    if cpp_files and run_compilation and shutil.which("g++"):
+        # Lightweight syntax-only check for the first C++ source file.
+        try:
+            result = subprocess.run(
+                ["g++", "-fsyntax-only", "-std=c++17", str(cpp_files[0])],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode != 0:
+                errors.append(result.stderr or result.stdout)
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            errors.append(f"C++ syntax check failed: {exc}")
+
+    # Run pytest if the workspace contains Python tests.
+    if run_tests and py_files:
+        test_files = _find_test_files(workspace_dir)
+        if test_files:
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-m", "pytest", "-q", "--tb=no"],
+                    cwd=str(workspace_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+                test_summary = _parse_pytest_summary(result.stdout + result.stderr)
+                if result.returncode != 0 and test_summary["success"]:
+                    test_summary["success"] = False
+            except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+                test_summary = {"passed": 0, "failed": 0, "skipped": 0, "total": 0, "success": False}
+                errors.append(f"pytest execution failed: {exc}")
+
+    elapsed = time.time() - start
+    success = not errors and test_summary.get("success", True)
+
+    verification = {
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "commit_or_version": _git_commit_or_version(),
+        "test_summary": test_summary,
+        "performance_baseline": {"verification_seconds": round(elapsed, 4)},
+        "errors": errors,
+        "success": success,
+    }
+
+    if not success and str(mode).lower() == "strict":
+        raise ExportVerificationError(
+            f"Export verification failed: {errors or 'tests failed'}",
+            verification=verification,
+        )
+
+    verification["unverified"] = not success
+    return verification
+
+
+def verify_aeroc_project(
+    project_dir: Path,
+    options: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Verify the exported ``aero_core`` standalone runner project compiles."""
+    project_dir = Path(project_dir).resolve()
+    run_compilation = _opt(options, "run_compilation", True)
+    mode = _opt(options, "mode", "strict")
+
+    errors: List[str] = []
+    start = time.time()
+
+    crate_dir = project_dir / "aeroc" / "aero_core"
+    if run_compilation and crate_dir.is_dir() and shutil.which("cargo"):
+        try:
+            result = subprocess.run(
+                ["cargo", "build", "--release"],
+                cwd=str(crate_dir),
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if result.returncode != 0:
+                errors.append(result.stdout + result.stderr)
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            errors.append(f"aero_core compilation failed: {exc}")
+
+    elapsed = time.time() - start
+    success = not errors
+    verification = {
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "commit_or_version": _git_commit_or_version(),
+        "test_summary": {"passed": 0, "failed": 0, "skipped": 0, "total": 0, "success": success},
+        "performance_baseline": {"verification_seconds": round(elapsed, 4)},
+        "errors": errors,
+        "success": success,
+    }
+
+    if not success and str(mode).lower() == "strict":
+        raise ExportVerificationError(
+            "Standalone aeroc project failed compilation",
+            verification=verification,
+        )
+
+    verification["unverified"] = not success
+    return verification
+
+
+def generate_verification_json(
+    verification: Dict[str, Any],
+    file_hashes: Optional[Dict[str, str]] = None,
+) -> str:
+    """Return a JSON string for ``verification.json``.
+
+    The payload contains the verification telemetry plus a SHA-256 hash map for
+    every bundled file.  In ``draft`` mode or when verification failed, the
+    ``unverified`` flag is set to ``true``.
+    """
+    payload = dict(verification)
+    if file_hashes is not None:
+        payload["file_hashes"] = file_hashes
+    payload.setdefault("unverified", not payload.get("success", True))
+    return json.dumps(payload, indent=2, sort_keys=True)
+
+
 def export_aeroc_project(
     workspace_dir: Path,
     output_dir: Path,
@@ -153,12 +430,13 @@ def export_scaffold_zip(
     workspace_dir: Path,
     output_path: Optional[Path] = None,
     project_name: str = "aero-forge-export",
+    options: Optional[Any] = None,
 ) -> Path:
     """Package the workspace and the aero_core runtime into a single scaffold zip.
 
     The resulting ``.aerozip`` archive contains the workspace files, the
-    ``aero_core`` Rust runtime, Python wrapper entrypoints, and the compiled
-    ``workspace.aeroc`` binary if it exists.
+    ``aero_core`` Rust runtime, Python wrapper entrypoints, a ``verification.json``
+    attestation, and the compiled ``workspace.aeroc`` binary if it exists.
     """
     workspace_dir = Path(workspace_dir).resolve()
 
@@ -167,6 +445,8 @@ def export_scaffold_zip(
         OverlayManager(workspace_dir).flush_to_workspace(workspace_dir)
     except Exception:
         pass
+
+    verification = verify_workspace_for_export(workspace_dir, options)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         scaffold_dir = Path(tmpdir) / "scaffold"
@@ -197,6 +477,16 @@ def export_scaffold_zip(
         aeroc_path = workspace_dir / "workspace.aeroc"
         if aeroc_path.is_file():
             shutil.copy2(aeroc_path, scaffold_dir / "workspace.aeroc")
+
+        # Verify the standalone aero_core runner compiles before packaging.
+        aeroc_verification = verify_aeroc_project(scaffold_dir, options)
+        verification.update(aeroc_verification)
+
+        file_hashes = _hash_project_files(scaffold_dir)
+        verification_json = generate_verification_json(verification, file_hashes)
+        (scaffold_dir / "verification.json").write_text(
+            verification_json, encoding="utf-8"
+        )
 
         output = output_path or (workspace_dir / f"{project_name}.aerozip")
         return package_aeroc(scaffold_dir, output)

@@ -13,6 +13,18 @@ from typing import Optional
 IO_ERROR = "Unsupported I/O operation detected. Aborting."
 
 
+class AeroForgeError(Exception):
+    """Base class for all Aero Forge domain errors."""
+
+
+class ExportVerificationError(AeroForgeError):
+    """Raised when a strict export fails pre-flight verification."""
+
+    def __init__(self, message: str, verification: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(message)
+        self.verification = verification or {}
+
+
 class UnsupportedError(ValueError):
     """Raised when the source contains constructs we cannot compile."""
 
