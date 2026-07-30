@@ -208,7 +208,7 @@ def _normalize_v2_data(data: Any) -> Any:
         if c_alias is None:
             normalized_abi["c_symbol_alias"] = ""
 
-        memory = str(normalized_abi.get("memory_model") or "").lower().strip().replace("-", "_")
+        memory = re.sub(r"[^a-z0-9_]", "_", str(normalized_abi.get("memory_model") or "").lower().strip())
         memory_synonyms = {
             "owned": "callee_allocates",
             "owned_results": "callee_allocates",
@@ -218,6 +218,10 @@ def _normalize_v2_data(data: Any) -> Any:
             "callee": "callee_allocates",
             "manual": "caller_allocates",
             "auto": "callee_allocates",
+            "automatic": "callee_allocates",
+            "stack": "callee_allocates",
+            "stack_automatic": "callee_allocates",
+            "stack_automatic_conversion": "callee_allocates",
             "python_gc": "callee_allocates",
             "gc": "callee_allocates",
             "ptr_with_length": "caller_allocates",
@@ -226,7 +230,10 @@ def _normalize_v2_data(data: Any) -> Any:
             "c_owned": "callee_allocates",
             "rust_owned": "callee_allocates",
         }
-        normalized_abi["memory_model"] = memory_synonyms.get(memory, memory) or "caller_allocates"
+        memory = memory_synonyms.get(memory, memory) or "caller_allocates"
+        if memory not in {"callee_allocates", "caller_allocates", "shared_pyo3"}:
+            memory = "caller_allocates"
+        normalized_abi["memory_model"] = memory
         normalized_abis.append(normalized_abi)
     data["abi_contracts"] = normalized_abis
 

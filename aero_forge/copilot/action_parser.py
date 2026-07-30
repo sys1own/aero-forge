@@ -84,6 +84,7 @@ _OUTRO_PATTERNS = [
     re.compile(r"\n\s*(?:Let\s+me\s+know\s+if[^\n]*)\s*$", re.IGNORECASE),
     re.compile(r"\n\s*(?:Suggested\s+Builder\s+Prompt|Copy|Edit\s+in\s+Builder)[^\n]*\s*$", re.IGNORECASE),
     re.compile(r"\n\s*(?:Here\s+is\s+the\s+full\s+prompt[^\n]*)\s*$", re.IGNORECASE),
+    re.compile(r"(?:\s*[,.-])?\s*Target:\s*[^\n]+(?:\s*Acceleration:\s*[^\n]+)?\s*$", re.IGNORECASE),
 ]
 
 # Preambles specifically for the *inside* of a builder prompt payload, e.g. when the
@@ -251,12 +252,17 @@ def _extract_code_block_from_prompt(text: str) -> str:
     return text
 
 
+def _strip_trailing_metadata_tags(text: str) -> str:
+    """Remove accidental trailing ``Target:`` and ``Acceleration:`` tags."""
+    return re.sub(r"(?:\s*[,.-])?\s*Target:\s*[^\n]+(?:\s*Acceleration:\s*[^\n]+)?\s*$", "", text, flags=re.IGNORECASE).strip()
+
+
 def sanitize_builder_prompt(prompt_text: str) -> str:
     """Strip conversational preambles and code-fence wrappers from a builder prompt.
 
     The returned string should start directly with the executable build/task
     requirements and contain no meta-commentary like "I've crafted..." or
-    "Here is the prompt...".
+    "Here is the prompt...", and no trailing ``Target:`` / ``Acceleration:`` tags.
     """
     if not prompt_text or not prompt_text.strip():
         return ""
@@ -270,6 +276,7 @@ def sanitize_builder_prompt(prompt_text: str) -> str:
         cleaned = pattern.sub("", cleaned)
     for pattern in _META_PROMPT_PATTERNS:
         cleaned = pattern.sub("", cleaned)
+    cleaned = _strip_trailing_metadata_tags(cleaned)
     cleaned = re.sub(r"\n\s*\n+", "\n\n", cleaned).strip()
     return cleaned.rstrip("-:\n ").strip()
 
@@ -572,11 +579,11 @@ class ActionParser:
         # New structured JSON response with explicit display_text and action.
         if data and ("display_text" in data or "action" in data):
             display_text = self._extract_display_text(data, "")
-            clean = self._extract_prompt_from_json(data)
-            if clean:
-                clean = sanitize_builder_prompt(self.sanitize(clean))
+            raw_prompt = self._extract_prompt_from_json(data)
+            if raw_prompt:
+                params = self._extract_parameters(raw_prompt, data)
+                clean = sanitize_builder_prompt(self.sanitize(raw_prompt))
                 display_text = clean_explanation_text(display_text, clean)
-                params = self._extract_parameters(clean, data)
                 raw_action = data.get("action")
                 action_type = "build"
                 if isinstance(raw_action, dict):
@@ -610,9 +617,9 @@ class ActionParser:
                     or ""
                 )
                 if isinstance(prompt, str) and prompt.strip():
+                    params = self._extract_parameters(prompt, data)
                     clean = sanitize_builder_prompt(self.sanitize(prompt))
                     display_text = clean_explanation_text(self._extract_display_text(data, ""), clean)
-                    params = self._extract_parameters(clean, data)
                     action_type = legacy_action.get("type")
                     if not action_type or action_type in ("PROPOSE_BUILD", "SUGGEST_BUILD_PROMPT"):
                         action_type = "build"
@@ -641,7 +648,8 @@ class ActionParser:
         # ``action:trigger_build`` speedup card (highest priority markdown action).
         trigger = _parse_trigger_build_block(text)
         if trigger:
-            clean = sanitize_builder_prompt(self.sanitize(trigger["builder_prompt"]))
+            raw_prompt = trigger["builder_prompt"]
+            clean = sanitize_builder_prompt(self.sanitize(raw_prompt))
             display_text = _TRIGGER_BUILD_RE.sub("", display_text)
             display_text = clean_explanation_text(self.sanitize(display_text), clean)
             params = _trigger_build_parameters(trigger, text)
@@ -659,10 +667,11 @@ class ActionParser:
         # Build prompt fence (new clean format).
         fence = _BUILD_PROMPT_FENCE_RE.search(text)
         if fence:
-            clean = sanitize_builder_prompt(self.sanitize(fence.group(1)))
+            raw_prompt = fence.group(1)
+            clean = sanitize_builder_prompt(self.sanitize(raw_prompt))
             display_text = _BUILD_PROMPT_FENCE_RE.sub("", display_text)
             display_text = clean_explanation_text(self.sanitize(display_text), clean)
-            params = self._extract_parameters(clean, {})
+            params = self._extract_parameters(raw_prompt, {})
             return {
                 "display_text": display_text,
                 "action": {
@@ -678,10 +687,11 @@ class ActionParser:
         for tag_re in (_BUILDER_PROMPT_TAG_RE, _LEGACY_BUILD_PROMPT_TAG_RE):
             tag = tag_re.search(text)
             if tag:
-                clean = sanitize_builder_prompt(self.sanitize(tag.group(1)))
+                raw_prompt = tag.group(1)
+                clean = sanitize_builder_prompt(self.sanitize(raw_prompt))
                 display_text = tag_re.sub("", display_text)
                 display_text = clean_explanation_text(self.sanitize(display_text), clean)
-                params = self._extract_parameters(clean, {})
+                params = self._extract_parameters(raw_prompt, {})
                 return {
                     "display_text": display_text,
                     "action": {
@@ -710,10 +720,11 @@ class ActionParser:
                 prompt = contract_data.get("prompt") or contract_data.get("build_prompt") or ""
                 if not isinstance(prompt, str):
                     prompt = str(prompt)
-            clean = sanitize_builder_prompt(self.sanitize(prompt)) if prompt else sanitize_builder_prompt(self.sanitize(raw_contract))
+            raw_prompt = prompt if prompt else raw_contract
+            clean = sanitize_builder_prompt(self.sanitize(raw_prompt))
             display_text = _CODE_FENCE_RE.sub("", display_text)
             display_text = clean_explanation_text(self.sanitize(display_text), clean)
-            params = self._extract_parameters(clean, contract_data if isinstance(contract_data, dict) else {})
+            params = self._extract_parameters(raw_prompt, contract_data if isinstance(contract_data, dict) else {})
             return {
                 "display_text": display_text,
                 "action": {
@@ -728,8 +739,9 @@ class ActionParser:
 
         # Plain text with build intent.
         if _has_build_intent(text):
-            clean = sanitize_builder_prompt(self.sanitize(text))
-            params = self._extract_parameters(clean, {})
+            raw_prompt = text
+            clean = sanitize_builder_prompt(self.sanitize(raw_prompt))
+            params = self._extract_parameters(raw_prompt, {})
             return {
                 "display_text": "",
                 "action": {
@@ -892,14 +904,17 @@ def parse_action_from_text(text: str) -> Optional[Dict[str, Any]]:
     """Best-effort extraction of a build action from any assistant text."""
     suggestion = parse_suggested_build_prompt(text)
     if suggestion["has_suggestion"]:
-        build_prompt = suggestion["build_prompt"] or ""
+        raw_prompt = suggestion["build_prompt"] or ""
+        target = _normalize_target(raw_prompt) or _infer_target_from_text(raw_prompt)
+        acceleration = _normalize_acceleration(raw_prompt)
+        clean_prompt = sanitize_builder_prompt(raw_prompt)
         return {
             "type": "SUGGEST_BUILD_PROMPT",
             "params": {
-                "prompt": build_prompt,
+                "prompt": clean_prompt,
                 "explanation": suggestion["explanation"],
-                "target": _normalize_target(build_prompt) or _infer_target_from_text(build_prompt),
-                "acceleration": _normalize_acceleration(build_prompt),
+                "target": target,
+                "acceleration": acceleration,
             },
         }
 
@@ -908,7 +923,7 @@ def parse_action_from_text(text: str) -> Optional[Dict[str, Any]]:
         return {
             "type": "PROPOSE_BUILD",
             "params": {
-                "prompt": contract["prompt"],
+                "prompt": sanitize_builder_prompt(contract["prompt"]),
                 "target": contract["target"],
                 "acceleration": contract["acceleration"],
             },
@@ -918,16 +933,16 @@ def parse_action_from_text(text: str) -> Optional[Dict[str, Any]]:
     if not target or not _has_build_intent(text):
         return None
 
-    prompt = text.strip()
-    if len(prompt) > 500:
-        prompt = prompt[:500].rsplit(" ", 1)[0] + "..."
-    if prompt.startswith("{"):
-        prompt = prompt[:200]
+    raw_prompt = text.strip()
+    if len(raw_prompt) > 500:
+        raw_prompt = raw_prompt[:500].rsplit(" ", 1)[0] + "..."
+    if raw_prompt.startswith("{"):
+        raw_prompt = raw_prompt[:200]
 
     return {
         "type": "PROPOSE_BUILD",
         "params": {
-            "prompt": prompt,
+            "prompt": sanitize_builder_prompt(raw_prompt),
             "target": target,
             "acceleration": _normalize_acceleration(text),
         },
@@ -978,17 +993,17 @@ def parse_copilot_response(response: str) -> Tuple[str, Optional[Dict[str, Any]]
         return "", None
 
     # New ``build_prompt`` fence format.
-    reply, build_prompt = extract_build_prompt(response)
-    if build_prompt:
-        reply = clean_explanation_text(reply, build_prompt)
-        target = _normalize_target(build_prompt) or _infer_target_from_text(build_prompt)
+    reply, raw_prompt = extract_build_prompt(response)
+    if raw_prompt:
+        reply = clean_explanation_text(reply, raw_prompt)
+        target = _normalize_target(raw_prompt) or _infer_target_from_text(raw_prompt)
         action = {
             "type": "SUGGEST_BUILD_PROMPT",
             "params": {
-                "prompt": build_prompt,
+                "prompt": sanitize_builder_prompt(raw_prompt),
                 "explanation": reply,
                 "target": target,
-                "acceleration": _normalize_acceleration(build_prompt),
+                "acceleration": _normalize_acceleration(raw_prompt),
             },
         }
         return reply, action
@@ -996,17 +1011,17 @@ def parse_copilot_response(response: str) -> Tuple[str, Optional[Dict[str, Any]]
     # New structured action-card format.
     suggestion = parse_suggested_build_prompt(response)
     if suggestion["has_suggestion"]:
-        build_prompt = suggestion["build_prompt"] or ""
-        target = _normalize_target(build_prompt) or _infer_target_from_text(build_prompt)
+        raw_prompt = suggestion["build_prompt"] or ""
+        target = _normalize_target(raw_prompt) or _infer_target_from_text(raw_prompt)
         reply = suggestion["explanation"] or _SUGGEST_JSON_FENCE_RE.sub("", response).strip()
-        reply = clean_explanation_text(reply, build_prompt)
+        reply = clean_explanation_text(reply, raw_prompt)
         action = {
             "type": "SUGGEST_BUILD_PROMPT",
             "params": {
-                "prompt": build_prompt,
+                "prompt": sanitize_builder_prompt(raw_prompt),
                 "explanation": reply,
                 "target": target,
-                "acceleration": _normalize_acceleration(build_prompt),
+                "acceleration": _normalize_acceleration(raw_prompt),
             },
         }
         return reply, action
@@ -1018,7 +1033,7 @@ def parse_copilot_response(response: str) -> Tuple[str, Optional[Dict[str, Any]]
         action = {
             "type": "PROPOSE_BUILD",
             "params": {
-                "prompt": contract["prompt"],
+                "prompt": sanitize_builder_prompt(contract["prompt"]),
                 "target": contract["target"],
                 "acceleration": contract["acceleration"],
             },

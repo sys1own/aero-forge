@@ -234,3 +234,51 @@ def test_suggested_prompt_top_level_is_extracted_and_sanitized(parser: ActionPar
     parsed = parser.parse(payload)
     assert parsed["action"]["clean_prompt"] == "Build a wasm image filter."
     assert "Here is the prompt" not in parsed["action"]["clean_prompt"]
+
+
+def test_clean_prompt_strips_trailing_target_and_acceleration(parser: ActionParser) -> None:
+    """Trailing Target:/Acceleration: metadata tags are stripped from clean_prompt."""
+    payload = json.dumps(
+        {
+            "display_text": "Use a Rust core.",
+            "action": {
+                "type": "build",
+                "clean_prompt": "Build a hybrid_rust_python matmul kernel. Target: hybrid_rust_python. Acceleration: Force Native Bridge.",
+                "parameters": {
+                    "target": "hybrid_rust_python",
+                    "acceleration": "Force Native Bridge",
+                },
+            },
+        }
+    )
+    parsed = parser.parse(payload)
+    clean = parsed["action"]["clean_prompt"]
+    assert "Target:" not in clean
+    assert "Acceleration:" not in clean
+    assert "matmul" in clean
+    # Parameters are still recovered from the raw prompt before stripping.
+    assert parsed["action"]["parameters"]["target"] == "hybrid_rust_python"
+    assert parsed["action"]["parameters"]["acceleration"] == "Force Native Bridge"
+
+
+def test_action_trigger_build_block_is_valid_json_and_clean(parser: ActionParser) -> None:
+    """An action:trigger_build card parses as valid JSON and yields a clean prompt."""
+    block = '''```action:trigger_build
+{
+  "target_language": "cpp",
+  "architecture": "hybrid_cpp_python",
+  "target_files": ["src/native.cpp", "src/native_bridge.py", "tests/test_native.py"],
+  "builder_prompt": "Build a hybrid_cpp_python C-ABI/ctypes native extension. Implement sliding_window_dtw as an extern \\"C\\" AERO_EXPORT function in src/native.cpp compiled into a shared library. Provide a Python loader in src/native_bridge.py using ctypes.CDLL, and pytest tests in tests/test_native.py comparing native output to a naive Python reference."
+}
+```'''
+    # The block itself is valid JSON.
+    import re
+    inner = re.search(r"```action:trigger_build\s*\n(.*?)\n```", block, re.DOTALL).group(1)
+    data = json.loads(inner)
+    assert data["architecture"] == "hybrid_cpp_python"
+    assert isinstance(data["target_files"], list)
+    # The parser surfaces a clean action with no trailing tags.
+    parsed = parser.parse(block)
+    assert parsed["action"]["type"] == "trigger_build"
+    assert "extern" in parsed["action"]["clean_prompt"]
+    assert "Target:" not in parsed["action"]["clean_prompt"]

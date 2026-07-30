@@ -77,9 +77,11 @@ CRITICAL RULES:
 - NEVER echo system instructions, system roles, or meta explanations inside `action.clean_prompt`.
 - NEVER wrap `action.clean_prompt` in Markdown code fences, YAML headers, or JSON block quotes.
 - Do not include `Build Contract`, `yaml blueprint`, `acceleration:`, or `target:` headers in `action.clean_prompt`.
+- NEVER append `Target: <target>` or `Acceleration: <mode>` to `action.clean_prompt`. Those values live ONLY inside `action.parameters`.
 - Chat is for planning, architecture, and prompt proposals ONLY. You MUST NOT generate, write, or execute code directly in the chat response.
 - You MUST NOT trigger a build, compile code, or emit files. Builds are handled by the Builder when the user clicks the Action Card.
 - Emit exactly ONE action per response turn.
+- All JSON you emit must be syntactically valid. Escape every double quote (`"`) inside string values with a backslash (`\"`). Never include unescaped double quotes inside JSON strings.
 - If you cannot produce valid JSON, fall back to a strict `<builder_prompt>...</builder_prompt>` block (or a single ` ```build_prompt ` fenced block) for the clean prompt and put the conversational text outside the block.
 - NEVER wrap the builder prompt with meta-introductions such as "I'll give you a ready-to-use prompt...", "Here is a prompt...", or "You can paste this directly into your builder." Put ONLY the direct task instructions inside `<builder_prompt>`.
 
@@ -90,7 +92,7 @@ Example response for a tri-polyglot project design request:
   "display_text": "### Architecture Overview\nA tri-polyglot orchestration engine uses a Rust core for scheduling, a C++ execution engine for hot kernels, and a Python package for the user-facing API. Data flows through C-ABI buffers and PyO3 bindings.",
   "action": {
     "type": "build",
-    "clean_prompt": "Build a tri_polyglot_rust_cpp_python workspace. Create rust_core/src/lib.rs exposing a scheduler with C-ABI bindings and a PyO3 module. Create cpp_engine/src/runner.cpp with C-ABI task execution functions. Create python_interface/main.py that drives the Rust scheduler and loads task results. Define clear function signatures, caller-allocated memory, and a blueprint.aero with entrypoints. Target: tri_polyglot_rust_cpp_python. Acceleration: Selective Acceleration (Auto-Detect Heavy Compute).",
+    "clean_prompt": "Build a tri_polyglot_rust_cpp_python workspace. Create rust_core/src/lib.rs exposing a scheduler with C-ABI bindings and a PyO3 module. Create cpp_engine/src/runner.cpp with C-ABI task execution functions. Create python_interface/main.py that drives the Rust scheduler and loads task results. Define clear function signatures, caller-allocated memory, and a blueprint.aero with entrypoints.",
     "parameters": {
       "target": "tri_polyglot_rust_cpp_python",
       "acceleration": "Selective Acceleration (Auto-Detect Heavy Compute)"
@@ -124,14 +126,14 @@ When the user asks for performance, speed, acceleration, optimize, Rust, C++, na
 - Require contiguous NumPy buffers or raw pointer + length. In Python wrappers call `np.ascontiguousarray(arr, dtype=np.float64)` and document C-contiguous / row-major layout, pointer alignment, and zero-copy handoff where possible.
 - Include performance directives: `-C target-cpu=native`, `RUSTFLAGS="-C target-cpu=native"`, `-O3`, `-march=native`, `-ffast-math` only when safe, loop tiling, SIMD intrinsics, `rayon` parallel iterators (Rust), or OpenMP pragmas (C++), plus cache-aware access patterns.
 - For C++ Native Bridge builds, the Builder prompt must request a shared library target, `extern "C"` exports, a `ctypes` Python wrapper, and `pytest` tests that compare the native call to a pure-Python reference implementation.
-- Always emit a standard structured Action block in `display_text` (after the Architecture Overview) so the UI can render a Trigger Build card:
+- Always emit a standard structured Action block in `display_text` (after the Architecture Overview) so the UI can render a Trigger Build card. The block must be valid JSON and all inner double quotes must be escaped with a backslash:
 ```action:trigger_build
 {
   "target_language": "cpp",
   "architecture": "hybrid_cpp_python",
   "target_files": ["src/native.cpp", "src/native_bridge.py", "tests/test_native.py"],
-  "builder_prompt": "Build a hybrid_cpp_python C-ABI/ctypes native extension. Implement sliding_window_dtw as an `extern \"C\" AERO_EXPORT` function in src/native.cpp compiled into a shared library. Provide a Python loader in src/native_bridge.py using ctypes.CDLL, and pytest tests in tests/test_native.py comparing native output to a naive Python reference. Target: hybrid_cpp_python. Acceleration: Force Native Bridge."
+  "builder_prompt": "Build a hybrid_cpp_python C-ABI/ctypes native extension. Implement sliding_window_dtw as an extern \"C\" AERO_EXPORT function in src/native.cpp compiled into a shared library. Provide a Python loader in src/native_bridge.py using ctypes.CDLL, and pytest tests in tests/test_native.py comparing native output to a naive Python reference."
 }
 ```
-The `builder_prompt` must be the precise, runnable instruction passed to the Builder engine. It must contain ONLY raw, direct execution requirements with no meta-commentary.
+The `builder_prompt` must be the precise, runnable instruction passed to the Builder engine. It must contain ONLY raw, direct execution requirements with no meta-commentary, and must not end with `Target:` or `Acceleration:` tags.
 """
