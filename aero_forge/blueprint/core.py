@@ -348,6 +348,7 @@ class Blueprint(BaseModel):
     metadata: Dict[str, str] = Field(default_factory=lambda: {"schema_version": "2.0.0"})
     module_graph: List[Dict[str, Any]] = Field(default_factory=list)
     cargo_dependencies: Dict[str, Any] = Field(default_factory=dict)
+    modification_plan: Dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _sync_manifest_and_module_graph(self) -> "Blueprint":
@@ -954,10 +955,12 @@ def write_blueprint(blueprint: Blueprint, path: Path) -> None:
     data["manifest"] = deduplicate_manifest_entries(data.get("manifest", []))
     data["module_graph"] = deduplicate_manifest_entries(data.get("module_graph", []))
 
-    path.write_text(
-        yaml.safe_dump(data, sort_keys=False, default_flow_style=False),
-        encoding="utf-8",
-    )
+    text = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
+    try:
+        yaml.safe_load(text)
+    except Exception as exc:
+        raise ValueError(f"blueprint.aero produced invalid YAML: {exc}") from exc
+    path.write_text(text, encoding="utf-8")
 
 
 def _parse_cargo_toml(path: Path) -> Dict[str, Any]:

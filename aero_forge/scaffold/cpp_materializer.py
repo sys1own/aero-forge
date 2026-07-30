@@ -1226,6 +1226,125 @@ def _so_name(pkg_name: str) -> str:
     return f"lib{pkg_name}.so"
 
 
+def _merge_native_bridge(existing_text: str, generated_text: str) -> str:
+    """Combine an existing ctypes bridge with a newly generated one.
+
+    Preserves functions already defined in *existing_text* and appends any new
+    functions exported by *generated_text*.
+    """
+    if not existing_text.strip():
+        return generated_text
+
+    import ast as _ast
+
+    existing_tree = _ast.parse(existing_text)
+    generated_tree = _ast.parse(generated_text)
+
+    existing_names = {
+        node.name
+        for node in _ast.walk(existing_tree)
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef))
+    }
+    existing_all: List[str] = []
+    for node in _ast.walk(existing_tree):
+        if isinstance(node, _ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, _ast.Name) and target.id == "__all__":
+                try:
+                    existing_all = [elt.value for elt in node.value.elts if isinstance(elt, _ast.Constant) and isinstance(elt.value, str)]
+                except Exception:
+                    pass
+
+    new_functions: List[str] = []
+    new_all: List[str] = []
+    generated_lines = generated_text.splitlines()
+    for node in generated_tree.body:
+        if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            if node.name not in existing_names:
+                start = node.lineno - 1
+                end = getattr(node, "end_lineno", node.lineno) or node.lineno
+                new_functions.append("\n".join(generated_lines[start:end]))
+        elif isinstance(node, _ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, _ast.Name) and target.id == "__all__":
+                try:
+                    new_all = [elt.value for elt in node.value.elts if isinstance(elt, _ast.Constant) and isinstance(elt.value, str)]
+                except Exception:
+                    pass
+
+    result_lines = existing_text.rstrip().splitlines()
+    result_lines.extend([""] + new_functions)
+
+    combined_all = existing_all + [n for n in new_all if n not in existing_all]
+    if combined_all:
+        if any(re.match(r"^__all__\s*=", line) for line in result_lines):
+            # Update existing __all__ list in place.
+            for i, line in enumerate(result_lines):
+                if re.match(r"^__all__\s*=", line):
+                    result_lines[i] = f"__all__ = {combined_all!r}"
+                    break
+        else:
+            result_lines.append(f"__all__ = {combined_all!r}")
+    return "\n".join(result_lines) + "\n"
+
+
+def _merge_init_py(existing_text: str, func_name: str, bridge_module: str = "native_bridge") -> str:
+    """Add *func_name* import and export to an existing package __init__.py."""
+    import_line = f"from .{bridge_module} import {func_name}"
+    if import_line not in existing_text:
+        existing_text = existing_text.rstrip() + "\n" + import_line + "\n"
+
+    all_match = re.search(r"__all__\s*=\s*(\[[^\]]*\])", existing_text, re.DOTALL)
+    if all_match:
+        try:
+            all_list: List[str] = eval(all_match.group(1))
+        except Exception:
+            all_list = []
+        if func_name not in all_list:
+            all_list.append(func_name)
+            start, end = all_match.span()
+            existing_text = existing_text[:start] + f"__all__ = {all_list!r}" + existing_text[end:]
+    else:
+        existing_text = existing_text.rstrip() + f"\n__all__ = [{func_name!r}]\n"
+    return existing_text
+
+
+def _inject_so_package_data(pyproject_text: str, package_name: str) -> str:
+    """Ensure ``*.so`` native libraries are included in ``[tool.setuptools.package-data]``.
+
+    The existing ``[tool.setuptools.package-data]`` section is preserved; if it is
+    missing, it is appended after the ``[project]`` section.
+    """
+    section = f"[tool.setuptools.package-data]\n{package_name} = [\"*.so\"]\n"
+    match = re.search(r"^\[tool\.setuptools\.package-data\]\s*$", pyproject_text, re.MULTILINE)
+    if match:
+        section_start = match.end()
+        section_end = len(pyproject_text)
+        next_section = re.search(r"\n\[", pyproject_text[section_start:])
+        if next_section:
+            section_end = section_start + next_section.start()
+        block = pyproject_text[section_start:section_end]
+        pkg_match = re.search(rf"^{re.escape(package_name)}\s*=\s*(\[.*?\])", block, re.MULTILINE | re.DOTALL)
+        if pkg_match:
+            try:
+                values: List[str] = eval(pkg_match.group(1))
+            except Exception:
+                values = []
+            if "*.so" not in values:
+                values.append("*.so")
+                new_decl = f"{package_name} = {values!r}"
+                block = block[: pkg_match.start()] + new_decl + block[pkg_match.end() :]
+            return pyproject_text[:section_start] + block + pyproject_text[section_end:]
+        return pyproject_text[:section_end] + f"{package_name} = [\"*.so\"]\n" + pyproject_text[section_end:]
+
+    project_match = re.search(r"^\[project\].*?^(?=\[|\Z)", pyproject_text, re.MULTILINE | re.DOTALL)
+    if project_match:
+        insert_pos = project_match.end()
+        return pyproject_text[:insert_pos] + "\n" + section + pyproject_text[insert_pos:]
+
+    return pyproject_text + "\n" + section
+
+
 class CppPolyglotMaterializer:
     """Write and build a C++/ctypes hybrid workspace from a Blueprint."""
 
@@ -1281,12 +1400,13 @@ class CppPolyglotMaterializer:
         import_name = pkg_dir.name
         pkg_module = self._dotted_module(pkg_rel)
 
-        cpp_source_path = self.workspace / explicit["cpp_path"] if explicit.get("cpp_path") else pkg_dir / "native.cpp"
+        if explicit.get("cpp_path"):
+            cpp_source_path = self.workspace / explicit["cpp_path"]
+        else:
+            cpp_source_path = pkg_dir / f"{func}.cpp"
         cpp_source_path.parent.mkdir(parents=True, exist_ok=True)
-        cpp_source_path.write_text(
-            _generate_native_cpp(import_name, contracts),
-            encoding="utf-8",
-        )
+        cpp_source = _generate_native_cpp(import_name, contracts)
+        cpp_source_path.write_text(cpp_source, encoding="utf-8")
 
         cmake_path = self.workspace / "CMakeLists.txt"
         if not cmake_path.is_file():
@@ -1295,26 +1415,42 @@ class CppPolyglotMaterializer:
 
         so_path = (pkg_dir / _so_name(import_name)).resolve()
         native_bridge_path = pkg_dir / "native_bridge.py"
-        native_bridge_path.write_text(
-            _ctypes_loader_source(
-                f"def {func}({', '.join(f'{a}: {t}' for a, t in args)}) -> {return_type}:\n    pass\n",
-                so_path,
-                [func],
-            ),
-            encoding="utf-8",
+        generated_bridge = _ctypes_loader_source(
+            f"def {func}({', '.join(f'{a}: {t}' for a, t in args)}) -> {return_type}:\n    pass\n",
+            so_path,
+            [func],
         )
+        if native_bridge_path.is_file():
+            existing_bridge = native_bridge_path.read_text(encoding="utf-8")
+            native_bridge_path.write_text(
+                _merge_native_bridge(existing_bridge, generated_bridge),
+                encoding="utf-8",
+            )
+        else:
+            native_bridge_path.write_text(generated_bridge, encoding="utf-8")
 
         init_path = pkg_dir / "__init__.py"
         if init_path.is_file():
             init_text = init_path.read_text(encoding="utf-8")
-            import_line = f"from .native_bridge import {func}"
-            if import_line not in init_text:
-                if not init_text.endswith("\n"):
-                    init_text += "\n"
-                init_path.write_text(init_text + import_line + "\n", encoding="utf-8")
+            init_path.write_text(
+                _merge_init_py(init_text, func, bridge_module="native_bridge"),
+                encoding="utf-8",
+            )
         else:
             init_path.write_text(
                 f"from .native_bridge import {func}\n__all__ = [{func!r}]\n",
+                encoding="utf-8",
+            )
+
+        pyproject_path = self.workspace / "pyproject.toml"
+        if pyproject_path.is_file():
+            pyproject_text = pyproject_path.read_text(encoding="utf-8")
+            project_name = import_name
+            project_match = re.search(r'^\[project\]\s*\n(?:[^\[]*\n)*?name\s*=\s*"([^"]+)"', pyproject_text, re.MULTILINE)
+            if project_match:
+                project_name = project_match.group(1)
+            pyproject_path.write_text(
+                _inject_so_package_data(pyproject_text, project_name),
                 encoding="utf-8",
             )
 
@@ -1352,6 +1488,17 @@ class CppPolyglotMaterializer:
             if build_proc.returncode != 0:
                 raise RuntimeError(f"C++ shared library build failed: {build_proc.stderr}")
 
+        modification_plan = {
+            "intent": "incremental_cpp_update",
+            "actions": [
+                {"path": str(cpp_source_path.relative_to(self.workspace)), "action": "CREATE"},
+                {"path": str(native_bridge_path.relative_to(self.workspace)), "action": "CREATE" if not (pkg_dir / "native_bridge.py").is_file() else "MODIFY"},
+                {"path": str(init_path.relative_to(self.workspace)), "action": "MODIFY"},
+                {"path": str(pyproject_path.relative_to(self.workspace)) if pyproject_path.is_file() else "pyproject.toml", "action": "MODIFY"},
+                {"path": str(test_path.relative_to(self.workspace)), "action": "CREATE"},
+            ],
+        }
+
         blueprint = blueprint.model_copy(update={
             "contracts": contracts,
             "manifest": list(blueprint.manifest) + [
@@ -1368,6 +1515,7 @@ class CppPolyglotMaterializer:
                     skip_build=True,
                 )
             ],
+            "modification_plan": modification_plan,
         })
         return blueprint
 
@@ -1375,9 +1523,17 @@ class CppPolyglotMaterializer:
         """Write the C++ workspace files and optionally build the shared library."""
         from aero_forge.scaffold.polyglot_materializer import _contracts_from_abi, _render_pyproject, guard_materialization
 
+        explicit = _extract_explicit_cpp_update(getattr(blueprint, "prompt", None) or "")
+        if explicit and blueprint.architecture == INTENT_HYBRID_CPP_PYTHON:
+            # An explicit function request in the prompt is treated as an LLM-initialized
+            # incremental update so the guard does not reject it as uninitialized.
+            if not getattr(blueprint, "metadata", None):
+                blueprint = blueprint.model_copy(update={"metadata": {"llm_initialized": "true"}})
+            elif "llm_initialized" not in blueprint.metadata:
+                blueprint = blueprint.model_copy(update={"metadata": {**dict(blueprint.metadata), "llm_initialized": "true"}})
+
         guard_materialization(self.workspace, blueprint, force_overwrite=force_overwrite)
 
-        explicit = _extract_explicit_cpp_update(getattr(blueprint, "prompt", None) or "")
         if explicit and blueprint.architecture == INTENT_HYBRID_CPP_PYTHON:
             return self._materialize_explicit_cpp_update(blueprint, build, explicit)
 
