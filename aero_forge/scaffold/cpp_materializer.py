@@ -8,6 +8,7 @@ library with ``g++``/``clang++`` and runs the test suite.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import re
@@ -17,6 +18,18 @@ import sys
 import textwrap
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+
+@dataclasses.dataclass
+class CppBuildConfig:
+    """Resolved C++ compilation targets for a blueprint."""
+
+    source_files: List[Path]
+    output_path: Path
+    compiler_flags: List[str]
+    linker_flags: List[str]
+    include_dirs: List[str]
+    header_paths: List[str]
 
 from aero_forge.blueprint import Blueprint, ContractEntry, FunctionSpec, ManifestEntry, write_blueprint
 from aero_forge.builder import language_router
@@ -900,7 +913,7 @@ def _generate_fallback_body(name: str, args: List[Tuple[str, str]], return_type:
     return "    return None"
 
 
-def _generate_init(pkg_name: str, pkg_dir: Path, contracts: List[ContractEntry]) -> str:
+def _generate_init(pkg_name: str, pkg_dir: Path, contracts: List[ContractEntry], so_path: Optional[Path] = None) -> str:
     """Generate ``__init__.py`` that loads the C-ABI .so via ctypes."""
     native_contracts = [c for c in contracts if _is_c_abi_contract(c)]
     fallback_contracts = [c for c in contracts if c not in native_contracts]
@@ -924,8 +937,8 @@ def _generate_init(pkg_name: str, pkg_dir: Path, contracts: List[ContractEntry])
     pieces: List[str] = []
     if native_names:
         stub_source = "\n".join(_contract_to_python_stub(c) for c in native_contracts)
-        so_path = (pkg_dir / _so_name(pkg_name)).resolve()
-        pieces.append(_ctypes_loader_source(stub_source, so_path, native_names))
+        effective_so_path = so_path if so_path is not None else (pkg_dir / _so_name(pkg_name)).resolve()
+        pieces.append(_ctypes_loader_source(stub_source, effective_so_path, native_names))
 
     for contract in fallback_contracts:
         if not contract.signature:
@@ -1226,6 +1239,98 @@ def _so_name(pkg_name: str) -> str:
     return f"lib{pkg_name}.so"
 
 
+def _load_v3_cpp_artifact(workspace: Path) -> Optional[Any]:
+    """Return the first C++ shared-library artifact from a v3 ``blueprint.aero``."""
+    blueprint_path = workspace / "blueprint.aero"
+    if not blueprint_path.is_file():
+        return None
+    try:
+        import yaml
+        from aero_forge.blueprint.schema import ArtifactType, BlueprintV3
+
+        text = blueprint_path.read_text(encoding="utf-8")
+        data = yaml.safe_load(text) or {}
+        if str(data.get("metadata", {}).get("schema_version")) != "3.0.0":
+            return None
+        bp = BlueprintV3.model_validate(data)
+        for artifact in bp.build_pipeline:
+            if artifact.type not in (
+                ArtifactType.shared_library,
+                ArtifactType.custom_cmd,
+                ArtifactType.python_extension,
+            ):
+                continue
+            if any(Path(f).suffix in {".cpp", ".c", ".cc", ".cxx"} for f in artifact.source_files):
+                return artifact
+    except Exception as exc:
+        logger.debug("Could not load v3 C++ build artifact: %s", exc)
+    return None
+
+
+def _resolve_output_path(
+    workspace: Path,
+    pkg_name: str,
+    pkg_dir: Path,
+    artifact_output: str,
+) -> Path:
+    """Resolve an artifact ``output_path`` to an absolute shared-library path."""
+    output = artifact_output.strip() if artifact_output else ""
+    if not output:
+        return (pkg_dir / _so_name(pkg_name)).resolve()
+    if output.startswith("${WORKSPACE_ROOT}"):
+        output = output.replace("${WORKSPACE_ROOT}", str(workspace), 1)
+    out_path = Path(output)
+    if not out_path.is_absolute():
+        out_path = (workspace / out_path).resolve()
+    if out_path.suffix not in {".so", ".dylib", ".dll"}:
+        out_path = out_path / _so_name(pkg_name)
+    return out_path
+
+
+def _extract_include_dirs(flags: List[str]) -> List[str]:
+    """Collect ``-I`` include directories from compiler flags."""
+    dirs: List[str] = []
+    i = 0
+    while i < len(flags):
+        flag = flags[i]
+        if flag.startswith("-I"):
+            if flag == "-I" and i + 1 < len(flags):
+                dirs.append(flags[i + 1])
+                i += 1
+            else:
+                dirs.append(flag[2:])
+        i += 1
+    return dirs
+
+
+_OPTIMIZATION_FLAGS = {"-O0", "-O1", "-O2", "-O3", "-Os", "-Og"}
+
+
+def _normalize_compiler_flags(flags: List[str]) -> Tuple[List[str], List[str]]:
+    """Return ``(include_dirs, cleaned_flags)`` from a list of compiler flags.
+
+    Strips ``-I`` include directives so they can be applied with proper path
+    resolution, while preserving optimization flags such as ``-O3`` and
+    architecture flags such as ``-march=native``.
+    """
+    include_dirs: List[str] = []
+    cleaned: List[str] = []
+    i = 0
+    while i < len(flags):
+        flag = flags[i]
+        if flag == "-I" and i + 1 < len(flags):
+            include_dirs.append(flags[i + 1])
+            i += 2
+            continue
+        if flag.startswith("-I"):
+            include_dirs.append(flag[2:])
+            i += 1
+            continue
+        cleaned.append(flag)
+        i += 1
+    return include_dirs, cleaned
+
+
 def _merge_native_bridge(existing_text: str, generated_text: str) -> str:
     """Combine an existing ctypes bridge with a newly generated one.
 
@@ -1378,6 +1483,109 @@ class CppPolyglotMaterializer:
         rel = rel.with_suffix("") if rel.suffix == ".py" else rel
         return ".".join(rel.parts)
 
+    def _resolve_cpp_build_config(
+        self,
+        blueprint: Blueprint,
+        pkg_name: str,
+        pkg_dir: Path,
+        cpp_source_path: Path,
+        header_paths: List[str],
+        explicit: Optional[Dict[str, Any]] = None,
+    ) -> CppBuildConfig:
+        """Resolve exact C++ source paths, flags, and output target.
+
+        Prefers a v3 ``blueprint.aero`` ``BuildArtifact`` when present, then the
+        v2 blueprint ``compiler_flags`` and manifest, then a minimal default.
+        """
+        workspace = self.workspace
+        artifact = None if explicit else _load_v3_cpp_artifact(workspace)
+
+        if artifact is not None:
+            source_files = [workspace / f for f in artifact.source_files if Path(f).suffix in {".cpp", ".c", ".cc", ".cxx"}]
+            if not source_files:
+                source_files = [cpp_source_path]
+            output_path = _resolve_output_path(workspace, pkg_name, pkg_dir, artifact.output_path)
+            compiler_flags = list(artifact.compiler_flags)
+            linker_flags = list(artifact.linker_flags)
+            include_dirs: List[str] = []
+            header_paths = list(header_paths) + [f for f in artifact.source_files if Path(f).suffix in {".h", ".hpp"}]
+        elif explicit and explicit.get("cpp_path"):
+            source_files = [workspace / explicit["cpp_path"]]
+            output_path = (pkg_dir / _so_name(pkg_dir.name)).resolve()
+            compiler_flags = list(getattr(blueprint, "compiler_flags", []) or [])
+            linker_flags = []
+            include_dirs = []
+        else:
+            source_files = [cpp_source_path]
+            output_path = (pkg_dir / _so_name(pkg_name)).resolve()
+            compiler_flags = list(getattr(blueprint, "compiler_flags", []) or [])
+            linker_flags = []
+            include_dirs = []
+
+        # Merge defaults with explicit flags, preserving user-provided optimization
+        # and architecture flags (e.g., ``-O3 -march=native``).
+        opt_flags = {f for f in compiler_flags if f in _OPTIMIZATION_FLAGS}
+        extra_include_dirs, cleaned_flags = _normalize_compiler_flags(compiler_flags)
+        include_dirs += extra_include_dirs
+
+        defaults = ["-shared", "-fPIC", "-std=c++17"]
+        if not opt_flags:
+            defaults.append("-O2")
+        merged_flags = defaults + cleaned_flags
+
+        # Add header parent directories to the include search path so generated
+        # ``#include "header.h"`` directives resolve correctly.
+        for h in header_paths:
+            parent = Path(h).parent
+            if parent.as_posix() not in (".", ""):
+                include_dirs.append(str((workspace / parent).resolve()))
+
+        return CppBuildConfig(
+            source_files=source_files,
+            output_path=output_path,
+            compiler_flags=merged_flags,
+            linker_flags=linker_flags,
+            include_dirs=include_dirs,
+            header_paths=header_paths,
+        )
+
+    def _compile_cpp(self, config: CppBuildConfig) -> None:
+        """Compile the configured C++ sources into a single shared library."""
+        compiler = _find_cpp_compiler()
+        if compiler is None:
+            raise RuntimeError("No C++ compiler found (g++, clang++, or c++)")
+
+        output_path = config.output_path
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        build_cmd = [compiler, *config.compiler_flags]
+        for inc in sorted(set(config.include_dirs)):
+            build_cmd.extend(["-I", str(inc)])
+        build_cmd.extend(["-o", str(output_path)])
+        build_cmd.extend(str(p) for p in config.source_files)
+        if config.linker_flags:
+            build_cmd.extend(config.linker_flags)
+
+        self._log(f"Compiling C-ABI shared library: {' '.join(build_cmd)}")
+        _accel_log("info", f"BUILD: compiling dynamic shared object with {' '.join(build_cmd)}")
+
+        env = dict(os.environ)
+        env["PYTHONUNBUFFERED"] = "1"
+
+        build_proc = subprocess.run(
+            build_cmd,
+            cwd=self.workspace,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        self._log(build_proc.stdout)
+        self._log(build_proc.stderr)
+
+        if build_proc.returncode != 0:
+            raise RuntimeError(f"C++ shared library build failed: {build_proc.stderr}")
+        _accel_log("success", f"BUILD: dynamic shared object compiled: {output_path}")
+
     def _materialize_explicit_cpp_update(
         self,
         blueprint: Blueprint,
@@ -1413,7 +1621,10 @@ class CppPolyglotMaterializer:
             cpp_rel = cpp_source_path.relative_to(self.workspace).as_posix()
             cmake_path.write_text(_generate_cmake(import_name, cpp_rel), encoding="utf-8")
 
-        so_path = (pkg_dir / _so_name(import_name)).resolve()
+        build_config = self._resolve_cpp_build_config(
+            blueprint, import_name, pkg_dir, cpp_source_path, header_paths=[], explicit=explicit
+        )
+        so_path = build_config.output_path
         native_bridge_path = pkg_dir / "native_bridge.py"
         generated_bridge = _ctypes_loader_source(
             f"def {func}({', '.join(f'{a}: {t}' for a, t in args)}) -> {return_type}:\n    pass\n",
@@ -1463,30 +1674,7 @@ class CppPolyglotMaterializer:
         )
 
         if build:
-            compiler = _find_cpp_compiler()
-            if compiler is None:
-                raise RuntimeError("No C++ compiler found (g++, clang++, or c++)")
-            build_cmd = [
-                compiler,
-                "-shared",
-                "-fPIC",
-                "-O2",
-                "-std=c++17",
-                "-o",
-                str(so_path),
-                str(cpp_source_path),
-            ]
-            self._log(f"Compiling C-ABI shared library: {' '.join(build_cmd)}")
-            build_proc = subprocess.run(
-                build_cmd,
-                cwd=self.workspace,
-                capture_output=True,
-                text=True,
-            )
-            self._log(build_proc.stdout)
-            self._log(build_proc.stderr)
-            if build_proc.returncode != 0:
-                raise RuntimeError(f"C++ shared library build failed: {build_proc.stderr}")
+            self._compile_cpp(build_config)
 
         modification_plan = {
             "intent": "incremental_cpp_update",
@@ -1607,9 +1795,19 @@ class CppPolyglotMaterializer:
                 header_paths.append(e.path)
         header_paths = list(dict.fromkeys(header_paths))
 
+        # Resolve dynamic C++ build targets (source files, compiler flags, output path).
+        build_config = self._resolve_cpp_build_config(
+            blueprint, pkg_name, pkg_dir, cpp_source_path, header_paths
+        )
+        cpp_source_path = build_config.source_files[0]
+        if not any(e.path == str(cpp_source_path.relative_to(self.workspace)) for e in blueprint.manifest):
+            blueprint.manifest.append(
+                ManifestEntry(path=str(cpp_source_path.relative_to(self.workspace)), lang="cpp", purpose="C-ABI shared library source")
+            )
+
         cpp_source_path.parent.mkdir(parents=True, exist_ok=True)
         cpp_source_path.write_text(
-            _generate_native_cpp(pkg_name, contracts, header_includes=[Path(h).name for h in header_paths]),
+            _generate_native_cpp(pkg_name, contracts, header_includes=[Path(h).name for h in build_config.header_paths]),
             encoding="utf-8",
         )
 
@@ -1618,7 +1816,7 @@ class CppPolyglotMaterializer:
             cpp_rel = cpp_source_path.relative_to(self.workspace).as_posix()
             cmake_path.write_text(_generate_cmake(pkg_name, cpp_rel), encoding="utf-8")
 
-        for header_path in header_paths:
+        for header_path in build_config.header_paths:
             hdr_path = self.workspace / header_path
             hdr_path.parent.mkdir(parents=True, exist_ok=True)
             hdr_path.write_text(_generate_cpp_header(pkg_name, contracts), encoding="utf-8")
@@ -1626,7 +1824,7 @@ class CppPolyglotMaterializer:
                 blueprint.manifest.append(ManifestEntry(path=header_path, lang="cpp", purpose="C-ABI header"))
 
         (pkg_dir / "__init__.py").write_text(
-            _generate_init(pkg_name, pkg_dir, contracts), encoding="utf-8"
+            _generate_init(pkg_name, pkg_dir, contracts, so_path=build_config.output_path), encoding="utf-8"
         )
         (pkg_dir / "cli.py").write_text(
             _generate_cli(pkg_module, function_names, contracts=contracts), encoding="utf-8"
@@ -1666,7 +1864,7 @@ class CppPolyglotMaterializer:
         write_blueprint(blueprint, self.workspace / "blueprint.aero")
 
         if build:
-            self._build_extension(pkg_name, pkg_dir, cpp_source_path, header_paths)
+            self._compile_cpp(build_config)
 
         functions = [
             FunctionSpec(
@@ -1689,57 +1887,6 @@ class CppPolyglotMaterializer:
         blueprint = blueprint.model_copy(update={"functions": functions})
 
         return blueprint
-
-    def _build_extension(
-        self,
-        pkg_name: str,
-        pkg_dir: Path,
-        cpp_source_path: Path,
-        header_paths: List[str],
-    ) -> bool:
-        """Compile the C-ABI shared library in place. Returns True on success."""
-        compiler = _find_cpp_compiler()
-        if compiler is None:
-            raise RuntimeError("No C++ compiler found (g++, clang++, or c++)")
-
-        so_name = _so_name(pkg_name)
-        so_path = pkg_dir / so_name
-
-        include_dirs = {str(Path(h).parent) for h in header_paths if Path(h).parent != Path(".")}
-        build_cmd = [
-            compiler,
-            "-shared",
-            "-fPIC",
-            "-O2",
-            "-std=c++17",
-        ]
-        for inc in sorted(include_dirs):
-            build_cmd.extend(["-I", str(self.workspace / inc)])
-        build_cmd.extend(["-o", str(so_path), str(cpp_source_path)])
-
-        self._log(f"Compiling C-ABI shared library: {' '.join(build_cmd)}")
-        _accel_log("info", f"BUILD: compiling dynamic shared object with {' '.join(build_cmd)}")
-
-        env = dict(os.environ)
-        env["PYTHONUNBUFFERED"] = "1"
-
-        build_proc = subprocess.run(
-            build_cmd,
-            cwd=self.workspace,
-            env=env,
-            capture_output=True,
-            text=True,
-        )
-        self._log(build_proc.stdout)
-        self._log(build_proc.stderr)
-
-        if build_proc.returncode != 0:
-            logger.error("C++ shared library build failed:\n%s", build_proc.stderr)
-            _accel_log("error", f"C++ shared library build failed: {build_proc.stderr}")
-            return False
-
-        _accel_log("success", f"BUILD: dynamic shared library compiled: {so_path}")
-        return True
 
     def _write_missing_manifest_entries(
         self,
