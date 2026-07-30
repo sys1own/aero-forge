@@ -10,10 +10,12 @@ any ``aero_forge`` dependency.
 
 from __future__ import annotations
 
+import base64
 import datetime
 import hashlib
 import io
 import json
+import platform
 import re
 import shutil
 import subprocess
@@ -526,3 +528,312 @@ def export_and_compile_aeroc(
     """Export and compile the standalone runner in one step."""
     project_dir = export_aeroc_project(workspace_dir, output_dir, project_name)
     return compile_aeroc(project_dir)
+
+
+# ---------------------------------------------------------------------------
+# Hybrid binary + source .aeroc packing and unpacking
+# ---------------------------------------------------------------------------
+
+
+def _host_platform_tag() -> str:
+    """Return a Rust-compatible ``{os}_{arch}`` tag for the current host."""
+    os_name = sys.platform
+    if os_name.startswith("linux"):
+        os_name = "linux"
+    elif os_name == "darwin":
+        os_name = "macos"
+    elif os_name.startswith("win"):
+        os_name = "windows"
+    elif os_name.startswith("freebsd"):
+        os_name = "freebsd"
+
+    arch = platform.machine().lower()
+    arch_aliases = {
+        "amd64": "x86_64",
+        "x86_64": "x86_64",
+        "x86": "x86",
+        "i386": "x86",
+        "i686": "x86",
+        "arm64": "aarch64",
+        "aarch64": "aarch64",
+        "arm": "arm",
+    }
+    arch = arch_aliases.get(arch, arch)
+    return f"{os_name}_{arch}"
+
+
+def _is_native_artifact(path: Path) -> bool:
+    """Return True if *path* is a pre-compiled native binary or wheel."""
+    if not path.is_file():
+        return False
+    return path.suffix.lower() in {".so", ".dylib", ".dll", ".pyd", ".whl"}
+
+
+def _read_pyproject_dependencies(workspace_dir: Path) -> List[str]:
+    """Parse Python project dependencies from ``pyproject.toml``."""
+    pyproject = workspace_dir / "pyproject.toml"
+    if not pyproject.is_file():
+        return []
+    try:
+        import tomli as tomllib
+    except ImportError:
+        return []
+    try:
+        with pyproject.open("rb") as f:
+            data = tomllib.load(f)
+    except Exception:
+        return []
+    return data.get("project", {}).get("dependencies", []) or []
+
+
+def _read_cargo_dependencies(workspace_dir: Path) -> Dict[str, Any]:
+    """Parse Rust crate dependencies from ``Cargo.toml``."""
+    cargo = workspace_dir / "Cargo.toml"
+    if not cargo.is_file():
+        return {}
+    try:
+        import tomli as tomllib
+    except ImportError:
+        return {}
+    try:
+        with cargo.open("rb") as f:
+            data = tomllib.load(f)
+    except Exception:
+        return {}
+    return data.get("dependencies", {}) or {}
+
+
+def _build_environment_lock(
+    workspace_dir: Path,
+    platform_tag: str,
+    native_binaries: List[Path],
+) -> Dict[str, Any]:
+    """Build a pinned dependency / toolchain lock file for the .aeroc bundle."""
+    python_version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    py_deps = _read_pyproject_dependencies(workspace_dir)
+    rust_deps = _read_cargo_dependencies(workspace_dir)
+
+    toolchains: List[str] = ["python>=3.9"]
+    if (workspace_dir / "Cargo.toml").is_file() or any(
+        p.name == "Cargo.toml" for p in workspace_dir.rglob("Cargo.toml")
+    ):
+        toolchains.append("cargo>=1.70")
+    if any(p.suffix.lower() in {".cpp", ".cxx", ".c", ".h", ".hpp"} for p in workspace_dir.rglob("*")):
+        toolchains.append("g++")
+
+    return {
+        "schema_version": 1,
+        "source_root": "src",
+        "artifact_root": f"artifacts/native/{platform_tag}",
+        "platforms": [platform_tag],
+        "toolchains": toolchains,
+        "python": {
+            "version": python_version,
+            "dependencies": py_deps,
+        },
+        "rust": {
+            "dependencies": rust_deps,
+        },
+        "native_binaries": [f"artifacts/native/{platform_tag}/{p.name}" for p in native_binaries],
+    }
+
+
+def compile_hybrid_aeroc(
+    workspace_dir: Path,
+    output_path: Union[str, Path],
+    platform_tag: Optional[str] = None,
+) -> str:
+    """Compile a workspace into a hybrid .aeroc container with native binaries.
+
+    The container layout is:
+
+        src/                          - raw source files
+        artifacts/native/{os}_{arch}/ - pre-compiled .so / .dylib / .dll
+        environment.lock              - pinned dependencies and toolchains
+
+    Native binaries are detected from the workspace root (and ``target/release/``,
+    ``dist/`` and ``build/`` subdirectories).  Source files are placed under
+    ``src/`` so the unpacker can strip the prefix during extraction.
+    """
+    workspace_dir = Path(workspace_dir).resolve()
+    output_path = Path(output_path).resolve()
+    platform_tag = platform_tag or _host_platform_tag()
+
+    from aero_forge._native import compile_aeroc
+
+    exclude_prefixes = {
+        ".aero",
+        ".git",
+        ".aero_core",
+        "target",
+        ".venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".cargo",
+        "node_modules",
+    }
+
+    native_binaries: List[Path] = []
+    source_files: List[Path] = []
+
+    # Native artifact search paths.
+    native_search_dirs = {
+        workspace_dir,
+        workspace_dir / "target" / "release",
+        workspace_dir / "dist",
+        workspace_dir / "build",
+    }
+    for search_dir in native_search_dirs:
+        if not search_dir.is_dir():
+            continue
+        for path in sorted(search_dir.rglob("*")):
+            if _is_native_artifact(path):
+                native_binaries.append(path)
+
+    for path in sorted(workspace_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        rel = path.relative_to(workspace_dir)
+        if any(part in exclude_prefixes for part in rel.parts):
+            continue
+        if rel.name.startswith("."):
+            continue
+        if _is_native_artifact(path):
+            # Already accounted for above.
+            continue
+        source_files.append(path)
+
+    sources: List[Dict[str, str]] = []
+
+    # Layout marker so the unpacker knows to strip the ``src/`` prefix.
+    marker = json.dumps({"layout": "hybrid", "version": 1}, indent=2)
+    sources.append({
+        "path": ".aeroc_hybrid",
+        "content_base64": base64.b64encode(marker.encode("utf-8")).decode("ascii"),
+    })
+
+    # Add source files under the ``src/`` prefix.
+    for path in source_files:
+        rel = path.relative_to(workspace_dir).as_posix().lstrip("/")
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        sources.append({
+            "path": f"src/{rel}",
+            "content_base64": base64.b64encode(data).decode("ascii"),
+        })
+
+    # Add native binaries under the platform-specific artifact directory.
+    for path in native_binaries:
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        sources.append({
+            "path": f"artifacts/native/{platform_tag}/{path.name}",
+            "content_base64": base64.b64encode(data).decode("ascii"),
+        })
+
+    # Add environment.lock at the root.
+    lock = _build_environment_lock(workspace_dir, platform_tag, native_binaries)
+    lock_json = json.dumps(lock, indent=2, sort_keys=True)
+    sources.append({
+        "path": "environment.lock",
+        "content_base64": base64.b64encode(lock_json.encode("utf-8")).decode("ascii"),
+    })
+
+    spec = {
+        "nodes": ["workspace"],
+        "edges": {},
+        "instructions": [{"op": "HALT"}],
+        "sources": sources,
+        "flags": 0,
+    }
+
+    return compile_aeroc(json.dumps(spec), str(output_path))
+
+
+def _cargo_manifest_in(output_dir: Path) -> Optional[Path]:
+    """Locate the Cargo.toml to use for source fallback compilation."""
+    for candidate in [output_dir / "Cargo.toml", output_dir / "src" / "Cargo.toml"]:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _fallback_compile_command(output_dir: Path, env: Dict[str, str]) -> Optional[List[str]]:
+    """Return a compile command appropriate for the extracted workspace."""
+    cargo_toml = _cargo_manifest_in(output_dir)
+    if cargo_toml:
+        args = ["cargo", "build", "--release"]
+        if cargo_toml.parent != output_dir:
+            args.extend(["--manifest-path", str(cargo_toml)])
+        return args
+
+    pyproject = output_dir / "pyproject.toml"
+    if pyproject.is_file():
+        return ["pip", "install", "--no-cache-dir", "-e", "."]
+
+    setup = output_dir / "setup.py"
+    if setup.is_file():
+        return ["pip", "install", "--no-cache-dir", "-e", "."]
+
+    return None
+
+
+def unpack_aeroc_with_fallback(
+    aeroc_path: Union[str, Path],
+    output_dir: Union[str, Path],
+    run_fallback: bool = True,
+) -> Dict[str, Any]:
+    """Unpack a hybrid .aeroc container and optionally compile from source.
+
+    The Rust unpacker extracts matching native binaries and ``src/`` source
+    files.  If no native artifact matches the host platform, it leaves a
+    ``.aeroc_fallback`` marker in *output_dir*.  When *run_fallback* is True
+    the Python side invokes :class:`ToolchainManager` to build from source.
+    """
+    from aero_forge._native import unpack_aeroc
+    from aero_forge.toolchain import ToolchainManager
+
+    aeroc_path = Path(aeroc_path).resolve()
+    output_dir = Path(output_dir).resolve()
+
+    count = unpack_aeroc(str(aeroc_path), str(output_dir))
+    result: Dict[str, Any] = {
+        "extracted": count,
+        "output_dir": str(output_dir),
+        "fallback": False,
+        "compiled": False,
+    }
+
+    fallback_marker = output_dir / ".aeroc_fallback"
+    if fallback_marker.is_file():
+        result["fallback"] = True
+        reason = fallback_marker.read_text(encoding="utf-8").strip()
+        result["fallback_reason"] = reason
+
+        if run_fallback:
+            command = _fallback_compile_command(output_dir, {})
+            if command:
+                toolchain = ToolchainManager(output_dir)
+                toolchain.prepare_environment(command[0])
+                proc = subprocess.run(
+                    command,
+                    cwd=str(output_dir),
+                    env=toolchain.env,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+                result["compiled"] = proc.returncode == 0
+                result["compile_stdout"] = proc.stdout
+                result["compile_stderr"] = proc.stderr
+                if proc.returncode == 0:
+                    fallback_marker.unlink()
+                    result["fallback"] = False
+            else:
+                result["compile_stderr"] = "No supported source manifest found for fallback compilation"
+
+    return result

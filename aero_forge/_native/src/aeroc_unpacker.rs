@@ -6,7 +6,9 @@
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 
 use constant_time_eq::constant_time_eq;
@@ -150,23 +152,113 @@ impl AerocFile {
     }
 }
 
+/// Return the host platform identifier used for native artifact directories.
+fn host_platform() -> String {
+    format!("{}_{}", std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// Check whether the first bytes of *data* match a known native executable format.
+fn is_valid_native_binary(data: &[u8]) -> bool {
+    if data.len() < 4 {
+        return false;
+    }
+    let magic = &data[..4];
+    // ELF
+    if magic == [0x7f, b'E', b'L', b'F'] {
+        return true;
+    }
+    // Mach-O 32/64-bit, little and big endian.
+    if magic == [0xfe, 0xed, 0xfa, 0xce]
+        || magic == [0xfe, 0xed, 0xfa, 0xcf]
+        || magic == [0xcf, 0xfa, 0xed, 0xfe]
+        || magic == [0xce, 0xfa, 0xed, 0xfe]
+    {
+        return true;
+    }
+    // Windows PE/COFF ("MZ").
+    if data.len() >= 2 && &data[..2] == b"MZ" {
+        return true;
+    }
+    false
+}
+
+/// Resolve a stored *path* to the final output location for the current host.
+///
+/// * ``src/`` prefixes are stripped so source files end up at the workspace root.
+/// * ``artifacts/native/{platform}/`` files are only kept when *platform*
+///   matches the current host, and are written to the output root.
+/// * ``environment.lock`` is written verbatim.
+fn resolve_output_path(
+    path: &str,
+    output_dir: &Path,
+    current_platform: &str,
+    hybrid_layout: bool,
+    src_count: &AtomicUsize,
+    native_total: &AtomicUsize,
+) -> Option<PathBuf> {
+    if path == ".aeroc_hybrid" || path == "aeroc.hybrid" {
+        return None;
+    }
+    if hybrid_layout {
+        if let Some(stripped) = path.strip_prefix("src/") {
+            src_count.fetch_add(1, Ordering::Relaxed);
+            return Some(output_dir.join(stripped));
+        }
+    }
+    if let Some(rest) = path.strip_prefix("artifacts/native/") {
+        native_total.fetch_add(1, Ordering::Relaxed);
+        if let Some((platform, file_path)) = rest.split_once('/') {
+            if platform == current_platform {
+                Some(output_dir.join(file_path))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else if path == "environment.lock" {
+        Some(output_dir.join(path))
+    } else {
+        Some(output_dir.join(path))
+    }
+}
+
 /// Unpack *aeroc_path* into *output_dir*, preserving the stored source tree.
 pub fn unpack_aeroc<P: AsRef<Path>>(aeroc_path: P, output_dir: P) -> Result<usize, UnpackError> {
     let file = AerocFile::open(aeroc_path)?;
     let output_dir = output_dir.as_ref();
     fs::create_dir_all(output_dir)?;
 
+    let current_platform = host_platform();
     let dictionary = file.dictionary()?.to_vec();
     let blocks = file.payload_blocks()?;
     let entries = file.source_map()?;
 
+    // Detect the hybrid binary+source layout marker before extraction.
+    let hybrid_layout = entries.iter().any(|entry| {
+        file.read_string(entry.path_ref)
+            .map(|path| path == ".aeroc_hybrid" || path == "aeroc.hybrid")
+            .unwrap_or(false)
+    });
+
+    let src_count = Arc::new(AtomicUsize::new(0));
+    let native_total = Arc::new(AtomicUsize::new(0));
+    let native_matched = Arc::new(AtomicUsize::new(0));
+
     // Parallel extraction: one source file per rayon task.
     entries.par_iter().try_for_each(|entry| {
         let path = file.read_string(entry.path_ref)?;
-        let out_path = output_dir.join(path);
-        if let Some(parent) = out_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        let out_path = match resolve_output_path(
+            path,
+            output_dir,
+            &current_platform,
+            hybrid_layout,
+            &src_count,
+            &native_total,
+        ) {
+            Some(p) => p,
+            None => return Ok(()),
+        };
 
         let start = entry.start_block as usize;
         let end = start + entry.block_count as usize;
@@ -210,9 +302,37 @@ pub fn unpack_aeroc<P: AsRef<Path>>(aeroc_path: P, output_dir: P) -> Result<usiz
             out.extend_from_slice(&chunk);
         }
 
+        // If this is a native binary for the current platform, validate its magic.
+        if path.starts_with("artifacts/native/") && !is_valid_native_binary(&out) {
+            eprintln!("aeroc fallback: native binary {path} failed validation for {current_platform}");
+            return Ok(());
+        }
+
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
         fs::write(&out_path, &out)?;
+
+        if path.starts_with("artifacts/native/") {
+            native_matched.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(())
     })?;
+
+    let matched = native_matched.load(Ordering::Relaxed);
+    let total = native_total.load(Ordering::Relaxed);
+    let srcs = src_count.load(Ordering::Relaxed);
+
+    // If the bundle shipped native binaries but none matched the host platform,
+    // leave a marker so the Python orchestrator can fall back to source compilation.
+    if total > 0 && matched == 0 && srcs > 0 {
+        eprintln!("aeroc fallback: no matching native binary for {current_platform}; source compilation required");
+        let marker = output_dir.join(".aeroc_fallback");
+        let reason = format!(
+            "no matching native binary for platform {current_platform}"
+        );
+        fs::write(&marker, reason)?;
+    }
 
     Ok(entries.len())
 }
