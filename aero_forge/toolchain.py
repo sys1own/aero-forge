@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
+from aero_forge.environment import env_manager
 from aero_forge.sandbox.manager import ensure_cargo_in_path
 
 
@@ -83,11 +84,12 @@ class ToolchainManager:
         """Install the workspace package in editable mode when a manifest exists."""
         if self._workspace_package_installed:
             return
-        manifest = self._workspace_package_manifest()
-        if not manifest:
-            return
-        self._log("info", "ENV", f"Installing workspace package in editable mode from {manifest.name}...")
-        proc = self._run_pip(["install", "-e", ".", "--no-deps"], check=False)
+        proc = env_manager.install_workspace_editable(
+            self.sandbox_dir,
+            self._venv_python(),
+            env=self.env,
+            log_callback=self.log_callback,
+        )
         if proc.returncode == 0:
             self._workspace_package_installed = True
             self._log("info", "ENV", "Workspace package installed in editable mode (ok)")

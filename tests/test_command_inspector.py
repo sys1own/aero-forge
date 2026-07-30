@@ -55,7 +55,7 @@ def test_detects_pyproject_scripts_and_pytest(tmp_path: Path) -> None:
         '[tool.pytest.ini_options]\ntestpaths = ["tests"]\n'
     )
     cmds = detect_runnable_commands(tmp_path)
-    assert any(c["cmd"] == "python -m demo.cli" and c["category"] == "run" for c in cmds)
+    assert any(c["cmd"] == "python -m demo.cli --help" and c["category"] == "run" for c in cmds)
     assert any(c["cmd"] == "pytest" and c["category"] == "test" for c in cmds)
     assert any(c["cmd"] == "pip install -e ." and c["category"] == "build" for c in cmds)
 
@@ -125,3 +125,47 @@ def test_detects_nested_cargo_manifest(tmp_path: Path) -> None:
         and c["category"] == "run"
         for c in cmds
     )
+
+
+def test_ignores_jinja_template_cargo_manifests(tmp_path: Path) -> None:
+    """Template Cargo.toml files are not treated as runnable crates."""
+    (tmp_path / "Cargo.toml").write_text(
+        '[package]\nname = "demo"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "src" / "main.rs").parent.mkdir(parents=True)
+    (tmp_path / "src" / "main.rs").write_text("fn main() {}")
+
+    templates = tmp_path / "src" / "accelerator" / "templates"
+    templates.mkdir(parents=True)
+    (templates / "Cargo.toml").write_text(
+        '[package]\nname = "{{ crate_name }}"\nversion = "{{ version }}"\n',
+        encoding="utf-8",
+    )
+    (templates / "lib.rs").write_text("// {{ template }}")
+
+    cmds = detect_runnable_commands(tmp_path)
+    assert any(c["cmd"] == "cargo run --bin demo" and c["category"] == "run" for c in cmds)
+    assert not any("templates/Cargo.toml" in c["cmd"] for c in cmds)
+
+
+def test_ignores_template_directory_layout(tmp_path: Path) -> None:
+    """Rust source inside a templates directory does not produce cargo commands."""
+    crate = tmp_path / "rust_core"
+    crate.mkdir()
+    (crate / "Cargo.toml").write_text(
+        '[package]\nname = "native"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (crate / "src" / "main.rs").parent.mkdir(parents=True)
+    (crate / "src" / "main.rs").write_text("fn main() {}")
+
+    templates = tmp_path / "templates"
+    templates.mkdir()
+    (templates / "Cargo.toml").write_text('[package]\nname = "tpl"\n')
+    (templates / "src" / "main.rs").parent.mkdir(parents=True)
+    (templates / "src" / "main.rs").write_text("fn main() {}")
+
+    cmds = detect_runnable_commands(tmp_path)
+    assert any("rust_core" in c["cmd"] for c in cmds)
+    assert not any("templates" in c["cmd"] for c in cmds)
