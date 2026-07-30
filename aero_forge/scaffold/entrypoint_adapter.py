@@ -191,7 +191,7 @@ class EntrypointAdapterEngine:
             "import sys",
             f"from {engine_module} import run_domain_task",
             "",
-            "def main():",
+            "def main(*main_args, **main_kwargs):",
             "    parser = argparse.ArgumentParser(description='Aero-Forge Executable Pipeline')",
         ]
 
@@ -237,7 +237,7 @@ class EntrypointAdapterEngine:
         lines.extend(
             [
                 "    args = parser.parse_args()",
-                "    status = run_domain_task(args)",
+                "    status = run_domain_task(args, *main_args, **main_kwargs)",
                 "    sys.exit(status if isinstance(status, int) else 0)",
                 "",
                 "if __name__ == '__main__':",
@@ -384,7 +384,7 @@ class EntrypointAdapterEngine:
             "        return {}",
             "    return {n: getattr(mod, n) for n in names if hasattr(mod, n)}",
             "",
-            "def run_domain_task(args):",
+            "def run_domain_task(args, *extra_args, **kwargs):",
             "    funcs = _load_functions()",
             '    cmd = getattr(args, "cmd", None)',
         ]

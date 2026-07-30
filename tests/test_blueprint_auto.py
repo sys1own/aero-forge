@@ -1,68 +1,78 @@
-"""Tests for automatic blueprint generation from uploaded repositories."""
+"""Tests for automatic blueprint generation and missing-blueprint warning suppression."""
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 import pytest
 
-from aero_forge.blueprint import (
-    generate_blueprint_from_uploaded_repo,
-    parse_blueprint,
-)
+from aero_forge.blueprint import ensure_workspace_blueprint, is_blueprint_ready
+from aero_forge.blueprint.schema import BlueprintV3
 
 
-def test_generates_blueprint_for_rust_python_repo(tmp_path: Path) -> None:
-    repo = tmp_path / "my_repo"
-    repo.mkdir()
-    (repo / "Cargo.toml").write_text(
-        '[package]\nname = "my_repo"\nversion = "0.1.0"\nedition = "2021"\n',
-        encoding="utf-8",
-    )
-    (repo / "rust_core").mkdir()
-    (repo / "rust_core" / "Cargo.toml").write_text(
-        '[package]\nname = "rust_core"\nversion = "0.1.0"\n',
-        encoding="utf-8",
-    )
-    (repo / "rust_core" / "src").mkdir(parents=True)
-    (repo / "rust_core" / "src" / "lib.rs").write_text("pub fn add(a: i32, b: i32) -> i32 { a + b }\n", encoding="utf-8")
-    (repo / "pyproject.toml").write_text('[project]\nname = "my_repo"\nversion = "0.1.0"\n', encoding="utf-8")
-    (repo / "src").mkdir()
-    (repo / "src" / "engine.py").write_text("def run():\n    pass\n", encoding="utf-8")
-
-    blueprint_path = generate_blueprint_from_uploaded_repo(repo)
-    assert blueprint_path == repo / "blueprint.aero"
-    assert blueprint_path.is_file()
-
-    bp = parse_blueprint(blueprint_path)
-    assert bp.architecture == "hybrid_rust_python"
-    assert "cargo" in bp.toolchains
-    assert "python" in bp.toolchains
-    paths = {m.path for m in bp.manifest}
-    assert "Cargo.toml" in paths
-    assert "pyproject.toml" in paths
-    assert "src/engine.py" in paths or "rust_core/src/lib.rs" in paths
+def test_ensure_workspace_blueprint_creates_file_for_empty_directory() -> None:
+    """An empty workspace should receive a minimal v3 blueprint from templates."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        path = ensure_workspace_blueprint(root)
+        assert path == root / "blueprint.aero"
+        assert path.is_file()
+        data = BlueprintV3.load(path).model_dump(mode="json")
+        assert data["metadata"]["schema_version"] == "3.0.0"
+        assert data["metadata"]["llm_initialized"] is True
+        assert data["metadata"]["status"] == "finalized"
 
 
-def test_returns_existing_blueprint_without_overwrite(tmp_path: Path) -> None:
-    repo = tmp_path / "existing"
-    repo.mkdir()
-    existing = repo / "blueprint.aero"
-    existing.write_text("project: existing\n", encoding="utf-8")
+def test_ensure_workspace_blueprint_does_not_overwrite_existing() -> None:
+    """If ``blueprint.aero`` already exists, the helper should leave it untouched."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        existing = root / "blueprint.aero"
+        existing.write_text("existing\n", encoding="utf-8")
+        result = ensure_workspace_blueprint(root)
+        assert result == existing
+        assert existing.read_text(encoding="utf-8") == "existing\n"
 
-    result = generate_blueprint_from_uploaded_repo(repo)
-    assert result == existing
-    assert existing.read_text(encoding="utf-8") == "project: existing\n"
+
+def test_ensure_workspace_blueprint_uses_pure_python_template() -> None:
+    """The generated description should be seeded from the pure_python template."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        path = ensure_workspace_blueprint(root)
+        bp = BlueprintV3.load(path)
+        assert "pure Python" in bp.llm_context.repository_summary.lower() or "numeric" in bp.llm_context.repository_summary.lower()
 
 
-def test_generates_blueprint_for_pure_python_repo(tmp_path: Path) -> None:
-    repo = tmp_path / "py_repo"
-    repo.mkdir()
-    (repo / "pyproject.toml").write_text('[project]\nname = "py_repo"\n', encoding="utf-8")
-    (repo / "app.py").write_text("def main():\n    print('hi')\n", encoding="utf-8")
+def test_ensure_workspace_blueprint_detects_rust_workspace() -> None:
+    """A workspace with ``Cargo.toml`` should get a rust-oriented blueprint."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "Cargo.toml").write_text("[package]\nname = 'demo'\n", encoding="utf-8")
+        path = ensure_workspace_blueprint(root)
+        bp = BlueprintV3.load(path)
+        assert bp.metadata.project_name
+        assert bp.build_pipeline
+        assert bp.build_pipeline[0].type.value == "cargo_cdylib"
+        assert any("src/lib.rs" in sf for sf in bp.build_pipeline[0].source_files)
 
-    generate_blueprint_from_uploaded_repo(repo)
-    bp = parse_blueprint(repo / "blueprint.aero")
-    assert bp.architecture == "pure_python"
-    assert "python" in bp.languages
-    assert any(m.path == "app.py" for m in bp.manifest)
+
+def test_ensure_workspace_blueprint_detects_python_rust_hybrid() -> None:
+    """A workspace with both Cargo.toml and Python files should be a hybrid."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        (root / "Cargo.toml").write_text("[package]\nname = 'demo'\n", encoding="utf-8")
+        (root / "main.py").write_text("print('ok')\n", encoding="utf-8")
+        path = ensure_workspace_blueprint(root)
+        bp = BlueprintV3.load(path)
+        assert bp.metadata.project_name
+        assert any(t.name.lower() == "rust" for t in bp.toolchains)
+        assert any(t.name.lower() in {"python", "cpython"} for t in bp.toolchains)
+
+
+def test_is_blueprint_ready_for_auto_generated_blueprint() -> None:
+    """A synthesized default blueprint should be reported as ready by the UI parser."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        path = ensure_workspace_blueprint(root)
+        assert is_blueprint_ready(path) is True

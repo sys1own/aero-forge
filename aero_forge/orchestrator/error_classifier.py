@@ -7,7 +7,7 @@ import re
 import traceback
 from enum import Enum
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 
 class ErrorClass(Enum):
@@ -160,13 +160,65 @@ def extract_target_files(text: Optional[str]) -> List[str]:
     return sorted({match.group(1) for match in _TARGET_FILE_RE.finditer(text)})
 
 
+# Regexes for Python/Rust positional-argument arity mismatches.
+# e.g. "TypeError: foo() takes 1 positional argument but 2 were given"
+SIGNATURE_MISMATCH_PATTERNS = [
+    re.compile(
+        r"TypeError:\s*(?:\w+\.)*(\w+)\(\)\s*takes\s+(?:from\s+\d+\s+to\s+)?\d+\s+positional\s+argument(?:s)?\s+but\s+\d+\s+(?:were|was)\s+given",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"TypeError:\s*(?:\w+\.)*(\w+)\(\)\s*(?:missing\s+\d+\s+required\s+(?:positional\s+)?argument|takes\s+\d+\s+positional\s+argument(?:s)?\s+\(\d+\s+given\))",
+        re.IGNORECASE,
+    ),
+]
+
+
+def is_signature_mismatch(text: Optional[str]) -> bool:
+    """Return True if *text* indicates a function-call arity/signature mismatch."""
+    if not text:
+        return False
+    return any(pattern.search(text) for pattern in SIGNATURE_MISMATCH_PATTERNS)
+
+
+def extract_signature_mismatch_symbol(text: Optional[str]) -> Optional[str]:
+    """Return the function name from the first positional-argument mismatch, if any."""
+    if not text:
+        return None
+    for pattern in SIGNATURE_MISMATCH_PATTERNS:
+        match = pattern.search(text)
+        if match and match.groups():
+            return match.group(1)
+    return None
+
+
+def get_signature_mismatch_expected_given(text: Optional[str]) -> Optional[Tuple[int, int]]:
+    """Return (expected, given) counts from a 'takes X but Y given' TypeError."""
+    if not text:
+        return None
+    match = re.search(
+        r"takes\s+(?:from\s+(\d+)\s+to\s+)?(\d+)\s+positional\s+argument(?:s)?\s+but\s+(\d+)\s+(?:were|was)\s+given",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    expected = int(match.group(2)) if match.group(2) is not None else int(match.group(1))
+    given = int(match.group(3))
+    return expected, given
+
+
 __all__ = [
     "ErrorClass",
+    "SIGNATURE_MISMATCH_PATTERNS",
     "classify",
     "classify_exception",
+    "extract_signature_mismatch_symbol",
     "extract_target_files",
     "format_transpiler_error",
     "format_transpiler_error_with_traceback",
+    "get_signature_mismatch_expected_given",
     "is_fatal",
+    "is_signature_mismatch",
     "is_transient",
 ]

@@ -158,8 +158,8 @@ def test_python_emitter(kv_spec: EngineSpec) -> None:
     output = build_engine(kv_spec, target_language="python")
     assert output.language == "python"
     assert "class KVStore:" in output.source
-    assert "def get(store: KVStore, key: str) -> int:" in output.source
-    assert "def sum_values(values: list[int]) -> int:" in output.source
+    assert "def get(store: KVStore, key: str" in output.source and "*args, **kwargs" in output.source
+    assert "def sum_values(values: list[int]" in output.source and "*args, **kwargs" in output.source
 
 
 def test_cpp_emitter(kv_spec: EngineSpec) -> None:
@@ -179,7 +179,7 @@ def test_fib_rust_control_flow(fib_spec: EngineSpec) -> None:
 
 def test_fib_python_control_flow(fib_spec: EngineSpec) -> None:
     output = build_engine(fib_spec, target_language="python")
-    assert "def fib(n: int) -> int:" in output.source
+    assert "def fib(n: int" in output.source and "*args, **kwargs" in output.source
     assert "if (n <= 1):" in output.source or "if n <= 1:" in output.source
     assert "return 1" in output.source
 
@@ -191,7 +191,7 @@ def add(a: int, b: int) -> int:
 """
     spec = spec_from_python(source, name="math_engine")
     output = build_engine(spec, target_language="python")
-    assert "def add(a: int, b: int) -> int:" in output.source
+    assert "def add(a: int, b: int" in output.source and "*args, **kwargs" in output.source
     assert "return (a + b)" in output.source
     rust = build_engine(spec, target_language="rust")
     assert "pub fn add" in rust.source

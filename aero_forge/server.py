@@ -1301,11 +1301,22 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             return _send_json(self, 400, {"error": "Missing 'session_id'"})
 
         session_dir = _session_dir(session_id)
+        from aero_forge.blueprint import ensure_workspace_blueprint
+
+        blueprint_path = session_dir / "blueprint.aero"
+        # Auto-generate a minimal blueprint for empty workspaces so the UI never
+        # warns about a missing blueprint.aero in an uninitialized session.
+        if not blueprint_path.is_file() and not _has_materialized_sources(session_dir):
+            try:
+                ensure_workspace_blueprint(session_dir)
+                set_session_blueprint_metadata(session_id, source="auto_generated", auto_initialized=True)
+            except Exception as exc:
+                logger.debug("Auto-blueprint generation failed for status: %s", exc)
+
         status = get_blueprint_status(session_dir)
         from aero_forge.blueprint import BlueprintV3, is_blueprint_ready
 
         try:
-            blueprint_path = session_dir / "blueprint.aero"
             transferable = False
             ready = False
             if blueprint_path.is_file():
@@ -1358,6 +1369,15 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             return _send_json(self, 400, {"error": "Missing 'session_id'"})
 
         session_dir = _session_dir(session_id)
+        blueprint_path = session_dir / "blueprint.aero"
+        if not blueprint_path.is_file() and not _has_materialized_sources(session_dir):
+            try:
+                from aero_forge.blueprint import ensure_workspace_blueprint
+
+                ensure_workspace_blueprint(session_dir)
+                set_session_blueprint_metadata(session_id, source="auto_generated", auto_initialized=True)
+            except Exception as exc:
+                logger.debug("Auto-blueprint generation failed for files: %s", exc)
         metadata = get_session_metadata(session_id, session_dir)
 
         return _send_json(

@@ -18,8 +18,11 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from aero_forge.config import Tier
 from aero_forge.healing.context_builder import ContextBuilder
+from aero_forge.healing.router import try_auto_fix
 from aero_forge.healing.structural_merger import MergeConflictError, apply_overlay
+from aero_forge.overlay.apply import persist_text_to_disk
 from aero_forge.llm.clients import BaseLLMClient, get_llm_client, LLMError
+from aero_forge.orchestrator.error_classifier import extract_signature_mismatch_symbol
 
 logger = logging.getLogger("aero_forge.healing.llm_healer")
 
@@ -53,6 +56,8 @@ class RuleBasedFallback:
             return cls._missing_import_directives(context, log_text)
         if error_type in ("unresolved_import", "rust_scope_error"):
             return cls._rust_import_directives(context, log_text)
+        if error_type == "signature_mismatch":
+            return cls._signature_mismatch_directives(context, log_text)
         return []
 
     @classmethod
@@ -62,6 +67,48 @@ class RuleBasedFallback:
         if target and isinstance(target, str):
             return target
         return default
+
+    @classmethod
+    def _signature_mismatch_directives(cls, context: Dict[str, Any], log_text: str) -> List[Dict[str, Any]]:
+        """Return a directive that updates the mismatched function signature.
+
+        The preferred fix is to make the target definition accept ``*args, **kwargs``
+        so the caller can pass any number of positional or keyword arguments without
+        changing the call site. If the target file cannot be located, no directives
+        are returned and the full-workspace LLM fallback handles the repair.
+        """
+        symbol = extract_signature_mismatch_symbol(log_text)
+        if not symbol:
+            return []
+        diagnosis = context.get("diagnosis") or {}
+        target = diagnosis.get("target_file") or "main.py"
+        workspace = Path(context["workspace"])
+        target_path = workspace / target
+        if not target_path.is_file():
+            # Try to locate the file defining the mismatched symbol.
+            builder = ContextBuilder(workspace)
+            definition = builder._find_function_definition(symbol)
+            if definition:
+                target = definition["file"]
+                target_path = workspace / target
+        if not target_path.is_file():
+            return []
+        original = target_path.read_text(encoding="utf-8")
+        # Use the deterministic router to insert *args, **kwargs if possible.
+        sample_error = f"TypeError: {symbol}() takes 1 positional argument but 2 were given"
+        fixed = try_auto_fix(sample_error, original)
+        if not fixed or fixed == original:
+            # Fallback: a more targeted error string matching the actual log.
+            fixed = try_auto_fix(log_text, original)
+        if not fixed or fixed == original:
+            return []
+        return [{
+            "target_file": str(Path(target).as_posix()),
+            "action": "rewrite",
+            "reason": f"Python signature mismatch for '{symbol}': accept additional arguments with *args, **kwargs.",
+            "instructions": f"Update the definition of {symbol} to accept *args, **kwargs, or wrap the caller to match the expected signature without breaking existing callers.",
+            "content": fixed,
+        }]
 
     @classmethod
     def _type_mismatch_directives(cls, context: Dict[str, Any], log_text: str) -> List[Dict[str, Any]]:
@@ -549,7 +596,7 @@ class LLMHealer:
                 language = "rust" if rel.suffix == ".rs" else "python"
                 apply_overlay(original, content, language=language)
 
-            target.write_text(content, encoding="utf-8")
+            persist_text_to_disk(target, content)
             applied.append(rel.as_posix())
             self._log("info", "HEAL_LLM", f"Applied directive to {rel}")
         return applied

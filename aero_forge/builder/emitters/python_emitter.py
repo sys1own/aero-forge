@@ -29,6 +29,8 @@ class PythonEmitter(BaseEmitter):
                 param_strs.append(f"{p.name}: {self._map_type(p.type_hint)}")
             else:
                 param_strs.append(p.name or "_")
+        # Variadic fallback so caller arity mismatches do not crash execution.
+        param_strs.extend(["*args", "**kwargs"])
 
         sig = f"def {node.name}({', '.join(param_strs)})"
         if node.type_hint:

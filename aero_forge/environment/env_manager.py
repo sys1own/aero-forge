@@ -27,12 +27,15 @@ def run_pip_in_workspace(
     log = log_callback or (lambda _level, _prefix, _msg: None)
     cmd = [venv_python, "-m", "pip", *args]
     log("info", "ENV", f"Running {' '.join(cmd)} in {workspace}")
+    env = env or os.environ.copy()
+    # Disable pip wheel/source caching so sandbox builds never reuse stale wheels.
+    env["PIP_NO_CACHE_DIR"] = env.get("PIP_NO_CACHE_DIR", "1")
     proc = subprocess.run(
         cmd,
         cwd=str(workspace),
         capture_output=True,
         text=True,
-        env=env or os.environ.copy(),
+        env=env,
         check=False,
     )
     if proc.returncode != 0:
@@ -74,7 +77,9 @@ def install_workspace_editable(
     if extra_args:
         args.extend(extra_args)
     else:
-        args.append("--no-deps")
+        # Always bust pip caches and reinstall the workspace package so overlay
+        # patches are reflected immediately in editable installs.
+        args.extend(["--no-cache-dir", "--force-reinstall", "--no-deps"])
     log = log_callback or (lambda _level, _prefix, _msg: None)
     log("info", "ENV", f"Installing workspace package in editable mode from {manifest}...")
     return run_pip_in_workspace(args, workspace, venv_python, env=env, log_callback=log_callback)

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+import os
+from pathlib import Path
+from typing import List, Optional, Tuple, Union
 
 
 def _parse_hunks(patch: str) -> List[List[Tuple[str, str]]]:
@@ -63,3 +65,27 @@ def apply_patch(target: str, patch: str) -> Tuple[str, bool]:
     if target.endswith("\n") and not merged.endswith("\n"):
         merged += "\n"
     return merged, conflict
+
+
+def apply_patch_to_disk(target_path: Union[str, Path], patch: str) -> bool:
+    """Apply *patch* to the file at *target_path* and force the change to disk.
+
+    Returns ``True`` when a conflict was detected while applying the patch.
+    The parent directory and file are fsynced so the update is visible to any
+    subsequent test or runner command.
+    """
+    target_path = Path(target_path)
+    original = target_path.read_text(encoding="utf-8") if target_path.exists() else ""
+    merged, conflict = apply_patch(original, patch)
+    persist_text_to_disk(target_path, merged)
+    return conflict
+
+
+def persist_text_to_disk(target_path: Union[str, Path], text: str) -> None:
+    """Write *text* to *target_path* and fsync so it is visible to subprocesses."""
+    target_path = Path(target_path)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(text, encoding="utf-8")
+    if hasattr(os, "fsync"):
+        with target_path.open("rb") as fh:
+            os.fsync(fh.fileno())
