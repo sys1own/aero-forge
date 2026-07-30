@@ -495,6 +495,8 @@ class IntentCompiler:
 
         resolved_output_dir = Path(output_dir) / "dist" if output_dir else Path("./dist")
 
+        modification_plan = self._build_modification_plan(v2, output_dir)
+
         return Blueprint(
             project=project,
             architecture=architecture,
@@ -514,4 +516,23 @@ class IntentCompiler:
             metadata=v2.metadata,
             module_graph=v2.module_graph,
             cargo_dependencies=v2.cargo_dependencies,
+            modification_plan=modification_plan,
         )
+
+    def _build_modification_plan(
+        self,
+        v2: BlueprintSchemaV2,
+        output_dir: Optional[str | Path],
+    ) -> Dict[str, Any]:
+        """Classify every requested file as CREATE or MODIFY based on workspace state."""
+        workspace = Path(output_dir) if output_dir else None
+        actions: List[Dict[str, str]] = []
+        for node in v2.module_graph:
+            path = node.get("path", "")
+            exists = workspace is not None and (workspace / path).is_file() if path else False
+            actions.append({
+                "path": path,
+                "action": "MODIFY" if exists else "CREATE",
+                "lang": node.get("lang") or node.get("language") or "python",
+            })
+        return {"intent": "incremental_update", "actions": actions}

@@ -88,6 +88,8 @@ class CppEmitter(BaseEmitter):
         body = node.body
         if body:
             self._emit_children(body, indent_level + 1)
+        elif self.c_abi and self._is_known_algorithm(node.name or ""):
+            self._emit_known_algorithm(node, indent_level + 1)
         else:
             self._write("// TODO", indent_level + 1)
         self._write("}", indent_level)
@@ -95,6 +97,58 @@ class CppEmitter(BaseEmitter):
         self._declared_vars = declared_before
         if self.c_abi:
             self._functions.append(node)
+
+    def _is_known_algorithm(self, name: str) -> bool:
+        """Return True when the emitter has a built-in numerical implementation for *name*."""
+        return name.lower() in {"sliding_window_dtw", "dtw"}
+
+    def _emit_known_algorithm(self, node: ASTNode, indent_level: int) -> None:
+        """Emit a full C++ implementation for well-known numerical contracts.
+
+        Currently supports a Sakoe-Chiba constrained sliding-window DTW. The
+        generated function matches the C-ABI wrapper emitted by
+        ``_emit_c_abi_wrapper`` and uses ``std::vector<double>`` for the two
+        input sequences and an ``int64_t`` window parameter.
+        """
+        params = [p for p in node.params if p.name != "self"]
+        if len(params) < 3:
+            self._write("// TODO: known algorithm signature not matched", indent_level)
+            return
+
+        a = params[0].name or "a"
+        b = params[1].name or "b"
+        window = params[2].name or "window"
+
+        for line in [
+            f"if ({a}.empty() || {b}.empty() || {window} <= 0) return -1.0;",
+            f"int64_t win = static_cast<int64_t>({window});",
+            f"int64_t n = static_cast<int64_t>({a}.size());",
+            f"int64_t m = static_cast<int64_t>({b}.size());",
+            f"if (std::llabs(n - m) > win) return -2.0;",
+            "const double INF = 1e100;",
+            "std::vector<double> prev(m, INF), cur(m, INF);",
+            "for (int64_t j = 0; j < m; ++j) {",
+            "    if (j > win) continue;",
+            f"    prev[j] = std::fabs({a}[0] - {b}[j]);",
+            "}",
+            "for (int64_t i = 1; i < n; ++i) {",
+            "    cur.assign(m, INF);",
+            "    for (int64_t j = 0; j < m; ++j) {",
+            "        if (i - j > win || j - i > win) continue;",
+            f"        double cost = std::fabs({a}[i] - {b}[j]);",
+            "        double best = prev[j];",
+            "        if (j > 0 && cur[j - 1] < best) best = cur[j - 1];",
+            "        if (j > 0 && prev[j - 1] < best) best = prev[j - 1];",
+            "        cur[j] = cost + best;",
+            "    }",
+            "    prev.swap(cur);",
+            "}",
+            "return prev[m - 1];",
+        ]:
+            self._write(line, indent_level)
+        if self._declared_vars is not None:
+            for var in ("win", "n", "m", "INF", "prev", "cur", "i", "j", "cost", "best"):
+                self._declared_vars.add(var)
 
     def _function_return_type(self, node: ASTNode) -> str:
         """Return the C++ return type for *node*, falling back to ``auto`` when needed."""

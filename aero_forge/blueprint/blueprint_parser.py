@@ -31,9 +31,13 @@ def _has_code_nodes(blueprint: Dict[str, Any]) -> bool:
         "verification_nodes",
         "nodes",
         "edges",
+        "modification_plan",
     ):
         value = blueprint.get(key)
         if value:
+            # A modification_plan with explicit file actions counts as an LLM plan.
+            if key == "modification_plan" and not value.get("actions"):
+                continue
             return True
     return False
 
@@ -77,10 +81,7 @@ def is_blueprint_ready(blueprint: Union[Dict[str, Any], Path, None]) -> bool:
     if status in {"draft", "uninitialized"}:
         return False
 
-    if not _has_code_nodes(blueprint):
-        return False
-
-    # A v3 blueprint with explicit LLM metadata is definitely ready.
+    # A blueprint explicitly marked as LLM-initialized is ready regardless of code nodes.
     if metadata.get("llm_initialized"):
         return True
     if str(metadata.get("generation_method", "")).lower() in {
@@ -89,6 +90,9 @@ def is_blueprint_ready(blueprint: Union[Dict[str, Any], Path, None]) -> bool:
         "llm",
     }:
         return True
+
+    if not _has_code_nodes(blueprint):
+        return False
 
     # v2 blueprints and finalized v3 blueprints with concrete code nodes are ready
     # unless their status explicitly says they are not.
