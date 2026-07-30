@@ -37,6 +37,8 @@ STRICT OPERATIONAL RULES:
 3. MAP ALL CLI FLAGS EXPLICITLY IN 'execution_strategy.cli_contract'. YOU MUST INFER ARGUMENT TYPES, SHORT FLAGS, DEFAULT VALUES, AND DESTINATION VARIABLES.
 4. MAP ALL CROSS-LANGUAGE FUNCTION CALLS TO EXPLICIT 'abi_contracts'. DEFINE INPUT/OUTPUT DATA TYPES USING C-ABI PRESERVED KEYWORDS (u32, i32, usize, f64, double*, int32_t).
 5. CREATE AT LEAST TWO 'verification_nodes' THAT TEST CLI ARGUMENT PARSING AND NUMERICAL OUTPUT METRICS.
+6. FILE BOUNDARY CONSTRAINT: ONLY list files in 'module_graph' that are explicitly required by the prompt or are minimal build config files (e.g. 'Cargo.toml', 'pyproject.toml', 'CMakeLists.txt'). DO NOT rewrite, regenerate, or reference unrelated source files, CLI files, tests, or documentation unless the user explicitly asks for them.
+7. ARTIFACT HYGIENE: NEVER stage, commit, or list generated binary targets ('*.so', '*.pyd', '*.dll', '*.dylib', '*.wasm', '*.whl'), virtual environments ('.venv/', 'venv/', 'pyvenv.cfg'), distribution metadata ('*.egg-info/', 'dist/', 'build/'), or package archives ('*.aeroc', '*.aerozip', '*.zip', '*.tar*') as project deliverables.
 
 The JSON must conform to BlueprintSchemaV2.0.0 with these top-level keys:
 - metadata: {schema_version: "2.0.0", project_name: "...", domain_target: "..."}
