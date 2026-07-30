@@ -122,12 +122,28 @@ def _strip_file_marker(code: str) -> str:
     return code
 
 
+def _split_by_file_markers(response: str) -> List[Tuple[str, str]]:
+    """Split a flat response with `# file: path` / `// file: path` markers into sections."""
+    marker_re = re.compile(r"^(\s*)(?:#|//)\s*file:\s*(\S+)\s*$", re.MULTILINE)
+    matches = list(marker_re.finditer(response))
+    sections: List[Tuple[str, str]] = []
+    for i, match in enumerate(matches):
+        path = match.group(2).strip()
+        start = match.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(response)
+        body = response[start:end]
+        sections.append((path, body))
+    return sections
+
+
 def _parse_multifile_response(
     response: str,
     output_dir: Path,
 ) -> Dict[Path, str]:
-    """Parse an LLM response containing marked code blocks into workspace files."""
+    """Parse an LLM response containing marked code blocks or marker sections into workspace files."""
     files: Dict[Path, str] = {}
+
+    # First try standard Markdown code fences.
     for _lang, code in extract_code_blocks(response):
         if not code.strip():
             continue
@@ -142,6 +158,23 @@ def _parse_multifile_response(
         except ValueError:
             continue
         files[target] = _strip_file_marker(code)
+
+    if files:
+        return files
+
+    # Fallback: split by `# file:` / `// file:` markers and write the following block.
+    for rel_path, body in _split_by_file_markers(response):
+        if not body.strip():
+            continue
+        if any(part == ".." for part in Path(rel_path).parts):
+            continue
+        target = (output_dir / rel_path).resolve()
+        try:
+            target.relative_to(output_dir.resolve())
+        except ValueError:
+            continue
+        files[target] = _strip_file_marker(body.strip("\n") + "\n")
+
     return files
 
 
@@ -151,7 +184,8 @@ def _ensure_root_cargo_workspace(workspace_dir: Path) -> bool:
     LLMs occasionally emit a root ``Cargo.toml`` that references the ``rust_core``
     crate but omits the ``[workspace]`` section, causing ``cargo build`` to fail
     with "manifest is missing either a [package] or a [workspace]".  This function
-    rewrites the root manifest as a minimal virtual workspace when it is invalid.
+    rewrites the root manifest as a minimal virtual workspace when it is invalid,
+    and ensures existing virtual workspaces use ``resolver = "2"`` for edition 2021.
     """
     root_cargo = workspace_dir / "Cargo.toml"
     if not root_cargo.is_file():
@@ -161,6 +195,19 @@ def _ensure_root_cargo_workspace(workspace_dir: Path) -> bool:
         text = root_cargo.read_text(encoding="utf-8")
     except Exception:
         return False
+
+    if re.search(r"^\s*\[workspace\]", text, re.MULTILINE) and not re.search(
+        r'^\s*resolver\s*=\s*"2"', text, re.MULTILINE
+    ):
+        text = re.sub(
+            r"(^\s*\[workspace\].*?)(?=\n\[|\Z)",
+            r'\1resolver = "2"\n',
+            text,
+            count=1,
+            flags=re.MULTILINE | re.DOTALL,
+        )
+        root_cargo.write_text(text, encoding="utf-8")
+        return True
 
     if toml_reader is not None:
         try:
@@ -211,12 +258,13 @@ def _make_script_runnable(script_path: Path, workspace_dir: Path) -> bool:
     top_level_imports = {
         node.names[0].name.split(".")[0]
         for node in ast.walk(tree)
-        if isinstance(node, (ast.Import, ast.ImportFrom))
-        and node.names
+        if isinstance(node, (ast.Import, ast.ImportFrom)) and node.names
     }
     local_packages = {
-        name for name in top_level_imports
-        if (workspace_dir / name).is_dir() and (workspace_dir / name / "__init__.py").is_file()
+        name
+        for name in top_level_imports
+        if (workspace_dir / name).is_dir()
+        and (workspace_dir / name / "__init__.py").is_file()
     }
     if not local_packages:
         return False
@@ -273,11 +321,20 @@ def _session_path(session_id: str) -> Path:
     return SESSION_DIR / f"{session_id}.json"
 
 
-def get_session_metadata(session_id: str, workspace: Optional[Path] = None) -> Dict[str, Any]:
+def get_session_metadata(
+    session_id: str, workspace: Optional[Path] = None
+) -> Dict[str, Any]:
     """Return blueprint provenance and runtime metadata for a session."""
     path = _session_path(session_id)
     if not path.exists():
-        defaults = {"blueprint_source": "unknown", "auto_initialized": False, "is_building": False, "is_synthesizing": False, "has_aeroc": False, "initialized_from_aeroc": False}
+        defaults = {
+            "blueprint_source": "unknown",
+            "auto_initialized": False,
+            "is_building": False,
+            "is_synthesizing": False,
+            "has_aeroc": False,
+            "initialized_from_aeroc": False,
+        }
         if workspace:
             defaults["has_aeroc"] = (workspace / "workspace.aeroc").is_file()
         return defaults
@@ -297,6 +354,7 @@ def get_session_metadata(session_id: str, workspace: Optional[Path] = None) -> D
     else:
         try:
             from aero_forge.sandbox.manager import SandboxManager
+
             workspace = SandboxManager().create_session_sandbox(session_id)
             data["has_aeroc"] = (workspace / "workspace.aeroc").is_file()
         except Exception:
@@ -403,7 +461,9 @@ class WorkspaceContextHarvester:
                 "state": llm_context.get("state", "raw"),
                 "repository_summary": llm_context.get("repository_summary", ""),
                 "dependency_graph": llm_context.get("dependency_graph", {}),
-                "exported_api_signatures": llm_context.get("exported_api_signatures", {}),
+                "exported_api_signatures": llm_context.get(
+                    "exported_api_signatures", {}
+                ),
                 "polyglot_boundaries": llm_context.get("polyglot_boundaries", []),
                 "compute_hotspots": llm_context.get("compute_hotspots", []),
             },
@@ -495,14 +555,11 @@ class ChatSession:
         self.prompt_template = prompt_template
         self.session_id = session_id or self._new_session_id()
         self.progress_callback = progress_callback or _noop
-        self.config_override = (
-            config_override
-            or ConfigOverride(
-                llm_provider=llm_provider,
-                model=model,
-                api_key=api_key,
-                max_retries=max_retries,
-            )
+        self.config_override = config_override or ConfigOverride(
+            llm_provider=llm_provider,
+            model=model,
+            api_key=api_key,
+            max_retries=max_retries,
         )
 
         self.messages: List[Dict[str, str]] = []
@@ -588,7 +645,9 @@ class ChatSession:
         if not self.output_dir.is_dir():
             return
         try:
-            context = WorkspaceContextHarvester(self.output_dir, max_file_size_kb=50).to_prompt()
+            context = WorkspaceContextHarvester(
+                self.output_dir, max_file_size_kb=50
+            ).to_prompt()
         except Exception as exc:
             logger.warning("Could not harvest workspace %s: %s", self.output_dir, exc)
             return
@@ -657,7 +716,9 @@ class ChatSession:
         self.last_terminal_command = command
         self.last_terminal_exit_code = exit_code
         self.last_terminal_log = log_text
-        self.last_evaluator_state = LogEvaluator().evaluate_log(command, exit_code, log_text)
+        self.last_evaluator_state = LogEvaluator().evaluate_log(
+            command, exit_code, log_text
+        )
 
     def _save_session(self) -> None:
         path = _session_path(self.session_id)
@@ -808,7 +869,13 @@ class ChatSession:
         else:
             target = "pure_python"
 
-        if has_rust or has_cpp or "accelerate" in lowered or "fast" in lowered or "speed" in lowered:
+        if (
+            has_rust
+            or has_cpp
+            or "accelerate" in lowered
+            or "fast" in lowered
+            or "speed" in lowered
+        ):
             acceleration = "Selective Acceleration (Auto-Detect Heavy Compute)"
         else:
             acceleration = "Standard Runtime (Bypass Bridge)"
@@ -846,8 +913,14 @@ class ChatSession:
         self._refresh_project_context()
 
         if not self.messages or self.messages[0].get("role") != "system":
-            self.messages.insert(0, {"role": "system", "content": self._copilot_system_prompt()})
-        if not self.messages or self.messages[-1].get("role") != "user" or self.messages[-1].get("content") != text:
+            self.messages.insert(
+                0, {"role": "system", "content": self._copilot_system_prompt()}
+            )
+        if (
+            not self.messages
+            or self.messages[-1].get("role") != "user"
+            or self.messages[-1].get("content") != text
+        ):
             self.messages.append({"role": "user", "content": text})
         self._save_session()
 
@@ -890,7 +963,9 @@ class ChatSession:
                 response = ""
 
         if not response:
-            fallback_action = self._fallback_build_action(text) if _has_build_intent(text) else None
+            fallback_action = (
+                self._fallback_build_action(text) if _has_build_intent(text) else None
+            )
             fallback = self._build_result(
                 "I didn't receive a response from the language model. Please check your provider/API key and try rephrasing.",
                 action=fallback_action,
@@ -909,13 +984,19 @@ class ChatSession:
             action = self._fallback_build_action(text)
 
         result = self._build_result(display_text, action=action, raw=response)
-        self.messages.append({"role": "assistant", "content": result["display_text"] or response})
+        self.messages.append(
+            {"role": "assistant", "content": result["display_text"] or response}
+        )
         self._save_session()
         return result
 
-    def _build_result(self, display_text: str, action: Optional[Dict[str, Any]], raw: str) -> Dict[str, Any]:
+    def _build_result(
+        self, display_text: str, action: Optional[Dict[str, Any]], raw: str
+    ) -> Dict[str, Any]:
         """Build a structured chat result compatible with both old and new UI fields."""
-        clean_prompt = sanitize_builder_prompt(action.get("clean_prompt", "")) if action else None
+        clean_prompt = (
+            sanitize_builder_prompt(action.get("clean_prompt", "")) if action else None
+        )
         parameters = action.get("parameters") if action else {}
         legacy_action = None
         if action:
@@ -924,14 +1005,19 @@ class ChatSession:
                 "params": {
                     "prompt": clean_prompt,
                     "target": parameters.get("target", "pure_python"),
-                    "acceleration": parameters.get("acceleration", "Selective Acceleration (Auto-Detect Heavy Compute)"),
+                    "acceleration": parameters.get(
+                        "acceleration",
+                        "Selective Acceleration (Auto-Detect Heavy Compute)",
+                    ),
                     "parameters": parameters,
                 },
             }
             # If the model left the conversational text empty, provide a concise
             # rationale rather than echoing the executable prompt.
             if not display_text:
-                target_label = parameters.get("target", "pure_python").replace("_", " ").title()
+                target_label = (
+                    parameters.get("target", "pure_python").replace("_", " ").title()
+                )
                 display_text = f"I propose a **{target_label}** build. Use the Action Card to edit or trigger it."
         # Wrap a heading around the conversational text when an action is attached
         # and the model did not supply one, but never hide a plain informational reply.
@@ -963,7 +1049,10 @@ class ChatSession:
             "type": "build",
             "source": "plain_text",
             "clean_prompt": text.strip(),
-            "parameters": {"target": "pure_python", "acceleration": "Selective Acceleration (Auto-Detect Heavy Compute)"},
+            "parameters": {
+                "target": "pure_python",
+                "acceleration": "Selective Acceleration (Auto-Detect Heavy Compute)",
+            },
             "blueprint": None,
         }
         action["clean_prompt"] = sanitize_builder_prompt(action.get("clean_prompt", ""))
@@ -1104,8 +1193,65 @@ class ChatSession:
         self._update_memory(text, result)
         return result
 
-    def _build_and_test_workspace(self) -> Tuple[Optional[subprocess.CompletedProcess[str]], int, str, str, bool]:
-        """Run post-processing, compile the Rust crate, and execute pytest.
+    @staticmethod
+    def _skip_dir_name(name: str) -> bool:
+        return name.startswith(".") or name in {
+            "target",
+            "dist",
+            "build",
+            "__pycache__",
+            ".pytest_cache",
+            ".venv",
+            "node_modules",
+            ".git",
+        }
+
+    def _ensure_package_inits(self) -> List[Path]:
+        """Create ``__init__.py`` files in directories that look like packages."""
+        created: List[Path] = []
+        for path in sorted(self.output_dir.rglob("*")):
+            if not path.is_dir():
+                continue
+            rel = path.relative_to(self.output_dir)
+            if any(self._skip_dir_name(part) for part in rel.parts):
+                continue
+            if (path / "__init__.py").is_file():
+                continue
+            has_py = any(
+                p.is_file() and p.suffix == ".py" and p.name != "__init__.py"
+                for p in path.iterdir()
+            )
+            if has_py:
+                (path / "__init__.py").write_text("", encoding="utf-8")
+                created.append(path / "__init__.py")
+        return created
+
+    def _build_cpp_extensions(self) -> List[subprocess.CompletedProcess[str]]:
+        """Build any C/C++ extensions described by Makefiles under the workspace."""
+        results: List[subprocess.CompletedProcess[str]] = []
+        for makefile in sorted(self.output_dir.rglob("Makefile")):
+            rel = makefile.relative_to(self.output_dir)
+            if any(self._skip_dir_name(part) for part in rel.parts):
+                continue
+            self._progress(f"Building C/C++ extension in {rel}...")
+            result = subprocess.run(
+                ["make"],
+                cwd=makefile.parent,
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+            if result.returncode != 0:
+                self._progress(
+                    f"C/C++ build warning in {rel}: {result.stderr or result.stdout}"
+                )
+            results.append(result)
+        return results
+
+    def _build_and_test_workspace(
+        self,
+    ) -> Tuple[Optional[subprocess.CompletedProcess[str]], int, str, str, bool]:
+        """Run post-processing, compile native crates/extensions, and execute pytest.
 
         Returns ``(cargo_result, pytest_rc, pytest_stdout, pytest_stderr, tests_passed)``.
         """
@@ -1114,11 +1260,15 @@ class ChatSession:
         if scripts_dir.is_dir():
             for script in scripts_dir.glob("*.py"):
                 if _make_script_runnable(script, self.output_dir):
-                    self._progress(f"Made {script.relative_to(self.output_dir)} runnable from any cwd")
+                    self._progress(
+                        f"Made {script.relative_to(self.output_dir)} runnable from any cwd"
+                    )
 
         # Repair common LLM truncation mistakes before compilation.
         for repaired in repair_workspace(self.output_dir):
-            self._progress(f"Repaired syntax truncation in {repaired.relative_to(self.output_dir)}")
+            self._progress(
+                f"Repaired syntax truncation in {repaired.relative_to(self.output_dir)}"
+            )
 
         # LLMs often emit a #[pymethods] impl whose methods duplicate an
         # inherent impl for the same struct; merge them before compiling.
@@ -1135,12 +1285,23 @@ class ChatSession:
         for modified in normalize_workspace(self.output_dir):
             self._progress(f"Normalized exports in {modified}")
 
+        # Ensure directories with .py modules are importable packages.
+        for init_path in self._ensure_package_inits():
+            self._progress(
+                f"Created package init {init_path.relative_to(self.output_dir)}"
+            )
+
         # Build the Rust crate if present.
         cargo_result: Optional[subprocess.CompletedProcess[str]] = None
-        for cargo_toml in [self.output_dir / "Cargo.toml", self.output_dir / "rust_core" / "Cargo.toml"]:
+        for cargo_toml in [
+            self.output_dir / "Cargo.toml",
+            self.output_dir / "rust_core" / "Cargo.toml",
+        ]:
             if cargo_toml.is_file():
                 crate_dir = cargo_toml.parent
-                self._progress(f"Compiling {cargo_toml.relative_to(self.output_dir)}...")
+                self._progress(
+                    f"Compiling {cargo_toml.relative_to(self.output_dir)}..."
+                )
                 cargo_result = run_cargo(
                     ["build", "--release"],
                     cwd=crate_dir,
@@ -1148,33 +1309,44 @@ class ChatSession:
                     timeout=600,
                 )
                 if cargo_result.returncode != 0:
-                    return cargo_result, 0, "", cargo_result.stderr or cargo_result.stdout, False
-                # Make compiled shared objects importable from the workspace root.
-                dist_dir = self.output_dir / "dist"
-                dist_dir.mkdir(parents=True, exist_ok=True)
-                search_roots = [
-                    self.output_dir / "target" / "release",
-                    self.output_dir / "rust_core" / "target" / "release",
-                    crate_dir / "target" / "release",
-                ]
-                for search in search_roots:
-                    for so in search.glob("*.so"):
-                        # Python imports extension modules as <name>.so, not lib<name>.so.
-                        module_so = so.name
-                        if module_so.startswith("lib") and module_so.endswith(".so"):
-                            module_so = module_so[3:]
-                        destinations = [
-                            dist_dir / so.name,
-                            self.output_dir / so.name,
-                            dist_dir / module_so,
-                            self.output_dir / module_so,
-                            search / module_so,
-                        ]
-                        for dst in destinations:
-                            if so.resolve() == dst.resolve():
-                                continue
-                            shutil.copy(so, dst)
+                    return (
+                        cargo_result,
+                        0,
+                        "",
+                        cargo_result.stderr or cargo_result.stdout,
+                        False,
+                    )
                 break
+
+        # Build any C/C++ extensions described by Makefiles.
+        self._build_cpp_extensions()
+
+        # Make compiled shared objects importable from the workspace root.
+        if cargo_result is not None and cargo_result.returncode == 0:
+            dist_dir = self.output_dir / "dist"
+            dist_dir.mkdir(parents=True, exist_ok=True)
+            search_roots = [
+                self.output_dir / "target" / "release",
+                self.output_dir / "rust_core" / "target" / "release",
+                crate_dir / "target" / "release",
+            ]
+            for search in search_roots:
+                for so in search.glob("*.so"):
+                    # Python imports extension modules as <name>.so, not lib<name>.so.
+                    module_so = so.name
+                    if module_so.startswith("lib") and module_so.endswith(".so"):
+                        module_so = module_so[3:]
+                    destinations = [
+                        dist_dir / so.name,
+                        self.output_dir / so.name,
+                        dist_dir / module_so,
+                        self.output_dir / module_so,
+                        search / module_so,
+                    ]
+                    for dst in destinations:
+                        if so.resolve() == dst.resolve():
+                            continue
+                        shutil.copy(so, dst)
 
         # Run pytest if tests exist; attempt deterministic self-healing on
         # common test typos (e.g. ``r_stats`` when ``rstats`` is defined).
@@ -1184,7 +1356,9 @@ class ChatSession:
             if tests_passed:
                 break
             combined = f"{pytest_stderr}\n{pytest_stdout}"
-            name_error = re.search(r"NameError: name ['\"](\w+)['\"] is not defined", combined)
+            name_error = re.search(
+                r"NameError: name ['\"](\w+)['\"] is not defined", combined
+            )
             file_line = re.search(r"([\w/]+\.py):\d+:", combined)
             if not name_error or not file_line:
                 break
@@ -1195,8 +1369,12 @@ class ChatSession:
                 fixed = try_auto_fix(combined, original)
                 if fixed and fixed != original:
                     test_file.write_text(fixed, encoding="utf-8")
-                    self._progress(f"Self-healed test typo: {bad_name} -> fixed in {test_file.name}")
-                    pytest_rc, pytest_stdout, pytest_stderr = _run_pytest(self.output_dir)
+                    self._progress(
+                        f"Self-healed test typo: {bad_name} -> fixed in {test_file.name}"
+                    )
+                    pytest_rc, pytest_stdout, pytest_stderr = _run_pytest(
+                        self.output_dir
+                    )
                     tests_passed = pytest_rc == 0
                     continue
             break
@@ -1228,15 +1406,21 @@ class ChatSession:
             "- TOML files: `# file: path/to/Cargo.toml`\n"
             "- Python files: `# file: path/to/file.py`\n\n"
             "At minimum emit:\n"
-            "- `Cargo.toml` (workspace root) and `rust_core/Cargo.toml` with a PyO3 cdylib crate\n"
+            '- `Cargo.toml` (workspace root with `resolver = "2"`) and `rust_core/Cargo.toml` with a PyO3 cdylib crate\n'
             "- `rust_core/src/lib.rs` exposing the requested Rust functions through PyO3\n"
             "- `pyproject.toml` (optional package metadata)\n"
             "- `scripts/run_simulation.py` as a runnable entry point\n"
             "- `tests/test_metrics.py` pytest tests that import the generated module and assert behavior\n\n"
-            "Use `pyo3 = { version = \"0.20.3\", features = [\"extension-module\", \"abi3-py39\", \"generate-import-lib\"] }`. "
-            "Set crate-type = [\"cdylib\"] in the crate Cargo.toml. "
+            'Use `pyo3 = { version = "0.20.3", features = ["extension-module", "abi3-py39", "generate-import-lib"] }` and `numpy = "0.20.0"` (the Rust crate is named `numpy`, not `pyo3_numpy`). '
+            'Set crate-type = ["cdylib"] in the crate Cargo.toml. '
+            "For PyO3 0.20.3 with numpy 0.20.0, use `use numpy::{PyArray1, PyReadonlyArray1};`, array arguments should be `PyReadonlyArray1<'py, f64>`, "
+            "array return values should be `&'py PyArray1<f64>`, and the `#[pymodule]` function should use `m: &PyModule` (do not use `Bound`). "
+            "Prefer `data.as_slice()` and `PyArray1::from_vec(py, vec)` for the implementation. "
             "Ensure the compiled `.so` name matches the `[lib] name` in `rust_core/Cargo.toml` so Python can import it. "
             "Python wrapper code should look for the compiled shared object in the workspace root, `rust_core/target/release`, `target/release`, or `dist`.\n\n"
+            'For C++ extensions, use `extern "C"` exports with `AERO_EXPORT` (or `__declspec(dllexport)` on Windows). '
+            "Place the `.cpp` source under a directory such as `cpp_engine/src/` and include a `Makefile` in `cpp_engine/` that builds `lib<name>.so`. "
+            "If a C function returns a heap-allocated array, always return a non-NULL pointer and set `*out_len = 0` for empty outputs so Python can free it safely.\n\n"
             "Test rules: for statistical / anomaly functions, generate tests that compare the compiled "
             "native output with the pure-Python fallback (parity) and use `math.isclose` / `pytest.approx` "
             "for floats. For anomaly detection, use a large sample with one extreme outlier (e.g. ``[1.0] * 100 + [10000.0]``) "
@@ -1260,12 +1444,19 @@ class ChatSession:
             {"role": "user", "content": text},
         ]
         try:
-            response = client.generate(messages, temperature=0.2)
+            response = client.generate(messages, temperature=0.2, max_tokens=8192)
         except Exception as exc:
             return {"message": f"LLM call failed: {exc}"}
 
         if not response:
             return {"message": "LLM returned an empty response."}
+
+        # Debug: keep raw response for troubleshooting parser failures.
+        debug_path = self.output_dir / ".aero_forge_last_multifile_response.md"
+        try:
+            debug_path.write_text(response, encoding="utf-8")
+        except Exception:
+            pass
 
         files = _parse_multifile_response(response, self.output_dir)
         if not files:
@@ -1281,47 +1472,66 @@ class ChatSession:
             path.write_text(content, encoding="utf-8")
             self._progress(f"Wrote {path.relative_to(self.output_dir)}")
 
-        cargo_result, pytest_rc, pytest_stdout, pytest_stderr, tests_passed = self._build_and_test_workspace()
+        cargo_result, pytest_rc, pytest_stdout, pytest_stderr, tests_passed = (
+            self._build_and_test_workspace()
+        )
 
-        # If tests still fail, ask the LLM to repair the workspace using the failing output.
+        # If the build or tests still fail, ask the LLM to repair the workspace.
         max_heals = max(1, self.max_iterations)
         for heal_iter in range(max_heals):
-            if tests_passed or cargo_result is None or cargo_result.returncode != 0:
+            if tests_passed:
                 break
-            self._progress(f"Healing test failures (attempt {heal_iter + 1}/{max_heals})...")
+            self._progress(
+                f"Healing build/test failures (attempt {heal_iter + 1}/{max_heals})..."
+            )
             try:
                 bundle = bundle_workspace(self.output_dir, max_file_size_kb=50)
             except Exception as exc:
                 logger.warning("Could not bundle workspace for healing: %s", exc)
                 bundle = {"files": {}, "blueprint": None}
-            context = format_context_block(bundle, fmt="xml") if bundle["files"] or bundle["blueprint"] else ""
+            context = (
+                format_context_block(bundle, fmt="xml")
+                if bundle["files"] or bundle["blueprint"]
+                else ""
+            )
+            failure_parts: List[str] = []
+            if cargo_result is not None and cargo_result.returncode != 0:
+                failure_parts.append("Cargo / Rust compiler output:")
+                failure_parts.append(cargo_result.stdout or "")
+                failure_parts.append(cargo_result.stderr or "")
+            if pytest_stderr or pytest_stdout:
+                failure_parts.append("Pytest output:")
+                failure_parts.append(pytest_stderr)
+                failure_parts.append(pytest_stdout)
+            error_text = "\n".join(p.strip() for p in failure_parts if p.strip())
             heal_system = (
                 "You are repairing a generated Rust/Python workspace. "
-                "The failing pytest output is shown below. "
+                "The failing build or test output is shown below. "
                 "Return the corrected files using the same Markdown code-fence format with file markers. "
                 "Only include files that need to change; preserve the rest. "
                 "Do not write explanatory text outside the code fences.\n\n"
-                "Fix the implementation and/or tests so `pytest` passes. "
-                "Ensure the Rust core exposes the same methods the tests call (e.g. `__len__`, `clear`, "
-                "`mean`, `peak`, `std_dev`, `z_score`, `is_anomaly`, `process_batch`). "
-                "For `process_batch`, always return `anomalies` as a list (empty list `[]` when none), never `None`."
+                "Fix the Rust implementation, Cargo.toml, pyproject.toml and/or tests so `cargo build --release` and `pytest` both pass. "
+                "Ensure the Rust core exposes the same functions the tests call. "
+                "When using PyO3 0.20.3 and numpy 0.20.0, PyArray function arguments should be `PyReadonlyArray1<f64>` or `&PyArray1<f64>`; "
+                "return `&PyArray1<f64>` or `PyObject`."
             )
             if context:
                 heal_system += "\n\n" + context
-            error_text = f"{pytest_stderr}\n{pytest_stdout}"
             heal_messages = [
                 {"role": "system", "content": heal_system},
                 {
                     "role": "user",
                     "content": (
                         f"Original request: {text}\n\n"
-                        f"Failing pytest output:\n```\n{error_text[:4000]}\n```\n\n"
+                        f"Failing output:\n```\n{error_text[:4000]}\n```\n\n"
                         "Return the corrected workspace files."
                     ),
                 },
             ]
             try:
-                heal_response = client.generate(heal_messages, temperature=0.2)
+                heal_response = client.generate(
+                    heal_messages, temperature=0.2, max_tokens=8192
+                )
             except Exception as exc:
                 self._progress(f"LLM healing call failed: {exc}")
                 break
@@ -1334,15 +1544,22 @@ class ChatSession:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(content, encoding="utf-8")
                 self._progress(f"Healed {path.relative_to(self.output_dir)}")
-            cargo_result, pytest_rc, pytest_stdout, pytest_stderr, tests_passed = self._build_and_test_workspace()
+            cargo_result, pytest_rc, pytest_stdout, pytest_stderr, tests_passed = (
+                self._build_and_test_workspace()
+            )
 
         file_list = ExecutionReport(self.output_dir).filter_paths(
-            sorted(str(p.relative_to(self.output_dir)) for p in self.output_dir.rglob("*") if p.is_file())
+            sorted(
+                str(p.relative_to(self.output_dir))
+                for p in self.output_dir.rglob("*")
+                if p.is_file()
+            )
         )
         result = {
             "success": tests_passed,
             "build": {
-                "success": (cargo_result is None or cargo_result.returncode == 0) and tests_passed,
+                "success": (cargo_result is None or cargo_result.returncode == 0)
+                and tests_passed,
                 "cargo_returncode": cargo_result.returncode if cargo_result else 0,
                 "pytest_returncode": pytest_rc,
                 "pytest_output": pytest_stdout,
@@ -1507,7 +1724,9 @@ class ChatSession:
     def _heal_action(self) -> Dict[str, Any]:
         """Apply a deterministic self-healing patch to the failing source file."""
         if not self.last_terminal_log:
-            return {"message": "No terminal error context. Run a command that fails, then ask me to 'fix error'."}
+            return {
+                "message": "No terminal error context. Run a command that fails, then ask me to 'fix error'."
+            }
 
         from aero_forge.healing.evaluator import LogEvaluator
 
@@ -1520,7 +1739,10 @@ class ChatSession:
         self.last_evaluator_state = diagnosis
 
         if not diagnosis.get("healable", False):
-            reason = diagnosis.get("reason") or "AST overlay is not safe for this error type."
+            reason = (
+                diagnosis.get("reason")
+                or "AST overlay is not safe for this error type."
+            )
             return {
                 "message": f"This error can't be auto-patched: {reason} Ask me how to fix it instead.",
                 "diagnosis": diagnosis,
