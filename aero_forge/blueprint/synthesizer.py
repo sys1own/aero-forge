@@ -12,6 +12,7 @@ import yaml
 from jinja2 import Template
 from pydantic import ValidationError
 
+from aero_forge.blueprint.core import ensure_workspace_blueprint
 from aero_forge.blueprint.schema import (
     ABIContractV3,
     ArtifactType,
@@ -529,3 +530,7 @@ Your response MUST be a single JSON object matching the BlueprintV3 Pydantic sch
 
 Output only the JSON object, no prose.
 """
+
+# ``ensure_workspace_blueprint`` is re-exported from ``aero_forge.blueprint.core``
+# so callers can ensure a workspace has a blueprint without importing the core module.
+# The actual implementation lives in core.py and uses the standard .aero templates.

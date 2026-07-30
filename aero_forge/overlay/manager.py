@@ -7,7 +7,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, Optional, Union
 
-from aero_forge.overlay.apply import apply_patch
+from aero_forge.overlay.apply import apply_patch, persist_text_to_disk
 from aero_forge.overlay.patch import is_empty_patch, make_patch
 from aero_forge.overlay.store import OverlayStore
 from aero_forge.overlay.structural_merger import StructuralMerger
@@ -74,7 +74,7 @@ class OverlayManager:
         merged, conflict = apply_patch(pristine, overlay)
         if conflict:
             return ReapplyStatus.CONFLICT
-        path.write_text(merged, encoding="utf-8")
+        persist_text_to_disk(path, merged)
         return ReapplyStatus.APPLIED
 
     def reapply_all(self) -> Dict[str, ReapplyStatus]:
@@ -114,7 +114,7 @@ class OverlayManager:
         if outcome.conflicts:
             return ReapplyStatus.CONFLICT
 
-        path.write_text(outcome.text, encoding="utf-8")
+        persist_text_to_disk(path, outcome.text)
         return ReapplyStatus.APPLIED
 
     @staticmethod
@@ -161,8 +161,7 @@ class OverlayManager:
                 baseline = ""
             merged, _ = apply_patch(baseline, patch)
             out_path = target / key
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(merged, encoding="utf-8")
+            persist_text_to_disk(out_path, merged)
             flushed[key] = True
         self.store.clear()
         return flushed

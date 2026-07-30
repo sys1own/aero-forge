@@ -12,12 +12,14 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import sys
 import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from aero_forge.blueprint.schema import BlueprintStatus, BlueprintV3
+from aero_forge.environment import env_manager
 from aero_forge.errors import UserError
 
 logger = logging.getLogger("aero_forge.builder.sandbox")
@@ -67,10 +69,17 @@ class DraftSandboxBuilder:
         )
         logger.info("Preparing draft build sandbox: %s", sandbox_root)
 
+        # Ensure any pip subprocess in the sandbox disables caches and reinstalls
+        # workspace packages so overlay edits are never masked by stale wheels.
+        env = (self.env or os.environ.copy()).copy()
+        env["PIP_NO_CACHE_DIR"] = env.get("PIP_NO_CACHE_DIR", "1")
+        env["PIP_FORCE_REINSTALL"] = env.get("PIP_FORCE_REINSTALL", "1")
+
         try:
             self._copy_workspace(sandbox_root)
-            self._make_source_dirs_read_only(sandbox_root)
             self._ensure_writable_output_dirs(sandbox_root)
+            self._ensure_workspace_package_installed(sandbox_root, env)
+            self._make_source_dirs_read_only(sandbox_root)
 
             try:
                 from aero_forge.daemon import compile_and_run_blueprint
@@ -84,7 +93,7 @@ class DraftSandboxBuilder:
                 result = {"status": "success", "build_results": [], "stdout": "", "stderr": ""}
             except Exception:
                 logger.exception("aeroc-daemon failed, falling back to Python executor")
-                result = self.blueprint.execute(sandbox_root, env=self.env)
+                result = self.blueprint.execute(sandbox_root, env=env)
 
             self._copy_outputs(sandbox_root, self.output_dir)
 
@@ -174,6 +183,33 @@ class DraftSandboxBuilder:
                 Path(root).chmod(dir_mode)
             except OSError:
                 pass
+
+    def _ensure_workspace_package_installed(self, sandbox_root: Path, env: Dict[str, str]) -> None:
+        """Re-install the workspace package in editable mode inside the sandbox.
+
+        This is done before source directories are locked to read-only so pip can
+        write package metadata, and it always uses ``--no-cache-dir`` and
+        ``--force-reinstall`` so stale wheels are not reused.
+        """
+        venv_dir = sandbox_root / ".venv"
+        if not venv_dir.is_dir():
+            return
+        if sys.platform == "win32":
+            venv_python = str(venv_dir / "Scripts" / "python.exe")
+        else:
+            venv_python = str(venv_dir / "bin" / "python")
+        if not Path(venv_python).is_file():
+            return
+        proc = env_manager.install_workspace_editable(
+            sandbox_root,
+            venv_python,
+            env=env,
+            log_callback=lambda level, prefix, msg: logger.log(
+                logging.INFO if level in ("info",) else logging.WARNING, f"[{prefix}] {msg}"
+            ),
+        )
+        if proc.returncode != 0:
+            logger.warning("Editable install in sandbox failed: %s", proc.stderr.strip()[-500:])
 
     def _ensure_writable_output_dirs(self, sandbox_root: Path) -> None:
         """Ensure output directories exist and are writable before the build runs."""

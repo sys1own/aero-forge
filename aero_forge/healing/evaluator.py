@@ -68,10 +68,13 @@ class LogEvaluator:
         (r"TabError:", "python_syntax", None, "Python tab/space error; structural AST overlay can repair it."),
     ]
 
-    PYTHON_SEMANTIC_PATTERNS: List[Tuple[str, str, str]] = [
+    PYTHON_SEMANTIC_PATTERNS: List[Tuple[str, str, Optional[str], str]] = [
         (r"ModuleNotFoundError:", "python_missing_module", None, "Missing Python dependency. Requires installation or environment change."),
         (r"ImportError:", "python_import_error", None, "Python import error. Requires module or dependency fix."),
         (r"AttributeError:", "python_runtime_error", None, "Python attribute error. Requires logic or API fix."),
+        # Signature/arity mismatches are explicitly identified so they can be healed.
+        (r"TypeError:\s*(?:\w+\.)*\w+\(\)\s*takes\s+(?:from\s+\d+\s+to\s+)?\d+\s+positional\s+argument(?:s)?\s+but\s+\d+\s+(?:were|was)\s+given", "signature_mismatch", None, "Function called with the wrong number of positional arguments. The target signature should accept *args, **kwargs or the caller should be adjusted."),
+        (r"TypeError:\s*(?:\w+\.)*\w+\(\)\s*missing\s+\d+\s+required\s+(?:positional\s+)?argument", "signature_mismatch", None, "Function called with missing required positional arguments. The target signature should accept *args, **kwargs or the caller should be adjusted."),
         (r"TypeError:", "python_runtime_error", None, "Python type error. Requires logic or signature fix."),
         (r"ValueError:", "python_runtime_error", None, "Python value error. Requires logic fix."),
         (r"KeyError:", "python_runtime_error", None, "Python key error. Requires logic fix."),
@@ -207,9 +210,11 @@ class LogEvaluator:
         for pattern, error_type, _code, reason in self.PYTHON_SEMANTIC_PATTERNS:
             if re.search(pattern, log_text, re.IGNORECASE):
                 frame = self._last_python_frame(log_text)
+                # Signature mismatches can be repaired by inserting *args, **kwargs AST.
+                is_signature = error_type == "signature_mismatch"
                 result.update({
-                    "healable": False,
-                    "ast_healable": False,
+                    "healable": is_signature,
+                    "ast_healable": is_signature,
                     "llm_healable": True,
                     "error_type": error_type,
                     "reason": reason,

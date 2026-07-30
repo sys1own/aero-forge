@@ -14,7 +14,11 @@ from typing import Any, Dict, Optional, Tuple
 
 import yaml
 
-from aero_forge.blueprint.core import BlueprintCore, parse_aero
+from aero_forge.blueprint.core import (
+    BlueprintCore,
+    ensure_workspace_blueprint,
+    parse_aero,
+)
 from aero_forge.copilot.action_parser import (
     ActionParser,
     _infer_target_from_text,
@@ -116,10 +120,12 @@ def _load_workspace_blueprint(workspace_path: Path) -> Dict[str, Any]:
     """Read and parse the workspace blueprint, auto-detecting one if absent.
 
     Tries ``blueprint.aero`` and ``workspace_blueprint.yaml`` in that order.
-    If neither exists, calls ``BlueprintCore.autodetect`` to build an
-    in-memory schema from the workspace contents.
+    If neither exists, calls ``ensure_workspace_blueprint`` to synthesize a
+    minimal default from standard templates and ``BlueprintCore.autodetect``
+    to build an in-memory schema from the workspace contents.
     """
     workspace_path = Path(workspace_path)
+    ensure_workspace_blueprint(workspace_path)
     candidates = [
         workspace_path / "blueprint.aero",
         workspace_path / "workspace_blueprint.yaml",

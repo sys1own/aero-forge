@@ -12,6 +12,11 @@ import difflib
 import re
 from typing import Optional, Set
 
+from aero_forge.orchestrator.error_classifier import (
+    extract_signature_mismatch_symbol,
+    is_signature_mismatch,
+)
+
 
 def _assigned_names(code: str) -> Set[str]:
     """Return all names that are assigned to anywhere in *code*."""
@@ -105,7 +110,83 @@ def try_auto_fix(error_log: str, code: str) -> Optional[str]:
         if patched != code:
             return patched
 
-    # 3. Missing Rust operator/function: currently not directly patchable in Python
-    # source; signal no deterministic fix so the build fails with a clear diagnostic.
+    # 3. Python function signature / arity mismatch: make the target function accept
+    # any additional positional or keyword arguments so callers do not fail.
+    if is_signature_mismatch(error_log):
+        symbol = extract_signature_mismatch_symbol(error_log)
+        if symbol:
+            patched = _make_function_variadic(code, symbol)
+            if patched:
+                return patched
 
+    return None
+
+
+def _make_function_variadic(code: str, name: str) -> Optional[str]:
+    """Return *code* with ``def <name>(...)`` accepting ``*args, **kwargs``.
+
+    The variadic parameters are inserted before the closing ``)`` of the function
+    argument list. If the function already declares ``*args`` or ``**kwargs``
+    the code is returned unchanged.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+
+    func = None
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            func = node
+            break
+    if func is None:
+        return None
+    if func.args.vararg or func.args.kwarg:
+        return code
+
+    try:
+        idx = code.index(f"def {name}(")
+    except ValueError:
+        return None
+
+    # Walk the source from the opening ``(`` of the signature to find the
+    # matching top-level closing ``)`` while respecting strings.
+    i = code.find("(", idx)
+    if i == -1:
+        return None
+    depth = 0
+    in_string = False
+    string_char = ""
+    escaped = False
+    while i < len(code):
+        ch = code[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == string_char:
+                in_string = False
+        else:
+            if ch in ('"', "'"):
+                in_string = True
+                string_char = ch
+            elif ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    # Insert ``*args, **kwargs`` before this closing paren.
+                    prefix = code[:i].rstrip()
+                    if prefix.endswith("("):
+                        insertion = "*args, **kwargs"
+                    else:
+                        insertion = ", *args, **kwargs"
+                    patched = prefix + insertion + code[i:]
+                    try:
+                        ast.parse(patched)
+                    except SyntaxError:
+                        return None
+                    return patched
+        i += 1
     return None

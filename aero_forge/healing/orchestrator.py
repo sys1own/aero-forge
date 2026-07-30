@@ -16,6 +16,7 @@ from aero_forge.healing.evaluator import HealingStrategy, LogEvaluator
 from aero_forge.healing.llm_healer import LLMHealer
 from aero_forge.healing.router import try_auto_fix
 from aero_forge.healing.structural_merger import MergeConflictError, apply_overlay
+from aero_forge.overlay.apply import persist_text_to_disk
 
 logger = logging.getLogger("aero_forge.healing.orchestrator")
 
@@ -235,7 +236,7 @@ class HealingOrchestrator:
             if parsed.get("missing_symbol") in {"Any", "List", "Dict", "Optional"}:
                 guarded = ensure_typing_imports(original)
                 if guarded != original:
-                    target_path.write_text(guarded, encoding="utf-8")
+                    persist_text_to_disk(target_path, guarded)
                     self.log_callback("info", "HEAL", f"Injected typing imports into {target}")
                     return {
                         "status": "success",
@@ -291,7 +292,7 @@ class HealingOrchestrator:
                 "error_message": "AST overlay produced no changes.",
             }
 
-        target_path.write_text(merged, encoding="utf-8")
+        persist_text_to_disk(target_path, merged)
         self.log_callback("info", "HEAL", f"Applied AST patch to {target}")
         diff = "\n".join(
             difflib.unified_diff(

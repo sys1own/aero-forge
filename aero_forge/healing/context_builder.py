@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from aero_forge.bundle_repo import bundle_workspace, format_context_block
+from aero_forge.orchestrator.error_classifier import (
+    extract_signature_mismatch_symbol,
+    is_signature_mismatch,
+)
 
 
 class ContextBuilder:
@@ -53,6 +57,8 @@ class ContextBuilder:
             "bundle": bundle,
             "previous_attempts": previous_attempts or [],
         }
+        if (diagnosis or {}).get("error_type") == "signature_mismatch" or is_signature_mismatch(log_text):
+            context["signature_context"] = self._build_signature_context(log_text, diagnosis)
         return context
 
     def build_prompt(
@@ -81,6 +87,20 @@ class ContextBuilder:
                 if attempt.get("error_message"):
                     previous_attempts_text += f"  Rejection/Error: {attempt['error_message']}\n"
 
+        sig_context = context.get("signature_context")
+        signature_guidance = ""
+        if sig_context:
+            signature_guidance = (
+                "### SIGNATURE MISMATCH GUIDANCE\n"
+                "This failure is a positional-argument arity mismatch. Prefer to update the "
+                "target function definition to accept ``*args, **kwargs`` so existing callers "
+                "continue to work. Alternatively, wrap the caller to match the expected "
+                "signature, but do not break existing callers.\n\n"
+                f"Mismatched symbol: {sig_context.get('symbol', 'unknown')}\n"
+                f"Definition: {sig_context.get('definition')}\n"
+                f"Caller: {sig_context.get('caller')}\n\n"
+            )
+
         prompt = (
             "You are a Diagnostic Director for an automated build repair engine. "
             "Analyze the failure below and return a single JSON object. "
@@ -94,6 +114,7 @@ class ContextBuilder:
             "---\n\n"
             f"{bundle_block}\n\n"
             f"{previous_attempts_text}\n"
+            f"{signature_guidance}"
             "Return ONLY a JSON object matching this schema:\n"
             "{\n"
             '  "diagnosis": "Detailed root cause analysis...",\n'
@@ -109,6 +130,57 @@ class ContextBuilder:
             "}\n"
         )
         return prompt
+
+    def _build_signature_context(
+        self,
+        log_text: str,
+        diagnosis: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Collect function definition and caller locations for a signature mismatch."""
+        symbol = extract_signature_mismatch_symbol(log_text)
+        if not symbol and diagnosis:
+            symbol = diagnosis.get("symbol") or diagnosis.get("target_file")
+
+        # Last Python traceback frame is the caller site.
+        caller: Optional[Dict[str, Any]] = None
+        matches = list(self._python_trace_re.finditer(log_text))
+        if matches:
+            last = matches[-1]
+            caller = {
+                "file": self._relative_file(last.group(1)),
+                "line": int(last.group(2)),
+            }
+
+        definition: Optional[Dict[str, Any]] = None
+        if isinstance(symbol, str):
+            definition = self._find_function_definition(symbol)
+
+        return {
+            "symbol": symbol,
+            "definition": definition,
+            "caller": caller,
+        }
+
+    def _find_function_definition(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Return the first Python file in the workspace defining ``def <symbol>(``."""
+        if not symbol.isidentifier():
+            return None
+        pattern = re.compile(rf"^\s*def\s+{re.escape(symbol)}\s*\(", re.MULTILINE)
+        for path in self.workspace_path.rglob("*.py"):
+            if "/tests/" in str(path.relative_to(self.workspace_path)).replace("\\", "/"):
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            match = pattern.search(text)
+            if match:
+                line = text[: match.start()].count("\n") + 1
+                return {
+                    "file": self._relative_file(str(path)),
+                    "line": line,
+                }
+        return None
 
     def _extract_references(self, log_text: str) -> List[Dict[str, Any]]:
         """Pull file/line and symbol references from the failure log."""

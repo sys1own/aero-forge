@@ -12,6 +12,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
+from aero_forge.blueprint_templates import list_templates, load_template
+from aero_forge.ingestion.zip_parser import generate_draft_v3_blueprint
 from aero_forge.orchestrator.stack_classifier import (
     INTENT_HYBRID_CPP_PYTHON,
     INTENT_HYBRID_CPP_RUST,
@@ -1112,6 +1114,177 @@ def _build_autodetected_blueprint(
         functions=functions,
         output_dir=repo_path / "dist",
     )
+
+
+def _sanitize_project_name(name: str) -> str:
+    """Convert a directory name into a valid Python/Rust package identifier."""
+    sanitized = "".join(c if c.isalnum() or c == "_" else "_" for c in name.lower())
+    sanitized = sanitized.strip("_")
+    if not sanitized or sanitized[0].isdigit():
+        sanitized = "engine"
+    return sanitized
+
+
+def _workspace_has_sources(workspace_root: Path) -> bool:
+    """Return True if *workspace_root* contains any real source/material files."""
+    skip_names = {
+        "blueprint.aero",
+        "workspace_blueprint.yaml",
+        "workspace_blueprint.yml",
+        "workspace.aeroc",
+    }
+    for path in workspace_root.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.name in skip_names or path.name.startswith("."):
+            continue
+        try:
+            if path.stat().st_size > 0:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def ensure_workspace_blueprint(workspace_root: Path) -> Path:
+    """Return ``workspace_root / blueprint.aero``, creating it if missing.
+
+    For workspaces that already contain source code, a Blueprint v3.0.0 is
+    inferred from the discovered artifacts. For truly empty workspaces, a
+    minimal blueprint is synthesized from the closest standard template
+    (``pure_python.aero`` by default) and marked as LLM-initialized so the UI
+    does not warn about a missing blueprint.
+    """
+    workspace_root = Path(workspace_root).resolve()
+    blueprint_path = workspace_root / "blueprint.aero"
+    if blueprint_path.is_file():
+        return blueprint_path
+
+    from aero_forge.blueprint.schema import (
+        ArtifactType,
+        BlueprintStatus,
+        BlueprintV3,
+        BuildArtifact,
+        ContextState,
+        ExecutionStrategyV3,
+        GenerationMethod,
+        LLMContext,
+        Metadata,
+        ToolchainSpec,
+        write_v3_blueprint,
+    )
+
+    # If the workspace already has source files, derive the blueprint from them
+    # instead of overwriting with an empty template.
+    if _workspace_has_sources(workspace_root):
+        blueprint = generate_draft_v3_blueprint(workspace_root)
+        blueprint.metadata.status = BlueprintStatus.finalized
+        blueprint.metadata.llm_initialized = True
+        blueprint.metadata.transferable = True
+        blueprint.metadata.generation_method = GenerationMethod.static_heuristic
+        blueprint.llm_context.state = ContextState.synthesized
+        write_v3_blueprint(blueprint, blueprint_path)
+        logger.info("Auto-generated source-derived blueprint: %s", blueprint_path)
+        return blueprint_path
+
+    has_rust = (workspace_root / "Cargo.toml").is_file()
+    has_python = (
+        (workspace_root / "pyproject.toml").is_file()
+        or (workspace_root / "setup.py").is_file()
+        or bool(list(workspace_root.rglob("*.py")))
+    )
+    cpp_sources = [
+        p for p in workspace_root.rglob("*")
+        if p.suffix in {".cpp", ".c", ".h", ".hpp"}
+    ]
+    has_cpp = bool(cpp_sources)
+
+    if has_rust and has_python:
+        architecture = INTENT_HYBRID_RUST_PYTHON
+    elif has_rust:
+        architecture = INTENT_PURE_RUST
+    elif has_cpp and has_python:
+        architecture = INTENT_HYBRID_CPP_PYTHON
+    elif has_cpp:
+        architecture = INTENT_HYBRID_CPP_PYTHON
+    else:
+        architecture = INTENT_PURE_PYTHON
+
+    template_name = suggested_blueprint_template(architecture)
+    template_text = ""
+    try:
+        template_text = load_template(template_name)
+    except KeyError:
+        logger.warning("No blueprint template found for %s; using defaults", architecture)
+
+    project_name = _sanitize_project_name(workspace_root.name)
+
+    # Pull the human-readable intent from the template to seed the LLM context.
+    description = f"Auto-generated {architecture} blueprint for empty workspace."
+    if template_text:
+        prompt_match = re.search(r'^prompt:\s*["\']?(.*?)["\']?$', template_text, re.MULTILINE)
+        constraints_match = re.search(r'^constraints:\s*["\']?(.*?)["\']?$', template_text, re.MULTILINE)
+        parts = []
+        if prompt_match:
+            parts.append(prompt_match.group(1).strip('"\''))
+        if constraints_match:
+            parts.append(constraints_match.group(1).strip('"\''))
+        if parts:
+            description = " ".join(parts)
+
+    classification = classify_stack(architecture)
+    toolchains = [ToolchainSpec(name=t) for t in classification.toolchains or ["python"]]
+
+    if architecture == INTENT_PURE_RUST:
+        source_files = ["src/lib.rs"]
+        artifact_type = ArtifactType.cargo_cdylib
+    elif architecture == INTENT_HYBRID_RUST_PYTHON:
+        source_files = ["src/lib.rs"]
+        artifact_type = ArtifactType.cargo_cdylib
+    elif has_cpp:
+        source_files = [str(p.relative_to(workspace_root)) for p in cpp_sources[:1]] or ["native/native.cpp"]
+        artifact_type = ArtifactType.shared_library
+    else:
+        source_files = [f"src/{project_name}/core.py"]
+        artifact_type = ArtifactType.python_extension
+
+    primary_entrypoint = source_files[0] if source_files else ""
+
+    blueprint = BlueprintV3(
+        metadata=Metadata(
+            schema_version="3.0.0",
+            project_name=project_name,
+            status=BlueprintStatus.finalized,
+            generation_method=GenerationMethod.static_heuristic,
+            transferable=True,
+            llm_initialized=True,
+            description=description,
+        ),
+        llm_context=LLMContext(
+            state=ContextState.synthesized,
+            repository_summary=description,
+            dependency_graph={},
+            compute_hotspots=[],
+        ),
+        toolchains=toolchains,
+        build_pipeline=[
+            BuildArtifact(
+                id=f"{project_name}_core",
+                type=artifact_type,
+                source_files=source_files,
+                output_path=f"dist/{project_name}",
+                description=description,
+            )
+        ],
+        execution_strategy=ExecutionStrategyV3(
+            primary_entrypoint=primary_entrypoint,
+            runtime="python3",
+        ),
+    )
+
+    write_v3_blueprint(blueprint, blueprint_path)
+    logger.info("Auto-generated minimal blueprint for empty workspace: %s", blueprint_path)
+    return blueprint_path
 
 
 class BlueprintCore:
