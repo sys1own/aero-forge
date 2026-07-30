@@ -7,6 +7,7 @@ from pathlib import Path
 
 from aero_forge.builder.aeroc_compiler import compile_directory_to_aeroc
 from aero_forge.materializer import auto_materialize, unpack_aeroc_file, workspace_requires_materialization
+from aero_forge.scaffold.aeroc_export import compile_hybrid_aeroc
 
 
 def test_compile_and_unpack_roundtrip(tmp_path: Path) -> None:
@@ -50,3 +51,69 @@ def test_auto_materialize_extracts_aeroc(tmp_path: Path) -> None:
     assert (empty / "Cargo.toml").read_text() == (original / "Cargo.toml").read_text()
     assert (empty / "src" / "main.rs").read_text() == (original / "src" / "main.rs").read_text()
     assert not workspace_requires_materialization(empty)
+
+
+def _dummy_elf() -> bytes:
+    """Return the smallest byte sequence that looks like a valid ELF shared object."""
+    return b"\x7fELF" + b"\x00" * 16
+
+
+def test_hybrid_aeroc_packs_and_unpacks_matching_native_binary(tmp_path: Path) -> None:
+    """A hybrid .aeroc stores source and a matching native binary."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("print('hello')\n")
+    (workspace / "libnative.so").write_bytes(_dummy_elf())
+
+    aeroc = tmp_path / "workspace.aeroc"
+    compile_hybrid_aeroc(workspace, aeroc)
+
+    out = tmp_path / "extracted"
+    out.mkdir()
+    unpack_aeroc_file(aeroc, out)
+
+    assert (out / "main.py").read_text() == "print('hello')\n"
+    assert (out / "libnative.so").is_file()
+    assert (out / "libnative.so").read_bytes() == _dummy_elf()
+    assert (out / "environment.lock").is_file()
+    assert not (out / ".aeroc_fallback").exists()
+
+
+def test_hybrid_aeroc_skips_mismatched_native_binary_and_marks_fallback(tmp_path: Path) -> None:
+    """A binary built for a different platform is skipped and a fallback marker is written."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("print('hello')\n")
+    (workspace / "libnative.so").write_bytes(_dummy_elf())
+
+    aeroc = tmp_path / "workspace.aeroc"
+    # Package the binary for a platform that is not the current host.
+    compile_hybrid_aeroc(workspace, aeroc, platform_tag="macos_aarch64")
+
+    out = tmp_path / "extracted"
+    out.mkdir()
+    unpack_aeroc_file(aeroc, out)
+
+    assert (out / "main.py").is_file()
+    assert not (out / "libnative.so").exists()
+    assert (out / ".aeroc_fallback").is_file()
+    assert "no matching native binary" in (out / ".aeroc_fallback").read_text()
+
+
+def test_hybrid_aeroc_preserves_non_hybrid_src_prefix(tmp_path: Path) -> None:
+    """Legacy .aeroc files without the hybrid marker keep their ``src/`` directories intact."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "main.rs").write_text("fn main() {}\n")
+    (tmp_path / "Cargo.toml").write_text('[package]\nname = "legacy"\n')
+
+    aeroc = tmp_path / "workspace.aeroc"
+    compile_directory_to_aeroc(tmp_path, aeroc)
+
+    out = tmp_path / "extracted"
+    out.mkdir()
+    unpack_aeroc_file(aeroc, out)
+
+    # Legacy layout must keep the original ``src/`` directory.
+    assert (out / "src" / "main.rs").is_file()
+    assert (out / "Cargo.toml").is_file()
