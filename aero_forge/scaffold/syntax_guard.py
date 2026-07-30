@@ -13,7 +13,6 @@ import re
 from pathlib import Path
 from typing import List, Tuple
 
-
 # File extensions that this guard can repair.
 GUARDED_EXTENSIONS = {".rs", ".cpp", ".c", ".h", ".hpp"}
 
@@ -69,6 +68,13 @@ def _balanced_tokens(source: str) -> Tuple[bool, List[str]]:
             continue
 
         if c in ('"', "'"):
+            # In Rust, a leading ' followed by an identifier is a lifetime (e.g. 'py, '_).
+            # Treat it as a single token rather than a string delimiter.
+            if c == "'" and (nxt.isalpha() or nxt == "_"):
+                i += 1
+                while i < n and (source[i].isalnum() or source[i] == "_"):
+                    i += 1
+                continue
             in_string = c
             i += 1
             continue
@@ -236,7 +242,11 @@ def _strip_dangling_doc_comments(source: str) -> str:
         lines = source.rstrip().splitlines()
         while lines:
             stripped = lines[-1].strip()
-            if stripped == "" or stripped.startswith("///") or stripped.startswith("//!"):
+            if (
+                stripped == ""
+                or stripped.startswith("///")
+                or stripped.startswith("//!")
+            ):
                 lines.pop()
                 changed = True
             else:
