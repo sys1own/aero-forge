@@ -294,6 +294,37 @@ def test_generate_returns_command_list(server):
     assert any(c["cmd"] == "pytest" for c in commands)
 
 
+def test_workspace_status_returns_flags(server):
+    """GET /api/workspace/status exposes runtime state flags."""
+    session_id = "test-status-flags"
+    _save_file(server, session_id, "main.py", "print('hello')\n")
+    client = _make_client(server)
+    client.request("GET", f"/api/workspace/status?session_id={session_id}")
+    resp = client.getresponse()
+    assert resp.status == 200
+    payload = json.loads(resp.read())
+    assert "has_aeroc" in payload
+    assert "initialized_from_aeroc" in payload
+    assert "is_building" in payload
+    assert payload["has_aeroc"] is False
+    assert payload["initialized_from_aeroc"] is False
+    assert payload["is_building"] is False
+
+
+def test_files_includes_status_flags(server):
+    """GET /api/files carries session metadata flags."""
+    session_id = "test-files-flags"
+    _save_file(server, session_id, "main.py", "print('hello')\n")
+    client = _make_client(server)
+    client.request("GET", f"/api/files?session_id={session_id}")
+    resp = client.getresponse()
+    assert resp.status == 200
+    payload = json.loads(resp.read())
+    assert "has_aeroc" in payload
+    assert "initialized_from_aeroc" in payload
+    assert "is_building" in payload
+
+
 def test_update_returns_command_list(server):
     """POST /api/update regenerates the workspace and returns runnable commands."""
     session_id = "test-update-commands"
