@@ -1721,5 +1721,51 @@ def export_aeroc_cmd(file: str, output: str, verbose: bool) -> None:
     click.echo(f"Exported standalone executable: {output}")
 
 
+@main.command("run")
+@click.argument("archive", type=click.Path(exists=True, dir_okay=False, path_type=str))
+@click.argument("args", nargs=-1)
+@click.option(
+    "--keep-workdir",
+    is_flag=True,
+    help="Do not delete the sandbox directory after execution.",
+)
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    help="Capture output and emit a structured JSON result.",
+)
+@click.option("--verbose", "-v", is_flag=True, help="Show debug logs.")
+def run_aeroc(
+    archive: str,
+    args: tuple[str, ...],
+    keep_workdir: bool,
+    json_output: bool,
+    verbose: bool,
+) -> None:
+    """Run a .aeroc archive in an isolated sandbox.
+
+    Example: aero run workspace.aeroc -- arg1 arg2
+    """
+    _setup_logging(verbose, json_output)
+    from aero_forge.scaffold.aeroc_export import run_aeroc_archive
+
+    result = run_aeroc_archive(
+        archive,
+        args=list(args),
+        keep_workdir=keep_workdir,
+        json_output=json_output,
+    )
+    if json_output:
+        click.echo(json.dumps(result, default=str))
+    else:
+        if result.get("stdout"):
+            click.echo(result["stdout"])
+        if result.get("stderr"):
+            click.echo(result["stderr"], err=True)
+    if not result.get("success"):
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     main()

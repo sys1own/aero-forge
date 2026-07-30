@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 
+from aero_forge.scaffold.aeroc_export import compile_hybrid_aeroc, run_aeroc_archive
+
 CLI = [sys.executable, "-m", "aero_forge.cli"]
 
 
@@ -108,3 +110,28 @@ def test_build_project_json_output(tmp_path: Path) -> None:
     assert payload["passed"] == payload["total"] == 1
     assert Path(payload["output_zip"]).is_file()
     assert payload["manifest"]["project"] == "json_project"
+
+
+def test_run_aeroc_archive_executes_python_entrypoint(tmp_path: Path) -> None:
+    """``aero run`` unpacks and executes the Python entrypoint of a .aeroc archive."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("print('aero run ok')\n", encoding="utf-8")
+    aeroc = tmp_path / "app.aeroc"
+    compile_hybrid_aeroc(workspace, aeroc)
+
+    result = run_aeroc_archive(aeroc, args=[], json_output=True, keep_workdir=True)
+    assert result["success"] is True
+    assert "aero run ok" in result["stdout"]
+
+
+def test_cli_run_subcommand_exists() -> None:
+    """The ``run`` subcommand is registered in the CLI and prints usage."""
+    result = subprocess.run(
+        CLI + ["run", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "ARCHIVE" in result.stdout
+    assert ".aeroc" in result.stdout
