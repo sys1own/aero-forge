@@ -14,6 +14,7 @@ No LLM API calls are made inside this loop.
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import re
@@ -79,21 +80,25 @@ def _extract_target_file(error_log: str, workspace: Path) -> Optional[str]:
     # Python traceback file paths.
     m = re.search(r'File "([^"]+)", line', error_log)
     if m:
-        path = Path(m.group(1))
-        if path.is_file():
-            try:
-                return str(path.relative_to(workspace))
-            except ValueError:
-                return str(path)
+        raw = Path(m.group(1))
+        candidates = [raw, workspace / raw]
+        for path in candidates:
+            if path.is_file():
+                try:
+                    return str(path.relative_to(workspace))
+                except ValueError:
+                    return str(path)
     # Rust/Cargo error paths: "--> path:line:col"
     m = re.search(r"-->\s+(\S+):\d+:\d+", error_log)
     if m:
-        path = Path(m.group(1))
-        if path.is_file():
-            try:
-                return str(path.relative_to(workspace))
-            except ValueError:
-                return str(path)
+        raw = Path(m.group(1))
+        candidates = [raw, workspace / raw]
+        for path in candidates:
+            if path.is_file():
+                try:
+                    return str(path.relative_to(workspace))
+                except ValueError:
+                    return str(path)
     return None
 
 
@@ -215,16 +220,26 @@ class DeterministicHealer:
             try:
                 patch = try_auto_fix(error_log, source_text)
                 if patch is not None and patch != source_text:
+                    target = str(source_path or "source.py")
                     result["status"] = "success"
-                    result["strategy_used"] = "ast_rewrite"
+                    result["strategy_used"] = "ast"
                     result["patch"] = patch
+                    result["target_file"] = target
+                    result["diff"] = "".join(
+                        difflib.unified_diff(
+                            source_text.splitlines(keepends=True),
+                            patch.splitlines(keepends=True),
+                            fromfile=target,
+                            tofile=target,
+                        )
+                    )
                     result["error_message"] = None
                     if apply and source_path:
                         resolved = self.workspace / source_path
                         resolved.write_text(patch, encoding="utf-8")
-                        result["patched_files"] = [str(source_path)]
+                        result["patched_files"] = [target]
                     else:
-                        result["patched_files"] = [str(source_path or "source.py")]
+                        result["patched_files"] = [target]
                     return result
             except Exception as exc:
                 self._log("warning", "HEAL", f"AST rewrite failed: {exc}")
@@ -298,24 +313,24 @@ class DeterministicHealer:
     ) -> Dict[str, Any]:
         """Convenience wrapper compatible with the legacy HealingOrchestrator API.
 
-        Reads the source from *target_file* under the workspace and dispatches to
-        ``execute_healing_pass``.
+        Reads the source from *target_file* (or extracts it from the error log)
+        under the workspace and dispatches to ``execute_healing_pass``.
         """
+        target_file = target_file or _extract_target_file(error_logs, self.workspace)
         if target_file:
             path = self.workspace / target_file
             try:
                 source = path.read_text(encoding="utf-8")
             except OSError:
                 source = None
-            result = self.execute_healing_pass(
+            return self.execute_healing_pass(
                 error_log=error_logs,
                 source_text=source,
                 source_path=Path(target_file),
                 command=command,
                 exit_code=exit_code,
+                apply=True,
             )
-            result["target_file"] = target_file
-            return result
 
         return self.execute_healing_pass(
             error_log=error_logs,
