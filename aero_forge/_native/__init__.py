@@ -9,9 +9,12 @@ try:
         Hasher,
         HinEngine,
         compile_aeroc,
+        enforce_repair_isolation_py,
+        evaluate_hin_energy,
         hash_bytes,
         hash_file,
         reduce_hin_uast,
+        repair_uast_expression,
         run_aeroc,
         unpack_aeroc,
     )
@@ -31,4 +34,7 @@ __all__ = [
     "hash_bytes",
     "hash_file",
     "reduce_hin_uast",
+    "evaluate_hin_energy",
+    "repair_uast_expression",
+    "enforce_repair_isolation_py",
 ]

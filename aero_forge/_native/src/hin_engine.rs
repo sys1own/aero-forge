@@ -6,12 +6,15 @@
 //! flat graph of ``Node`` / ``Port`` indices.  Reduction runs with the Python
 //! GIL released.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
+use std::collections::VecDeque;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
+use smallvec::SmallVec;
 
 /// MELL structural type used for port annotations.
 #[derive(Clone, Debug, Serialize)]
@@ -831,4 +834,221 @@ pub fn reduce_hin_uast(json: &str, max_steps: Option<usize>) -> PyResult<String>
         .to_json()
         .map_err(|e| PyValueError::new_err(format!("serialization failed: {}", e)))?;
     Ok(format!("{{\"steps\":{},\"graph\":{}}}", steps, out))
+}
+
+// ---------------------------------------------------------------------------
+// Proof-theoretic HIN energy evaluator (deterministic self-healing support)
+// ---------------------------------------------------------------------------
+
+/// MELL linear-logic symbols carried by HIN ports.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "kind")]
+#[allow(dead_code)]
+pub enum MellSymbol {
+    I,
+    Tensor { left: Box<MellSymbol>, right: Box<MellSymbol> },
+    Implication { left: Box<MellSymbol>, right: Box<MellSymbol> },
+    Bang { inner: Box<MellSymbol> },
+    #[serde(rename = "var")]
+    Var { name: String },
+}
+
+impl Default for MellSymbol {
+    fn default() -> Self {
+        MellSymbol::I
+    }
+}
+
+/// Single HIN port with an optional connection and a MELL type annotation.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub struct HinPort {
+    pub owner: usize,
+    pub name: String,
+    pub is_principal: bool,
+    pub target: Option<usize>,
+    pub mell: MellSymbol,
+}
+
+/// Energy accounting state for a HIN node or the whole graph.
+#[derive(Clone, Debug, Serialize)]
+pub struct EnergyState {
+    pub stalled: usize,
+    pub wires: usize,
+    pub dangling: usize,
+    pub total: f64,
+}
+
+/// HIN node backed by a small-vector of auxiliary port indices.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub struct HinNode {
+    pub id: String,
+    pub kind: String,
+    pub principal: Option<usize>,
+    pub aux: SmallVec<[usize; 4]>,
+    pub energy: EnergyState,
+}
+
+/// Parse-able port representation used by the energy evaluator.
+#[derive(Deserialize)]
+struct PortInput {
+    name: String,
+    #[serde(default)]
+    is_principal: bool,
+    target_node: Option<String>,
+    target_port: Option<String>,
+    #[serde(default)]
+    mell: Option<MellSymbol>,
+}
+
+/// Parse-able node representation used by the energy evaluator.
+#[derive(Deserialize)]
+struct NodeInput {
+    id: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    ports: Vec<PortInput>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ArenaInput {
+    Nodes(Vec<NodeInput>),
+    Object { nodes: Vec<NodeInput> },
+}
+
+/// Evaluate the HIN interaction-net energy of an arena JSON description.
+///
+/// Energy is defined as `E(G) = 10.0 * stalled + 5.0 * wires + 2.0 * dangling`,
+/// where:
+///   * `stalled` counts active principal-principal pairs whose node kinds are
+///     identical (they cannot reduce without further interaction);
+///   * `wires` counts bidirectional connections between ports;
+///   * `dangling` counts ports with no target or a missing target.
+#[pyfunction]
+pub fn evaluate_hin_energy(arena_json: &str) -> PyResult<String> {
+    let arena: ArenaInput = serde_json::from_str(arena_json)
+        .map_err(|e| PyValueError::new_err(format!("invalid arena JSON: {}", e)))?;
+    let nodes_input = match arena {
+        ArenaInput::Nodes(nodes) => nodes,
+        ArenaInput::Object { nodes } => nodes,
+    };
+
+    let mut ports: Vec<HinPort> = Vec::new();
+    let mut nodes: Vec<HinNode> = Vec::with_capacity(nodes_input.len());
+    let mut port_lookup: HashMap<(String, String), usize> = HashMap::new();
+
+    // First pass: allocate ports and nodes, recording lookup keys.
+    for node_input in nodes_input {
+        let node_idx = nodes.len();
+        let mut node = HinNode {
+            id: node_input.id,
+            kind: node_input.kind,
+            principal: None,
+            aux: SmallVec::new(),
+            energy: EnergyState {
+                stalled: 0,
+                wires: 0,
+                dangling: 0,
+                total: 0.0,
+            },
+        };
+        for (port_idx_in_node, port_input) in node_input.ports.into_iter().enumerate() {
+            let port_idx = ports.len();
+            // The first port without an explicit flag is treated as principal,
+            // matching the output format of HinEngine::to_json.
+            let is_principal = port_input.is_principal || port_idx_in_node == 0;
+            let port = HinPort {
+                owner: node_idx,
+                name: port_input.name.clone(),
+                is_principal,
+                target: None,
+                mell: port_input.mell.unwrap_or_default(),
+            };
+            port_lookup.insert((node.id.clone(), port_input.name), port_idx);
+            if is_principal {
+                node.principal = Some(port_idx);
+            } else {
+                node.aux.push(port_idx);
+            }
+            ports.push(port);
+        }
+        nodes.push(node);
+    }
+
+    // Second pass: wire targets.
+    let mut dangling = 0usize;
+    let mut targeted = 0usize;
+    for port_idx in 0..ports.len() {
+        let owner_id = nodes[ports[port_idx].owner].id.clone();
+        let port_name = ports[port_idx].name.clone();
+        if let Some(key) = port_lookup.get(&(owner_id, port_name)) {
+            // Use the lookup key recorded above; the actual target is resolved below.
+            let _ = key;
+        }
+        // Resolve the target from the original input by scanning the lookup table.
+        // (The lookup map key is (owner_id, port_name); the stored value is the port index.)
+        // Here we already have port_idx; nothing more to resolve for this loop.
+        // This block is intentionally left minimal because the wiring logic is applied
+        // through the port_input.target_node/target_port fields, which we need to recover.
+    }
+
+    // Re-parse to wire, since we consumed the input in the first pass.
+    // We can reuse the arena string and update ports in place.
+    let arena2: ArenaInput = serde_json::from_str(arena_json)
+        .map_err(|e| PyValueError::new_err(format!("invalid arena JSON: {}", e)))?;
+    let nodes_input2 = match arena2 {
+        ArenaInput::Nodes(nodes) => nodes,
+        ArenaInput::Object { nodes } => nodes,
+    };
+    let mut port_iter = 0usize;
+    for node_input in nodes_input2 {
+        for port_input in node_input.ports {
+            if let (Some(tnode), Some(tport)) = (port_input.target_node, port_input.target_port) {
+                if let Some(&target_idx) = port_lookup.get(&(tnode, tport)) {
+                    ports[port_iter].target = Some(target_idx);
+                    targeted += 1;
+                } else {
+                    dangling += 1;
+                }
+            } else {
+                dangling += 1;
+            }
+            port_iter += 1;
+        }
+    }
+
+    let wires = targeted / 2;
+
+    // Count active principal-principal pairs and stalled pairs.
+    let mut stalled = 0usize;
+    let mut seen_active: Vec<(usize, usize)> = Vec::new();
+    for node_idx in 0..nodes.len() {
+        if let Some(p) = nodes[node_idx].principal {
+            if let Some(target_idx) = ports[p].target {
+                if ports[target_idx].is_principal {
+                    let target_owner = ports[target_idx].owner;
+                    if node_idx < target_owner {
+                        seen_active.push((node_idx, target_owner));
+                        if nodes[node_idx].kind == nodes[target_owner].kind {
+                            stalled += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let total = 10.0 * stalled as f64 + 5.0 * wires as f64 + 2.0 * dangling as f64;
+    let energy = EnergyState {
+        stalled,
+        wires,
+        dangling,
+        total,
+    };
+
+    serde_json::to_string(&energy)
+        .map_err(|e| PyValueError::new_err(format!("energy serialization failed: {}", e)))
 }
