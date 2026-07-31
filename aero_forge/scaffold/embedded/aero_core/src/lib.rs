@@ -1,7 +1,9 @@
 //! Zero-dependency embedded wavefront execution engine for standalone exports.
 
+pub mod goi_solver;
 pub mod wavefront;
 
+pub use goi_solver::{compute_metamorphic_gradients, execute_goi_wave, Matrix};
 pub use wavefront::{compute_wavefronts, execute, ScheduleError, Task, TaskResult};
 
 /// Simple facade used by generated `.aeroc` binaries.

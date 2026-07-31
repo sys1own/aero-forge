@@ -11,13 +11,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shlex
 import shutil
-import subprocess
-import sys
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
+from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 logger = logging.getLogger("aero_forge.scheduler.wavefront")
 
@@ -28,6 +28,25 @@ class SchedulerError(Exception):
 
 class CycleError(SchedulerError):
     """Raised when the graph contains a cycle and cannot be levelised."""
+
+
+class MutationKind(str, Enum):
+    """Kinds of graph mutation used by incremental schedule repair."""
+
+    ADD_NODE = "add_node"
+    REMOVE_NODE = "remove_node"
+    ADD_EDGE = "add_edge"
+    REMOVE_EDGE = "remove_edge"
+    UPDATE_NODE = "update_node"
+
+
+@dataclass
+class GraphMutation:
+    """A single structural change to a task DAG."""
+
+    kind: MutationKind
+    node_id: Optional[str] = None
+    edge: Optional[Tuple[str, str]] = None
 
 
 @dataclass
@@ -58,11 +77,20 @@ class WavefrontScheduler:
         self,
         adj_list: Dict[str, List[str]],
         roots: Optional[Sequence[str]] = None,
+        *,
+        use_goi: bool = False,
+        goi_weights: Optional[Dict[Tuple[str, str], float]] = None,
+        goi_damping: float = 0.15,
     ) -> List[List[str]]:
         """Return level-ordered waves from a DAG adjacency list.
 
-        Uses Kahn's algorithm grouped into breadth-first layers.
+        Uses Kahn's algorithm grouped into breadth-first layers.  When
+        ``use_goi`` is True and ``numpy`` is available, nodes inside each wave
+        are ordered by a GoI-derived precedence score so that tasks on the
+        most critical dependency paths run first.
         """
+        from aero_forge.scheduler import goi_solver
+
         nodes = set(adj_list.keys()) | {n for deps in adj_list.values() for n in deps}
         reverse: Dict[str, List[str]] = {n: [] for n in nodes}
         for node, deps in adj_list.items():
@@ -73,10 +101,25 @@ class WavefrontScheduler:
         queue: deque = deque(roots if roots is not None else [n for n in nodes if in_degree[n] == 0])
         waves: List[List[str]] = []
 
+        scores: Dict[str, float] = {}
+        if use_goi:
+            try:
+                scores = goi_solver.precedence_scores(
+                    adj_list, damping=goi_damping, weights=goi_weights
+                )
+            except Exception as exc:
+                self._log("warning", "SCHEDULER", f"GoI precedence failed ({exc}); using lexical order")
+                scores = {}
+
         while queue:
             wave: List[str] = []
             next_queue: deque = deque()
-            for node in sorted(queue):
+            # Order within a wave: GoI score desc, then name asc for determinism.
+            ordered_queue = sorted(
+                queue,
+                key=lambda n: (-scores.get(n, 0.0), n),
+            )
+            for node in ordered_queue:
                 wave.append(node)
                 for nbr in reverse.get(node, []):
                     in_degree[nbr] -= 1
@@ -137,6 +180,16 @@ class WavefrontScheduler:
         """Fallback check: accept the wave if task count is within thread limit."""
         return len(tasks_in_wave) <= self.thread_limit
 
+    def _split_command(self, command: str) -> List[str]:
+        """Parse a command string into an argv list for direct execution.
+
+        Falls back to a simple split if ``shlex`` cannot tokenize the string.
+        """
+        try:
+            return shlex.split(command)
+        except ValueError:
+            return command.split()
+
     async def _run_task(self, task: Task) -> Tuple[Task, Dict[str, Any]]:
         """Run a single task and return its result dictionary."""
         env = task.env or os.environ.copy()
@@ -144,8 +197,20 @@ class WavefrontScheduler:
         timeout = task.timeout or 120
         self._log("info", "WAVE", f"Starting task: {task.name} (`{task.command}`)")
 
-        proc = await asyncio.create_subprocess_shell(
-            task.command,
+        argv = self._split_command(task.command)
+        if not argv:
+            return task, {
+                "name": task.name,
+                "command": task.command,
+                "returncode": -1,
+                "stdout": "",
+                "stderr": "Empty command",
+                "timed_out": False,
+            }
+
+        proc = await asyncio.create_subprocess_exec(
+            argv[0],
+            *argv[1:],
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
@@ -174,11 +239,111 @@ class WavefrontScheduler:
             "timed_out": False,
         }
 
+    def update_schedule(
+        self,
+        adj_list: Dict[str, List[str]],
+        old_schedule: List[List[str]],
+        mutations: Sequence[GraphMutation],
+    ) -> List[List[str]]:
+        """Repair a schedule after local mutations without a full rebuild.
+
+        Only the *influence zone* (mutated nodes plus all ancestors and
+        descendants) is re-levelised; untouched nodes keep their old levels.
+        """
+        if not mutations:
+            return old_schedule
+
+        nodes = set(adj_list.keys()) | {n for deps in adj_list.values() for n in deps}
+        adj = {n: list(adj_list.get(n, [])) for n in nodes}
+        reverse: Dict[str, List[str]] = {n: [] for n in nodes}
+        for n, deps in adj.items():
+            for d in deps:
+                reverse[d].append(n)
+
+        old_levels: Dict[str, int] = {}
+        for level, wave in enumerate(old_schedule):
+            for node in wave:
+                old_levels[node] = level
+
+        affected: set[str] = set()
+        for m in mutations:
+            if m.node_id:
+                affected.add(m.node_id)
+            if m.edge:
+                affected.update(m.edge)
+
+        # Expand the influence zone both up- and downstream.
+        stack = list(affected)
+        while stack:
+            node = stack.pop()
+            for nbr in adj.get(node, []):
+                if nbr not in affected:
+                    affected.add(nbr)
+                    stack.append(nbr)
+            for pred in reverse.get(node, []):
+                if pred not in affected:
+                    affected.add(pred)
+                    stack.append(pred)
+
+        # Base level for an affected node is constrained by its unaffected preds.
+        base_level: Dict[str, int] = {n: 0 for n in affected}
+        for node in affected:
+            for pred in adj.get(node, []):
+                if pred not in affected:
+                    base_level[node] = max(base_level[node], old_levels.get(pred, 0) + 1)
+
+        sub_indeg: Dict[str, int] = {}
+        for node in affected:
+            count = 0
+            for pred in adj.get(node, []):
+                if pred in affected:
+                    count += 1
+            sub_indeg[node] = count
+
+        new_level: Dict[str, int] = {}
+        queue: deque = deque()
+        for node in affected:
+            new_level[node] = base_level[node]
+            if sub_indeg[node] == 0:
+                queue.append(node)
+
+        processed = 0
+        while queue:
+            node = queue.popleft()
+            processed += 1
+            for nbr in reverse.get(node, []):
+                if nbr not in affected:
+                    continue
+                candidate = new_level[node] + 1
+                if candidate > new_level.get(nbr, base_level[nbr]):
+                    new_level[nbr] = candidate
+                sub_indeg[nbr] -= 1
+                if sub_indeg[nbr] == 0:
+                    queue.append(nbr)
+
+        if processed != len(affected):
+            raise CycleError("Affected subgraph contains a cycle")
+
+        levels: Dict[int, List[str]] = defaultdict(list)
+        max_level = 0
+        for node, level in old_levels.items():
+            if node not in affected:
+                levels[level].append(node)
+                max_level = max(max_level, level)
+        for node, level in new_level.items():
+            levels[level].append(node)
+            max_level = max(max_level, level)
+
+        return [sorted(levels[i]) for i in range(max_level + 1)]
+
     async def execute(
         self,
         tasks: Dict[str, Task],
         adj_list: Optional[Dict[str, List[str]]] = None,
         roots: Optional[Sequence[str]] = None,
+        *,
+        use_goi: bool = False,
+        goi_weights: Optional[Dict[Tuple[str, str], float]] = None,
     ) -> List[Dict[str, Any]]:
         """Execute ``tasks`` in topological waves.
 
@@ -190,7 +355,7 @@ class WavefrontScheduler:
             return []
 
         adj = adj_list or {name: [] for name in tasks}
-        waves = self.compute_wavefronts(adj, roots=roots)
+        waves = self.compute_wavefronts(adj, roots=roots, use_goi=use_goi, goi_weights=goi_weights)
 
         results: List[Dict[str, Any]] = []
         for wave_idx, wave in enumerate(waves):
