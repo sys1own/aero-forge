@@ -477,6 +477,19 @@
     .spinner { width: 12px; height: 12px; border: 2px solid rgba(255,255,255,0.2); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; vertical-align: middle; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+
+    /* Export success drawer with integration snippets */
+    #export-success-modal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; }
+    #export-success-modal.hidden { display: none; }
+    #export-success-modal .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; width: min(720px, 90vw); max-height: 80vh; display: flex; flex-direction: column; box-shadow: 0 10px 30px rgba(0,0,0,0.4); }
+    #export-success-modal .modal header { padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+    #export-success-modal .modal .body { padding: 1rem; overflow: auto; }
+    #export-success-modal .modal .tabs { display: flex; gap: 0.3rem; margin-bottom: 0.6rem; }
+    #export-success-modal .modal .tab { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); padding: 0.35rem 0.7rem; border-radius: 4px; cursor: pointer; }
+    #export-success-modal .modal .tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+    #export-success-modal pre { background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; padding: 0.6rem; overflow: auto; font-size: 0.8rem; max-height: 240px; white-space: pre-wrap; word-break: break-word; }
+    #export-success-modal .copy-row { display: flex; justify-content: flex-end; margin-top: 0.4rem; }
+    #export-success-modal .copy-row button { font-size: 0.75rem; padding: 0.25rem 0.6rem; }
   </style>
 </head>
 <body>
@@ -848,6 +861,8 @@
       treeRefreshInterval: null,
       lastTerminalCommand: '',
       lastTerminalExitCode: null,
+      exportManifest: null,
+      exportSnippetLang: 'python',
       lastTerminalLog: '',
       treeExpanded: new Set(),
       blueprintSource: 'unknown',
@@ -887,6 +902,12 @@
       uploadRoot: document.getElementById('upload-root'),
       downloadBtn: document.getElementById('download-btn'),
       exportPopover: document.getElementById('export-options-popover'),
+      exportSuccessModal: document.getElementById('export-success-modal'),
+      closeExportModal: document.getElementById('close-export-modal'),
+      snippetCode: document.getElementById('snippet-code'),
+      snippetTabs: document.getElementById('snippet-tabs'),
+      copySnippet: document.getElementById('copy-snippet'),
+      exportSuccessMessage: document.getElementById('export-success-message'),
       gutterLeft: document.getElementById('gutter-left'),
       gutterRight: document.getElementById('gutter-right'),
       gutterBottom: document.getElementById('gutter-bottom'),
@@ -2322,23 +2343,99 @@
         hin_native_bundle: !!document.querySelector('input[name="export-hin-native-bundle"]:checked'),
         pyo3_c_api: !!document.querySelector('input[name="export-pyo3-c-api"]:checked'),
       };
-      const res = await fetch('/api/workspace/export', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: state.sessionId, options }),
+      try {
+        const res = await fetch('/api/workspace/export', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: state.sessionId, options }),
+        });
+        if (!res.ok) { throw new Error('Export request failed'); }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const disposition = res.headers.get('Content-Disposition') || '';
+        const match = disposition.match(/filename="?([^";]+)"?/);
+        a.href = url; a.download = match ? match[1] : `${state.sessionId}.zip`;
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+
+        const parts = Object.keys(options).filter(k => options[k]).map(k => k.replace(/_/g, ' '));
+        log(`Download started (${parts.join(', ') || 'target source only'})`, 'success');
+
+        if (options.hin_native_bundle) {
+          await openExportDrawer(options);
+        }
+      } catch (e) {
+        log(`Download failed: ${e.message}`, 'error');
+      } finally {
+        if (ui.exportPopover) ui.exportPopover.removeAttribute('open');
+      }
+    }
+
+    async function openExportDrawer(options) {
+      let manifest = null;
+      try {
+        const res = await fetch('/api/workspace/hinb-manifest', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: state.sessionId, options }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          manifest = data.manifest || null;
+        }
+      } catch (e) { /* manifest not available */ }
+      if (!manifest) return;
+      state.exportManifest = manifest;
+      state.exportSnippetLang = 'python';
+      renderSnippet();
+      ui.exportSuccessModal.classList.remove('hidden');
+      ui.exportSuccessMessage.textContent = `HIN bundle ${manifest.project || ''} exported. Default backend: ${manifest.default_backend}, precision: ${manifest.precision_mode}.`;
+    }
+
+    function sampleValue(dtype, shape) {
+      let scalar;
+      if (dtype && dtype.includes('int')) scalar = '0';
+      else if (dtype && dtype.includes('bool')) scalar = 'false';
+      else if (dtype && dtype.includes('str')) scalar = '""';
+      else scalar = '0.0';
+      const dims = (shape || []).length;
+      if (dims === 0) return scalar;
+      if (dims === 1) return `[${scalar}, ${scalar}, ${scalar}]`;
+      return `[[${scalar}, ${scalar}], [${scalar}, ${scalar}]]`;
+    }
+
+    function generateSnippet(lang, manifest) {
+      const ep = (manifest.entrypoints && manifest.entrypoints[0]) || {};
+      const fname = ep.name || 'entry';
+      const inputs = ep.inputs || [];
+      const inArgs = inputs.map(i => i.name).join(', ');
+      const inKwargs = inputs.map(i => `${i.name}=${sampleValue(i.dtype, i.shape)}`).join(', ');
+      const inDecls = inputs.map(i => {
+        if (lang === 'cpp') return `double ${i.name} = ${sampleValue(i.dtype, []).replace(/"/g, "'").replace(/false/g, '0')};
+    std::vector<double> ${i.name}_buf = {${i.name}};`;
+        return '';
+      }).filter(Boolean);
+      const project = manifest.project || 'model';
+      if (lang === 'python') {
+        return `# pip install aero-forge (provides aero_forge.hin_runtime)\nfrom aero_forge.hin_runtime import load_hin_bundle\n\nbundle = load_hin_bundle("${project}.hinb")\nresult = bundle.run("${fname}"${inArgs ? ', ' + inKwargs : ''})\nprint(result)`;
+      }
+      if (lang === 'cpp') {
+        return `#include <aero/hin_runtime.hpp>\n#include <iostream>\n\nint main() {\n    aero::HINBundle bundle("${project}.hinb");\n    ${inDecls.join('\\n    ')}\n    double result = bundle.run("${fname}"${inputs.length ? ', ' + inputs.map(i => `${i.name}_buf.data()`).join(', ') : ''});\n    std::cout << result << std::endl;\n    return 0;\n}`;
+      }
+      if (lang === 'rust') {
+        return `use aero_hin::Bundle;\n\nfn main() -> Result<(), Box<dyn std::error::Error>> {\n    let bundle = Bundle::open("${project}.hinb")?;\n    ${inputs.map(i => `let ${i.name} = ${sampleValue(i.dtype, i.shape).replace(/"/g, '"')};`).join('\\n    ')}\n    let result = bundle.run("${fname}"${inputs.length ? ', ' + inArgs : ''});\n    println!("{}", result);\n    Ok(())\n}`;
+      }
+      return '';
+    }
+
+    function renderSnippet() {
+      const lang = state.exportSnippetLang || 'python';
+      if (!state.exportManifest) return;
+      ui.snippetCode.textContent = generateSnippet(lang, state.exportManifest);
+      Array.from(ui.snippetTabs.children).forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.lang === lang);
       });
-      if (!res.ok) { log('Download failed', 'error'); return; }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      const disposition = res.headers.get('Content-Disposition') || '';
-      const match = disposition.match(/filename="?([^";]+)"?/);
-      a.href = url; a.download = match ? match[1] : `${state.sessionId}.zip`;
-      document.body.appendChild(a); a.click(); a.remove();
-      URL.revokeObjectURL(url);
-      const parts = Object.keys(options).filter(k => options[k]).map(k => k.replace(/_/g, ' '));
-      log(`Download started (${parts.join(', ') || 'target source only'})`, 'success');
-      if (ui.exportPopover) ui.exportPopover.removeAttribute('open');
     }
 
     async function downloadFile(path) {
@@ -2838,6 +2935,27 @@
       e.stopPropagation();
       downloadZip();
     });
+    if (ui.closeExportModal) ui.closeExportModal.addEventListener('click', () => {
+      ui.exportSuccessModal.classList.add('hidden');
+    });
+    if (ui.exportSuccessModal) ui.exportSuccessModal.addEventListener('click', (e) => {
+      if (e.target === ui.exportSuccessModal) ui.exportSuccessModal.classList.add('hidden');
+    });
+    if (ui.snippetTabs) ui.snippetTabs.addEventListener('click', (e) => {
+      if (e.target.dataset.lang) {
+        state.exportSnippetLang = e.target.dataset.lang;
+        renderSnippet();
+      }
+    });
+    if (ui.copySnippet) ui.copySnippet.addEventListener('click', async () => {
+      const text = ui.snippetCode.textContent;
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        ui.copySnippet.textContent = 'Copied!';
+        setTimeout(() => ui.copySnippet.textContent = 'Copy', 1200);
+      } catch (e) { log('Copy failed', 'error'); }
+    });
 
     // Collapse the export options popover when clicking outside it.
     document.addEventListener('click', (e) => {
@@ -2906,5 +3024,26 @@
     startTreeRefresh();
     log('Aero Forge UI loaded');
   </script>
+
+  <div id="export-success-modal" class="hidden">
+    <div class="modal">
+      <header>
+        <strong>Export Successful</strong>
+        <button id="close-export-modal" class="icon-btn" title="Close">&times;</button>
+      </header>
+      <div class="body">
+        <p id="export-success-message">Your HIN bundle is ready. Use the integration snippets below.</p>
+        <div class="tabs" id="snippet-tabs">
+          <button class="tab active" data-lang="python">Python</button>
+          <button class="tab" data-lang="cpp">C++</button>
+          <button class="tab" data-lang="rust">Rust</button>
+        </div>
+        <pre id="snippet-code"></pre>
+        <div class="copy-row">
+          <button id="copy-snippet" class="secondary">Copy</button>
+        </div>
+      </div>
+    </div>
+  </div>
 </body>
 </html>

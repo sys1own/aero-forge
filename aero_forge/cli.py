@@ -1884,5 +1884,48 @@ def run_aeroc(
         sys.exit(1)
 
 
+@main.command("inspect")
+@click.argument(
+    "path",
+    type=click.Path(exists=True, dir_okay=False, path_type=str),
+)
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    help="Emit the raw manifest as JSON instead of a table.",
+)
+def inspect_hinb(path: str, json_output: bool) -> None:
+    """Inspect a ``.hinb`` HIN native bundle without loading compute graphs."""
+    from aero_forge.hin_runtime import inspect_hin_bundle
+
+    manifest = inspect_hin_bundle(path)
+    if json_output:
+        click.echo(json.dumps(manifest, indent=2, default=str))
+        return
+
+    click.echo(f"Bundle:       {manifest.get('project', 'unknown')}")
+    click.echo(f"HIN version:  {manifest.get('hin_version', '1.0')}")
+    click.echo(f"Backend:      {manifest.get('default_backend', 'hin_cpu')}")
+    click.echo(f"Precision:    {manifest.get('precision_mode', 'ieee')}")
+    click.echo("")
+
+    def _fmt_schema(items: list[dict[str, Any]]) -> str:
+        parts = []
+        for item in items:
+            name = item.get("name", "")
+            dtype = item.get("dtype", "float64")
+            shape = item.get("shape", [])
+            shape_str = "[]" if not shape else str(shape).replace("None", "?")
+            parts.append(f"{name}:{dtype}{shape_str}" if name else f"{dtype}{shape_str}")
+        return ", ".join(parts) if parts else "-"
+
+    click.echo("Entrypoints:")
+    for ep in manifest.get("entrypoints", []):
+        inputs = _fmt_schema(ep.get("inputs", []))
+        output = _fmt_schema([ep.get("output", {})])
+        click.echo(f"  {ep.get('name', 'unknown')}({inputs}) -> {output}")
+
+
 if __name__ == "__main__":
     main()

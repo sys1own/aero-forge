@@ -1,19 +1,21 @@
 """Workspace export orchestration combining target source, native crate source,
 the embedded wavefront micro-runtime, standalone ``.aeroc`` artifacts, and
-HIN-native ``.hinb`` bundles."""
+HIN-native ``.hinb`` bundles with portable metadata manifests."""
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import datetime
 import enum
 import io
 import json
+import re
 import shutil
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from aero_forge.bundle_repo import (
     ExportProfile,
@@ -54,6 +56,9 @@ class ExportOptions:
     * ``native_libraries`` - include C++/Rust dynamic bindings linked against ``hin_engine``.
     * ``hin_native_bundle`` - include a ``.hinb`` binary with HIN bytecode and pre-computed graph data.
     * ``pyo3_c_api`` - include a PyO3 / C-API native Python wrapper.
+    * ``engine_backend`` - HIN engine backend recorded in the bundle manifest.
+    * ``precision_mode`` - precision mode recorded in the bundle manifest.
+    * ``hin_version`` - HIN engine compatibility version for ``.hinb`` exports.
     * ``project_name`` - archive / project name stem.
     """
 
@@ -68,6 +73,9 @@ class ExportOptions:
     native_libraries: bool = False
     hin_native_bundle: bool = False
     pyo3_c_api: bool = False
+    engine_backend: str = "hin_cpu"
+    precision_mode: str = "ieee"
+    hin_version: str = "1.0"
     project_name: str = "aero-forge-export"
 
     @classmethod
@@ -145,6 +153,9 @@ def export_workspace(
         * ``native_libraries`` (bool)        - include C++/Rust dynamic bindings
         * ``hin_native_bundle`` (bool)       - include a ``.hinb`` binary bundle
         * ``pyo3_c_api`` (bool)              - include a PyO3 / C-API wrapper
+        * ``engine_backend`` (str)           - HIN engine backend for the manifest
+        * ``precision_mode`` (str)           - precision mode for the manifest
+        * ``hin_version`` (str)              - HIN engine compatibility version
 
     Returns ``(archive_bytes, filename)``.
     """
@@ -229,7 +240,13 @@ def export_workspace(
                 file_hashes[arcname] = _sha256_bytes(archive_bytes)
 
         if opts.hin_native_bundle:
-            hinb_bytes = _build_hin_bundle(session_dir, project_name)
+            hinb_bytes = _build_hin_bundle(
+                session_dir,
+                project_name,
+                engine_backend=opts.engine_backend,
+                precision_mode=opts.precision_mode,
+                hin_version=opts.hin_version,
+            )
             hinb_name = f"{project_name}.hinb"
             zf.writestr(hinb_name, hinb_bytes)
             file_hashes[hinb_name] = _sha256_bytes(hinb_bytes)
@@ -271,10 +288,18 @@ def _hash_aeroc_dir(project_dir: Path) -> Dict[str, str]:
     return hashes
 
 
-def _build_hin_bundle(session_dir: Path, project_name: str) -> bytes:
-    """Package HIN bytecode, UASTs, and pre-computed reduction data into ``.hinb``.
+def _build_hin_bundle(
+    session_dir: Path,
+    project_name: str,
+    *,
+    engine_backend: str = "hin_cpu",
+    precision_mode: str = "ieee",
+    hin_version: str = "1.0",
+) -> bytes:
+    """Package HIN bytecode, UASTs, and a metadata manifest into ``.hinb``.
 
     The resulting ``.hinb`` file is a zip archive containing:
+    * ``manifest.json`` - metadata manifest with inputs, outputs, and engine specs
     * ``metadata.json`` - project name, schema version, and timestamp
     * ``environment.lock`` - pinned toolchain/dependency metadata when present
     * ``graphs/<rel>.json`` - UAST and reduced HIN graph for each Python source
@@ -306,31 +331,189 @@ def _build_hin_bundle(session_dir: Path, project_name: str) -> bytes:
         "dist",
         "build",
     }
+
+    # Build per-source graph payloads and collect function signatures.
+    graph_entries: List[str] = []
+    entrypoints: List[Dict[str, Any]] = []
+    input_schema: List[Dict[str, Any]] = []
+    output_schema: List[Dict[str, Any]] = []
+    graph_payloads: List[Tuple[str, Dict[str, Any]]] = []
+
+    for path in sorted(session_dir.rglob("*.py")):
+        rel = path.relative_to(session_dir)
+        if any(part in skip_prefixes for part in rel.parts[:1]):
+            continue
+        if rel.name.startswith("."):
+            continue
+        source = path.read_text(encoding="utf-8")
+        signatures = _parse_function_signatures(source)
+        try:
+            uast = python_source_to_uast(source)
+            hin = reduce_uast(uast, max_steps=10000)
+        except Exception as exc:
+            hin = {"error": str(exc), "steps": 0, "graph": [], "native": False}
+        rel_posix = str(rel.as_posix())
+        arcname = f"graphs/{rel_posix}.json"
+        graph_payloads.append(
+            (
+                arcname,
+                {
+                    "source": rel_posix,
+                    "source_text": source,
+                    "uast": uast,
+                    "hin": hin,
+                    "signatures": signatures,
+                },
+            )
+        )
+        graph_entries.append(arcname)
+        for sig in signatures:
+            entrypoints.append({"name": sig["name"], "source": rel_posix, **sig})
+            for arg in sig["inputs"]:
+                input_schema.append({"function": sig["name"], **arg})
+            output_schema.append({"function": sig["name"], **sig["output"]})
+
+    manifest: Dict[str, Any] = {
+        "schema_version": "1.0.0",
+        "hin_version": hin_version,
+        "project": project_name,
+        "precision_mode": precision_mode,
+        "default_backend": engine_backend,
+        "input_schema": input_schema,
+        "output_schema": output_schema,
+        "entrypoints": entrypoints,
+        "graphs": graph_entries,
+        "environment": environment_lock,
+        "timestamp": metadata["timestamp"],
+    }
+
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps(manifest, indent=2, default=str))
         zf.writestr("metadata.json", json.dumps(metadata, indent=2, default=str))
         zf.writestr("environment.lock", json.dumps(environment_lock, indent=2, default=str))
-        for path in sorted(session_dir.rglob("*.py")):
-            rel = path.relative_to(session_dir)
-            if any(part in skip_prefixes for part in rel.parts[:1]):
-                continue
-            if rel.name.startswith("."):
-                continue
-            source = path.read_text(encoding="utf-8")
-            try:
-                uast = python_source_to_uast(source)
-                hin = reduce_uast(uast, max_steps=10000)
-            except Exception as exc:
-                hin = {"error": str(exc), "steps": 0, "graph": [], "native": False}
-            payload = {"source": str(rel.as_posix()), "uast": uast, "hin": hin}
-            zf.writestr(
-                f"graphs/{rel.as_posix()}.json",
-                json.dumps(payload, default=str),
-            )
+        for arcname, payload in graph_payloads:
+            zf.writestr(arcname, json.dumps(payload, default=str))
         blueprint_path = session_dir / "blueprint.aero"
         if blueprint_path.is_file():
             zf.writestr("blueprint.aero", blueprint_path.read_text(encoding="utf-8"))
     return buf.getvalue()
+
+
+def _build_hin_manifest(
+    session_dir: Path,
+    project_name: str,
+    *,
+    engine_backend: str = "hin_cpu",
+    precision_mode: str = "ieee",
+    hin_version: str = "1.0",
+) -> Dict[str, Any]:
+    """Build the ``manifest.json`` for a ``.hinb`` bundle without computing graphs.
+
+    This is a cheap, allocation-free helper used by the export UI and the
+    ``/api/workspace/hinb-manifest`` endpoint to render integration snippets.
+    """
+    environment_lock: Dict[str, Any] = {}
+    lock_path = session_dir / "environment.lock"
+    if lock_path.is_file():
+        try:
+            environment_lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    skip_prefixes = {
+        "target",
+        ".venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".aero",
+        ".cargo",
+        "dist",
+        "build",
+    }
+
+    entrypoints: List[Dict[str, Any]] = []
+    input_schema: List[Dict[str, Any]] = []
+    output_schema: List[Dict[str, Any]] = []
+    graph_entries: List[str] = []
+
+    for path in sorted(session_dir.rglob("*.py")):
+        rel = path.relative_to(session_dir)
+        if any(part in skip_prefixes for part in rel.parts[:1]):
+            continue
+        if rel.name.startswith("."):
+            continue
+        source = path.read_text(encoding="utf-8")
+        signatures = _parse_function_signatures(source)
+        rel_posix = str(rel.as_posix())
+        graph_entries.append(f"graphs/{rel_posix}.json")
+        for sig in signatures:
+            entrypoints.append({"name": sig["name"], "source": rel_posix, **sig})
+            for arg in sig["inputs"]:
+                input_schema.append({"function": sig["name"], **arg})
+            output_schema.append({"function": sig["name"], **sig["output"]})
+
+    return {
+        "schema_version": "1.0.0",
+        "hin_version": hin_version,
+        "project": project_name,
+        "precision_mode": precision_mode,
+        "default_backend": engine_backend,
+        "input_schema": input_schema,
+        "output_schema": output_schema,
+        "entrypoints": entrypoints,
+        "graphs": graph_entries,
+        "environment": environment_lock,
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+
+def _type_to_schema(annotation: str) -> Dict[str, Any]:
+    """Map a simple Python type annotation string to a HIN schema entry."""
+    if not annotation:
+        return {"dtype": "float64", "shape": []}
+    ann = annotation.strip()
+    # Recurse into list[...] or typing.List[...]
+    m = re.fullmatch(r"(?:typing\.)?[Ll]ist\[(.*)\]", ann)
+    if m:
+        child = _type_to_schema(m.group(1))
+        return {"dtype": child["dtype"], "shape": [None] + child["shape"]}
+    ann_lower = ann.lower()
+    if "int" in ann_lower:
+        dtype = "int64"
+    elif "float" in ann_lower:
+        dtype = "float64"
+    elif "bool" in ann_lower:
+        dtype = "bool"
+    elif "str" in ann_lower:
+        dtype = "string"
+    else:
+        dtype = "float64"
+    return {"dtype": dtype, "shape": []}
+
+
+def _parse_function_signatures(source: str) -> List[Dict[str, Any]]:
+    """Extract function names, parameter names/types, and return types from Python source."""
+    try:
+        tree = ast.parse(source)
+    except Exception:
+        return []
+    signatures: List[Dict[str, Any]] = []
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        try:
+            args: List[Dict[str, Any]] = []
+            for arg in node.args.args:
+                ann = ast.unparse(arg.annotation) if arg.annotation else ""
+                schema = _type_to_schema(ann)
+                args.append({"name": arg.arg, **schema})
+            ret_ann = ast.unparse(node.returns) if node.returns else ""
+            output = _type_to_schema(ret_ann)
+            signatures.append({"name": node.name, "inputs": args, "output": output})
+        except Exception:
+            continue
+    return signatures
 
 
 def _pyproject_toml_for_maturin(project_name: str) -> str:

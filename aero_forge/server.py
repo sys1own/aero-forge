@@ -110,7 +110,7 @@ from aero_forge.blueprint.schema import ArtifactType, BuildArtifact, ContextStat
 from aero_forge.blueprint.validator import InvalidBlueprintError
 from aero_forge.scaffold.pre_write_validator import BlueprintValidationError
 from aero_forge.scaffold.aeroc_export import export_scaffold_zip
-from aero_forge.scaffold.export_options import export_workspace
+from aero_forge.scaffold.export_options import _build_hin_manifest, export_workspace
 from aero_forge.scaffold.workspace import BlueprintRegenerator
 from aero_forge.universal_builder import build_universal_project
 
@@ -852,6 +852,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_workspace_accelerate()
             if path == "/api/workspace/export":
                 return self._handle_workspace_export()
+            if path == "/api/workspace/hinb-manifest":
+                return self._handle_hinb_manifest()
             if path == "/api/workspace/download-aeroc":
                 return self._handle_workspace_download_aeroc()
             if path == "/api/workspace/export-scaffold":
@@ -2251,6 +2253,39 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             )
         except Exception as exc:
             logger.exception("Workspace export endpoint failed")
+            return _send_json(self, 500, {"error": str(exc)})
+
+    def _handle_hinb_manifest(self) -> None:
+        """Return the portable ``manifest.json`` for the session's ``.hinb`` bundle."""
+        try:
+            body = _parse_json_body(self)
+            session_id = body.get("session_id", "").strip()
+            project_name = body.get("project_name", "aero-forge-export").strip()
+            options = body.get("options", {})
+            if not session_id:
+                return _send_json(self, 400, {"error": "Missing 'session_id'"})
+
+            session_dir = _session_dir(session_id)
+            if not session_dir.is_dir():
+                return _send_json(
+                    self,
+                    404,
+                    {"error": f"Sandbox for session '{session_id}' does not exist"},
+                )
+
+            from aero_forge.scaffold.export_options import ExportOptions
+
+            opts = ExportOptions.from_dict(options, project_name=project_name)
+            manifest = _build_hin_manifest(
+                session_dir,
+                project_name,
+                engine_backend=opts.engine_backend,
+                precision_mode=opts.precision_mode,
+                hin_version=opts.hin_version,
+            )
+            return _send_json(self, 200, {"manifest": manifest})
+        except Exception as exc:
+            logger.exception("HIN bundle manifest endpoint failed")
             return _send_json(self, 500, {"error": str(exc)})
 
     def _handle_workspace_download_aeroc(self) -> None:
