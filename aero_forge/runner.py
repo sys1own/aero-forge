@@ -84,6 +84,7 @@ def run_wavefront_tasks(
     dependencies: Optional[Dict[int, List[int]]] = None,
     env: Optional[Dict[str, str]] = None,
     log_callback: Optional[Callable[[str, str, str], None]] = None,
+    progress_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
 ) -> List[Dict[str, Any]]:
     """Execute a set of build/test commands through the WavefrontScheduler.
 
@@ -93,7 +94,7 @@ def run_wavefront_tasks(
     """
     env = env or os.environ.copy()
     dependencies = dependencies or {}
-    scheduler = WavefrontScheduler(log_callback=log_callback)
+    scheduler = WavefrontScheduler(log_callback=log_callback, progress_callback=progress_callback)
 
     tasks = {str(i): Task(name=f"task-{i}", command=cmd, cwd=sandbox_dir, env=env) for i, cmd in enumerate(commands)}
     adj: Dict[str, List[str]] = {}
@@ -111,11 +112,12 @@ async def run_wavefront_tasks_async(
     dependencies: Optional[Dict[int, List[int]]] = None,
     env: Optional[Dict[str, str]] = None,
     log_callback: Optional[Callable[[str, str, str], None]] = None,
+    progress_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
 ) -> List[Dict[str, Any]]:
     """Async variant of ``run_wavefront_tasks``."""
     env = env or os.environ.copy()
     dependencies = dependencies or {}
-    scheduler = WavefrontScheduler(log_callback=log_callback)
+    scheduler = WavefrontScheduler(log_callback=log_callback, progress_callback=progress_callback)
     tasks = {str(i): Task(name=f"task-{i}", command=cmd, cwd=sandbox_dir, env=env) for i, cmd in enumerate(commands)}
     adj: Dict[str, List[str]] = {}
     for i, deps in dependencies.items():

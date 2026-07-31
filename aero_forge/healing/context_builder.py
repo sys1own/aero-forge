@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from aero_forge.bundle_repo import bundle_workspace, format_context_block
+from aero_forge.healing import hin_graph
 from aero_forge.orchestrator.error_classifier import (
     extract_signature_mismatch_symbol,
     is_signature_mismatch,
@@ -46,6 +47,7 @@ class ContextBuilder:
         bundle = bundle_workspace(self.workspace_path)
         references = self._extract_references(log_text)
         affected_files = self._affected_files(references, diagnosis, command)
+        hin_affected, hin_waves = self._hingraph_context(references, diagnosis)
         context: Dict[str, Any] = {
             "workspace": str(self.workspace_path),
             "command": command,
@@ -54,6 +56,8 @@ class ContextBuilder:
             "diagnosis": diagnosis or {},
             "references": references,
             "affected_files": affected_files,
+            "hingraph_affected": hin_affected,
+            "hingraph_waves": hin_waves,
             "bundle": bundle,
             "previous_attempts": previous_attempts or [],
         }
@@ -160,6 +164,37 @@ class ContextBuilder:
             "definition": definition,
             "caller": caller,
         }
+
+    def _hingraph_context(
+        self,
+        references: List[Dict[str, Any]],
+        diagnosis: Optional[Dict[str, Any]],
+    ) -> Tuple[List[str], List[List[str]]]:
+        """Return HINGraph influence-zone files and wavefront schedule for failures."""
+        symbols: List[str] = []
+        for ref in references:
+            if ref.get("type") == "symbol":
+                symbols.append(ref["name"])
+            elif ref.get("type") == "location":
+                file = Path(ref["file"])
+                if file.suffix == ".py":
+                    symbols.append(file.stem)
+        if diagnosis:
+            target = diagnosis.get("target_file") or diagnosis.get("symbol")
+            if isinstance(target, str):
+                symbols.append(Path(target).stem)
+        try:
+            affected, waves = hin_graph.influence_zone(self.workspace_path, symbols, radius=2)
+            # Map module names back to the most likely file paths for the bundle.
+            file_map = {p.stem: p for p in self.workspace_path.rglob("*.py")}
+            files = sorted(
+                {str(file_map.get(s, s)) for s in affected if s}
+            )
+            return files, waves
+        except Exception as exc:
+            logger = __import__("logging").getLogger(__name__)
+            logger.debug("HINGraph context failed: %s", exc)
+            return [], []
 
     def _find_function_definition(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Return the first Python file in the workspace defining ``def <symbol>(``."""

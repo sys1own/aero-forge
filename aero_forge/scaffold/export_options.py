@@ -180,8 +180,10 @@ def export_workspace(
                     rel = path.relative_to(embedded_src)
                     if rel.name == "__pycache__" or "__pycache__" in rel.parts:
                         continue
+                    if rel.parts and rel.parts[0] == "target":
+                        continue
                     arcname = f"crates/aero_core/{rel.as_posix()}"
-                    content = path.read_text(encoding="utf-8")
+                    content = path.read_bytes().decode("utf-8", errors="replace")
                     zf.writestr(arcname, content)
                     file_hashes[arcname] = _sha256(content)
 
