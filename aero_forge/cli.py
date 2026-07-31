@@ -73,9 +73,7 @@ def _resolve_llm_provider(
     return llm_provider
 
 
-def _emit_json_or_text(
-    json_obj: Any, text: str, *, json_output: bool, err: bool = False
-) -> None:
+def _emit_json_or_text(json_obj: Any, text: str, *, json_output: bool, err: bool = False) -> None:
     """Print ``json_obj`` as JSON or ``text`` depending on ``json_output``."""
     if json_output:
         click.echo(json.dumps(json_obj, default=str))
@@ -111,9 +109,7 @@ def _output_generate_json(
 
 
 @click.group()
-@click.version_option(
-    version=__import__("aero_forge").__version__, prog_name="aero-forge"
-)
+@click.version_option(version=__import__("aero_forge").__version__, prog_name="aero-forge")
 def main() -> None:
     """Aero-Forge: transpile, compile, and heal Python functions."""
 
@@ -444,6 +440,40 @@ def fix(
     help="Attempt GPU acceleration for functions annotated with # @accelerate gpu.",
 )
 @click.option(
+    "--engine-backend",
+    "engine_backend",
+    type=click.Choice(
+        ["hin_cpu", "hin_gpu", "hin_wasm"],
+        case_sensitive=False,
+    ),
+    default=None,
+    help="HIN engine backend target (default: hin_cpu).",
+)
+@click.option(
+    "--wavefront-parallelism",
+    "wavefront_parallelism",
+    type=int,
+    default=None,
+    help="Wavefront solver concurrency depth.",
+)
+@click.option(
+    "--precision-shield-mode",
+    "precision_shield_mode",
+    type=click.Choice(
+        ["ieee", "fast_math", "shield"],
+        case_sensitive=False,
+    ),
+    default=None,
+    help="Precision mode: ieee, fast_math, or shield.",
+)
+@click.option(
+    "--hin-jit-opt-level",
+    "hin_jit_opt_level",
+    type=click.IntRange(0, 2),
+    default=None,
+    help="HIN JIT optimization level (0=Debug, 1=Balanced, 2=Max Fusion & SIMD).",
+)
+@click.option(
     "--prompt-template",
     type=click.Choice(
         [
@@ -503,6 +533,10 @@ def build(
     dry_run: bool,
     target: str,
     gpu: bool,
+    engine_backend: str | None,
+    wavefront_parallelism: int | None,
+    precision_shield_mode: str | None,
+    hin_jit_opt_level: int | None,
     verbose: bool,
     prompt_template: str,
     progress: bool,
@@ -513,8 +547,11 @@ def build(
     start = time.perf_counter()
 
     # Auto-materialize an empty workspace that contains a standalone workspace.aeroc.
-    workspace_root = Path(blueprint).parent if blueprint and blueprint != "blueprint.aero" else Path(".")
+    workspace_root = (
+        Path(blueprint).parent if blueprint and blueprint != "blueprint.aero" else Path(".")
+    )
     from aero_forge.materializer import auto_materialize
+
     if auto_materialize(workspace_root):
         click.echo(f"Auto-materialized workspace from {workspace_root / 'workspace.aeroc'}")
 
@@ -530,6 +567,10 @@ def build(
                 max_workers=workers or jobs or 4,
                 cache_enabled=not no_cache,
                 target=target,
+                engine_backend=engine_backend,
+                wavefront_parallelism=wavefront_parallelism,
+                precision_shield_mode=precision_shield_mode,
+                hin_jit_opt_level=hin_jit_opt_level,
             )
         else:
             builder = ProjectBuilder(
@@ -541,6 +582,10 @@ def build(
                 max_workers=workers or jobs or 4,
                 cache_enabled=not no_cache,
                 target=target,
+                engine_backend=engine_backend,
+                wavefront_parallelism=wavefront_parallelism,
+                precision_shield_mode=precision_shield_mode,
+                hin_jit_opt_level=hin_jit_opt_level,
             )
             result = builder.build()
 
@@ -551,9 +596,7 @@ def build(
             click.echo(json.dumps(result, default=str))
         else:
             click.echo(f"Status: {result['status']}")
-            click.echo(
-                f"Functions compiled: {', '.join(result['functions_compiled']) or 'none'}"
-            )
+            click.echo(f"Functions compiled: {', '.join(result['functions_compiled']) or 'none'}")
             click.echo(f"Tests passed: {result['passed']}/{result['total']}")
             click.echo(f"Output zip: {result['output_zip']}")
             if result.get("summary"):
@@ -572,9 +615,7 @@ def build(
                 click.echo(f"Wrote blueprint: {blueprint_path}")
         elif auto_detect:
             root = (
-                Path(blueprint).parent
-                if blueprint and blueprint != "blueprint.aero"
-                else Path(".")
+                Path(blueprint).parent if blueprint and blueprint != "blueprint.aero" else Path(".")
             )
             bp = _blueprint_from_auto_detect(root, output_dir)
             if write_blueprint_flag:
@@ -644,6 +685,10 @@ def build(
         dry_run=dry_run,
         progress=progress,
         blueprint_path=Path(blueprint),
+        engine_backend=engine_backend,
+        wavefront_parallelism=wavefront_parallelism,
+        precision_shield_mode=precision_shield_mode,
+        hin_jit_opt_level=hin_jit_opt_level,
     )
 
     try:
@@ -677,9 +722,7 @@ def build(
 
     if result.get("dry_run"):
         if json_output:
-            click.echo(
-                json.dumps({"success": True, "dry_run": True, **result}, default=str)
-            )
+            click.echo(json.dumps({"success": True, "dry_run": True, **result}, default=str))
         else:
             click.echo(
                 f"Dry-run complete: {result['total']} function(s) would be built "
@@ -851,6 +894,40 @@ def build(
     help="Run an LLM self-review step on the generated code before compilation.",
 )
 @click.option(
+    "--engine-backend",
+    "engine_backend",
+    type=click.Choice(
+        ["hin_cpu", "hin_gpu", "hin_wasm"],
+        case_sensitive=False,
+    ),
+    default=None,
+    help="HIN engine backend target (default: hin_cpu).",
+)
+@click.option(
+    "--wavefront-parallelism",
+    "wavefront_parallelism",
+    type=int,
+    default=None,
+    help="Wavefront solver concurrency depth.",
+)
+@click.option(
+    "--precision-shield-mode",
+    "precision_shield_mode",
+    type=click.Choice(
+        ["ieee", "fast_math", "shield"],
+        case_sensitive=False,
+    ),
+    default=None,
+    help="Precision mode: ieee, fast_math, or shield.",
+)
+@click.option(
+    "--hin-jit-opt-level",
+    "hin_jit_opt_level",
+    type=click.IntRange(0, 2),
+    default=None,
+    help="HIN JIT optimization level (0=Debug, 1=Balanced, 2=Max Fusion & SIMD).",
+)
+@click.option(
     "--json",
     "json_output",
     is_flag=True,
@@ -889,6 +966,10 @@ def generate(
     discover: bool,
     explain: bool,
     review: bool,
+    engine_backend: str | None,
+    wavefront_parallelism: int | None,
+    precision_shield_mode: str | None,
+    hin_jit_opt_level: int | None,
     json_output: bool,
     stream_progress: bool,
 ) -> None:
@@ -915,9 +996,7 @@ def generate(
 
     def _progress(message: str) -> None:
         if stream_progress or json_output:
-            click.echo(
-                json.dumps({"type": "progress", "message": message}, default=str)
-            )
+            click.echo(json.dumps({"type": "progress", "message": message}, default=str))
 
     if project_dir:
         try:
@@ -930,6 +1009,10 @@ def generate(
                 model=model,
                 max_workers=1,
                 cache_enabled=False,
+                engine_backend=engine_backend,
+                wavefront_parallelism=wavefront_parallelism,
+                precision_shield_mode=precision_shield_mode,
+                hin_jit_opt_level=hin_jit_opt_level,
             )
             result = builder.generate_and_build(
                 prompt,
@@ -984,9 +1067,11 @@ def generate(
             discover=discover,
             explain=explain,
             review=review,
-            build_kwargs=(
-                {"max_workers": 1, "cache_enabled": False} if do_build else None
-            ),
+            build_kwargs=({"max_workers": 1, "cache_enabled": False} if do_build else None),
+            engine_backend=engine_backend,
+            wavefront_parallelism=wavefront_parallelism,
+            precision_shield_mode=precision_shield_mode,
+            hin_jit_opt_level=hin_jit_opt_level,
             progress_callback=_progress,
         )
     except Exception as exc:
@@ -1004,8 +1089,7 @@ def generate(
         if build_result.get("success"):
             summary = format_build_summary(
                 build_result,
-                output_dir=Path(result.get("blueprint_path", output_dir)).parent
-                / "dist",
+                output_dir=Path(result.get("blueprint_path", output_dir)).parent / "dist",
                 prompt=prompt,
                 llm_provider=llm_provider,
                 model=model,
@@ -1258,9 +1342,7 @@ def chat(
 
     def _progress(message: str) -> None:
         if json_output:
-            click.echo(
-                json.dumps({"type": "progress", "message": message}, default=str)
-            )
+            click.echo(json.dumps({"type": "progress", "message": message}, default=str))
         else:
             click.echo(f"[{message}]")
 
@@ -1313,9 +1395,7 @@ def chat(
         _print_chat_response(session, response, json_output=json_output)
 
 
-def _print_chat_response(
-    session: Any, response: str, *, json_output: bool = False
-) -> None:
+def _print_chat_response(session: Any, response: str, *, json_output: bool = False) -> None:
     """Print a chat response with color or as JSON."""
     if json_output:
         build = (session.last_build_result or {}).get("build") or {}
@@ -1332,9 +1412,7 @@ def _print_chat_response(
         return
     build = (session.last_build_result or {}).get("build") or {}
     lowered = response.lower()
-    if not build.get("success") and (
-        "oops" in lowered or "snag" in lowered or "error" in lowered
-    ):
+    if not build.get("success") and ("oops" in lowered or "snag" in lowered or "error" in lowered):
         click.secho(response, fg="red")
     elif build.get("success") and ("done!" in lowered or "passed" in lowered):
         click.secho(response, fg="green")
@@ -1511,9 +1589,7 @@ def examples_create(
     help="Port to bind the web server (default: $PORT or 8080).",
     type=int,
 )
-@click.option(
-    "--no-browser", is_flag=True, help="Do not automatically open the browser."
-)
+@click.option("--no-browser", is_flag=True, help="Do not automatically open the browser.")
 @click.option("--verbose", "-v", is_flag=True, help="Show debug logs.")
 def web(port: int, no_browser: bool, verbose: bool) -> None:
     """Run the embedded Aero-Forge web server."""
@@ -1531,9 +1607,7 @@ def web(port: int, no_browser: bool, verbose: bool) -> None:
     help="Port to bind the web server (default: $PORT or 8080).",
     type=int,
 )
-@click.option(
-    "--no-browser", is_flag=True, help="Do not automatically open the browser."
-)
+@click.option("--no-browser", is_flag=True, help="Do not automatically open the browser.")
 @click.option("--verbose", "-v", is_flag=True, help="Show debug logs.")
 def serve(port: int, no_browser: bool, verbose: bool) -> None:
     """Alias for ``aero-forge web``."""
@@ -1553,7 +1627,8 @@ def serve(port: int, no_browser: bool, verbose: bool) -> None:
     "--json",
     "json_output",
     is_flag=True,
-    help="Output structured JSON instead of human-readable text.")
+    help="Output structured JSON instead of human-readable text.",
+)
 def reset(workspace: str, verbose: bool, json_output: bool) -> None:
     """Purge all persisted Aero-Forge state (caches, overlays, healing attempts)."""
     _setup_logging(verbose)
@@ -1646,7 +1721,9 @@ def synthesize_blueprint(
 @blueprint_group.command("validate")
 @click.argument("blueprint_path", type=click.Path(exists=True, dir_okay=False, path_type=str))
 @click.option("--json", "json_output", is_flag=True)
-@click.option("--export", "export_check", is_flag=True, help="Enforce finalized/transferable for export.")
+@click.option(
+    "--export", "export_check", is_flag=True, help="Enforce finalized/transferable for export."
+)
 def validate_blueprint(blueprint_path: str, json_output: bool, export_check: bool) -> None:
     """Validate a Blueprint v3.0.0 file."""
     validator = BlueprintV3Validator(blueprint_path)
@@ -1658,7 +1735,9 @@ def validate_blueprint(blueprint_path: str, json_output: bool, export_check: boo
     if json_output:
         click.echo(json.dumps(result, default=str))
     else:
-        click.echo(f"Blueprint is valid{' and exportable' if export_check else ''}: {blueprint_path}")
+        click.echo(
+            f"Blueprint is valid{' and exportable' if export_check else ''}: {blueprint_path}"
+        )
 
 
 @main.group("aeroc")
@@ -1667,8 +1746,20 @@ def aeroc_group() -> None:
 
 
 @aeroc_group.command("compile")
-@click.option("--input", "-i", type=click.Path(exists=True, path_type=str), default=".", help="Workspace directory or a blueprint file inside a workspace.")
-@click.option("--output", "-o", type=click.Path(dir_okay=False, path_type=str), default="workspace.aeroc", help="Output container path.")
+@click.option(
+    "--input",
+    "-i",
+    type=click.Path(exists=True, path_type=str),
+    default=".",
+    help="Workspace directory or a blueprint file inside a workspace.",
+)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(dir_okay=False, path_type=str),
+    default="workspace.aeroc",
+    help="Output container path.",
+)
 @click.option("--verbose", "-v", is_flag=True)
 def compile_aeroc_cmd(input: str, output: str, verbose: bool) -> None:
     """Compile a workspace tree into a workspace.aeroc container."""
@@ -1682,8 +1773,20 @@ def compile_aeroc_cmd(input: str, output: str, verbose: bool) -> None:
 
 
 @aeroc_group.command("exec")
-@click.option("--file", "-f", type=click.Path(exists=True, dir_okay=False, path_type=str), required=True, help="workspace.aeroc file to execute.")
-@click.option("--target-dir", "-t", type=click.Path(file_okay=False, path_type=str), default=".", help="Working directory for build tasks.")
+@click.option(
+    "--file",
+    "-f",
+    type=click.Path(exists=True, dir_okay=False, path_type=str),
+    required=True,
+    help="workspace.aeroc file to execute.",
+)
+@click.option(
+    "--target-dir",
+    "-t",
+    type=click.Path(file_okay=False, path_type=str),
+    default=".",
+    help="Working directory for build tasks.",
+)
 @click.option("--jobs", "-j", type=int, default=1, help="Number of worker threads.")
 @click.option("--verbose", "-v", is_flag=True)
 def exec_aeroc_cmd(file: str, target_dir: str, jobs: int, verbose: bool) -> None:
@@ -1696,7 +1799,9 @@ def exec_aeroc_cmd(file: str, target_dir: str, jobs: int, verbose: bool) -> None
 
 
 @aeroc_group.command("unpack")
-@click.option("--file", "-f", type=click.Path(exists=True, dir_okay=False, path_type=str), required=True)
+@click.option(
+    "--file", "-f", type=click.Path(exists=True, dir_okay=False, path_type=str), required=True
+)
 @click.option("--target-dir", "-t", type=click.Path(file_okay=False, path_type=str), default=".")
 @click.option("--verbose", "-v", is_flag=True)
 def unpack_aeroc_cmd(file: str, target_dir: str, verbose: bool) -> None:
@@ -1709,8 +1814,20 @@ def unpack_aeroc_cmd(file: str, target_dir: str, verbose: bool) -> None:
 
 
 @aeroc_group.command("export")
-@click.option("--file", "-f", type=click.Path(exists=True, dir_okay=False, path_type=str), required=True, help="workspace.aeroc file to bundle.")
-@click.option("--output", "-o", type=click.Path(dir_okay=False, path_type=str), default="workspace.aeroc.bin", help="Standalone executable path.")
+@click.option(
+    "--file",
+    "-f",
+    type=click.Path(exists=True, dir_okay=False, path_type=str),
+    required=True,
+    help="workspace.aeroc file to bundle.",
+)
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(dir_okay=False, path_type=str),
+    default="workspace.aeroc.bin",
+    help="Standalone executable path.",
+)
 @click.option("--verbose", "-v", is_flag=True)
 def export_aeroc_cmd(file: str, output: str, verbose: bool) -> None:
     """Bundle workspace.aeroc into a self-extracting executable."""

@@ -47,9 +47,7 @@ class FunctionSpec(BaseModel):
         if self.compile_all:
             self.name = self.name or "*"
         if not self.compile_all and not self.name:
-            raise ValueError(
-                "FunctionSpec requires 'name' unless 'compile_all' is true"
-            )
+            raise ValueError("FunctionSpec requires 'name' unless 'compile_all' is true")
         if self.output_name is None:
             self.output_name = self.name
         return self
@@ -114,6 +112,10 @@ class ExecutionStrategy(BaseModel):
     primary_entrypoint: Dict[str, Any] = Field(default_factory=dict)
     cli_contract: CLIContract = Field(default_factory=CLIContract)
     run_spec: Dict[str, Any] = Field(default_factory=dict)
+    engine_backend: str = ""
+    wavefront_parallelism: int = 0
+    precision_shield_mode: str = ""
+    hin_jit_opt_level: int = 0
 
 
 class ABIContract(BaseModel):
@@ -202,9 +204,15 @@ class ABIContract(BaseModel):
         if value not in {"callee_allocates", "caller_allocates", "shared_pyo3"}:
             if "pyo3" in value or "borrow" in value or "shared" in value:
                 value = "shared_pyo3"
-            elif any(k in value for k in ("callee", "owned", "returned", "rust")) and "caller" not in value:
+            elif (
+                any(k in value for k in ("callee", "owned", "returned", "rust"))
+                and "caller" not in value
+            ):
                 value = "callee_allocates"
-            elif any(k in value for k in ("caller", "c_memory", "c_alloc", "pointer", "buffer", "array", "by_c")):
+            elif any(
+                k in value
+                for k in ("caller", "c_memory", "c_alloc", "pointer", "buffer", "array", "by_c")
+            ):
                 value = "caller_allocates"
         allowed = {"callee_allocates", "caller_allocates", "shared_pyo3"}
         if value not in allowed:
@@ -223,9 +231,7 @@ class ABIContract(BaseModel):
 class BlueprintSchemaV2(BaseModel):
     """Schema v2.0.0 blueprint: an executable task and contract graph."""
 
-    metadata: Dict[str, str] = Field(
-        default_factory=lambda: {"schema_version": "2.0.0"}
-    )
+    metadata: Dict[str, str] = Field(default_factory=lambda: {"schema_version": "2.0.0"})
     execution_strategy: ExecutionStrategy = Field(default_factory=ExecutionStrategy)
     abi_contracts: List[ABIContract] = Field(default_factory=list)
     module_graph: List[Dict[str, Any]] = Field(default_factory=list)
@@ -278,11 +284,9 @@ class BlueprintValidator:
     @staticmethod
     def _is_v1_schema(data: Dict[str, Any]) -> bool:
         """Heuristic: v1 blueprints carry 'project' and 'architecture' without schema metadata."""
-        return (
-            "project" in data
-            or "architecture" in data
-            or "functions" in data
-        ) and ("metadata" not in data or data.get("metadata", {}).get("schema_version") is None)
+        return ("project" in data or "architecture" in data or "functions" in data) and (
+            "metadata" not in data or data.get("metadata", {}).get("schema_version") is None
+        )
 
     @staticmethod
     def _upgrade_v1(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -402,9 +406,7 @@ class Blueprint(BaseModel):
                 if not test.is_file():
                     missing.append(str(test))
         if missing:
-            raise ValueError(
-                f"Blueprint references missing file(s): {', '.join(missing)}"
-            )
+            raise ValueError(f"Blueprint references missing file(s): {', '.join(missing)}")
         return self
 
 
@@ -633,7 +635,9 @@ def generate_blueprint(
             ManifestEntry(path="build.rs", lang="rust", purpose="C++ build and link script"),
             ManifestEntry(path="src/main.rs", lang="rust", purpose="Rust CLI binary"),
             ManifestEntry(path="src/cpp_core/native.cpp", lang="cpp", purpose="C-ABI math source"),
-            ManifestEntry(path="tests/test_hybrid_cpp_rust.rs", lang="rust", purpose="Rust integration test"),
+            ManifestEntry(
+                path="tests/test_hybrid_cpp_rust.rs", lang="rust", purpose="Rust integration test"
+            ),
             ManifestEntry(path="README.md", lang="markdown", purpose="Project README"),
         ]
     elif intent == INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON:
@@ -641,10 +645,18 @@ def generate_blueprint(
             ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust workspace manifest"),
             ManifestEntry(path="rust_core/Cargo.toml", lang="toml", purpose="PyO3 crate manifest"),
             ManifestEntry(path="rust_core/src/lib.rs", lang="rust", purpose="Rust native core"),
-            ManifestEntry(path="cpp_core/native.cpp", lang="cpp", purpose="C-ABI dynamic shared library source"),
+            ManifestEntry(
+                path="cpp_core/native.cpp",
+                lang="cpp",
+                purpose="C-ABI dynamic shared library source",
+            ),
             ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python package manifest"),
-            ManifestEntry(path="src/python/__init__.py", lang="python", purpose="Python driver package"),
-            ManifestEntry(path="src/python/main.py", lang="python", purpose="Python CLI / REPL entrypoint"),
+            ManifestEntry(
+                path="src/python/__init__.py", lang="python", purpose="Python driver package"
+            ),
+            ManifestEntry(
+                path="src/python/main.py", lang="python", purpose="Python CLI / REPL entrypoint"
+            ),
             ManifestEntry(path="tests/test_tri.py", lang="python", purpose="pytest tests"),
             ManifestEntry(path="README.md", lang="markdown", purpose="Project README"),
         ]
@@ -795,10 +807,7 @@ def _contracts_to_abi_contracts(
 ) -> List[ABIContract]:
     """Synthesise ``ABIContract`` entries from legacy ``ContractEntry`` definitions."""
     abi_contracts: List[ABIContract] = []
-    header_candidates = [
-        e.path for e in manifest
-        if Path(e.path).suffix in (".h", ".hpp")
-    ]
+    header_candidates = [e.path for e in manifest if Path(e.path).suffix in (".h", ".hpp")]
     for contract in contracts:
         if not contract.signature:
             continue
@@ -806,7 +815,9 @@ def _contracts_to_abi_contracts(
             name, args, return_type = _parse_signature_local(contract.signature)
         except Exception:
             continue
-        if not all(_is_c_abi_compatible(t) for _, t in args) or not _is_c_abi_compatible(return_type):
+        if not all(_is_c_abi_compatible(t) for _, t in args) or not _is_c_abi_compatible(
+            return_type
+        ):
             continue
 
         lang = (contract.language or "").lower()
@@ -832,7 +843,9 @@ def _contracts_to_abi_contracts(
         if not header_path and header_candidates:
             # Reuse the first declared header for the whole C-ABI surface.
             header_path = header_candidates[0]
-        if not header_path and any(Path(e.path).suffix in (".cpp", ".cc", ".cxx") for e in manifest):
+        if not header_path and any(
+            Path(e.path).suffix in (".cpp", ".cc", ".cxx") for e in manifest
+        ):
             header_path = f"include/{name}.h"
 
         abi_contracts.append(
@@ -891,7 +904,9 @@ def _default_verification_nodes(
     return [
         {
             "test_id": f"{project_name}_cli_parses",
-            "execution_cmd": f"{runtime} {entry} --help" if runtime == "python3" else f"cargo run -- --help",
+            "execution_cmd": (
+                f"{runtime} {entry} --help" if runtime == "python3" else f"cargo run -- --help"
+            ),
             "expected_exit_code": 0,
             "stdout_match_patterns": ["usage"],
             "stderr_prohibited_patterns": ["Traceback"],
@@ -1018,9 +1033,7 @@ def generate_blueprint_from_uploaded_repo(repo_path: Path) -> Path:
     setup_py = repo_path / "setup.py"
 
     has_rust = cargo_toml.is_file()
-    has_python = pyproject.is_file() or setup_py.is_file() or bool(
-        list(repo_path.rglob("*.py"))
-    )
+    has_python = pyproject.is_file() or setup_py.is_file() or bool(list(repo_path.rglob("*.py")))
     cpp_sources = [p for p in repo_path.rglob("*") if p.suffix in {".cpp", ".c", ".h", ".hpp"}]
     has_cpp = bool(cpp_sources)
 
@@ -1050,22 +1063,46 @@ def generate_blueprint_from_uploaded_repo(repo_path: Path) -> Path:
 
     manifest: List[ManifestEntry] = []
     if has_rust:
-        manifest.append(ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust workspace manifest"))
+        manifest.append(
+            ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust workspace manifest")
+        )
         for member in members:
-            manifest.append(ManifestEntry(path=f"{member}/Cargo.toml", lang="toml", purpose="Workspace member crate"))
-            manifest.append(ManifestEntry(path=f"{member}/src/lib.rs", lang="rust", purpose="Rust crate source"))
+            manifest.append(
+                ManifestEntry(
+                    path=f"{member}/Cargo.toml", lang="toml", purpose="Workspace member crate"
+                )
+            )
+            manifest.append(
+                ManifestEntry(path=f"{member}/src/lib.rs", lang="rust", purpose="Rust crate source")
+            )
     if pyproject.is_file():
-        manifest.append(ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python package metadata"))
+        manifest.append(
+            ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python package metadata")
+        )
     elif setup_py.is_file():
-        manifest.append(ManifestEntry(path="setup.py", lang="python", purpose="Python package setup"))
+        manifest.append(
+            ManifestEntry(path="setup.py", lang="python", purpose="Python package setup")
+        )
     for src in sorted(repo_path.rglob("*.py")):
-        if src.name.startswith("test_") or "/tests/" in str(src.relative_to(repo_path)).replace("\\", "/"):
+        if src.name.startswith("test_") or "/tests/" in str(src.relative_to(repo_path)).replace(
+            "\\", "/"
+        ):
             continue
         if _is_path_inside(src, repo_path):
-            manifest.append(ManifestEntry(path=str(src.relative_to(repo_path)), lang="python", purpose="Python source"))
+            manifest.append(
+                ManifestEntry(
+                    path=str(src.relative_to(repo_path)), lang="python", purpose="Python source"
+                )
+            )
     for hdr in sorted(cpp_sources):
         if _is_path_inside(hdr, repo_path):
-            manifest.append(ManifestEntry(path=str(hdr.relative_to(repo_path)), lang=hdr.suffix.lstrip("."), purpose="C/C++ source"))
+            manifest.append(
+                ManifestEntry(
+                    path=str(hdr.relative_to(repo_path)),
+                    lang=hdr.suffix.lstrip("."),
+                    purpose="C/C++ source",
+                )
+            )
 
     # Discover Python entry points.
     functions: List[FunctionSpec] = []
@@ -1195,10 +1232,7 @@ def ensure_workspace_blueprint(workspace_root: Path) -> Path:
         or (workspace_root / "setup.py").is_file()
         or bool(list(workspace_root.rglob("*.py")))
     )
-    cpp_sources = [
-        p for p in workspace_root.rglob("*")
-        if p.suffix in {".cpp", ".c", ".h", ".hpp"}
-    ]
+    cpp_sources = [p for p in workspace_root.rglob("*") if p.suffix in {".cpp", ".c", ".h", ".hpp"}]
     has_cpp = bool(cpp_sources)
 
     if has_rust and has_python:
@@ -1225,12 +1259,14 @@ def ensure_workspace_blueprint(workspace_root: Path) -> Path:
     description = f"Auto-generated {architecture} blueprint for empty workspace."
     if template_text:
         prompt_match = re.search(r'^prompt:\s*["\']?(.*?)["\']?$', template_text, re.MULTILINE)
-        constraints_match = re.search(r'^constraints:\s*["\']?(.*?)["\']?$', template_text, re.MULTILINE)
+        constraints_match = re.search(
+            r'^constraints:\s*["\']?(.*?)["\']?$', template_text, re.MULTILINE
+        )
         parts = []
         if prompt_match:
-            parts.append(prompt_match.group(1).strip('"\''))
+            parts.append(prompt_match.group(1).strip("\"'"))
         if constraints_match:
-            parts.append(constraints_match.group(1).strip('"\''))
+            parts.append(constraints_match.group(1).strip("\"'"))
         if parts:
             description = " ".join(parts)
 
@@ -1244,7 +1280,9 @@ def ensure_workspace_blueprint(workspace_root: Path) -> Path:
         source_files = ["src/lib.rs"]
         artifact_type = ArtifactType.cargo_cdylib
     elif has_cpp:
-        source_files = [str(p.relative_to(workspace_root)) for p in cpp_sources[:1]] or ["native/native.cpp"]
+        source_files = [str(p.relative_to(workspace_root)) for p in cpp_sources[:1]] or [
+            "native/native.cpp"
+        ]
         artifact_type = ArtifactType.shared_library
     else:
         source_files = [f"src/{project_name}/core.py"]
@@ -1314,12 +1352,11 @@ class BlueprintCore:
 
         has_rust = cargo_toml.is_file()
         has_python = (
-            pyproject.is_file()
-            or setup_py.is_file()
-            or bool(list(repo_path.rglob("*.py")))
+            pyproject.is_file() or setup_py.is_file() or bool(list(repo_path.rglob("*.py")))
         )
         cpp_sources = [
-            p for p in repo_path.rglob("*")
+            p
+            for p in repo_path.rglob("*")
             if p.suffix in {".cpp", ".c", ".h", ".hpp", ".cc", ".cxx"}
         ]
         has_cpp = bool(cpp_sources)
@@ -1358,10 +1395,14 @@ class BlueprintCore:
             )
             for member in members:
                 manifest.append(
-                    ManifestEntry(path=f"{member}/Cargo.toml", lang="toml", purpose="Workspace member crate")
+                    ManifestEntry(
+                        path=f"{member}/Cargo.toml", lang="toml", purpose="Workspace member crate"
+                    )
                 )
                 manifest.append(
-                    ManifestEntry(path=f"{member}/src/lib.rs", lang="rust", purpose="Rust crate source")
+                    ManifestEntry(
+                        path=f"{member}/src/lib.rs", lang="rust", purpose="Rust crate source"
+                    )
                 )
         if pyproject.is_file():
             manifest.append(
@@ -1376,9 +1417,7 @@ class BlueprintCore:
             if src.name.startswith("test_") or "/tests/" in rel:
                 continue
             if _is_path_inside(src, repo_path):
-                manifest.append(
-                    ManifestEntry(path=rel, lang="python", purpose="Python source")
-                )
+                manifest.append(ManifestEntry(path=rel, lang="python", purpose="Python source"))
         for hdr in sorted(cpp_sources):
             if _is_path_inside(hdr, repo_path):
                 manifest.append(

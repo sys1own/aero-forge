@@ -100,6 +100,7 @@
       flex-shrink: 0;
     }
     #sidebar.collapsed { width: 40px !important; min-width: 40px !important; max-width: 40px !important; overflow: hidden; }
+    #sidebar.collapsed > * { display: none; }
     .sidebar-header {
       height: 34px; padding: 0 0.5rem; border-bottom: 1px solid var(--border);
       display: flex; align-items: center; justify-content: space-between; background: var(--panel); gap: 0.3rem;
@@ -555,30 +556,30 @@
           <details id="export-options-popover" class="export-popover full">
             <summary id="export-summary" title="Export options" aria-label="Export options">Export &#9662;</summary>
             <div class="export-options" title="Choose what to include in the downloaded zip">
-              <div class="export-menu" role="menu">
-                <button id="download-aeroc-btn" class="export-menu-item" title="Download compiled binary IR container">&#11015; Binary IR (.aeroc)</button>
-                <button id="export-scaffold-btn" class="export-menu-item" title="Export Wavefront scaffold zip">&#128230; Wavefront Scaffold (.zip)</button>
-              </div>
-              <hr style="border:0;border-top:1px solid var(--border);margin:0.4rem 0;">
               <label class="export-option">
                 <input type="checkbox" name="export-pure-target" value="1" checked>
-                <span>Pure Target Source</span>
-                <small>Generated source files and tests only.</small>
+                <span>Generated Target Source</span>
+                <small>Human-readable source files and tests.</small>
               </label>
               <label class="export-option">
-                <input type="checkbox" name="export-native-crate" value="1">
-                <span>Include Native Acceleration Crate (PyO3 / Rust)</span>
-                <small>Adds crates/native_core for maturin builds.</small>
+                <input type="checkbox" name="export-hybrid-polyglot" value="1">
+                <span>Hybrid / Polyglot Package (.aerozip)</span>
+                <small>HIN graph artifacts, compiled manifests, and dynamic libraries.</small>
               </label>
               <label class="export-option">
-                <input type="checkbox" name="export-wavefront-runtime" value="1">
-                <span>Include Standalone Wavefront Micro-Runtime</span>
-                <small>Adds the zero-dependency aero_core crate.</small>
+                <input type="checkbox" name="export-native-libraries" value="1">
+                <span>Native Libraries (C++ / Rust)</span>
+                <small>Dynamic bindings linked against hin_engine.</small>
               </label>
               <label class="export-option">
-                <input type="checkbox" name="export-standalone-aeroc" value="1">
-                <span>Export Wavefront Scaffold (.aerozip)</span>
-                <small>Includes the aero_core runtime and Python wrapper entrypoints.</small>
+                <input type="checkbox" name="export-hin-native-bundle" value="1">
+                <span>HIN Native Bundle (.hinb)</span>
+                <small>Single-file HIN bytecode, pre-computed graph data, and metadata.</small>
+              </label>
+              <label class="export-option">
+                <input type="checkbox" name="export-pyo3-c-api" value="1">
+                <span>PyO3 / C-API Native Wrapper</span>
+                <small>Direct Python native extension export.</small>
               </label>
               <button id="download-btn" class="secondary" style="width:100%;margin-top:0.3rem;">Download Zip</button>
             </div>
@@ -639,11 +640,31 @@
                   </select>
                 </div>
                 <div class="deck-control-group">
-                  <label for="acceleration-policy">Acceleration</label>
-                  <select id="acceleration-policy">
-                    <option value="selective">Selective Acceleration (Auto-Detect Heavy Compute)</option>
-                    <option value="force">Force Native Bridge</option>
-                    <option value="bypass">Standard Runtime (Bypass Bridge)</option>
+                  <label for="engine-backend">Engine Backend</label>
+                  <select id="engine-backend">
+                    <option value="hin_cpu">HIN-CPU Multi-Threaded (Wavefront solver)</option>
+                    <option value="hin_gpu">HIN-GPU / CUDA / Vulkan</option>
+                    <option value="hin_wasm">HIN-WASM (Web target)</option>
+                  </select>
+                </div>
+                <div class="deck-control-group">
+                  <label for="wavefront-parallelism">Wavefront Solver Parallelism</label>
+                  <input id="wavefront-parallelism" type="number" min="1" max="64" value="4" style="width: 100%; padding: 0.3rem 0.4rem; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 4px;">
+                </div>
+                <div class="deck-control-group">
+                  <label for="precision-shield-mode">Precision Shield Mode</label>
+                  <select id="precision-shield-mode">
+                    <option value="ieee">IEEE Float Precision</option>
+                    <option value="fast_math">Fast-Math</option>
+                    <option value="shield">Precision Shield checks</option>
+                  </select>
+                </div>
+                <div class="deck-control-group">
+                  <label for="hin-jit-opt-level">HIN JIT Optimization Level</label>
+                  <select id="hin-jit-opt-level">
+                    <option value="0">0 - Debug</option>
+                    <option value="1">1 - Balanced</option>
+                    <option value="2">2 - Max Graph Fusion & SIMD</option>
                   </select>
                 </div>
                 <div class="status-bar">
@@ -865,8 +886,6 @@
       uploadInput: document.getElementById('upload-input'),
       uploadRoot: document.getElementById('upload-root'),
       downloadBtn: document.getElementById('download-btn'),
-      downloadAerocBtn: document.getElementById('download-aeroc-btn'),
-      exportScaffoldBtn: document.getElementById('export-scaffold-btn'),
       exportPopover: document.getElementById('export-options-popover'),
       gutterLeft: document.getElementById('gutter-left'),
       gutterRight: document.getElementById('gutter-right'),
@@ -895,7 +914,10 @@
       cancelAccelerate: document.getElementById('cancel-accelerate'),
       confirmAccelerate: document.getElementById('confirm-accelerate'),
       targetLanguage: document.getElementById('target-language'),
-      accelerationPolicy: document.getElementById('acceleration-policy'),
+      engineBackend: document.getElementById('engine-backend'),
+      wavefrontParallelism: document.getElementById('wavefront-parallelism'),
+      precisionShieldMode: document.getElementById('precision-shield-mode'),
+      hinJitOptLevel: document.getElementById('hin-jit-opt-level'),
       templateSelect: document.getElementById('template-select'),
       loadTemplate: document.getElementById('load-template'),
       acceleratorLog: document.getElementById('accelerator-log'),
@@ -2267,7 +2289,7 @@
       if (!state.sessionId) { log('No workspace session', 'error'); return; }
       setBusy(true);
       try {
-        const includeNative = !!document.querySelector('input[name="export-native-crate"]:checked');
+        const includeNative = !!document.querySelector('input[name="export-pyo3-c-api"]:checked');
         const res = await fetch('/api/workspace/export-scaffold', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -2295,9 +2317,10 @@
       if (!state.sessionId) return;
       const options = {
         pure_target: !!document.querySelector('input[name="export-pure-target"]:checked'),
-        include_native_crate: !!document.querySelector('input[name="export-native-crate"]:checked'),
-        include_wavefront_runtime: !!document.querySelector('input[name="export-wavefront-runtime"]:checked'),
-        standalone_aeroc: !!document.querySelector('input[name="export-standalone-aeroc"]:checked'),
+        hybrid_polyglot: !!document.querySelector('input[name="export-hybrid-polyglot"]:checked'),
+        native_libraries: !!document.querySelector('input[name="export-native-libraries"]:checked'),
+        hin_native_bundle: !!document.querySelector('input[name="export-hin-native-bundle"]:checked'),
+        pyo3_c_api: !!document.querySelector('input[name="export-pyo3-c-api"]:checked'),
       };
       const res = await fetch('/api/workspace/export', {
         method: 'POST',
@@ -2478,7 +2501,16 @@
       log(`Building: ${prompt}`);
       addChat('system', `Building: ${prompt}`);
       try {
-        const data = await api('POST', '/api/build', buildBody({ prompt, variants: ui.variantToggle.checked, target_language: ui.targetLanguage.value, acceleration_policy: ui.accelerationPolicy.value, model: state.provider === 'deepseek' ? 'deepseek-v4-flash' : undefined }));
+        const data = await api('POST', '/api/build', buildBody({
+          prompt,
+          variants: ui.variantToggle.checked,
+          target_language: ui.targetLanguage.value,
+          engine_backend: ui.engineBackend ? ui.engineBackend.value : 'hin_cpu',
+          wavefront_parallelism: ui.wavefrontParallelism ? parseInt(ui.wavefrontParallelism.value, 10) : null,
+          precision_shield_mode: ui.precisionShieldMode ? ui.precisionShieldMode.value : 'ieee',
+          hin_jit_opt_level: ui.hinJitOptLevel ? parseInt(ui.hinJitOptLevel.value, 10) : null,
+          model: state.provider === 'deepseek' ? 'deepseek-v4-flash' : undefined
+        }));
         state.sessionId = data.session_id;
         state.blueprintSource = data.blueprint_source || state.blueprintSource;
         state.autoInitialized = !!data.auto_initialized;
@@ -2659,14 +2691,14 @@
         const match = opts.find(o => o.value === target);
         if (match) ui.targetLanguage.value = target;
       }
-      if (acceleration && ui.accelerationPolicy) {
+      if (acceleration && ui.engineBackend) {
         const accMap = {
-          'Selective Acceleration (Auto-Detect Heavy Compute)': 'selective',
-          'Force Native Bridge': 'force',
-          'Standard Runtime (Bypass Bridge)': 'bypass'
+          'HIN-CPU Multi-Threaded (Wavefront solver)': 'hin_cpu',
+          'HIN-GPU / CUDA / Vulkan': 'hin_gpu',
+          'HIN-WASM (Web target)': 'hin_wasm'
         };
         const val = accMap[acceleration];
-        if (val) ui.accelerationPolicy.value = val;
+        if (val) ui.engineBackend.value = val;
       }
     }
 
@@ -2806,14 +2838,7 @@
       e.stopPropagation();
       downloadZip();
     });
-    if (ui.downloadAerocBtn) ui.downloadAerocBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      downloadAeroc();
-    });
-    if (ui.exportScaffoldBtn) ui.exportScaffoldBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      downloadScaffold();
-    });
+
     // Collapse the export options popover when clicking outside it.
     document.addEventListener('click', (e) => {
       if (ui.exportPopover && !ui.exportPopover.contains(e.target)) {

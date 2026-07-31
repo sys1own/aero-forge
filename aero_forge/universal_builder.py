@@ -21,7 +21,13 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from aero_forge.blueprint import Blueprint, ContractEntry, ManifestEntry, parse_blueprint, write_blueprint
+from aero_forge.blueprint import (
+    Blueprint,
+    ContractEntry,
+    ManifestEntry,
+    parse_blueprint,
+    write_blueprint,
+)
 from aero_forge.builder.aeroc_compiler import compile_directory_to_aeroc
 from aero_forge.builder.executor import ExecutionReport
 from aero_forge.config import ConfigOverride
@@ -59,6 +65,7 @@ def _build_pure_python(
     max_retries: int = 3,
     max_tokens: Optional[int] = None,
     config_override: Optional[ConfigOverride] = None,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Materialize and test a pure-Python project from a planned blueprint."""
     result = generate_and_build(
@@ -72,10 +79,16 @@ def _build_pure_python(
         max_tokens=max_tokens,
         build_kwargs={"max_workers": 1, "cache_enabled": True},
         config_override=config_override,
+        **kwargs,
     )
     # normalize legacy generate_and_build result to include top-level success
     result.setdefault(
-        "success", result.get("build", {}).get("success", False) if isinstance(result.get("build"), dict) else False
+        "success",
+        (
+            result.get("build", {}).get("success", False)
+            if isinstance(result.get("build"), dict)
+            else False
+        ),
     )
     # Ensure the authoritative blueprint carries the language/feature tags.
     if (output_dir / "blueprint.aero").is_file():
@@ -145,7 +158,8 @@ def _augment_blueprint_with_explicit_paths(
     existing_package_names = {
         Path(e.path).parts[0]
         for e in blueprint.manifest
-        if len(Path(e.path).parts) > 1 and Path(e.path).parts[0] not in {"tests", "src", "scripts", "examples", "docs"}
+        if len(Path(e.path).parts) > 1
+        and Path(e.path).parts[0] not in {"tests", "src", "scripts", "examples", "docs"}
     }
 
     additions: List[ManifestEntry] = []
@@ -266,10 +280,16 @@ def _hybrid_fallback_blueprint(
             ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust workspace manifest"),
             ManifestEntry(path="rust_core/Cargo.toml", lang="toml", purpose="PyO3 crate manifest"),
             ManifestEntry(path="rust_core/src/lib.rs", lang="rust", purpose="Rust native core"),
-            ManifestEntry(path="cpp_core/native.cpp", lang="cpp", purpose="C-ABI shared library source"),
+            ManifestEntry(
+                path="cpp_core/native.cpp", lang="cpp", purpose="C-ABI shared library source"
+            ),
             ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python package manifest"),
-            ManifestEntry(path=f"{pkg_name}/__init__.py", lang="python", purpose="Python driver package"),
-            ManifestEntry(path=f"{pkg_name}/main.py", lang="python", purpose="Python CLI / REPL entrypoint"),
+            ManifestEntry(
+                path=f"{pkg_name}/__init__.py", lang="python", purpose="Python driver package"
+            ),
+            ManifestEntry(
+                path=f"{pkg_name}/main.py", lang="python", purpose="Python CLI / REPL entrypoint"
+            ),
             ManifestEntry(path="run_shell.py", lang="python", purpose="Headless launcher"),
             ManifestEntry(path="tests/test_tri.py", lang="python", purpose="pytest tests"),
             ManifestEntry(path="README.md", lang="markdown", purpose="docs"),
@@ -317,12 +337,18 @@ def _hybrid_fallback_blueprint(
             if is_cpp:
                 if "native.cpp" not in requested_package_files.get(pkg_dir, []):
                     manifest.append(
-                        ManifestEntry(path=f"{pkg_dir}/native.cpp", lang="cpp", purpose="pybind11 extension source")
+                        ManifestEntry(
+                            path=f"{pkg_dir}/native.cpp",
+                            lang="cpp",
+                            purpose="pybind11 extension source",
+                        )
                     )
             else:
                 if "native.py" not in requested_package_files.get(pkg_dir, []):
                     manifest.append(
-                        ManifestEntry(path=f"{pkg_dir}/native.py", lang="python", purpose="native wrapper")
+                        ManifestEntry(
+                            path=f"{pkg_dir}/native.py", lang="python", purpose="native wrapper"
+                        )
                     )
             if "cli.py" not in requested_package_files.get(pkg_dir, []):
                 manifest.append(
@@ -343,7 +369,10 @@ def _hybrid_fallback_blueprint(
     # Provide native test coverage.
     if not is_tri:
         test_file = "tests/test_cli.py" if is_cpp else "tests/test_native.py"
-        if "test_native.py" not in requested_root_files and "test_cli.py" not in requested_root_files:
+        if (
+            "test_native.py" not in requested_root_files
+            and "test_cli.py" not in requested_root_files
+        ):
             manifest.append(ManifestEntry(path=test_file, lang="python", purpose="native tests"))
 
     python_prefix = f"{pkg_name}.native." if packages and not is_cpp else ""
@@ -386,6 +415,7 @@ def _run_polyglot_materializer(
     output_dir: Path,
     prompt: str = "",
     blueprint: Optional[Blueprint] = None,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Materialize a guaranteed hybrid workspace using the polyglot materializer."""
     output_dir = Path(output_dir).resolve()
@@ -465,6 +495,7 @@ def _run_hybrid_cpp_rust_materializer(
     project_name: str,
     blueprint: Blueprint,
     output_dir: Path,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Materialize and build a Rust binary that statically links a C++ C-ABI library."""
     from aero_forge.scaffold.hybrid_cpp_rust_materializer import (
@@ -502,9 +533,7 @@ def _run_hybrid_cpp_rust_materializer(
     }
 
 
-def _classification_for_architecture(
-    architecture: str, features: List[str]
-) -> StackClassification:
+def _classification_for_architecture(architecture: str, features: List[str]) -> StackClassification:
     """Create a StackClassification for an explicitly chosen architecture."""
     languages_map = {
         INTENT_PURE_PYTHON: ["python"],
@@ -536,7 +565,12 @@ def build_universal_project(
     progress_callback: Optional[Any] = None,
     architecture: Optional[str] = None,
     acceleration_policy: Optional[str] = None,
+    engine_backend: Optional[str] = None,
+    wavefront_parallelism: Optional[int] = None,
+    precision_shield_mode: Optional[str] = None,
+    hin_jit_opt_level: Optional[int] = None,
     workspace_path: Optional[Path | str] = None,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Classify *prompt*, write ``blueprint.aero``, and build the workspace.
 
@@ -561,7 +595,9 @@ def build_universal_project(
                 existing_contracts = list(existing.contracts or [])
                 existing_manifest = list(existing.manifest or [])
             except Exception as exc:
-                logger.warning("Could not read existing workspace blueprint %s: %s", existing_path, exc)
+                logger.warning(
+                    "Could not read existing workspace blueprint %s: %s", existing_path, exc
+                )
 
     if progress_callback:
         progress_callback("Planning workspace...")
@@ -569,14 +605,21 @@ def build_universal_project(
     # Pass 1: classify and write blueprint.aero.
     classification = classify_stack(prompt)
     if architecture:
-        classification = _classification_for_architecture(
-            architecture, classification.features
-        )
+        classification = _classification_for_architecture(architecture, classification.features)
     effective_constraints = constraints or ""
+    accel_parts = []
     if acceleration_policy and acceleration_policy != "selective":
-        effective_constraints = (
-            f"{effective_constraints}\n\nAcceleration policy: {acceleration_policy}"
-        ).strip()
+        accel_parts.append(f"Acceleration policy: {acceleration_policy}")
+    if engine_backend:
+        accel_parts.append(f"Engine backend: {engine_backend}")
+    if wavefront_parallelism:
+        accel_parts.append(f"Wavefront parallelism: {wavefront_parallelism}")
+    if precision_shield_mode:
+        accel_parts.append(f"Precision shield mode: {precision_shield_mode}")
+    if hin_jit_opt_level is not None:
+        accel_parts.append(f"HIN JIT opt level: {hin_jit_opt_level}")
+    if accel_parts:
+        effective_constraints = (f"{effective_constraints}\n\n" + "\n".join(accel_parts)).strip()
     blueprint = plan_workspace(
         prompt,
         output_dir,
@@ -603,7 +646,9 @@ def build_universal_project(
     # does not fail on LLM-invented paths.
     deterministic_manifest = [
         ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
-        for e in default_manifest_for_architecture(blueprint.architecture, project_name or blueprint.project or "generated")
+        for e in default_manifest_for_architecture(
+            blueprint.architecture, project_name or blueprint.project or "generated"
+        )
     ]
     blueprint.manifest = deterministic_manifest
     blueprint.module_graph = []
@@ -619,12 +664,20 @@ def build_universal_project(
             output_dir,
             prompt=prompt,
             blueprint=blueprint,
+            engine_backend=engine_backend,
+            wavefront_parallelism=wavefront_parallelism,
+            precision_shield_mode=precision_shield_mode,
+            hin_jit_opt_level=hin_jit_opt_level,
         )
     elif blueprint.architecture == INTENT_HYBRID_CPP_RUST:
         result = _run_hybrid_cpp_rust_materializer(
             project_name or blueprint.project or "generated",
             blueprint,
             output_dir,
+            engine_backend=engine_backend,
+            wavefront_parallelism=wavefront_parallelism,
+            precision_shield_mode=precision_shield_mode,
+            hin_jit_opt_level=hin_jit_opt_level,
         )
     elif blueprint.architecture == INTENT_HYBRID_CPP_PYTHON:
         # C++/pybind11 builds go straight to the polyglot materializer because
@@ -635,6 +688,10 @@ def build_universal_project(
             output_dir,
             prompt=prompt,
             blueprint=blueprint,
+            engine_backend=engine_backend,
+            wavefront_parallelism=wavefront_parallelism,
+            precision_shield_mode=precision_shield_mode,
+            hin_jit_opt_level=hin_jit_opt_level,
         )
     elif blueprint.architecture == INTENT_HYBRID_RUST_PYTHON:
         # Explicit PyO3/NumPy/Rayon native extension updates are handled directly
@@ -648,6 +705,10 @@ def build_universal_project(
                 output_dir,
                 prompt=prompt,
                 blueprint=blueprint,
+                engine_backend=engine_backend,
+                wavefront_parallelism=wavefront_parallelism,
+                precision_shield_mode=precision_shield_mode,
+                hin_jit_opt_level=hin_jit_opt_level,
             )
         else:
             try:
@@ -662,9 +723,15 @@ def build_universal_project(
                     max_tokens=max_tokens,
                     progress_callback=progress_callback,
                     config_override=config_override,
+                    engine_backend=engine_backend,
+                    wavefront_parallelism=wavefront_parallelism,
+                    precision_shield_mode=precision_shield_mode,
+                    hin_jit_opt_level=hin_jit_opt_level,
                 )
             except Exception as exc:
-                logger.warning("generate_monorepo failed: %s; falling back to PolyglotMaterializer", exc)
+                logger.warning(
+                    "generate_monorepo failed: %s; falling back to PolyglotMaterializer", exc
+                )
                 result = {"success": False, "error": str(exc)}
             if not result.get("success"):
                 logger.warning(
@@ -679,6 +746,10 @@ def build_universal_project(
                     output_dir,
                     prompt=prompt,
                     blueprint=blueprint,
+                    engine_backend=engine_backend,
+                    wavefront_parallelism=wavefront_parallelism,
+                    precision_shield_mode=precision_shield_mode,
+                    hin_jit_opt_level=hin_jit_opt_level,
                 )
     else:
         result = _build_pure_python(
@@ -691,6 +762,10 @@ def build_universal_project(
             max_retries=max_retries,
             max_tokens=max_tokens,
             config_override=config_override,
+            engine_backend=engine_backend,
+            wavefront_parallelism=wavefront_parallelism,
+            precision_shield_mode=precision_shield_mode,
+            hin_jit_opt_level=hin_jit_opt_level,
         )
 
     result["blueprint_path"] = str(output_dir / "blueprint.aero")
@@ -702,11 +777,7 @@ def build_universal_project(
     }
     if not result.get("files"):
         result["files"] = ExecutionReport(output_dir).filter_paths(
-            sorted(
-                str(p.relative_to(output_dir))
-                for p in output_dir.rglob("*")
-                if p.is_file()
-            )
+            sorted(str(p.relative_to(output_dir)) for p in output_dir.rglob("*") if p.is_file())
         )
 
     # Produce a portable standalone ``workspace.aeroc`` artifact from the materialized tree.

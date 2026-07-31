@@ -36,9 +36,7 @@ def _safe_extract(zip_path: Path, dest: Path) -> None:
             try:
                 target.relative_to(dest.resolve())
             except ValueError as exc:
-                raise ValueError(
-                    f"Zip member escapes extraction directory: {member_path}"
-                ) from exc
+                raise ValueError(f"Zip member escapes extraction directory: {member_path}") from exc
         zf.extractall(dest)
 
 
@@ -68,15 +66,17 @@ class ProjectBuilder:
         target: str = "native",
         template: Optional[str] = None,
         config_override: Optional[ConfigOverride] = None,
+        engine_backend: Optional[str] = None,
+        wavefront_parallelism: Optional[int] = None,
+        precision_shield_mode: Optional[str] = None,
+        hin_jit_opt_level: Optional[int] = None,
     ):
         self.project_root = Path(project_root).resolve()
         self.output_dir = Path(output_dir) if output_dir else self.project_root / "dist"
         if output_zip:
             self.output_zip = Path(output_zip).resolve()
         else:
-            self.output_zip = (
-                self.project_root.parent / f"{self.project_root.name}_bundle.zip"
-            )
+            self.output_zip = self.project_root.parent / f"{self.project_root.name}_bundle.zip"
         self.llm_provider = llm_provider
         self.model = model
         self.max_workers = max_workers
@@ -84,6 +84,10 @@ class ProjectBuilder:
         self.target = target
         self.template = template
         self.config_override = config_override
+        self.engine_backend = engine_backend
+        self.wavefront_parallelism = wavefront_parallelism
+        self.precision_shield_mode = precision_shield_mode
+        self.hin_jit_opt_level = hin_jit_opt_level
 
     def _discover(self) -> List[Any]:
         """Return discovered ``FunctionSpec`` objects for the project."""
@@ -97,13 +101,9 @@ class ProjectBuilder:
         functions = [f.name for f in self._discover()] or None
         project_name = self.project_root.name
         if chosen == "axum":
-            root = ProjectScaffolder.scaffold_axum(
-                self.project_root, project_name, functions
-            )
+            root = ProjectScaffolder.scaffold_axum(self.project_root, project_name, functions)
         elif chosen == "clap":
-            root = ProjectScaffolder.scaffold_clap(
-                self.project_root, project_name, functions
-            )
+            root = ProjectScaffolder.scaffold_clap(self.project_root, project_name, functions)
         elif chosen == "python_hybrid":
             root = ProjectScaffolder.scaffold_python_hybrid(
                 self.project_root, project_name, functions
@@ -121,9 +121,7 @@ class ProjectBuilder:
         """Build a short text summary of existing project functions for the LLM."""
         by_file: Dict[str, List[str]] = {}
         for func in functions:
-            by_file.setdefault(
-                str(func.file.relative_to(self.project_root)), []
-            ).append(func.name)
+            by_file.setdefault(str(func.file.relative_to(self.project_root)), []).append(func.name)
         lines = ["Existing project files and functions:"]
         for file, names in sorted(by_file.items()):
             lines.append(f"  {file}: {', '.join(sorted(names))}")
@@ -155,6 +153,10 @@ class ProjectBuilder:
             cache_enabled=self.cache_enabled,
             target=self.target,
             config_override=self.config_override,
+            engine_backend=self.engine_backend,
+            wavefront_parallelism=self.wavefront_parallelism,
+            precision_shield_mode=self.precision_shield_mode,
+            hin_jit_opt_level=self.hin_jit_opt_level,
         )
         build_result = runner.build()
 
@@ -162,9 +164,7 @@ class ProjectBuilder:
         manifest = self._write_manifest(build_result, functions, elapsed)
         self._write_package_init(build_result)
 
-        _zip_directory(
-            self.project_root, self.output_zip, arc_root=self.project_root.name
-        )
+        _zip_directory(self.project_root, self.output_zip, arc_root=self.project_root.name)
 
         summary = ""
         if build_result.get("success"):
@@ -183,11 +183,7 @@ class ProjectBuilder:
             "output_zip": str(self.output_zip),
             "output_dir": str(self.output_dir),
             "functions_compiled": sorted(
-                {
-                    name
-                    for r in build_result.get("results", [])
-                    for name in r.get("functions", [])
-                }
+                {name for r in build_result.get("results", []) for name in r.get("functions", [])}
             ),
             "total": build_result.get("total", 0),
             "passed": build_result.get("passed", 0),
@@ -208,9 +204,7 @@ class ProjectBuilder:
     ) -> Dict[str, Any]:
         """Generate a new function in the project context and rebuild the project."""
         functions = self._discover()
-        context = (
-            self._context_summary(functions) if functions else "The project is empty."
-        )
+        context = self._context_summary(functions) if functions else "The project is empty."
 
         src_dir = self.project_root / "src"
         src_dir.mkdir(parents=True, exist_ok=True)
@@ -243,11 +237,7 @@ class ProjectBuilder:
         manifest = {
             "project": self.project_root.name,
             "functions_compiled": sorted(
-                {
-                    name
-                    for r in build_result.get("results", [])
-                    for name in r.get("functions", [])
-                }
+                {name for r in build_result.get("results", []) for name in r.get("functions", [])}
             ),
             "files": [str(r.get("source")) for r in build_result.get("results", [])],
             "artifacts": [
@@ -261,9 +251,7 @@ class ProjectBuilder:
             "status": "success" if build_result.get("success") else "partial",
         }
         manifest_path = self.output_dir / "build_manifest.json"
-        manifest_path.write_text(
-            json.dumps(manifest, indent=2, default=str), encoding="utf-8"
-        )
+        manifest_path.write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
         return manifest
 
     def _write_package_init(self, build_result: Dict[str, Any]) -> None:

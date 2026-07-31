@@ -52,16 +52,92 @@ DEFAULT_SYSTEM_PROMPT = get_default_template().system_prompt
 
 # Words ignored when deriving a module name from the user's prompt.
 _STOP_WORDS = {
-    "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for", "of",
-    "with", "by", "from", "as", "is", "are", "be", "being", "been", "have",
-    "has", "had", "do", "does", "did", "will", "would", "could", "should",
-    "may", "might", "can", "shall", "this", "that", "these", "those", "i",
-    "you", "he", "she", "it", "we", "they", "me", "him", "her", "us", "them",
-    "my", "your", "his", "its", "our", "their", "what", "which", "who", "when",
-    "where", "why", "how", "all", "each", "every", "some", "any", "no",
-    "write", "implement", "create", "build", "generate", "make", "function",
-    "program", "code", "algorithm", "routine", "method", "fast", "optimized",
-    "quick", "simple",
+    "a",
+    "an",
+    "the",
+    "and",
+    "or",
+    "but",
+    "in",
+    "on",
+    "at",
+    "to",
+    "for",
+    "of",
+    "with",
+    "by",
+    "from",
+    "as",
+    "is",
+    "are",
+    "be",
+    "being",
+    "been",
+    "have",
+    "has",
+    "had",
+    "do",
+    "does",
+    "did",
+    "will",
+    "would",
+    "could",
+    "should",
+    "may",
+    "might",
+    "can",
+    "shall",
+    "this",
+    "that",
+    "these",
+    "those",
+    "i",
+    "you",
+    "he",
+    "she",
+    "it",
+    "we",
+    "they",
+    "me",
+    "him",
+    "her",
+    "us",
+    "them",
+    "my",
+    "your",
+    "his",
+    "its",
+    "our",
+    "their",
+    "what",
+    "which",
+    "who",
+    "when",
+    "where",
+    "why",
+    "how",
+    "all",
+    "each",
+    "every",
+    "some",
+    "any",
+    "no",
+    "write",
+    "implement",
+    "create",
+    "build",
+    "generate",
+    "make",
+    "function",
+    "program",
+    "code",
+    "algorithm",
+    "routine",
+    "method",
+    "fast",
+    "optimized",
+    "quick",
+    "simple",
 }
 
 # Names too generic to use as a module name.
@@ -69,10 +145,41 @@ _GENERIC_NAMES = {"main", "run", "solve", "helper", "generated", "app", "test"}
 
 
 _PYTHON_KEYWORDS = {
-    "False", "None", "True", "and", "as", "assert", "async", "await", "break",
-    "class", "continue", "def", "del", "elif", "else", "except", "finally",
-    "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal",
-    "not", "or", "pass", "raise", "return", "try", "while", "with", "yield",
+    "False",
+    "None",
+    "True",
+    "and",
+    "as",
+    "assert",
+    "async",
+    "await",
+    "break",
+    "class",
+    "continue",
+    "def",
+    "del",
+    "elif",
+    "else",
+    "except",
+    "finally",
+    "for",
+    "from",
+    "global",
+    "if",
+    "import",
+    "in",
+    "is",
+    "lambda",
+    "nonlocal",
+    "not",
+    "or",
+    "pass",
+    "raise",
+    "return",
+    "try",
+    "while",
+    "with",
+    "yield",
 }
 
 
@@ -191,9 +298,7 @@ def parse_generated_response(text: str) -> Tuple[str, str]:
     blocks = extract_code_blocks(text)
     python_blocks: List[str] = []
     if blocks:
-        python_blocks = [
-            code for lang, code in blocks if lang in (None, "python", "py")
-        ]
+        python_blocks = [code for lang, code in blocks if lang in (None, "python", "py")]
         if not python_blocks:
             python_blocks = [code for _, code in blocks]
 
@@ -201,9 +306,7 @@ def parse_generated_response(text: str) -> Tuple[str, str]:
         # No markdown fences; extract plain ``def`` functions from raw text.
         impl, tests = _extract_functions_from_text(text)
         if not impl:
-            raise GenerationError(
-                "No code blocks or function definitions found in LLM response"
-            )
+            raise GenerationError("No code blocks or function definitions found in LLM response")
         return impl, tests
 
     if len(python_blocks) >= 2:
@@ -392,9 +495,7 @@ def write_generated_project(
     # Preserve the existing module name across incremental rewrites so overlays
     # remain anchored to the same file.
     if module_name is None:
-        existing_modules = [
-            p.stem for p in src_dir.glob("*.py") if p.name != "__init__.py"
-        ]
+        existing_modules = [p.stem for p in src_dir.glob("*.py") if p.name != "__init__.py"]
         existing_stem = existing_modules[0] if existing_modules else None
         module_name = _derive_module_name(prompt, implementation, existing=existing_stem)
 
@@ -584,10 +685,7 @@ def sanitize_generated_code(source: str) -> str:
 
 def _has_float_literal(node: ast.AST) -> bool:
     """Return True when *node* contains any float Constant."""
-    return any(
-        isinstance(n, ast.Constant) and isinstance(n.value, float)
-        for n in ast.walk(node)
-    )
+    return any(isinstance(n, ast.Constant) and isinstance(n.value, float) for n in ast.walk(node))
 
 
 def _is_literal_expression(node: ast.AST) -> bool:
@@ -724,9 +822,11 @@ def generate_project(
 
     # Derive a domain-specific module name once so smoke tests and the saved
     # file are consistent.
-    existing_modules = [
-        p.stem for p in (output_dir / "src").glob("*.py") if p.name != "__init__.py"
-    ] if (output_dir / "src").is_dir() else []
+    existing_modules = (
+        [p.stem for p in (output_dir / "src").glob("*.py") if p.name != "__init__.py"]
+        if (output_dir / "src").is_dir()
+        else []
+    )
     module_name = _derive_module_name(
         prompt, implementation, existing=existing_modules[0] if existing_modules else None
     )
@@ -773,11 +873,25 @@ def generate_and_build(
     config_override: Optional[ConfigOverride] = None,
     target_language: Optional[str] = None,
     acceleration_policy: Optional[str] = None,
+    engine_backend: Optional[str] = None,
+    wavefront_parallelism: Optional[int] = None,
+    precision_shield_mode: Optional[str] = None,
+    hin_jit_opt_level: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Generate code from a prompt and optionally build/optimize it.
 
     Returns a dictionary describing the generated files and build result.
     """
+    if wavefront_parallelism is not None:
+        try:
+            wavefront_parallelism = int(wavefront_parallelism)
+        except (TypeError, ValueError):
+            wavefront_parallelism = None
+    if hin_jit_opt_level is not None:
+        try:
+            hin_jit_opt_level = int(hin_jit_opt_level)
+        except (TypeError, ValueError):
+            hin_jit_opt_level = None
     if variants > 1:
         from aero_forge.variants import generate_variants, select_best_variant
 
@@ -798,6 +912,10 @@ def generate_and_build(
             explain=explain,
             review=review,
             config_override=config_override,
+            engine_backend=engine_backend,
+            wavefront_parallelism=wavefront_parallelism,
+            precision_shield_mode=precision_shield_mode,
+            hin_jit_opt_level=hin_jit_opt_level,
         )
         best = select_best_variant(variant_results, output_dir=output_dir)
         best["variants"] = variant_results
@@ -855,6 +973,10 @@ def generate_and_build(
         "iterations": [],
         "target_language": target_language or "auto",
         "acceleration_policy": acceleration_policy or "selective",
+        "engine_backend": engine_backend or "default",
+        "wavefront_parallelism": wavefront_parallelism,
+        "precision_shield_mode": precision_shield_mode,
+        "hin_jit_opt_level": hin_jit_opt_level,
     }
 
     if progress_callback:
@@ -873,10 +995,28 @@ def generate_and_build(
             progress_callback=progress_callback,
             config_override=config_override,
         )
-        result["build"] = (
-            result["iterations"][-1].get("build") if result["iterations"] else None
-        )
+        result["build"] = result["iterations"][-1].get("build") if result["iterations"] else None
     elif build_kwargs is not None:
+        # Derive BuildRunner settings from the UI/CLI acceleration selections.
+        derived_kwargs: Dict[str, Any] = {
+            "engine_backend": engine_backend,
+            "precision_shield_mode": precision_shield_mode,
+            "hin_jit_opt_level": hin_jit_opt_level,
+        }
+        if wavefront_parallelism is not None and wavefront_parallelism > 0:
+            derived_kwargs["max_workers"] = wavefront_parallelism
+        if target_language:
+            tl = str(target_language).lower()
+            if tl == "wasm":
+                derived_kwargs["target"] = "wasm32-unknown-unknown"
+        if engine_backend:
+            eb = str(engine_backend).lower().replace("-", "_")
+            if eb in ("hin_gpu", "gpu", "hin_cuda", "hin_vulkan"):
+                derived_kwargs["gpu"] = True
+            if eb in ("hin_wasm", "wasm"):
+                derived_kwargs["target"] = "wasm32-unknown-unknown"
+        # Merge with caller-supplied build_kwargs; explicit acceleration args win.
+        build_kwargs = {**build_kwargs, **derived_kwargs}
         bp = Blueprint.model_validate(
             {
                 "project": project_name,
@@ -992,9 +1132,7 @@ def optimize_generated_code(
         iterations.append(iteration_result)
 
         if not build_result.get("success"):
-            error_log = "\n".join(
-                r.get("logs", "") for r in build_result.get("results", [])
-            )
+            error_log = "\n".join(r.get("logs", "") for r in build_result.get("results", []))
             fixed = _ask_for_fix(
                 implementation,
                 error_log,
@@ -1011,9 +1149,7 @@ def optimize_generated_code(
             continue
 
         # Ask the LLM to optimize the working implementation.
-        if iteration < 3 or (
-            previous_time is not None and elapsed < previous_time * 0.99
-        ):
+        if iteration < 3 or (previous_time is not None and elapsed < previous_time * 0.99):
             previous_time = elapsed
             optimized = _ask_for_optimize(
                 implementation,

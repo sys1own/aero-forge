@@ -1,9 +1,11 @@
 """Workspace export orchestration combining target source, native crate source,
-the embedded wavefront micro-runtime, and standalone ``.aeroc`` artifacts."""
+the embedded wavefront micro-runtime, standalone ``.aeroc`` artifacts, and
+HIN-native ``.hinb`` bundles."""
 
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import enum
 import io
 import json
@@ -48,6 +50,10 @@ class ExportOptions:
     * ``include_native_crate`` - include the PyO3 native acceleration crate.
     * ``include_wavefront_runtime`` - include the embedded ``aero_core`` runtime.
     * ``standalone_aeroc`` - include a pre-packaged ``.aerozip`` project.
+    * ``hybrid_polyglot`` - package a HIN-aware hybrid ``.aerozip`` project.
+    * ``native_libraries`` - include C++/Rust dynamic bindings linked against ``hin_engine``.
+    * ``hin_native_bundle`` - include a ``.hinb`` binary with HIN bytecode and pre-computed graph data.
+    * ``pyo3_c_api`` - include a PyO3 / C-API native Python wrapper.
     * ``project_name`` - archive / project name stem.
     """
 
@@ -58,6 +64,10 @@ class ExportOptions:
     include_native_crate: bool = False
     include_wavefront_runtime: bool = False
     standalone_aeroc: bool = False
+    hybrid_polyglot: bool = False
+    native_libraries: bool = False
+    hin_native_bundle: bool = False
+    pyo3_c_api: bool = False
     project_name: str = "aero-forge-export"
 
     @classmethod
@@ -78,6 +88,11 @@ class ExportOptions:
             opts.project_name = project_name
         if "mode" in options and isinstance(options["mode"], str):
             opts.mode = ExportMode(options["mode"])
+        # Map new HIN-facing option names to the existing implementation flags.
+        if opts.hybrid_polyglot:
+            opts.standalone_aeroc = True
+        if opts.native_libraries or opts.pyo3_c_api:
+            opts.include_native_crate = True
         return opts
 
 
@@ -126,10 +141,19 @@ def export_workspace(
         * ``include_native_crate`` (bool)    - include PyO3 native crate source
         * ``include_wavefront_runtime`` (bool) - include embedded aero_core runtime
         * ``standalone_aeroc`` (bool)        - include a pre-packaged ``.aeroc`` project
+        * ``hybrid_polyglot`` (bool)         - package a HIN-aware hybrid project
+        * ``native_libraries`` (bool)        - include C++/Rust dynamic bindings
+        * ``hin_native_bundle`` (bool)       - include a ``.hinb`` binary bundle
+        * ``pyo3_c_api`` (bool)              - include a PyO3 / C-API wrapper
 
     Returns ``(archive_bytes, filename)``.
     """
     opts = ExportOptions.from_dict(options, project_name=project_name)
+    # Map HIN export options to the existing implementation flags.
+    if opts.hybrid_polyglot:
+        opts.standalone_aeroc = True
+    if opts.native_libraries or opts.pyo3_c_api:
+        opts.include_native_crate = True
     pure_target = opts.pure_target
     include_native = opts.include_native_crate
     include_wavefront = opts.include_wavefront_runtime
@@ -204,6 +228,12 @@ def export_workspace(
                 zf.writestr(arcname, archive_bytes)
                 file_hashes[arcname] = _sha256_bytes(archive_bytes)
 
+        if opts.hin_native_bundle:
+            hinb_bytes = _build_hin_bundle(session_dir, project_name)
+            hinb_name = f"{project_name}.hinb"
+            zf.writestr(hinb_name, hinb_bytes)
+            file_hashes[hinb_name] = _sha256_bytes(hinb_bytes)
+
         verification_json = generate_verification_json(verification, file_hashes)
         zf.writestr("verification.json", verification_json)
 
@@ -213,11 +243,13 @@ def export_workspace(
 
 def _sha256(content: str) -> str:
     import hashlib
+
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
 def _sha256_bytes(content: bytes) -> str:
     import hashlib
+
     return hashlib.sha256(content).hexdigest()
 
 
@@ -237,6 +269,68 @@ def _hash_aeroc_dir(project_dir: Path) -> Dict[str, str]:
         except OSError:
             continue
     return hashes
+
+
+def _build_hin_bundle(session_dir: Path, project_name: str) -> bytes:
+    """Package HIN bytecode, UASTs, and pre-computed reduction data into ``.hinb``.
+
+    The resulting ``.hinb`` file is a zip archive containing:
+    * ``metadata.json`` - project name, schema version, and timestamp
+    * ``environment.lock`` - pinned toolchain/dependency metadata when present
+    * ``graphs/<rel>.json`` - UAST and reduced HIN graph for each Python source
+    * ``blueprint.aero`` - the workspace blueprint if one exists
+    """
+    from aero_forge.hin_engine import reduce_uast
+    from aero_forge.translator import python_source_to_uast
+
+    metadata: Dict[str, Any] = {
+        "project": project_name,
+        "schema_version": "1.0.0",
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+    environment_lock: Dict[str, Any] = {}
+    lock_path = session_dir / "environment.lock"
+    if lock_path.is_file():
+        try:
+            environment_lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    skip_prefixes = {
+        "target",
+        ".venv",
+        "__pycache__",
+        ".pytest_cache",
+        ".aero",
+        ".cargo",
+        "dist",
+        "build",
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("metadata.json", json.dumps(metadata, indent=2, default=str))
+        zf.writestr("environment.lock", json.dumps(environment_lock, indent=2, default=str))
+        for path in sorted(session_dir.rglob("*.py")):
+            rel = path.relative_to(session_dir)
+            if any(part in skip_prefixes for part in rel.parts[:1]):
+                continue
+            if rel.name.startswith("."):
+                continue
+            source = path.read_text(encoding="utf-8")
+            try:
+                uast = python_source_to_uast(source)
+                hin = reduce_uast(uast, max_steps=10000)
+            except Exception as exc:
+                hin = {"error": str(exc), "steps": 0, "graph": [], "native": False}
+            payload = {"source": str(rel.as_posix()), "uast": uast, "hin": hin}
+            zf.writestr(
+                f"graphs/{rel.as_posix()}.json",
+                json.dumps(payload, default=str),
+            )
+        blueprint_path = session_dir / "blueprint.aero"
+        if blueprint_path.is_file():
+            zf.writestr("blueprint.aero", blueprint_path.read_text(encoding="utf-8"))
+    return buf.getvalue()
 
 
 def _pyproject_toml_for_maturin(project_name: str) -> str:
