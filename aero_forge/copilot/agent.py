@@ -35,9 +35,18 @@ def _legacy_action_type(action: Dict[str, Any]) -> str:
     """Map the canonical ActionParser type to the legacy UI action type."""
     new_type = action.get("type", "build")
     source = action.get("source", "")
-    if action.get("contract") or source in ("blueprint_contract", "legacy_json", "plain_text") or new_type in ("apply_blueprint", "PROPOSE_BUILD"):
+    if (
+        action.get("contract")
+        or source in ("blueprint_contract", "legacy_json", "plain_text")
+        or new_type in ("apply_blueprint", "PROPOSE_BUILD")
+    ):
         return "PROPOSE_BUILD"
-    if new_type in ("suggest_build_prompt", "trigger_build") or source in ("build_prompt_fence", "xml_tag", "structured_json", "action_trigger_build"):
+    if new_type in ("suggest_build_prompt", "trigger_build") or source in (
+        "build_prompt_fence",
+        "xml_tag",
+        "structured_json",
+        "action_trigger_build",
+    ):
         return "SUGGEST_BUILD_PROMPT"
     return "SUGGEST_BUILD_PROMPT"
 
@@ -50,16 +59,22 @@ def _to_legacy_action(parsed: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     params = action.get("parameters") or {}
     clean = sanitize_builder_prompt(action.get("clean_prompt", ""))
-    return {
+    legacy = {
         "type": _legacy_action_type(action),
         "params": {
             "prompt": clean,
-            "target": params.get("target") or _normalize_target(clean) or _infer_target_from_text(clean),
-            "acceleration": params.get("acceleration") or _normalize_acceleration(clean),
+            "target": params.get("target")
+            or _normalize_target(clean)
+            or _infer_target_from_text(clean),
+            "acceleration": params.get("acceleration")
+            or _normalize_acceleration(clean),
             "explanation": parsed.get("display_text", ""),
             "parameters": params,
         },
     }
+    if params.get("target_files"):
+        legacy["params"]["target_files"] = list(params["target_files"])
+    return legacy
 
 
 def _has_markdown_heading(text: str) -> bool:
@@ -87,7 +102,9 @@ def format_copilot_response(response: str) -> Tuple[str, Optional[Dict[str, Any]
     if not display_text and _looks_like_json(response):
         try:
             data = json.loads(response.strip())
-            display_text = "### Response\n```json\n" + json.dumps(data, indent=2) + "\n```"
+            display_text = (
+                "### Response\n```json\n" + json.dumps(data, indent=2) + "\n```"
+            )
         except json.JSONDecodeError:
             display_text = response.strip()
 
@@ -103,7 +120,9 @@ def format_copilot_response(response: str) -> Tuple[str, Optional[Dict[str, Any]
         display_text = "### Architecture Overview\n\n" + display_text
 
     if not display_text:
-        display_text = clean_explanation_text(parsed.get("display_text", response.strip()), clean_prompt)
+        display_text = clean_explanation_text(
+            parsed.get("display_text", response.strip()), clean_prompt
+        )
 
     return display_text.strip(), legacy_action
 

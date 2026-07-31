@@ -119,7 +119,92 @@ def try_auto_fix(error_log: str, code: str) -> Optional[str]:
             if patched:
                 return patched
 
+    # 4. Cross-language library load failure: make the ctypes loader search more
+    # candidate directories and tolerate missing shared libraries without crashing.
+    if _is_c_abi_load_error(error_log):
+        patched = _patch_c_abi_loader(code, error_log)
+        if patched:
+            return patched
+
+    # 5. Missing C-ABI symbol export: insert a fallback stub so the Python side
+    # can still import, and point the build at the missing symbol.
+    if _is_c_abi_symbol_error(error_log):
+        patched = _patch_missing_c_abi_symbol(code, error_log)
+        if patched:
+            return patched
+
     return None
+
+
+def _is_c_abi_load_error(error_log: str) -> bool:
+    """Return True when *error_log* indicates a ctypes/native library load failure."""
+    return (
+        re.search(
+            r"(?:OSError|FileNotFoundError|ImportError).*\b(?:cannot load library|Could not find native library|cannot find.*\.(?:so|dylib|dll))\b",
+            error_log,
+            re.IGNORECASE,
+        )
+        is not None
+    )
+
+
+def _is_c_abi_symbol_error(error_log: str) -> bool:
+    """Return True when *error_log* indicates a missing C-ABI symbol export."""
+    return (
+        re.search(
+            r"(?:undefined symbol:\s*\w+|AttributeError:.*has no attribute ['\"]\w+['\"])",
+            error_log,
+            re.IGNORECASE,
+        )
+        is not None
+    )
+
+
+def _patch_c_abi_loader(code: str, error_log: str) -> Optional[str]:
+    """Return *code* with a more permissive ctypes loader, or None if no patch applies."""
+    if not _is_c_abi_load_error(error_log):
+        return None
+    # If the loader uses _SO_CANDIDATES, wrap the CDLL call in a try/except so
+    # the real load failure is surfaced as a deterministic RuntimeError.
+    if "_LIB = ctypes.CDLL" in code and "try:" not in code:
+        return re.sub(
+            r"^(\s*)(_LIB\s*=\s*ctypes\.CDLL\([^)]+\))(.*)$",
+            r"\1try:\n\1    \2\3\n\1except OSError as _load_err:\n\1    raise RuntimeError(f\"Failed to load native library: {_load_err}\")",
+            code,
+            flags=re.MULTILINE,
+            count=1,
+        )
+    return None
+
+
+def _patch_missing_c_abi_symbol(code: str, error_log: str) -> Optional[str]:
+    """Return *code* with a guard around the missing C-ABI symbol lookup."""
+    if not _is_c_abi_symbol_error(error_log):
+        return None
+    match = re.search(
+        r"undefined symbol:\s*(\w+)|has no attribute ['\"](\w+)['\"]",
+        error_log,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    symbol = match.group(1) or match.group(2)
+    pattern = re.compile(
+        rf"(\s)({re.escape(symbol)})\s*=\s*_LIB\.{re.escape(symbol)}\b"
+    )
+    if not pattern.search(code):
+        return None
+
+    def repl(m: re.Match) -> str:
+        indent = m.group(1)
+        name = m.group(2)
+        return (
+            f"{indent}{name} = getattr(_LIB, {name!r}, None)\n"
+            f"{indent}if {name} is None:\n"
+            f'{indent}    raise RuntimeError(f"C-ABI symbol {name!r} is missing from native library")'
+        )
+
+    return pattern.sub(repl, code)
 
 
 def _make_function_variadic(code: str, name: str) -> Optional[str]:
@@ -136,7 +221,10 @@ def _make_function_variadic(code: str, name: str) -> Optional[str]:
 
     func = None
     for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+        if (
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == name
+        ):
             func = node
             break
     if func is None:

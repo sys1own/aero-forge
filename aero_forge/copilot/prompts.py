@@ -193,5 +193,20 @@ When the user asks for performance, speed, acceleration, optimize, Rust, C++, na
   "builder_prompt": "Build a hybrid_cpp_python C-ABI/ctypes native extension. Implement sliding_window_dtw as an extern \"C\" AERO_EXPORT function in src/native.cpp compiled into a shared library. Provide a Python loader in src/native_bridge.py using ctypes.CDLL, and pytest tests in tests/test_native.py comparing native output to a naive Python reference."
 }
 ```
+
+[POLYGLOT DIRECTORY & SYMBOL CONTRACT GUIDELINES]
+When the user requests a polyglot build (Python + Rust + C++), the clean prompt MUST:
+- Declare an architecture of `tri_polyglot_rust_cpp_python`, `hybrid_rust_python`, `hybrid_cpp_python`, or `hybrid_cpp_rust`.
+- Specify concrete directory/file paths. Preferred conventions:
+  * Rust PyO3 core: `rust_engine/src/lib.rs` with `rust_engine/Cargo.toml`.
+  * C-ABI shared library: `cpp_engine/src/kernels.cpp` with headers under `cpp_engine/include/` if needed.
+  * Python driver: `python_interface/__init__.py` and `python_interface/main.py`.
+- For each cross-language function, provide an exact signature and ABI contract:
+  * Rust/PyO3 exports use `#[pyfunction(name = "<python_name>")]` and `#[pymodule]` `fn <modname>(_py: Python, m: &PyModule) -> PyResult<()>`.
+  * C-ABI exports use `extern "C" AERO_EXPORT <type> <name>(...)` with scalar, pointer+length, or output-pointer signatures.
+  * Python `ctypes` loaders map `restype` and `argtypes` to the C-ABI contract.
+- Avoid generic stubs like `// TODO`, `todo!()`, or `pass` in exported functions. Request a real baseline implementation or an explicit `#[allow(unused_variables)]` / `(void)param;` suppression with a default return.
+- The Python package must be able to locate the compiled `.so`/`.dylib`/`.dll` from the workspace root (`dist/`, `target/release/`, `cpp_engine/src/`, `cpp_core/`, `src/`) without hardcoded relative paths.
+
 The `builder_prompt` must be the precise, runnable instruction passed to the Builder engine. It must contain ONLY raw, direct execution requirements with no meta-commentary, and must not end with `Target:` or `Acceleration:` tags.
 """

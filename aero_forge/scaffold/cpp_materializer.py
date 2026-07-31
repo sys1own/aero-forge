@@ -31,7 +31,14 @@ class CppBuildConfig:
     include_dirs: List[str]
     header_paths: List[str]
 
-from aero_forge.blueprint import Blueprint, ContractEntry, FunctionSpec, ManifestEntry, write_blueprint
+
+from aero_forge.blueprint import (
+    Blueprint,
+    ContractEntry,
+    FunctionSpec,
+    ManifestEntry,
+    write_blueprint,
+)
 from aero_forge.builder import language_router
 from aero_forge.builder.emitters.cpp_emitter import CppEmitter
 from aero_forge.builder.spec import (
@@ -78,7 +85,7 @@ def _extract_explicit_cpp_update(
     cpp_markers = (
         "hybrid_cpp_python",
         "c-abi",
-        "extern \"c\"",
+        'extern "c"',
         "extern 'c'",
         "ctypes",
         "native bridge",
@@ -88,7 +95,9 @@ def _extract_explicit_cpp_update(
         return None
 
     # Try an explicit C++ signature first.
-    sig_m = re.search(r"(?:fn|function)\s+(\w+)\s*\(([^)]*)\)\s*(?:->\s*(\S+))?", prompt)
+    sig_m = re.search(
+        r"(?:fn|function)\s+(\w+)\s*\(([^)]*)\)\s*(?:->\s*(\S+))?", prompt
+    )
     if sig_m:
         func = sig_m.group(1)
         arg_text = sig_m.group(2).strip()
@@ -104,7 +113,11 @@ def _extract_explicit_cpp_update(
     )
     if not name_m:
         # Last resort: any identifier that looks like a kernel (e.g. sliding_window_dtw).
-        name_m = re.search(r"\b([a-z_]\w+_dtw|[a-z_]\w+_distance|[a-z_]\w+_kernel)\b", prompt, re.IGNORECASE)
+        name_m = re.search(
+            r"\b([a-z_]\w+_dtw|[a-z_]\w+_distance|[a-z_]\w+_kernel)\b",
+            prompt,
+            re.IGNORECASE,
+        )
     if not name_m:
         return None
 
@@ -293,7 +306,11 @@ def _telemetry_source_for_contract(contract: ContractEntry) -> str:
             f"        total += {a_name}[i] * {b_name}[i]\n"
             "    return total\n"
         )
-    if len(list_args) == 1 and not scalar_args and return_type in ("float", "f64", "double", "int", "i64"):
+    if (
+        len(list_args) == 1
+        and not scalar_args
+        and return_type in ("float", "f64", "double", "int", "i64")
+    ):
         a_name = list_args[0][0]
         return (
             f"def {name}({a_name}: list[float]) -> {return_type}:\n"
@@ -312,6 +329,7 @@ def _accel_log(level: str, message: str) -> None:
         return
     try:
         import time
+
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"{timestamp} [{level}] {message}\n")
@@ -341,7 +359,9 @@ def _vector_transform_spec(pkg_name: str) -> EngineSpec:
     return EngineSpec(name=pkg_name, root=module(name=pkg_name, children=[func]))
 
 
-def _known_contract_spec(pkg_name: str, contract: ContractEntry) -> Optional[EngineSpec]:
+def _known_contract_spec(
+    pkg_name: str, contract: ContractEntry
+) -> Optional[EngineSpec]:
     """Return an EngineSpec for a contract whose C++ body is known in advance."""
     if not contract.signature:
         return None
@@ -356,10 +376,14 @@ def _known_contract_spec(pkg_name: str, contract: ContractEntry) -> Optional[Eng
 
 def _is_nested_list_type(type_hint: str) -> bool:
     th = (type_hint or "").strip()
-    return th.startswith("list[") and th.endswith("]") and _is_c_abi_list(th[5:-1].strip())
+    return (
+        th.startswith("list[") and th.endswith("]") and _is_c_abi_list(th[5:-1].strip())
+    )
 
 
-def _generic_c_abi_contract_spec(pkg_name: str, contract: ContractEntry) -> Optional[EngineSpec]:
+def _generic_c_abi_contract_spec(
+    pkg_name: str, contract: ContractEntry
+) -> Optional[EngineSpec]:
     """Build a default numeric EngineSpec for any C-ABI-compatible contract."""
     if not contract.signature:
         return None
@@ -371,7 +395,9 @@ def _generic_c_abi_contract_spec(pkg_name: str, contract: ContractEntry) -> Opti
         return None
     if not all(_is_c_abi_list(t) or _is_c_abi_scalar(t) for _, t in args):
         return None
-    if _is_nested_list_type(return_type) or any(_is_nested_list_type(t) for _, t in args):
+    if _is_nested_list_type(return_type) or any(
+        _is_nested_list_type(t) for _, t in args
+    ):
         return None
     list_args = [(a, t) for a, t in args if _is_c_abi_list(t)]
     scalar_args = [(a, t) for a, t in args if _is_c_abi_scalar(t)]
@@ -401,20 +427,34 @@ def _generic_c_abi_contract_spec(pkg_name: str, contract: ContractEntry) -> Opti
                 name=idx,
                 children=[
                     call("range", [call(f"{a_name}.size", [])]),
-                    block(children=[
-                        ASTNode(
-                            kind="aug_assign",
-                            name="total",
-                            value="+",
-                            children=[
-                                binary_op(
-                                    ASTNode(kind="subscript", children=[reference(a_name), reference(idx)]),
-                                    "*",
-                                    ASTNode(kind="subscript", children=[reference(b_name), reference(idx)]),
-                                )
-                            ],
-                        )
-                    ]),
+                    block(
+                        children=[
+                            ASTNode(
+                                kind="aug_assign",
+                                name="total",
+                                value="+",
+                                children=[
+                                    binary_op(
+                                        ASTNode(
+                                            kind="subscript",
+                                            children=[
+                                                reference(a_name),
+                                                reference(idx),
+                                            ],
+                                        ),
+                                        "*",
+                                        ASTNode(
+                                            kind="subscript",
+                                            children=[
+                                                reference(b_name),
+                                                reference(idx),
+                                            ],
+                                        ),
+                                    )
+                                ],
+                            )
+                        ]
+                    ),
                 ],
             )
             ret = return_node(reference("total"))
@@ -424,7 +464,9 @@ def _generic_c_abi_contract_spec(pkg_name: str, contract: ContractEntry) -> Opti
                 return_type=return_type,
                 body=[total, loop, ret],
             )
-            return EngineSpec(name=pkg_name, root=module(name=pkg_name, children=[func]))
+            return EngineSpec(
+                name=pkg_name, root=module(name=pkg_name, children=[func])
+            )
 
         # Single list -> sum
         if len(list_args) == 1 and not scalar_args:
@@ -434,14 +476,16 @@ def _generic_c_abi_contract_spec(pkg_name: str, contract: ContractEntry) -> Opti
                 name="x",
                 children=[
                     reference(list_name),
-                    block(children=[
-                        ASTNode(
-                            kind="aug_assign",
-                            name="total",
-                            value="+",
-                            children=[reference("x")],
-                        )
-                    ]),
+                    block(
+                        children=[
+                            ASTNode(
+                                kind="aug_assign",
+                                name="total",
+                                value="+",
+                                children=[reference("x")],
+                            )
+                        ]
+                    ),
                 ],
             )
             ret = return_node(reference("total"))
@@ -451,7 +495,9 @@ def _generic_c_abi_contract_spec(pkg_name: str, contract: ContractEntry) -> Opti
                 return_type=return_type,
                 body=[total, loop, ret],
             )
-            return EngineSpec(name=pkg_name, root=module(name=pkg_name, children=[func]))
+            return EngineSpec(
+                name=pkg_name, root=module(name=pkg_name, children=[func])
+            )
 
         # Single list + scalar -> weighted sum (x * scalar)
         if len(list_args) == 1 and len(scalar_args) == 1:
@@ -462,14 +508,20 @@ def _generic_c_abi_contract_spec(pkg_name: str, contract: ContractEntry) -> Opti
                 name="x",
                 children=[
                     reference(list_name),
-                    block(children=[
-                        ASTNode(
-                            kind="aug_assign",
-                            name="total",
-                            value="+",
-                            children=[binary_op(reference("x"), "*", reference(scalar_name))],
-                        )
-                    ]),
+                    block(
+                        children=[
+                            ASTNode(
+                                kind="aug_assign",
+                                name="total",
+                                value="+",
+                                children=[
+                                    binary_op(
+                                        reference("x"), "*", reference(scalar_name)
+                                    )
+                                ],
+                            )
+                        ]
+                    ),
                 ],
             )
             ret = return_node(reference("total"))
@@ -479,7 +531,9 @@ def _generic_c_abi_contract_spec(pkg_name: str, contract: ContractEntry) -> Opti
                 return_type=return_type,
                 body=[total, loop, ret],
             )
-            return EngineSpec(name=pkg_name, root=module(name=pkg_name, children=[func]))
+            return EngineSpec(
+                name=pkg_name, root=module(name=pkg_name, children=[func])
+            )
 
         # Generic scalar return: sum all scalar arguments and all list elements.
         body: List[ASTNode] = [total]
@@ -499,14 +553,16 @@ def _generic_c_abi_contract_spec(pkg_name: str, contract: ContractEntry) -> Opti
                     name="x",
                     children=[
                         reference(list_name),
-                        block(children=[
-                            ASTNode(
-                                kind="aug_assign",
-                                name="total",
-                                value="+",
-                                children=[reference("x")],
-                            )
-                        ]),
+                        block(
+                            children=[
+                                ASTNode(
+                                    kind="aug_assign",
+                                    name="total",
+                                    value="+",
+                                    children=[reference("x")],
+                                )
+                            ]
+                        ),
                     ],
                 )
             )
@@ -524,7 +580,11 @@ def _generic_c_abi_contract_spec(pkg_name: str, contract: ContractEntry) -> Opti
         if len(list_args) != 1 or len(scalar_args) > 1:
             return None
         list_name, list_type = list_args[0]
-        inner = _map_py_type(list_type[5:-1].strip()) if list_type.startswith("list[") and list_type.endswith("]") else "float"
+        inner = (
+            _map_py_type(list_type[5:-1].strip())
+            if list_type.startswith("list[") and list_type.endswith("]")
+            else "float"
+        )
         scalar_name = scalar_args[0][0] if scalar_args else None
 
         out = binding("out", list_literal([]), type_hint=return_type)
@@ -548,7 +608,9 @@ def _generic_c_abi_contract_spec(pkg_name: str, contract: ContractEntry) -> Opti
     return None
 
 
-def _contract_to_engine_spec(pkg_name: str, contract: ContractEntry) -> Optional[EngineSpec]:
+def _contract_to_engine_spec(
+    pkg_name: str, contract: ContractEntry
+) -> Optional[EngineSpec]:
     spec = _known_contract_spec(pkg_name, contract)
     if spec is not None:
         return spec
@@ -576,7 +638,11 @@ def _is_special_cpp_contract(contract: ContractEntry) -> bool:
     if "dtw" in name or "sliding_window" in name:
         list_args = [a for a, t in args if _is_c_abi_list(t)]
         scalar_args = [a for a, t in args if _is_c_abi_scalar(t)]
-        return len(list_args) == 2 and len(scalar_args) == 1 and _map_py_type(return_type) == "float"
+        return (
+            len(list_args) == 2
+            and len(scalar_args) == 1
+            and _map_py_type(return_type) == "float"
+        )
     return False
 
 
@@ -585,7 +651,12 @@ def _special_cpp_param_decl(a: str, t: str, *, is_output: bool = False) -> str:
         # All special ray-marching contracts currently operate on double arrays.
         # The output buffer (last list when returning a scalar count) is mutable.
         return f"{'double' if is_output else 'const double'}* {a}, size_t {a}_len"
-    ctype = {"float": "double", "int": "int64_t", "bool": "bool", "str": "const char*"}.get(_map_py_type(t), "double")
+    ctype = {
+        "float": "double",
+        "int": "int64_t",
+        "bool": "bool",
+        "str": "const char*",
+    }.get(_map_py_type(t), "double")
     return f"{ctype} {a}"
 
 
@@ -595,9 +666,9 @@ def _special_cpp_source(pkg_name: str, contract: ContractEntry) -> str:
         return ""
     name, args, return_type = _parse_signature(contract.signature)
     if name == "compute_sdf_sphere":
-        return '''extern "C" AERO_EXPORT double compute_sdf_sphere(double x, double y, double z, double radius) {
+        return """extern "C" AERO_EXPORT double compute_sdf_sphere(double x, double y, double z, double radius) {
     return std::sqrt(x * x + y * y + z * z) - radius;
-}'''
+}"""
     if "march" in name and "ray" in name:
         list_args = [a for a, t in args if _is_c_abi_list(t)]
         scalar_args = [a for a, t in args if _is_c_abi_scalar(t)]
@@ -609,7 +680,9 @@ def _special_cpp_source(pkg_name: str, contract: ContractEntry) -> str:
 
         # The last list argument is the output buffer only when an explicit output
         # array is supplied (more than two list parameters or a list return type).
-        output_list_arg = list_args[-1] if (not return_list and len(list_args) > 2) else None
+        output_list_arg = (
+            list_args[-1] if (not return_list and len(list_args) > 2) else None
+        )
         c_params = [
             _special_cpp_param_decl(a, t, is_output=(a == output_list_arg))
             for a, t in args
@@ -624,7 +697,11 @@ def _special_cpp_source(pkg_name: str, contract: ContractEntry) -> str:
         # present, otherwise derive it from the origins array length.
         count_var = None
         for a, t in args:
-            if _is_c_abi_scalar(t) and _map_py_type(t) == "int" and a in ("count", "n", "num", "length", "len"):
+            if (
+                _is_c_abi_scalar(t)
+                and _map_py_type(t) == "int"
+                and a in ("count", "n", "num", "length", "len")
+            ):
                 count_var = a
                 break
         if count_var:
@@ -648,52 +725,60 @@ def _special_cpp_source(pkg_name: str, contract: ContractEntry) -> str:
             body_lines.append("    double* out = new double[count_val];")
             body_lines.append("    *out_len = static_cast<size_t>(count_val);")
         body_lines.append("    for (int64_t i = 0; i < count_val; ++i) {")
-        body_lines.extend([
-            f"        double ox = {origins}[i * 3 + 0];",
-            f"        double oy = {origins}[i * 3 + 1];",
-            f"        double oz = {origins}[i * 3 + 2];",
-            f"        double dx = {dirs}[i * 3 + 0];",
-            f"        double dy = {dirs}[i * 3 + 1];",
-            f"        double dz = {dirs}[i * 3 + 2];",
-            "        double len = std::sqrt(dx * dx + dy * dy + dz * dz);",
-            "        if (len > 0.0) { dx /= len; dy /= len; dz /= len; }",
-            "        double t = 0.0;",
-            "        int64_t step = 0;",
-            "        for (; step < max_steps; ++step) {",
-            "            double px = ox + dx * t;",
-            "            double py = oy + dy * t;",
-            "            double pz = oz + dz * t;",
-            "            double dist = std::sqrt(px * px + py * py + pz * pz) - sphere_radius;",
-            "            if (dist < hit_threshold) {",
-        ])
+        body_lines.extend(
+            [
+                f"        double ox = {origins}[i * 3 + 0];",
+                f"        double oy = {origins}[i * 3 + 1];",
+                f"        double oz = {origins}[i * 3 + 2];",
+                f"        double dx = {dirs}[i * 3 + 0];",
+                f"        double dy = {dirs}[i * 3 + 1];",
+                f"        double dz = {dirs}[i * 3 + 2];",
+                "        double len = std::sqrt(dx * dx + dy * dy + dz * dz);",
+                "        if (len > 0.0) { dx /= len; dy /= len; dz /= len; }",
+                "        double t = 0.0;",
+                "        int64_t step = 0;",
+                "        for (; step < max_steps; ++step) {",
+                "            double px = ox + dx * t;",
+                "            double py = oy + dy * t;",
+                "            double pz = oz + dz * t;",
+                "            double dist = std::sqrt(px * px + py * py + pz * pz) - sphere_radius;",
+                "            if (dist < hit_threshold) {",
+            ]
+        )
         if return_list:
             body_lines.append("                out[i] = t;")
         else:
             body_lines.append(f"                {out_arg}[i] = t;")
-        body_lines.extend([
-            "                break;",
-            "            }",
-            "            t += dist;",
-            "            if (t > 1e6) { ",
-        ])
+        body_lines.extend(
+            [
+                "                break;",
+                "            }",
+                "            t += dist;",
+                "            if (t > 1e6) { ",
+            ]
+        )
         if return_list:
             body_lines.append("                out[i] = -1.0;")
         else:
             body_lines.append(f"                {out_arg}[i] = -1.0;")
-        body_lines.extend([
-            "                break;",
-            "            }",
-            "        }",
-            "        if (step == max_steps) { ",
-        ])
+        body_lines.extend(
+            [
+                "                break;",
+                "            }",
+                "        }",
+                "        if (step == max_steps) { ",
+            ]
+        )
         if return_list:
             body_lines.append("            out[i] = -1.0;")
         else:
             body_lines.append(f"            {out_arg}[i] = -1.0;")
-        body_lines.extend([
-            "        }",
-            "    }",
-        ])
+        body_lines.extend(
+            [
+                "        }",
+                "    }",
+            ]
+        )
         if return_list:
             body_lines.append("    return out;")
         else:
@@ -703,17 +788,25 @@ def _special_cpp_source(pkg_name: str, contract: ContractEntry) -> str:
     if "dtw" in name or "sliding_window" in name:
         list_args = [a for a, t in args if _is_c_abi_list(t)]
         scalar_args = [a for a, t in args if _is_c_abi_scalar(t)]
-        if len(list_args) == 2 and len(scalar_args) == 1 and _map_py_type(return_type) == "float":
+        if (
+            len(list_args) == 2
+            and len(scalar_args) == 1
+            and _map_py_type(return_type) == "float"
+        ):
             a_name, b_name = list_args[0], list_args[1]
             window_name = scalar_args[0]
-            return_list = _is_c_abi_list(return_type) or _is_c_abi_tuple_return(return_type)
-            output_list_arg = list_args[-1] if (not return_list and len(list_args) > 2) else None
+            return_list = _is_c_abi_list(return_type) or _is_c_abi_tuple_return(
+                return_type
+            )
+            output_list_arg = (
+                list_args[-1] if (not return_list and len(list_args) > 2) else None
+            )
             c_params = [
                 _special_cpp_param_decl(a, t, is_output=(a == output_list_arg))
                 for a, t in args
             ]
             sig = f'extern "C" AERO_EXPORT double {name}({", ".join(c_params)})'
-            return f'''{sig} {{
+            return f"""{sig} {{
     if (!{a_name} || !{b_name} || {a_name}_len == 0 || {b_name}_len == 0 || {window_name} <= 0) {{
         return -1.0;
     }}
@@ -744,7 +837,7 @@ def _special_cpp_source(pkg_name: str, contract: ContractEntry) -> str:
         prev.swap(cur);
     }}
     return prev[{b_name}_len - 1];
-}}'''
+}}"""
     return ""
 
 
@@ -758,7 +851,9 @@ def _c_function_decl(contract: ContractEntry) -> str:
         return_list = _is_c_abi_list(return_type) or _is_c_abi_tuple_return(return_type)
         # Only the last list argument is an output buffer when there are more than
         # two list parameters or the return type is itself a list.
-        output_list_arg = list_args[-1] if (not return_list and len(list_args) > 2) else None
+        output_list_arg = (
+            list_args[-1] if (not return_list and len(list_args) > 2) else None
+        )
         c_params = [
             _special_cpp_param_decl(a, t, is_output=(a == output_list_arg))
             for a, t in args
@@ -767,7 +862,12 @@ def _c_function_decl(contract: ContractEntry) -> str:
             c_params.append("size_t* out_len")
             ret = "double*"
         else:
-            tmap = {"float": "double", "int": "int64_t", "bool": "bool", "str": "const char*"}
+            tmap = {
+                "float": "double",
+                "int": "int64_t",
+                "bool": "bool",
+                "str": "const char*",
+            }
             ret = tmap.get(_map_py_type(return_type), "void")
         return f'    AERO_EXPORT {ret} {name}({", ".join(c_params)});'
 
@@ -790,11 +890,11 @@ def _generate_cpp_header(pkg_name: str, contracts: List[ContractEntry]) -> str:
     lines = [
         "#pragma once",
         "",
-        '#ifdef _WIN32',
-        '#define AERO_EXPORT __declspec(dllexport)',
-        '#else',
+        "#ifdef _WIN32",
+        "#define AERO_EXPORT __declspec(dllexport)",
+        "#else",
         '#define AERO_EXPORT __attribute__((visibility("default")))',
-        '#endif',
+        "#endif",
         "",
         "#include <cstdint>",
         "#include <cstddef>",
@@ -812,13 +912,15 @@ def _generate_cpp_header(pkg_name: str, contracts: List[ContractEntry]) -> str:
             lines.append(decl)
         except Exception:
             continue
-    lines.extend([
-        "",
-        "#ifdef __cplusplus",
-        "}",
-        "#endif",
-        "",
-    ])
+    lines.extend(
+        [
+            "",
+            "#ifdef __cplusplus",
+            "}",
+            "#endif",
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -839,7 +941,9 @@ def _generate_native_cpp(
             continue
         # Emit telemetry for each contract routed to C++.
         telemetry_source = _telemetry_source_for_contract(contract)
-        language_router.should_accelerate_with_native(telemetry_source, min_numeric_ops=2)
+        language_router.should_accelerate_with_native(
+            telemetry_source, min_numeric_ops=2
+        )
         language_router.select_native_backend(telemetry_source, hint="cpp")
         normal_contracts.append(contract)
 
@@ -862,15 +966,22 @@ def _generate_native_cpp(
 
     include_block = ""
     if header_includes:
-        include_block = "\n".join(f'#include "{Path(h).name}"' for h in header_includes) + "\n"
+        include_block = (
+            "\n".join(f'#include "{Path(h).name}"' for h in header_includes) + "\n"
+        )
 
     if special_contracts:
         special_parts = [_special_cpp_source(pkg_name, c) for c in special_contracts]
-        source = source.rstrip() + "\n\n" + "\n\n".join(p for p in special_parts if p) + "\n"
+        source = (
+            source.rstrip() + "\n\n" + "\n\n".join(p for p in special_parts if p) + "\n"
+        )
 
     if not specs and not special_contracts:
         # Keep the file syntactically valid even when nothing is accelerated.
-        return include_block + "// Auto-generated C-ABI shared library for aero-forge\n// No C-ABI-compatible contracts were detected.\n"
+        return (
+            include_block
+            + "// Auto-generated C-ABI shared library for aero-forge\n// No C-ABI-compatible contracts were detected.\n"
+        )
 
     return include_block + source
 
@@ -890,14 +1001,26 @@ def _generate_pyproject_toml(pkg_name: str) -> str:
 
 
 def _is_scalar_type(type_hint: str) -> bool:
-    return type_hint.lower().replace(" ", "") in ("int", "i64", "i32", "float", "f64", "f32", "bool", "str", "string")
+    return type_hint.lower().replace(" ", "") in (
+        "int",
+        "i64",
+        "i32",
+        "float",
+        "f64",
+        "f32",
+        "bool",
+        "str",
+        "string",
+    )
 
 
 def _is_list_type(type_hint: str) -> bool:
     return type_hint.lower().startswith("list[") and type_hint.endswith("]")
 
 
-def _generate_fallback_body(name: str, args: List[Tuple[str, str]], return_type: str) -> str:
+def _generate_fallback_body(
+    name: str, args: List[Tuple[str, str]], return_type: str
+) -> str:
     """Return a pure-Python fallback implementation from type patterns."""
     rt = return_type.lower().replace(" ", "")
     scalar_args = [(a, t) for a, t in args if _is_scalar_type(t)]
@@ -911,7 +1034,7 @@ def _generate_fallback_body(name: str, args: List[Tuple[str, str]], return_type:
     if "dict" in rt:
         if not args:
             return '    return {"status": "ok"}'
-        return '    return {}'
+        return "    return {}"
     if rt in ("int", "i64", "i32"):
         return "    return 0"
     if rt in ("float", "f64", "f32"):
@@ -955,7 +1078,9 @@ def _generate_init(
     pieces: List[str] = []
     if native_names:
         stub_source = "\n".join(_contract_to_python_stub(c) for c in native_contracts)
-        effective_so_path = so_path if so_path is not None else (pkg_dir / _so_name(pkg_name)).resolve()
+        effective_so_path = (
+            so_path if so_path is not None else (pkg_dir / _so_name(pkg_name)).resolve()
+        )
         loader_path = pkg_dir / "__init__.py"
         pieces.append(
             _ctypes_loader_source(
@@ -1028,7 +1153,11 @@ def _parse_arg_token(t: str, token: str) -> str:
     return token
 
 
-def _generate_cli(pkg_name: str, function_names: List[str], contracts: Optional[List[ContractEntry]] = None) -> str:
+def _generate_cli(
+    pkg_name: str,
+    function_names: List[str],
+    contracts: Optional[List[ContractEntry]] = None,
+) -> str:
     """Generate an interactive CLI that can also run headless commands."""
     contracts = contracts or []
     sigs: Dict[str, str] = {}
@@ -1060,48 +1189,58 @@ def _generate_cli(pkg_name: str, function_names: List[str], contracts: Optional[
         except Exception:
             continue
         if not args:
-            lines.extend([
-                f"def do_{name}(args: str = '') -> None:",
-                f'    """Call {name}."""',
-                f"    print({name}())",
-                "",
-            ])
+            lines.extend(
+                [
+                    f"def do_{name}(args: str = '') -> None:",
+                    f'    """Call {name}."""',
+                    f"    print({name}())",
+                    "",
+                ]
+            )
             continue
         usage_parts: List[str] = []
         token_vars: List[str] = []
         for idx, (a, t) in enumerate(args):
             usage_parts.append(f"<arg{idx}>" if _is_py_list_type(t) else f"<{a}>")
             token_vars.append(f"arg{idx}")
-        lines.extend([
-            f"def do_{name}(args: str = '') -> None:",
-            f'    """Usage: {name} {" ".join(usage_parts)}"""',
-            "    if not args:",
-            f'        print("Usage: {name} {" ".join(usage_parts)}")',
-            "        return",
-            f"    parts = args.split()",
-            f"    if len(parts) < {len(args)}:",
-            f'        print("Usage: {name} {" ".join(usage_parts)}")',
-            "        return",
-            "    try:",
-        ])
+        lines.extend(
+            [
+                f"def do_{name}(args: str = '') -> None:",
+                f'    """Usage: {name} {" ".join(usage_parts)}"""',
+                "    if not args:",
+                f'        print("Usage: {name} {" ".join(usage_parts)}")',
+                "        return",
+                f"    parts = args.split()",
+                f"    if len(parts) < {len(args)}:",
+                f'        print("Usage: {name} {" ".join(usage_parts)}")',
+                "        return",
+                "    try:",
+            ]
+        )
         parse_lines: List[str] = []
         call_args: List[str] = []
         for idx, (a, t) in enumerate(args):
-            parse_lines.append(f"        {token_vars[idx]} = {_parse_arg_token(t, f'parts[{idx}]')}")
+            parse_lines.append(
+                f"        {token_vars[idx]} = {_parse_arg_token(t, f'parts[{idx}]')}"
+            )
             call_args.append(token_vars[idx])
         lines.extend(parse_lines)
-        lines.extend([
-            "    except ValueError:",
-            f'        print("Usage: {name} {" ".join(usage_parts)}")',
-            "        return",
-            f"    print({name}({', '.join(call_args)}))",
-            "",
-        ])
+        lines.extend(
+            [
+                "    except ValueError:",
+                f'        print("Usage: {name} {" ".join(usage_parts)}")',
+                "        return",
+                f"    print({name}({', '.join(call_args)}))",
+                "",
+            ]
+        )
 
-    lines.extend([
-        "def run_all() -> None:",
-        '    """Run every exported function with sample arguments."""',
-    ])
+    lines.extend(
+        [
+            "def run_all() -> None:",
+            '    """Run every exported function with sample arguments."""',
+        ]
+    )
     for name in function_names:
         sig = sigs.get(name, "")
         if not sig:
@@ -1114,58 +1253,66 @@ def _generate_cli(pkg_name: str, function_names: List[str], contracts: Optional[
         lines.append(f'    print("{name}:", {name}({sample_call}))')
     lines.append("")
 
-    lines.extend([
-        "class AeroShell(cmd.Cmd):",
-        '    intro = "C++/ctypes REPL. Type \'help\' for commands, \'quit\' to exit."',
-        '    prompt = "cpp> "',
-        "",
-    ])
+    lines.extend(
+        [
+            "class AeroShell(cmd.Cmd):",
+            "    intro = \"C++/ctypes REPL. Type 'help' for commands, 'quit' to exit.\"",
+            '    prompt = "cpp> "',
+            "",
+        ]
+    )
     for name in function_names:
         if name not in sigs:
             continue
-        lines.extend([
-            f"    def do_{name}(self, args: str) -> None:",
-            f"        do_{name}(args)",
+        lines.extend(
+            [
+                f"    def do_{name}(self, args: str) -> None:",
+                f"        do_{name}(args)",
+                "",
+            ]
+        )
+    lines.extend(
+        [
+            "    def do_quit(self, args: str) -> bool:",
+            '        """Exit the REPL."""',
+            "        return True",
             "",
-        ])
-    lines.extend([
-        "    def do_quit(self, args: str) -> bool:",
-        '        """Exit the REPL."""',
-        "        return True",
-        "",
-        "    do_exit = do_quit",
-        "",
-        "def main(argv: Optional[List[str]] = None) -> int:",
-        '    parser = argparse.ArgumentParser(description="C++/ctypes CLI")',
-        '    parser.add_argument("commands", nargs="*")',
-        '    parser.add_argument("--cmd", default=None)',
-        "    ns = parser.parse_args(argv)",
-        "    shell = AeroShell()",
-        "    if ns.cmd:",
-        "        shell.onecmd(ns.cmd)",
-        "    elif ns.commands:",
-        "        shell.onecmd(' '.join(ns.commands))",
-        "    elif not sys.stdin.isatty():",
-        '        print("CLI ready")',
-        "        run_all()",
-        "    else:",
-        "        try:",
-        "            shell.cmdloop()",
-        "        except (EOFError, KeyboardInterrupt):",
-        "            print()",
-        "    return 0",
-        "",
-        'if __name__ == "__main__":',
-        "    sys.exit(main() or 0)",
-        "",
-    ])
+            "    do_exit = do_quit",
+            "",
+            "def main(argv: Optional[List[str]] = None) -> int:",
+            '    parser = argparse.ArgumentParser(description="C++/ctypes CLI")',
+            '    parser.add_argument("commands", nargs="*")',
+            '    parser.add_argument("--cmd", default=None)',
+            "    ns = parser.parse_args(argv)",
+            "    shell = AeroShell()",
+            "    if ns.cmd:",
+            "        shell.onecmd(ns.cmd)",
+            "    elif ns.commands:",
+            "        shell.onecmd(' '.join(ns.commands))",
+            "    elif not sys.stdin.isatty():",
+            '        print("CLI ready")',
+            "        run_all()",
+            "    else:",
+            "        try:",
+            "            shell.cmdloop()",
+            "        except (EOFError, KeyboardInterrupt):",
+            "            print()",
+            "    return 0",
+            "",
+            'if __name__ == "__main__":',
+            "    sys.exit(main() or 0)",
+            "",
+        ]
+    )
     return "\n".join(lines) + "\n"
 
 
-def _generate_dtw_test_source(pkg_module: str, func: str, args: List[Tuple[str, str]]) -> str:
+def _generate_dtw_test_source(
+    pkg_module: str, func: str, args: List[Tuple[str, str]]
+) -> str:
     """Return a pytest file that compares the C-ABI DTW to a naive Python reference."""
     arg_names = [a for a, _ in args]
-    return f'''import math
+    return f"""import math
 import sys
 from pathlib import Path
 
@@ -1208,7 +1355,7 @@ def test_{func}():
     expected = _naive_dtw(a, b, 3)
     got = {func}({', '.join([arg_names[0], arg_names[1], '3'])})
     assert math.isclose(got, expected, rel_tol=1e-9)
-'''
+"""
 
 
 def _generate_tests(blueprint: Blueprint, pkg_module: str) -> str:
@@ -1287,7 +1434,10 @@ def _load_v3_cpp_artifact(workspace: Path) -> Optional[Any]:
                 ArtifactType.python_extension,
             ):
                 continue
-            if any(Path(f).suffix in {".cpp", ".c", ".cc", ".cxx"} for f in artifact.source_files):
+            if any(
+                Path(f).suffix in {".cpp", ".c", ".cc", ".cxx"}
+                for f in artifact.source_files
+            ):
                 return artifact
     except Exception as exc:
         logger.debug("Could not load v3 C++ build artifact: %s", exc)
@@ -1358,6 +1508,58 @@ def _normalize_compiler_flags(flags: List[str]) -> Tuple[List[str], List[str]]:
     return include_dirs, cleaned
 
 
+def _collect_cpp_sources(source_path: Path) -> List[Path]:
+    """Discover C++ implementation files next to *source_path*.
+
+    If *source_path* is a file, all ``.cpp``/``.cc``/``.cxx`` siblings are
+    returned. If none are found the original file is used. If *source_path* is
+    a directory, every C++ source file directly inside it is returned.
+    """
+    base_dir = source_path.parent if source_path.is_file() else source_path
+    sources: List[Path] = []
+    if base_dir.is_dir():
+        for ext in ("*.cpp", "*.cc", "*.cxx"):
+            sources.extend(sorted(base_dir.glob(ext)))
+    if source_path.is_file() and not any(p == source_path for p in sources):
+        sources.insert(0, source_path)
+    if not sources:
+        return [source_path]
+    return sources
+
+
+def _collect_include_dirs(
+    source_path: Path, header_paths: List[str], workspace: Path
+) -> List[str]:
+    """Return absolute include directories for a C++ build.
+
+    Includes the source directory, the parent directories of declared header
+    paths, and any sibling ``include`` directories such as ``include/`` or
+    ``cpp_engine/include/``.
+    """
+    dirs: Set[str] = set()
+    if source_path.is_file() or source_path.suffix in {".cpp", ".cc", ".cxx"}:
+        base_dir = source_path.parent
+    else:
+        base_dir = source_path
+    if base_dir.is_dir():
+        dirs.add(str(base_dir.resolve()))
+
+    for h in header_paths:
+        parent = Path(h).parent
+        if parent.as_posix() not in (".", ""):
+            dirs.add(str((workspace / parent).resolve()))
+
+    for cand in (
+        base_dir / "include",
+        base_dir.parent / "include",
+        workspace / "include",
+    ):
+        if cand.is_dir():
+            dirs.add(str(cand.resolve()))
+
+    return sorted(dirs)
+
+
 def _merge_native_bridge(existing_text: str, generated_text: str) -> str:
     """Combine an existing ctypes bridge with a newly generated one.
 
@@ -1383,7 +1585,11 @@ def _merge_native_bridge(existing_text: str, generated_text: str) -> str:
             target = node.targets[0]
             if isinstance(target, _ast.Name) and target.id == "__all__":
                 try:
-                    existing_all = [elt.value for elt in node.value.elts if isinstance(elt, _ast.Constant) and isinstance(elt.value, str)]
+                    existing_all = [
+                        elt.value
+                        for elt in node.value.elts
+                        if isinstance(elt, _ast.Constant) and isinstance(elt.value, str)
+                    ]
                 except Exception:
                     pass
 
@@ -1400,7 +1606,11 @@ def _merge_native_bridge(existing_text: str, generated_text: str) -> str:
             target = node.targets[0]
             if isinstance(target, _ast.Name) and target.id == "__all__":
                 try:
-                    new_all = [elt.value for elt in node.value.elts if isinstance(elt, _ast.Constant) and isinstance(elt.value, str)]
+                    new_all = [
+                        elt.value
+                        for elt in node.value.elts
+                        if isinstance(elt, _ast.Constant) and isinstance(elt.value, str)
+                    ]
                 except Exception:
                     pass
 
@@ -1420,7 +1630,9 @@ def _merge_native_bridge(existing_text: str, generated_text: str) -> str:
     return "\n".join(result_lines) + "\n"
 
 
-def _merge_init_py(existing_text: str, func_name: str, bridge_module: str = "native_bridge") -> str:
+def _merge_init_py(
+    existing_text: str, func_name: str, bridge_module: str = "native_bridge"
+) -> str:
     """Add *func_name* import and export to an existing package __init__.py."""
     import_line = f"from .{bridge_module} import {func_name}"
     if import_line not in existing_text:
@@ -1435,7 +1647,9 @@ def _merge_init_py(existing_text: str, func_name: str, bridge_module: str = "nat
         if func_name not in all_list:
             all_list.append(func_name)
             start, end = all_match.span()
-            existing_text = existing_text[:start] + f"__all__ = {all_list!r}" + existing_text[end:]
+            existing_text = (
+                existing_text[:start] + f"__all__ = {all_list!r}" + existing_text[end:]
+            )
     else:
         existing_text = existing_text.rstrip() + f"\n__all__ = [{func_name!r}]\n"
     return existing_text
@@ -1447,8 +1661,10 @@ def _inject_so_package_data(pyproject_text: str, package_name: str) -> str:
     The existing ``[tool.setuptools.package-data]`` section is preserved; if it is
     missing, it is appended after the ``[project]`` section.
     """
-    section = f"[tool.setuptools.package-data]\n{package_name} = [\"*.so\"]\n"
-    match = re.search(r"^\[tool\.setuptools\.package-data\]\s*$", pyproject_text, re.MULTILINE)
+    section = f'[tool.setuptools.package-data]\n{package_name} = ["*.so"]\n'
+    match = re.search(
+        r"^\[tool\.setuptools\.package-data\]\s*$", pyproject_text, re.MULTILINE
+    )
     if match:
         section_start = match.end()
         section_end = len(pyproject_text)
@@ -1456,7 +1672,11 @@ def _inject_so_package_data(pyproject_text: str, package_name: str) -> str:
         if next_section:
             section_end = section_start + next_section.start()
         block = pyproject_text[section_start:section_end]
-        pkg_match = re.search(rf"^{re.escape(package_name)}\s*=\s*(\[.*?\])", block, re.MULTILINE | re.DOTALL)
+        pkg_match = re.search(
+            rf"^{re.escape(package_name)}\s*=\s*(\[.*?\])",
+            block,
+            re.MULTILINE | re.DOTALL,
+        )
         if pkg_match:
             try:
                 values: List[str] = eval(pkg_match.group(1))
@@ -1467,12 +1687,20 @@ def _inject_so_package_data(pyproject_text: str, package_name: str) -> str:
                 new_decl = f"{package_name} = {values!r}"
                 block = block[: pkg_match.start()] + new_decl + block[pkg_match.end() :]
             return pyproject_text[:section_start] + block + pyproject_text[section_end:]
-        return pyproject_text[:section_end] + f"{package_name} = [\"*.so\"]\n" + pyproject_text[section_end:]
+        return (
+            pyproject_text[:section_end]
+            + f'{package_name} = ["*.so"]\n'
+            + pyproject_text[section_end:]
+        )
 
-    project_match = re.search(r"^\[project\].*?^(?=\[|\Z)", pyproject_text, re.MULTILINE | re.DOTALL)
+    project_match = re.search(
+        r"^\[project\].*?^(?=\[|\Z)", pyproject_text, re.MULTILINE | re.DOTALL
+    )
     if project_match:
         insert_pos = project_match.end()
-        return pyproject_text[:insert_pos] + "\n" + section + pyproject_text[insert_pos:]
+        return (
+            pyproject_text[:insert_pos] + "\n" + section + pyproject_text[insert_pos:]
+        )
 
     return pyproject_text + "\n" + section
 
@@ -1523,49 +1751,52 @@ class CppPolyglotMaterializer:
 
         Prefers a v3 ``blueprint.aero`` ``BuildArtifact`` when present, then the
         v2 blueprint ``compiler_flags`` and manifest, then a minimal default.
+        Source files are discovered dynamically from the requested directory.
         """
         workspace = self.workspace
         artifact = None if explicit else _load_v3_cpp_artifact(workspace)
 
         if artifact is not None:
-            source_files = [workspace / f for f in artifact.source_files if Path(f).suffix in {".cpp", ".c", ".cc", ".cxx"}]
-            if not source_files:
-                source_files = [cpp_source_path]
-            output_path = _resolve_output_path(workspace, pkg_name, pkg_dir, artifact.output_path)
+            primary = (
+                workspace / artifact.source_files[0]
+                if artifact.source_files
+                else cpp_source_path
+            )
+            source_files = _collect_cpp_sources(primary)
+            output_path = _resolve_output_path(
+                workspace, pkg_name, pkg_dir, artifact.output_path
+            )
             compiler_flags = list(artifact.compiler_flags)
             linker_flags = list(artifact.linker_flags)
-            include_dirs: List[str] = []
-            header_paths = list(header_paths) + [f for f in artifact.source_files if Path(f).suffix in {".h", ".hpp"}]
+            header_paths = list(header_paths) + [
+                f for f in artifact.source_files if Path(f).suffix in {".h", ".hpp"}
+            ]
         elif explicit and explicit.get("cpp_path"):
-            source_files = [workspace / explicit["cpp_path"]]
-            output_path = (pkg_dir / _so_name(pkg_dir.name)).resolve()
+            primary = workspace / explicit["cpp_path"]
+            source_files = _collect_cpp_sources(primary)
+            output_path = (primary.parent / _so_name(pkg_name)).resolve()
             compiler_flags = list(getattr(blueprint, "compiler_flags", []) or [])
             linker_flags = []
-            include_dirs = []
         else:
-            source_files = [cpp_source_path]
-            output_path = (pkg_dir / _so_name(pkg_name)).resolve()
+            source_files = _collect_cpp_sources(cpp_source_path)
+            output_path = (cpp_source_path.parent / _so_name(pkg_name)).resolve()
             compiler_flags = list(getattr(blueprint, "compiler_flags", []) or [])
             linker_flags = []
-            include_dirs = []
 
         # Merge defaults with explicit flags, preserving user-provided optimization
         # and architecture flags (e.g., ``-O3 -march=native``).
         opt_flags = {f for f in compiler_flags if f in _OPTIMIZATION_FLAGS}
         extra_include_dirs, cleaned_flags = _normalize_compiler_flags(compiler_flags)
-        include_dirs += extra_include_dirs
 
         defaults = ["-shared", "-fPIC", "-std=c++17"]
         if not opt_flags:
             defaults.append("-O2")
         merged_flags = defaults + cleaned_flags
 
-        # Add header parent directories to the include search path so generated
-        # ``#include "header.h"`` directives resolve correctly.
-        for h in header_paths:
-            parent = Path(h).parent
-            if parent.as_posix() not in (".", ""):
-                include_dirs.append(str((workspace / parent).resolve()))
+        include_dirs = (
+            _collect_include_dirs(source_files[0], header_paths, workspace)
+            + extra_include_dirs
+        )
 
         return CppBuildConfig(
             source_files=source_files,
@@ -1594,7 +1825,9 @@ class CppPolyglotMaterializer:
             build_cmd.extend(config.linker_flags)
 
         self._log(f"Compiling C-ABI shared library: {' '.join(build_cmd)}")
-        _accel_log("info", f"BUILD: compiling dynamic shared object with {' '.join(build_cmd)}")
+        _accel_log(
+            "info", f"BUILD: compiling dynamic shared object with {' '.join(build_cmd)}"
+        )
 
         env = dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
@@ -1646,10 +1879,17 @@ class CppPolyglotMaterializer:
         cmake_path = self.workspace / "CMakeLists.txt"
         if not cmake_path.is_file():
             cpp_rel = cpp_source_path.relative_to(self.workspace).as_posix()
-            cmake_path.write_text(_generate_cmake(import_name, cpp_rel), encoding="utf-8")
+            cmake_path.write_text(
+                _generate_cmake(import_name, cpp_rel), encoding="utf-8"
+            )
 
         build_config = self._resolve_cpp_build_config(
-            blueprint, import_name, pkg_dir, cpp_source_path, header_paths=[], explicit=explicit
+            blueprint,
+            import_name,
+            pkg_dir,
+            cpp_source_path,
+            header_paths=[],
+            explicit=explicit,
         )
         so_path = build_config.output_path
         native_bridge_path = pkg_dir / "native_bridge.py"
@@ -1686,7 +1926,11 @@ class CppPolyglotMaterializer:
         if pyproject_path.is_file():
             pyproject_text = pyproject_path.read_text(encoding="utf-8")
             project_name = import_name
-            project_match = re.search(r'^\[project\]\s*\n(?:[^\[]*\n)*?name\s*=\s*"([^"]+)"', pyproject_text, re.MULTILINE)
+            project_match = re.search(
+                r'^\[project\]\s*\n(?:[^\[]*\n)*?name\s*=\s*"([^"]+)"',
+                pyproject_text,
+                re.MULTILINE,
+            )
             if project_match:
                 project_name = project_match.group(1)
             pyproject_path.write_text(
@@ -1708,60 +1952,132 @@ class CppPolyglotMaterializer:
         modification_plan = {
             "intent": "incremental_cpp_update",
             "actions": [
-                {"path": str(cpp_source_path.relative_to(self.workspace)), "action": "CREATE"},
-                {"path": str(native_bridge_path.relative_to(self.workspace)), "action": "CREATE" if not (pkg_dir / "native_bridge.py").is_file() else "MODIFY"},
-                {"path": str(init_path.relative_to(self.workspace)), "action": "MODIFY"},
-                {"path": str(pyproject_path.relative_to(self.workspace)) if pyproject_path.is_file() else "pyproject.toml", "action": "MODIFY"},
-                {"path": str(test_path.relative_to(self.workspace)), "action": "CREATE"},
+                {
+                    "path": str(cpp_source_path.relative_to(self.workspace)),
+                    "action": "CREATE",
+                },
+                {
+                    "path": str(native_bridge_path.relative_to(self.workspace)),
+                    "action": (
+                        "CREATE"
+                        if not (pkg_dir / "native_bridge.py").is_file()
+                        else "MODIFY"
+                    ),
+                },
+                {
+                    "path": str(init_path.relative_to(self.workspace)),
+                    "action": "MODIFY",
+                },
+                {
+                    "path": (
+                        str(pyproject_path.relative_to(self.workspace))
+                        if pyproject_path.is_file()
+                        else "pyproject.toml"
+                    ),
+                    "action": "MODIFY",
+                },
+                {
+                    "path": str(test_path.relative_to(self.workspace)),
+                    "action": "CREATE",
+                },
             ],
         }
 
-        blueprint = blueprint.model_copy(update={
-            "contracts": contracts,
-            "manifest": list(blueprint.manifest) + [
-                ManifestEntry(path=str(cpp_source_path.relative_to(self.workspace)), lang="cpp", purpose="C-ABI shared library source"),
-                ManifestEntry(path=str(native_bridge_path.relative_to(self.workspace)), lang="python", purpose="ctypes native bridge"),
-                ManifestEntry(path=str(init_path.relative_to(self.workspace)), lang="python", purpose="package init"),
-                ManifestEntry(path=str(test_path.relative_to(self.workspace)), lang="python", purpose="pytest tests"),
-            ],
-            "functions": [
-                FunctionSpec(
-                    file=native_bridge_path,
-                    name=func,
-                    tests=[test_path],
-                    skip_build=True,
-                )
-            ],
-            "modification_plan": modification_plan,
-        })
+        blueprint = blueprint.model_copy(
+            update={
+                "contracts": contracts,
+                "manifest": list(blueprint.manifest)
+                + [
+                    ManifestEntry(
+                        path=str(cpp_source_path.relative_to(self.workspace)),
+                        lang="cpp",
+                        purpose="C-ABI shared library source",
+                    ),
+                    ManifestEntry(
+                        path=str(native_bridge_path.relative_to(self.workspace)),
+                        lang="python",
+                        purpose="ctypes native bridge",
+                    ),
+                    ManifestEntry(
+                        path=str(init_path.relative_to(self.workspace)),
+                        lang="python",
+                        purpose="package init",
+                    ),
+                    ManifestEntry(
+                        path=str(test_path.relative_to(self.workspace)),
+                        lang="python",
+                        purpose="pytest tests",
+                    ),
+                ],
+                "functions": [
+                    FunctionSpec(
+                        file=native_bridge_path,
+                        name=func,
+                        tests=[test_path],
+                        skip_build=True,
+                    )
+                ],
+                "modification_plan": modification_plan,
+            }
+        )
         return blueprint
 
-    def materialize(self, blueprint: Blueprint, *, build: bool = False, force_overwrite: bool = False) -> Blueprint:
+    def materialize(
+        self,
+        blueprint: Blueprint,
+        *,
+        build: bool = False,
+        force_overwrite: bool = False,
+    ) -> Blueprint:
         """Write the C++ workspace files and optionally build the shared library."""
-        from aero_forge.scaffold.polyglot_materializer import _contracts_from_abi, _render_pyproject, guard_materialization
+        from aero_forge.scaffold.polyglot_materializer import (
+            _contracts_from_abi,
+            _render_pyproject,
+            guard_materialization,
+        )
 
-        explicit = _extract_explicit_cpp_update(getattr(blueprint, "prompt", None) or "")
+        explicit = _extract_explicit_cpp_update(
+            getattr(blueprint, "prompt", None) or ""
+        )
         if explicit and blueprint.architecture == INTENT_HYBRID_CPP_PYTHON:
             # An explicit function request in the prompt is treated as an LLM-initialized
             # incremental update so the guard does not reject it as uninitialized.
             if not getattr(blueprint, "metadata", None):
-                blueprint = blueprint.model_copy(update={"metadata": {"llm_initialized": "true"}})
+                blueprint = blueprint.model_copy(
+                    update={"metadata": {"llm_initialized": "true"}}
+                )
             elif "llm_initialized" not in blueprint.metadata:
-                blueprint = blueprint.model_copy(update={"metadata": {**dict(blueprint.metadata), "llm_initialized": "true"}})
+                blueprint = blueprint.model_copy(
+                    update={
+                        "metadata": {
+                            **dict(blueprint.metadata),
+                            "llm_initialized": "true",
+                        }
+                    }
+                )
 
-        guard_materialization(self.workspace, blueprint, force_overwrite=force_overwrite)
+        guard_materialization(
+            self.workspace, blueprint, force_overwrite=force_overwrite
+        )
 
         if explicit and blueprint.architecture == INTENT_HYBRID_CPP_PYTHON:
             return self._materialize_explicit_cpp_update(blueprint, build, explicit)
 
         project = blueprint.project or "polyglot_cpp_project"
         pkg_name = _sanitize_module_name(project)
-        contracts = list(blueprint.contracts) if blueprint.contracts else list(_DEFAULT_CONTRACTS)
+        contracts = (
+            list(blueprint.contracts)
+            if blueprint.contracts
+            else list(_DEFAULT_CONTRACTS)
+        )
         if not blueprint.contracts:
             blueprint.contracts = contracts
         if not blueprint.abi_contracts:
             from aero_forge.blueprint import _contracts_to_abi_contracts
-            blueprint.abi_contracts = _contracts_to_abi_contracts(contracts, list(blueprint.manifest))
+
+            blueprint.abi_contracts = _contracts_to_abi_contracts(
+                contracts, list(blueprint.manifest)
+            )
         if blueprint.abi_contracts:
             abi_entries = _contracts_from_abi(blueprint.abi_contracts)
             existing_names = {c.name for c in contracts}
@@ -1779,7 +2095,8 @@ class CppPolyglotMaterializer:
         tests_dir.mkdir(exist_ok=True)
 
         test_entries = [
-            e for e in blueprint.manifest
+            e
+            for e in blueprint.manifest
             if e.path.endswith(".py") and Path(e.path).name.startswith("test_")
         ]
         if test_entries:
@@ -1799,19 +2116,28 @@ class CppPolyglotMaterializer:
             else:
                 language_router.select_native_backend(stub, hint="rust_hin")
 
-        _accel_log("info", "Routing C++ selective acceleration through CppEmitter and CppPolyglotMaterializer")
+        _accel_log(
+            "info",
+            "Routing C++ selective acceleration through CppEmitter and CppPolyglotMaterializer",
+        )
 
         # Resolve C++ source and header paths from the blueprint manifest / module graph.
         cpp_entries = [
-            e for e in blueprint.manifest
-            if e.lang == "cpp" or Path(e.path).suffix in (".cpp", ".cc", ".cxx", ".h", ".hpp")
+            e
+            for e in blueprint.manifest
+            if e.lang == "cpp"
+            or Path(e.path).suffix in (".cpp", ".cc", ".cxx", ".h", ".hpp")
         ]
         cpp_source_entry = next(
             (e for e in cpp_entries if Path(e.path).suffix in (".cpp", ".cc", ".cxx")),
             None,
         )
         if cpp_source_entry is None:
-            cpp_source_entry = ManifestEntry(path=str(pkg_rel / "native.cpp"), lang="cpp", purpose="C-ABI shared library source")
+            cpp_source_entry = ManifestEntry(
+                path=str(pkg_rel / "native.cpp"),
+                lang="cpp",
+                purpose="C-ABI shared library source",
+            )
             blueprint.manifest.append(cpp_source_entry)
         cpp_source_path = self.workspace / cpp_source_entry.path
 
@@ -1829,28 +2155,45 @@ class CppPolyglotMaterializer:
             blueprint, pkg_name, pkg_dir, cpp_source_path, header_paths
         )
         cpp_source_path = build_config.source_files[0]
-        if not any(e.path == str(cpp_source_path.relative_to(self.workspace)) for e in blueprint.manifest):
+        if not any(
+            e.path == str(cpp_source_path.relative_to(self.workspace))
+            for e in blueprint.manifest
+        ):
             blueprint.manifest.append(
-                ManifestEntry(path=str(cpp_source_path.relative_to(self.workspace)), lang="cpp", purpose="C-ABI shared library source")
+                ManifestEntry(
+                    path=str(cpp_source_path.relative_to(self.workspace)),
+                    lang="cpp",
+                    purpose="C-ABI shared library source",
+                )
             )
 
         cpp_source_path.parent.mkdir(parents=True, exist_ok=True)
         cpp_source_path.write_text(
-            _generate_native_cpp(pkg_name, contracts, header_includes=[Path(h).name for h in build_config.header_paths]),
+            _generate_native_cpp(
+                pkg_name,
+                contracts,
+                header_includes=[Path(h).name for h in build_config.header_paths],
+            ),
             encoding="utf-8",
         )
 
         cmake_path = self.workspace / "CMakeLists.txt"
-        if not cmake_path.is_file() and "CMakeLists.txt" in {e.path for e in blueprint.manifest}:
+        if not cmake_path.is_file() and "CMakeLists.txt" in {
+            e.path for e in blueprint.manifest
+        }:
             cpp_rel = cpp_source_path.relative_to(self.workspace).as_posix()
             cmake_path.write_text(_generate_cmake(pkg_name, cpp_rel), encoding="utf-8")
 
         for header_path in build_config.header_paths:
             hdr_path = self.workspace / header_path
             hdr_path.parent.mkdir(parents=True, exist_ok=True)
-            hdr_path.write_text(_generate_cpp_header(pkg_name, contracts), encoding="utf-8")
+            hdr_path.write_text(
+                _generate_cpp_header(pkg_name, contracts), encoding="utf-8"
+            )
             if not any(e.path == header_path for e in blueprint.manifest):
-                blueprint.manifest.append(ManifestEntry(path=header_path, lang="cpp", purpose="C-ABI header"))
+                blueprint.manifest.append(
+                    ManifestEntry(path=header_path, lang="cpp", purpose="C-ABI header")
+                )
 
         (pkg_dir / "__init__.py").write_text(
             _generate_init(
@@ -1863,11 +2206,13 @@ class CppPolyglotMaterializer:
             encoding="utf-8",
         )
         (pkg_dir / "cli.py").write_text(
-            _generate_cli(pkg_module, function_names, contracts=contracts), encoding="utf-8"
+            _generate_cli(pkg_module, function_names, contracts=contracts),
+            encoding="utf-8",
         )
         pyproject_pkg_dir = str(pkg_rel.parent) if pkg_rel.parts[:-1] else "."
         (self.workspace / "pyproject.toml").write_text(
-            _render_pyproject(pkg_module, package_dir=pyproject_pkg_dir), encoding="utf-8"
+            _render_pyproject(pkg_module, package_dir=pyproject_pkg_dir),
+            encoding="utf-8",
         )
         (self.workspace / "run_shell.py").write_text(
             _generate_run_shell(f"{pkg_module}.cli"), encoding="utf-8"
@@ -1875,21 +2220,37 @@ class CppPolyglotMaterializer:
         (self.workspace / "README.md").write_text(
             _generate_readme(pkg_name), encoding="utf-8"
         )
-        test_path.write_text(
-            _generate_tests(blueprint, pkg_module), encoding="utf-8"
-        )
+        test_path.write_text(_generate_tests(blueprint, pkg_module), encoding="utf-8")
 
         # Manifest integrity: ensure every declared entry exists, including
         # any extra files requested by the module_graph/manifest (e.g. CMakeLists.txt).
-        self._write_missing_manifest_entries(blueprint, pkg_name, pkg_module, pkg_rel, contracts, function_names)
+        self._write_missing_manifest_entries(
+            blueprint, pkg_name, pkg_module, pkg_rel, contracts, function_names
+        )
 
         manifest: List[ManifestEntry] = [
-            ManifestEntry(path=str(cpp_source_path.relative_to(self.workspace)), lang="cpp", purpose="C-ABI shared library source"),
-            ManifestEntry(path=str(pkg_rel / "__init__.py"), lang="python", purpose="ctypes loader package init"),
-            ManifestEntry(path=str(pkg_rel / "cli.py"), lang="python", purpose="CLI module"),
-            ManifestEntry(path="pyproject.toml", lang="toml", purpose="project manifest"),
+            ManifestEntry(
+                path=str(cpp_source_path.relative_to(self.workspace)),
+                lang="cpp",
+                purpose="C-ABI shared library source",
+            ),
+            ManifestEntry(
+                path=str(pkg_rel / "__init__.py"),
+                lang="python",
+                purpose="ctypes loader package init",
+            ),
+            ManifestEntry(
+                path=str(pkg_rel / "cli.py"), lang="python", purpose="CLI module"
+            ),
+            ManifestEntry(
+                path="pyproject.toml", lang="toml", purpose="project manifest"
+            ),
             ManifestEntry(path="run_shell.py", lang="python", purpose="launcher"),
-            ManifestEntry(path=str(test_path.relative_to(self.workspace)), lang="python", purpose="tests"),
+            ManifestEntry(
+                path=str(test_path.relative_to(self.workspace)),
+                lang="python",
+                purpose="tests",
+            ),
             ManifestEntry(path="README.md", lang="markdown", purpose="docs"),
         ]
         existing_paths = {e.path for e in blueprint.manifest}
@@ -1956,14 +2317,27 @@ class CppPolyglotMaterializer:
                         workspace_root=self.workspace,
                     )
                 elif rel.name == "cli.py":
-                    content = _generate_cli(pkg_module, function_names, contracts=contracts)
+                    content = _generate_cli(
+                        pkg_module, function_names, contracts=contracts
+                    )
                 elif rel.name == "main.py":
-                    from aero_forge.scaffold.entrypoint_adapter import EntrypointAdapterEngine
-                    execution_strategy = blueprint.execution_strategy.model_dump() if blueprint.execution_strategy else {
-                        "primary_entrypoint": {"path": entry.path, "runtime": "python3", "wrapper_generation": True},
-                        "cli_contract": {"parser_type": "argparse", "flags": []},
-                        "run_spec": {},
-                    }
+                    from aero_forge.scaffold.entrypoint_adapter import (
+                        EntrypointAdapterEngine,
+                    )
+
+                    execution_strategy = (
+                        blueprint.execution_strategy.model_dump()
+                        if blueprint.execution_strategy
+                        else {
+                            "primary_entrypoint": {
+                                "path": entry.path,
+                                "runtime": "python3",
+                                "wrapper_generation": True,
+                            },
+                            "cli_contract": {"parser_type": "argparse", "flags": []},
+                            "run_spec": {},
+                        }
+                    )
                     main_pkg_module = self._dotted_module(rel.parent)
                     EntrypointAdapterEngine(
                         execution_strategy,
@@ -1974,8 +2348,26 @@ class CppPolyglotMaterializer:
                     ).synthesize_root_entrypoint()
                     continue
                 elif rel.name == "native_bridge.py":
-                    native_names = [n for n in function_names if _is_c_abi_contract(next((c for c in contracts if c.signature and _parse_signature(c.signature)[0] == n), ContractEntry(name="", signature="")))]
-                    stub = "\n".join(_contract_to_python_stub(c) for c in contracts if _is_c_abi_contract(c))
+                    native_names = [
+                        n
+                        for n in function_names
+                        if _is_c_abi_contract(
+                            next(
+                                (
+                                    c
+                                    for c in contracts
+                                    if c.signature
+                                    and _parse_signature(c.signature)[0] == n
+                                ),
+                                ContractEntry(name="", signature=""),
+                            )
+                        )
+                    ]
+                    stub = "\n".join(
+                        _contract_to_python_stub(c)
+                        for c in contracts
+                        if _is_c_abi_contract(c)
+                    )
                     so_path = (self.workspace / pkg_rel / _so_name(pkg_name)).resolve()
                     content = _ctypes_loader_source(
                         stub,

@@ -58,9 +58,18 @@ _TRIGGER_BUILD_RE = re.compile(
 
 # Meta wrappers and conversational preambles that must not leak into a build prompt.
 _META_PROMPT_PATTERNS = [
-    re.compile(r"^\s*Here(?:'s| is)?\s+(?:a\s+)?(?:detailed\s+)?(?:ready-to-use\s+)?prompt[^\n]*\n*", re.IGNORECASE | re.MULTILINE),
-    re.compile(r"^\s*You\s+can\s+paste(?:\s+this)?(?:\s+directly)?(?:\s+into|\s+in)?(?:\s+the\s+(?:builder|prompt))?[^\n]*\n*", re.IGNORECASE | re.MULTILINE),
-    re.compile(r"^\s*Below\s+is\s+(?:the\s+)?(?:build\s+)?prompt[^\n]*\n*", re.IGNORECASE | re.MULTILINE),
+    re.compile(
+        r"^\s*Here(?:'s| is)?\s+(?:a\s+)?(?:detailed\s+)?(?:ready-to-use\s+)?prompt[^\n]*\n*",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    re.compile(
+        r"^\s*You\s+can\s+paste(?:\s+this)?(?:\s+directly)?(?:\s+into|\s+in)?(?:\s+the\s+(?:builder|prompt))?[^\n]*\n*",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    re.compile(
+        r"^\s*Below\s+is\s+(?:the\s+)?(?:build\s+)?prompt[^\n]*\n*",
+        re.IGNORECASE | re.MULTILINE,
+    ),
     re.compile(r"^\s*Build\s+Contract\s*[:\-]?[^\n]*\n*", re.IGNORECASE | re.MULTILINE),
     re.compile(r"^\s*Build\s+Prompt\s*[:\-]?[^\n]*\n*", re.IGNORECASE | re.MULTILINE),
     re.compile(r"^\s*yaml\s+blueprint\s*[:\-]?[^\n]*\n*", re.IGNORECASE | re.MULTILINE),
@@ -72,19 +81,40 @@ _META_PROMPT_PATTERNS = [
 
 # Intro / outro phrases that may wrap a prompt when the LLM ignores the strict delimiters.
 _INTRO_PATTERNS = [
-    re.compile(r"^\s*(?:I['’]ll\s+give\s+you\s+a\s+(?:ready-to-use\s+)?(?:build\s+)?prompt[^\n]*(?:\n\n|\n))", re.IGNORECASE),
-    re.compile(r"^\s*(?:Here(?:'s| is)?\s+(?:a\s+)?(?:detailed\s+)?(?:ready-to-use\s+)?(?:build\s+)?prompt[^\n]*(?:\n\n|\n))", re.IGNORECASE),
-    re.compile(r"^\s*(?:Below\s+is\s+(?:the\s+)?(?:build\s+)?(?:ready-to-use\s+)?prompt[^\n]*(?:\n\n|\n))", re.IGNORECASE),
-    re.compile(r"^\s*(?:You\s+can\s+use\s+this\s+(?:build\s+)?prompt[^\n]*(?:\n\n|\n))", re.IGNORECASE),
+    re.compile(
+        r"^\s*(?:I['’]ll\s+give\s+you\s+a\s+(?:ready-to-use\s+)?(?:build\s+)?prompt[^\n]*(?:\n\n|\n))",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:Here(?:'s| is)?\s+(?:a\s+)?(?:detailed\s+)?(?:ready-to-use\s+)?(?:build\s+)?prompt[^\n]*(?:\n\n|\n))",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:Below\s+is\s+(?:the\s+)?(?:build\s+)?(?:ready-to-use\s+)?prompt[^\n]*(?:\n\n|\n))",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^\s*(?:You\s+can\s+use\s+this\s+(?:build\s+)?prompt[^\n]*(?:\n\n|\n))",
+        re.IGNORECASE,
+    ),
     re.compile(r"^\s*(?:This\s+(?:build\s+)?prompt[^\n]*(?:\n\n|\n))", re.IGNORECASE),
 ]
 
 _OUTRO_PATTERNS = [
-    re.compile(r"\n\s*(?:You\s+can\s+paste\s+(?:this\s+)?(?:directly\s+)?(?:into|in)\s+(?:the\s+)?(?:builder|prompt)[^\n]*)\s*$", re.IGNORECASE),
+    re.compile(
+        r"\n\s*(?:You\s+can\s+paste\s+(?:this\s+)?(?:directly\s+)?(?:into|in)\s+(?:the\s+)?(?:builder|prompt)[^\n]*)\s*$",
+        re.IGNORECASE,
+    ),
     re.compile(r"\n\s*(?:Let\s+me\s+know\s+if[^\n]*)\s*$", re.IGNORECASE),
-    re.compile(r"\n\s*(?:Suggested\s+Builder\s+Prompt|Copy|Edit\s+in\s+Builder)[^\n]*\s*$", re.IGNORECASE),
+    re.compile(
+        r"\n\s*(?:Suggested\s+Builder\s+Prompt|Copy|Edit\s+in\s+Builder)[^\n]*\s*$",
+        re.IGNORECASE,
+    ),
     re.compile(r"\n\s*(?:Here\s+is\s+the\s+full\s+prompt[^\n]*)\s*$", re.IGNORECASE),
-    re.compile(r"(?:\s*[,.-])?\s*Target:\s*[^\n]+(?:\s*Acceleration:\s*[^\n]+)?\s*$", re.IGNORECASE),
+    re.compile(
+        r"(?:\s*[,.-])?\s*Target:\s*[^\n]+(?:\s*Acceleration:\s*[^\n]+)?\s*$",
+        re.IGNORECASE,
+    ),
 ]
 
 # Preambles specifically for the *inside* of a builder prompt payload, e.g. when the
@@ -132,7 +162,8 @@ def _trigger_build_parameters(block: Dict[str, Any], text: str) -> Dict[str, Any
     target = _normalize_target(architecture) or _infer_target_from_text(builder_prompt)
     params = {
         "target": target or "pure_python",
-        "target_language": block["target_language"] or ("rust" if "rust" in (target or "") else "cpp"),
+        "target_language": block["target_language"]
+        or ("rust" if "rust" in (target or "") else "cpp"),
         "architecture": _normalize_target(architecture) or target or "pure_python",
         "target_files": block["target_files"],
         "acceleration": _normalize_acceleration(builder_prompt),
@@ -240,10 +271,16 @@ def _extract_wavefront_parallelism(raw: Any) -> Optional[int]:
 def _extract_engine_parameters(params: Dict[str, Any]) -> Dict[str, Any]:
     """Extract and normalize engine configuration fields from a parameter dict."""
     engine_backend = _normalize_engine_backend(params.get("engine_backend"))
-    wavefront_parallelism = _extract_wavefront_parallelism(params.get("wavefront_parallelism"))
-    precision_shield_mode = _normalize_precision_shield(params.get("precision_shield_mode"))
+    wavefront_parallelism = _extract_wavefront_parallelism(
+        params.get("wavefront_parallelism")
+    )
+    precision_shield_mode = _normalize_precision_shield(
+        params.get("precision_shield_mode")
+    )
     hin_jit_opt_level = _normalize_jit_level(
-        params.get("jit_optimization_level") if "jit_optimization_level" in params else params.get("hin_jit_opt_level")
+        params.get("jit_optimization_level")
+        if "jit_optimization_level" in params
+        else params.get("hin_jit_opt_level")
     )
     result: Dict[str, Any] = {}
     if engine_backend:
@@ -312,7 +349,12 @@ def _strip_outer_quotes(text: str) -> str:
     text = text.strip()
     while len(text) >= 2 and text[0] == text[-1] and text[0] in ('"', "'"):
         text = text[1:-1].strip()
-    text = text.replace('\\n', '\n').replace('\\t', '\t').replace('\\"', '"').replace("\\'", "'")
+    text = (
+        text.replace("\\n", "\n")
+        .replace("\\t", "\t")
+        .replace('\\"', '"')
+        .replace("\\'", "'")
+    )
     return text.strip()
 
 
@@ -321,7 +363,10 @@ def _extract_code_block_from_prompt(text: str) -> str:
     if not text:
         return text or ""
     # Prefer an explicit ```build_prompt fence, then any generic triple-backtick block.
-    for pattern in (_BUILD_PROMPT_FENCE_RE, re.compile(r"```(?:\w+)?\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)):
+    for pattern in (
+        _BUILD_PROMPT_FENCE_RE,
+        re.compile(r"```(?:\w+)?\s*\n(.*?)```", re.DOTALL | re.IGNORECASE),
+    ):
         match = pattern.search(text)
         if match:
             return match.group(1).strip()
@@ -330,7 +375,12 @@ def _extract_code_block_from_prompt(text: str) -> str:
 
 def _strip_trailing_metadata_tags(text: str) -> str:
     """Remove accidental trailing ``Target:`` and ``Acceleration:`` tags."""
-    return re.sub(r"(?:\s*[,.-])?\s*Target:\s*[^\n]+(?:\s*Acceleration:\s*[^\n]+)?\s*$", "", text, flags=re.IGNORECASE).strip()
+    return re.sub(
+        r"(?:\s*[,.-])?\s*Target:\s*[^\n]+(?:\s*Acceleration:\s*[^\n]+)?\s*$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    ).strip()
 
 
 def sanitize_builder_prompt(prompt_text: str) -> str:
@@ -420,8 +470,14 @@ def _remove_prompt_lines(text: str, prompt: str) -> str:
 
 # Meta headers that may appear above a duplicated prompt in the explanation.
 _EXPLANATION_META_HEADERS = [
-    re.compile(r"^\s*(?:Suggested\s+Builder\s+Prompt|Here\s+is\s+(?:the\s+)?prompt|Builder\s+Prompt|Build\s+Prompt)\s*[:\-]?\s*$", re.IGNORECASE | re.MULTILINE),
-    re.compile(r"^\s*The\s+suggested\s+build\s+prompt\s+is\s*[:\-]?\s*$", re.IGNORECASE | re.MULTILINE),
+    re.compile(
+        r"^\s*(?:Suggested\s+Builder\s+Prompt|Here\s+is\s+(?:the\s+)?prompt|Builder\s+Prompt|Build\s+Prompt)\s*[:\-]?\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    ),
+    re.compile(
+        r"^\s*The\s+suggested\s+build\s+prompt\s+is\s*[:\-]?\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    ),
 ]
 
 
@@ -499,7 +555,13 @@ class ActionParser:
         if not isinstance(data, dict):
             return None
         action = data.get("action") or {}
-        for key in ("suggested_prompt", "clean_prompt", "target_prompt", "build_prompt", "prompt"):
+        for key in (
+            "suggested_prompt",
+            "clean_prompt",
+            "target_prompt",
+            "build_prompt",
+            "prompt",
+        ):
             candidate = action.get(key) if isinstance(action, dict) else None
             if not candidate:
                 candidate = data.get(key)
@@ -524,7 +586,9 @@ class ActionParser:
         if isinstance(data, dict):
             action_data = data.get("action") or {}
             if isinstance(action_data, dict):
-                params = dict(action_data.get("parameters") or action_data.get("params") or {})
+                params = dict(
+                    action_data.get("parameters") or action_data.get("params") or {}
+                )
 
         target = (
             params.get("target")
@@ -534,8 +598,21 @@ class ActionParser:
         )
         acceleration = (
             params.get("acceleration")
-            or (action_data.get("acceleration") if isinstance(action_data, dict) else None)
+            or (
+                action_data.get("acceleration")
+                if isinstance(action_data, dict)
+                else None
+            )
             or (data.get("acceleration") if isinstance(data, dict) else None)
+        )
+        target_files = (
+            params.get("target_files")
+            or (
+                action_data.get("target_files")
+                if isinstance(action_data, dict)
+                else None
+            )
+            or (data.get("target_files") if isinstance(data, dict) else None)
         )
 
         if not target:
@@ -548,11 +625,14 @@ class ActionParser:
 
         engine_params = _extract_engine_parameters(params)
 
-        return {
+        result = {
             "target": target or "pure_python",
             "acceleration": acceleration,
             **engine_params,
         }
+        if target_files:
+            result["target_files"] = list(target_files)
+        return result
 
     def _extract_blueprint(self, data: Any) -> Optional[str]:
         """Return a raw blueprint string if one is embedded in the action."""
@@ -615,14 +695,18 @@ class ActionParser:
             try:
                 parsed_contract = yaml.safe_load(raw_contract)
                 if isinstance(parsed_contract, dict):
-                    prompt = parsed_contract.get("prompt") or parsed_contract.get("build_prompt")
+                    prompt = parsed_contract.get("prompt") or parsed_contract.get(
+                        "build_prompt"
+                    )
                     if isinstance(prompt, str) and prompt.strip():
                         return sanitize_builder_prompt(self.sanitize(prompt))
             except yaml.YAMLError:
                 try:
                     parsed_contract = json.loads(raw_contract)
                     if isinstance(parsed_contract, dict):
-                        prompt = parsed_contract.get("prompt") or parsed_contract.get("build_prompt")
+                        prompt = parsed_contract.get("prompt") or parsed_contract.get(
+                            "build_prompt"
+                        )
                         if isinstance(prompt, str) and prompt.strip():
                             return sanitize_builder_prompt(self.sanitize(prompt))
                 except json.JSONDecodeError:
@@ -685,7 +769,9 @@ class ActionParser:
         if data:
             legacy_action = data.get("action")
             if isinstance(legacy_action, dict):
-                legacy_params = legacy_action.get("params") or legacy_action.get("parameters") or {}
+                legacy_params = (
+                    legacy_action.get("params") or legacy_action.get("parameters") or {}
+                )
                 prompt = (
                     legacy_params.get("prompt")
                     or legacy_params.get("build_prompt")
@@ -698,9 +784,14 @@ class ActionParser:
                 if isinstance(prompt, str) and prompt.strip():
                     params = self._extract_parameters(prompt, data)
                     clean = sanitize_builder_prompt(self.sanitize(prompt))
-                    display_text = clean_explanation_text(self._extract_display_text(data, ""), clean)
+                    display_text = clean_explanation_text(
+                        self._extract_display_text(data, ""), clean
+                    )
                     action_type = legacy_action.get("type")
-                    if not action_type or action_type in ("PROPOSE_BUILD", "SUGGEST_BUILD_PROMPT"):
+                    if not action_type or action_type in (
+                        "PROPOSE_BUILD",
+                        "SUGGEST_BUILD_PROMPT",
+                    ):
                         action_type = "build"
                     return {
                         "display_text": display_text,
@@ -769,7 +860,9 @@ class ActionParser:
                 raw_prompt = tag.group(1)
                 clean = sanitize_builder_prompt(self.sanitize(raw_prompt))
                 display_text = tag_re.sub("", display_text)
-                display_text = clean_explanation_text(self.sanitize(display_text), clean)
+                display_text = clean_explanation_text(
+                    self.sanitize(display_text), clean
+                )
                 params = self._extract_parameters(raw_prompt, {})
                 return {
                     "display_text": display_text,
@@ -796,14 +889,20 @@ class ActionParser:
                     pass
             prompt = ""
             if isinstance(contract_data, dict):
-                prompt = contract_data.get("prompt") or contract_data.get("build_prompt") or ""
+                prompt = (
+                    contract_data.get("prompt")
+                    or contract_data.get("build_prompt")
+                    or ""
+                )
                 if not isinstance(prompt, str):
                     prompt = str(prompt)
             raw_prompt = prompt if prompt else raw_contract
             clean = sanitize_builder_prompt(self.sanitize(raw_prompt))
             display_text = _CODE_FENCE_RE.sub("", display_text)
             display_text = clean_explanation_text(self.sanitize(display_text), clean)
-            params = self._extract_parameters(raw_prompt, contract_data if isinstance(contract_data, dict) else {})
+            params = self._extract_parameters(
+                raw_prompt, contract_data if isinstance(contract_data, dict) else {}
+            )
             return {
                 "display_text": display_text,
                 "action": {
@@ -888,7 +987,9 @@ def extract_build_prompt(text: str) -> Tuple[str, Optional[str]]:
                 return reply, extracted
 
     # 3. XML-style fallback tags.
-    bp_match = _BUILDER_PROMPT_TAG_RE.search(stripped) or _LEGACY_BUILD_PROMPT_TAG_RE.search(stripped)
+    bp_match = _BUILDER_PROMPT_TAG_RE.search(
+        stripped
+    ) or _LEGACY_BUILD_PROMPT_TAG_RE.search(stripped)
     if bp_match:
         extracted = bp_match.group(1).strip()
         reply = ""
@@ -896,7 +997,9 @@ def extract_build_prompt(text: str) -> Tuple[str, Optional[str]]:
         if ex_match:
             reply = ex_match.group(1).strip()
         if not reply:
-            reply = _BUILDER_PROMPT_TAG_RE.sub("", _LEGACY_BUILD_PROMPT_TAG_RE.sub("", stripped)).strip()
+            reply = _BUILDER_PROMPT_TAG_RE.sub(
+                "", _LEGACY_BUILD_PROMPT_TAG_RE.sub("", stripped)
+            ).strip()
         return reply, extracted
 
     # 4. No prompt found.
@@ -967,7 +1070,12 @@ def parse_suggested_build_prompt(text: str) -> Dict[str, Any]:
             "raw": stripped,
         }
 
-    return {"explanation": stripped, "has_suggestion": False, "build_prompt": None, "raw": stripped}
+    return {
+        "explanation": stripped,
+        "has_suggestion": False,
+        "build_prompt": None,
+        "raw": stripped,
+    }
 
 
 def _build_suggestion(parsed: Dict[str, Any], raw: str) -> Dict[str, Any]:
@@ -1030,7 +1138,9 @@ def parse_action_from_text(text: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def _maybe_parse_json_object(response: str) -> Optional[Tuple[str, Optional[Dict[str, Any]]]]:
+def _maybe_parse_json_object(
+    response: str,
+) -> Optional[Tuple[str, Optional[Dict[str, Any]]]]:
     """Handle legacy top-level JSON responses with ``reply`` and ``action``."""
     text = response.strip()
     if not text.startswith("{"):
@@ -1095,7 +1205,10 @@ def parse_copilot_response(response: str) -> Tuple[str, Optional[Dict[str, Any]]
     if suggestion["has_suggestion"]:
         raw_prompt = suggestion["build_prompt"] or ""
         target = _normalize_target(raw_prompt) or _infer_target_from_text(raw_prompt)
-        reply = suggestion["explanation"] or _SUGGEST_JSON_FENCE_RE.sub("", response).strip()
+        reply = (
+            suggestion["explanation"]
+            or _SUGGEST_JSON_FENCE_RE.sub("", response).strip()
+        )
         reply = clean_explanation_text(reply, raw_prompt)
         action = {
             "type": "SUGGEST_BUILD_PROMPT",

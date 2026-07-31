@@ -90,9 +90,7 @@ class Engine:
             node.name for node in tree.body if isinstance(node, ast.ClassDef)
         }
         local_function_nodes = {
-            node.name: node
-            for node in tree.body
-            if isinstance(node, ast.FunctionDef)
+            node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)
         }
 
         # Expand the requested set to include any locally-defined helpers that
@@ -179,12 +177,12 @@ class Engine:
         if target_mode == TargetMode.C_ABI:
             cargo = (
                 f"[package]\n"
-                f"name = \"{crate_name}\"\n"
-                f"version = \"0.1.0\"\n"
-                f"edition = \"2021\"\n"
+                f'name = "{crate_name}"\n'
+                f'version = "0.1.0"\n'
+                f'edition = "2021"\n'
                 f"\n"
                 f"[lib]\n"
-                f"name = \"{crate_name}\"\n"
+                f'name = "{crate_name}"\n'
                 f'crate-type = ["cdylib"]\n'
                 f"\n"
                 f"[dependencies]\n"
@@ -199,23 +197,25 @@ class Engine:
                 f"{functions_section}"
                 "\n\n"
                 "#[no_mangle]\n"
-                "pub extern \"C\" fn free_buffer_i64(ptr: *mut i64, len: usize) {\n"
+                'pub extern "C" fn free_buffer_i64(ptr: *mut i64, len: usize) {\n'
                 "    if !ptr.is_null() { unsafe { let _ = Vec::from_raw_parts(ptr, len, len); } }\n"
                 "}\n"
                 "\n"
                 "#[no_mangle]\n"
-                "pub extern \"C\" fn free_buffer_f64(ptr: *mut f64, len: usize) {\n"
+                'pub extern "C" fn free_buffer_f64(ptr: *mut f64, len: usize) {\n'
                 "    if !ptr.is_null() { unsafe { let _ = Vec::from_raw_parts(ptr, len, len); } }\n"
                 "}\n"
                 "\n"
                 "#[no_mangle]\n"
-                "pub extern \"C\" fn free_buffer_bool(ptr: *mut bool, len: usize) {\n"
+                'pub extern "C" fn free_buffer_bool(ptr: *mut bool, len: usize) {\n'
                 "    if !ptr.is_null() { unsafe { let _ = Vec::from_raw_parts(ptr, len, len); } }\n"
                 "}\n"
             )
         else:
             cargo_template = (
-                resources.files("aero_forge.templates").joinpath("Cargo.toml").read_text()
+                resources.files("aero_forge.templates")
+                .joinpath("Cargo.toml")
+                .read_text()
             )
             lib_template = (
                 resources.files("aero_forge.templates").joinpath("lib.rs").read_text()
@@ -238,9 +238,7 @@ class Engine:
 
         return crate_root
 
-    def _emit_from_blueprint(
-        self, crate_root: Path, workspace_root: Path
-    ) -> None:
+    def _emit_from_blueprint(self, crate_root: Path, workspace_root: Path) -> None:
         """Copy generated crate files to the paths declared in ``workspace_root/blueprint.aero``.
 
         Raises ``BlueprintValidationError`` if a declared Rust/TOML file cannot
@@ -264,7 +262,9 @@ class Engine:
 
         # Map manifest paths and identify declared Cargo.toml / lib.rs directories.
         manifest_paths = {entry.path: entry for entry in blueprint.manifest}
-        cargo_dirs = {Path(p).parent for p in manifest_paths if Path(p).name == "Cargo.toml"}
+        cargo_dirs = {
+            Path(p).parent for p in manifest_paths if Path(p).name == "Cargo.toml"
+        }
         lib_paths = {Path(p) for p in manifest_paths if Path(p).name == "lib.rs"}
 
         crate_dirs: List[Path] = []
@@ -285,12 +285,14 @@ class Engine:
             dest_dir = workspace_root / crate_dir
             dest_dir.mkdir(parents=True, exist_ok=True)
             (dest_dir / "Cargo.toml").write_text(
-                (crate_root / "Cargo.toml").read_text(encoding="utf-8"), encoding="utf-8"
+                (crate_root / "Cargo.toml").read_text(encoding="utf-8"),
+                encoding="utf-8",
             )
             src_dir = dest_dir / "src"
             src_dir.mkdir(parents=True, exist_ok=True)
             (src_dir / "lib.rs").write_text(
-                (crate_root / "src" / "lib.rs").read_text(encoding="utf-8"), encoding="utf-8"
+                (crate_root / "src" / "lib.rs").read_text(encoding="utf-8"),
+                encoding="utf-8",
             )
             write_cargo_config(dest_dir)
 
@@ -301,9 +303,7 @@ class Engine:
         if root_cargo and not root_lib and crate_dirs:
             members = [str(d) for d in crate_dirs if d != Path(".")]
             workspace_toml = (
-                "[workspace]\n"
-                f'members = {json.dumps(members)}\n'
-                'resolver = "2"\n'
+                "[workspace]\n" f"members = {json.dumps(members)}\n" 'resolver = "2"\n'
             )
             (workspace_root / "Cargo.toml").write_text(workspace_toml, encoding="utf-8")
 
@@ -495,9 +495,7 @@ class RustGenerator:
                         if len(parts) == len(elts):
                             for typ, elt in zip(parts, elts):
                                 if isinstance(elt, ast.Name):
-                                    types[elt.id] = self._unify(
-                                        types.get(elt.id), typ
-                                    )
+                                    types[elt.id] = self._unify(types.get(elt.id), typ)
         elif isinstance(stmt, ast.AugAssign):
             target_type = None
             if isinstance(stmt.target, ast.Name):
@@ -518,7 +516,11 @@ class RustGenerator:
                 call = stmt.value
                 arg = call.args[0]
                 arg_expr_type = self._infer_expr_type(arg, types)
-                if _call_name(call) == "extend" and arg_expr_type and arg_expr_type.startswith("Vec<"):
+                if (
+                    _call_name(call) == "extend"
+                    and arg_expr_type
+                    and arg_expr_type.startswith("Vec<")
+                ):
                     element_type = _element_type(arg_expr_type)
                 else:
                     element_type = arg_expr_type or self.function_type
@@ -536,9 +538,7 @@ class RustGenerator:
                 isinstance(stmt.value, ast.Constant) and stmt.value.value is None
             ):
                 return
-            ret_type = (
-                self._infer_expr_type(stmt.value, types) or self.function_type
-            )
+            ret_type = self._infer_expr_type(stmt.value, types) or self.function_type
             types["__return__"] = self._unify(types.get("__return__"), ret_type)
             self._propagate_subscript_types(stmt.value, ret_type, types)
         elif isinstance(stmt, ast.For):
@@ -557,15 +557,26 @@ class RustGenerator:
             if name == "range" and isinstance(target, ast.Name) and target.id != "_":
                 types[target.id] = "i64"
             elif name in ("keys", "values", "items") and base is not None:
-                base_node = iter_expr.func.value if isinstance(iter_expr.func, ast.Attribute) else None
-                dict_type = self._infer_expr_type(base_node, types) if base_node else None
+                base_node = (
+                    iter_expr.func.value
+                    if isinstance(iter_expr.func, ast.Attribute)
+                    else None
+                )
+                dict_type = (
+                    self._infer_expr_type(base_node, types) if base_node else None
+                )
                 if dict_type and dict_type.startswith("BTreeMap<"):
                     key_type, val_type = _kv_types(dict_type)
                     if name in ("keys", "values") and isinstance(target, ast.Name):
                         types[target.id] = self._unify(
-                            types.get(target.id), key_type if name == "keys" else val_type
+                            types.get(target.id),
+                            key_type if name == "keys" else val_type,
                         )
-                    elif name == "items" and isinstance(target, ast.Tuple) and len(target.elts) == 2:
+                    elif (
+                        name == "items"
+                        and isinstance(target, ast.Tuple)
+                        and len(target.elts) == 2
+                    ):
                         k_elt, v_elt = target.elts
                         if isinstance(k_elt, ast.Name):
                             types[k_elt.id] = self._unify(types.get(k_elt.id), key_type)
@@ -1397,9 +1408,8 @@ class RustGenerator:
                     # Do not hoist list replication whose count depends on a
                     # variable before input guards (e.g. ``[True] * (n + 1)``
                     # may allocate a huge/zero buffer for negative ``n``).
-                    if (
-                        isinstance(stmt.value, ast.BinOp)
-                        and isinstance(stmt.value.op, ast.Mult)
+                    if isinstance(stmt.value, ast.BinOp) and isinstance(
+                        stmt.value.op, ast.Mult
                     ):
                         left_is_list = isinstance(stmt.value.left, ast.List)
                         right_is_list = isinstance(stmt.value.right, ast.List)
@@ -1458,9 +1468,7 @@ class RustGenerator:
     def _zero(self) -> str:
         return self._zero_for_type(self.return_type)
 
-    def _preferred_return_var(
-        self, return_type: Optional[str] = None
-    ) -> Optional[str]:
+    def _preferred_return_var(self, return_type: Optional[str] = None) -> Optional[str]:
         """Return the name of a local variable matching *return_type*.
 
         This is used to synthesise a trailing ``return`` when the Python source
@@ -1480,8 +1488,18 @@ class RustGenerator:
         ]
         if not candidates:
             return None
-        preferred = ("result", "out", "output", "results", "ret", "answer",
-                     "return_value", "values", "weighted_scores", "scores")
+        preferred = (
+            "result",
+            "out",
+            "output",
+            "results",
+            "ret",
+            "answer",
+            "return_value",
+            "values",
+            "weighted_scores",
+            "scores",
+        )
         for name in reversed(candidates):
             if name in preferred:
                 return name
@@ -1495,7 +1513,7 @@ class RustGenerator:
         if typ == "bool":
             return "false"
         if typ == "String":
-            return 'String::new()'
+            return "String::new()"
         if typ.startswith("BTreeMap<"):
             k, v = _kv_types(typ)
             return f"BTreeMap::<{k}, {v}>::new()"
@@ -1620,10 +1638,12 @@ class RustGenerator:
             for name, typ in zip(self.arg_names, self.arg_types)
         )
         return_type = self._return_type()
+        allow_unused = "#[allow(unused_variables)]\n"
         if self.target_mode == TargetMode.C_ABI:
-            header = f"fn {self.rust_function_name}({args}) -> {return_type} {{"
+            header = f"{allow_unused}fn {self.rust_function_name}({args}) -> {return_type} {{"
         else:
             header = (
+                f"{allow_unused}"
                 f'#[pyfunction(name = "{self.orig_name}")]\n'
                 f"fn {self.rust_function_name}({args}) -> {return_type} {{"
             )
@@ -1633,22 +1653,21 @@ class RustGenerator:
         # Recompute the most likely return variable against the actual signature
         # type, then synthesise a trailing ``return`` if the body does not end
         # with an explicit ``return`` statement and the function is not unit.
-        if (
-            body_stmts
-            and not isinstance(body_stmts[-1], ast.Return)
-            and return_type not in ("()", "None", "")
-        ):
-            return_var = self._preferred_return_var(return_type)
-            if (
-                isinstance(body_stmts[-1], ast.If)
-                and not body_stmts[-1].orelse
-                and self._block_returns(body_stmts[-1].body)
-            ):
+        if return_type not in ("()", "None", ""):
+            if not body_stmts:
                 body_lines.append(f"return {self._zero_for_type(return_type)};")
-            elif return_var:
-                body_lines.append(f"return {return_var};")
-            else:
-                body_lines.append(f"return {self._zero_for_type(return_type)};")
+            elif not isinstance(body_stmts[-1], ast.Return):
+                return_var = self._preferred_return_var(return_type)
+                if (
+                    isinstance(body_stmts[-1], ast.If)
+                    and not body_stmts[-1].orelse
+                    and self._block_returns(body_stmts[-1].body)
+                ):
+                    body_lines.append(f"return {self._zero_for_type(return_type)};")
+                elif return_var:
+                    body_lines.append(f"return {return_var};")
+                else:
+                    body_lines.append(f"return {self._zero_for_type(return_type)};")
         body = "\n".join(defaults + body_lines)
         indented = "\n".join("    " + line for line in body.splitlines())
         return f"{header}\n{indented}\n}}"
@@ -1704,7 +1723,7 @@ class RustGenerator:
             )
 
         return (
-            f'#[no_mangle]\n'
+            f"#[no_mangle]\n"
             f'pub extern "C" fn {self.safe_name}({", ".join(c_args)}) -> {c_ret} {{\n'
             f"    {body}\n"
             f"}}"
@@ -1818,9 +1837,8 @@ class RustGenerator:
             if isinstance(target, ast.Name):
                 name = target.id
                 is_empty_collection = (
-                    (isinstance(stmt.value, ast.List) and not stmt.value.elts)
-                    or (isinstance(stmt.value, ast.Dict) and not stmt.value.keys)
-                )
+                    isinstance(stmt.value, ast.List) and not stmt.value.elts
+                ) or (isinstance(stmt.value, ast.Dict) and not stmt.value.keys)
                 if is_empty_collection and name in self.type_env:
                     rhs_type = self.type_env[name]
                 else:
@@ -1830,7 +1848,11 @@ class RustGenerator:
                     and name not in self.arg_names
                     and name not in self.loop_vars
                     and not name.startswith(("__", "tmp"))
-                    and (self._return_var is None or self._return_var.startswith("__") or self._return_var.startswith("tmp"))
+                    and (
+                        self._return_var is None
+                        or self._return_var.startswith("__")
+                        or self._return_var.startswith("tmp")
+                    )
                 ):
                     self._return_var = name
                 value = self._strip_outer_parens(self._emit_expr(stmt.value, rhs_type))
@@ -1866,14 +1888,9 @@ class RustGenerator:
                 stmt.targets[0].id if isinstance(stmt.targets[0], ast.Name) else None
             )
             is_empty_collection = (
-                (isinstance(stmt.value, ast.List) and not stmt.value.elts)
-                or (isinstance(stmt.value, ast.Dict) and not stmt.value.keys)
-            )
-            if (
-                is_empty_collection
-                and first_name
-                and first_name in self.type_env
-            ):
+                isinstance(stmt.value, ast.List) and not stmt.value.elts
+            ) or (isinstance(stmt.value, ast.Dict) and not stmt.value.keys)
+            if is_empty_collection and first_name and first_name in self.type_env:
                 rhs_type = self.type_env[first_name]
             else:
                 rhs_type = self._type_of(stmt.value)
@@ -2138,15 +2155,11 @@ class RustGenerator:
             )
         start = "0_i64"
         if len(call.args) > 1:
-            start = self._strip_outer_parens(
-                self._emit_expr(call.args[1], "i64")
-            )
+            start = self._strip_outer_parens(self._emit_expr(call.args[1], "i64"))
         else:
             for kw in call.keywords:
                 if kw.arg == "start":
-                    start = self._strip_outer_parens(
-                        self._emit_expr(kw.value, "i64")
-                    )
+                    start = self._strip_outer_parens(self._emit_expr(kw.value, "i64"))
                     break
         element_type = _element_type(iterable_type)
         iter_rust = self._emit_expr(iterable, iterable_type)
@@ -2247,7 +2260,11 @@ class RustGenerator:
             else:
                 mut = "mut " if self._is_mutable(names[0]) else ""
                 target_str = f"{mut}{names[0]}"
-        parts = self._tuple_element_types(target_type) if _is_tuple_type(target_type) else [target_type] * len(names)
+        parts = (
+            self._tuple_element_types(target_type)
+            if _is_tuple_type(target_type)
+            else [target_type] * len(names)
+        )
         if len(parts) != len(names):
             raise UnsupportedError(
                 "Tuple target element count does not match iterator type", node=stmt
@@ -2269,9 +2286,7 @@ class RustGenerator:
                 "for ... in dict variable only supports dict/BTreeMap types", node=stmt
             )
         key_type, _ = _kv_types(dict_type)
-        dict_expr = self._emit_expr(
-            ast.Name(id=dict_name, ctx=ast.Load()), dict_type
-        )
+        dict_expr = self._emit_expr(ast.Name(id=dict_name, ctx=ast.Load()), dict_type)
         old = self.type_env.get(target_name)
         self.type_env[target_name] = key_type
         body = self._emit_body(stmt.body)
@@ -2462,10 +2477,7 @@ class RustGenerator:
             )
             return self._emit_constant(constant, ctx)
 
-        if (
-            isinstance(expr.value, ast.Name)
-            and expr.value.id in SAFE_STD_MODULES
-        ):
+        if isinstance(expr.value, ast.Name) and expr.value.id in SAFE_STD_MODULES:
             # Stub access to safe stdlib module attributes (e.g. sys.version,
             # time.time) to a typed zero value so they do not fail the build.
             return self._zero_for_type(ctx)
@@ -2504,7 +2516,14 @@ class RustGenerator:
         if isinstance(value, str):
             lowered = value.strip().lower()
             is_neg = lowered.startswith("-")
-            is_inf = lowered in {"inf", "infinity", "+inf", "+infinity", "-inf", "-infinity"}
+            is_inf = lowered in {
+                "inf",
+                "infinity",
+                "+inf",
+                "+infinity",
+                "-inf",
+                "-infinity",
+            }
             if is_inf:
                 rust_inf = "-f64::INFINITY" if is_neg else "f64::INFINITY"
                 if ctx == "f64":
@@ -2532,7 +2551,9 @@ class RustGenerator:
 
     def _emit_dict_literal(self, expr: ast.Dict, ctx: str) -> str:
         """Emit a Python dict literal as a Rust BTreeMap construction block."""
-        key_type, val_type = _kv_types(ctx) if ctx.startswith("BTreeMap<") else ("String", "String")
+        key_type, val_type = (
+            _kv_types(ctx) if ctx.startswith("BTreeMap<") else ("String", "String")
+        )
         if not expr.keys:
             return f"BTreeMap::<{key_type}, {val_type}>::new()"
         # Infer concrete types from the first key/value if no annotation was given.
@@ -2692,7 +2713,9 @@ class RustGenerator:
             "Unsupported list comprehension iterator or target", node=expr
         )
 
-    def _emit_subscript(self, expr: ast.Subscript, ctx: str, *, place: bool = False) -> str:
+    def _emit_subscript(
+        self, expr: ast.Subscript, ctx: str, *, place: bool = False
+    ) -> str:
         """Emit a subscript (possibly a chain) and borrow/clone as needed.
 
         When ``place`` is True, emit a place expression suitable for assignment
@@ -2756,7 +2779,9 @@ class RustGenerator:
                         if lower == "0":
                             iter_expr += f".take(({upper}) as usize)"
                         else:
-                            iter_expr += f".take((({upper}) - ({lower})).max(0) as usize)"
+                            iter_expr += (
+                                f".take((({upper}) - ({lower})).max(0) as usize)"
+                            )
                     access = (
                         f"{iter_expr}.step_by(({step_expr}) as usize)"
                         f".cloned().collect::<Vec<{element_type}>>"
@@ -2849,12 +2874,12 @@ class RustGenerator:
                     )
                 else:
                     default = self._zero_for_type(val_type)
-                    access = f"({access}).get(&{key_expr}).cloned().unwrap_or({default})"
+                    access = (
+                        f"({access}).get(&{key_expr}).cloned().unwrap_or({default})"
+                    )
                 final_type = val_type
             else:
-                raise UnsupportedError(
-                    f"Cannot index into type {final_type}", node=idx
-                )
+                raise UnsupportedError(f"Cannot index into type {final_type}", node=idx)
 
         # When the final value is a non-Copy container and the context expects an
         # owned value, clone it.  Scalar/copy types (i64, f64, bool) dereference
@@ -3226,7 +3251,9 @@ class RustGenerator:
                 arg_type = self._type_of(expr.args[0])
                 if arg_type.startswith("Vec<"):
                     arg = args[0]
-                    return f"({arg}).iter().cloned().reduce(|a, b| a.{method}(b)).unwrap()"
+                    return (
+                        f"({arg}).iter().cloned().reduce(|a, b| a.{method}(b)).unwrap()"
+                    )
             result = f"({args[0]})"
             for a in args[1:]:
                 result = f"({result}.{method}({a}))"
@@ -3244,18 +3271,19 @@ class RustGenerator:
 
         if base is None and name == "isinstance":
             if len(expr.args) != 2:
-                raise UnsupportedError("isinstance() takes exactly two arguments", node=expr)
+                raise UnsupportedError(
+                    "isinstance() takes exactly two arguments", node=expr
+                )
             obj_type = self._type_of(expr.args[0])
             type_arg = expr.args[1]
             if isinstance(type_arg, ast.Tuple):
-                names = {
-                    elt.id for elt in type_arg.elts if isinstance(elt, ast.Name)
-                }
+                names = {elt.id for elt in type_arg.elts if isinstance(elt, ast.Name)}
             elif isinstance(type_arg, ast.Name):
                 names = {type_arg.id}
             else:
                 raise UnsupportedError(
-                    "isinstance() type argument must be a type or tuple of types", node=expr
+                    "isinstance() type argument must be a type or tuple of types",
+                    node=expr,
                 )
             numeric = {"int", "float", "bool"}
             if names == {"int"}:
@@ -3303,7 +3331,12 @@ class RustGenerator:
             if isinstance(arg_node, ast.Constant) and isinstance(arg_node.value, str):
                 lowered = arg_node.value.strip().lower()
                 is_inf = lowered in {
-                    "inf", "infinity", "+inf", "+infinity", "-inf", "-infinity",
+                    "inf",
+                    "infinity",
+                    "+inf",
+                    "+infinity",
+                    "-inf",
+                    "-infinity",
                 }
                 if is_inf:
                     ctx = "f64" if name == "float" else "i64"
@@ -3328,17 +3361,25 @@ class RustGenerator:
 
         if base is None and name == "sum":
             if not expr.args:
-                raise UnsupportedError("sum() requires at least one argument", node=expr)
+                raise UnsupportedError(
+                    "sum() requires at least one argument", node=expr
+                )
             arg = expr.args[0]
             arg_type = self._type_of(arg)
             if not arg_type.startswith("Vec<"):
-                raise UnsupportedError("sum() is only supported on list/Vec types", node=expr)
+                raise UnsupportedError(
+                    "sum() is only supported on list/Vec types", node=expr
+                )
             arg_str = self._strip_outer_parens(self._emit_expr(arg, arg_type))
             if arg_type == "Vec<Vec<f64>>":
                 return f"({arg_str}).iter().map(|row| row.iter().sum::<f64>()).sum::<f64>()"
             return f"({arg_str}).iter().sum::<f64>()"
 
-        if base is None and name in self.local_function_nodes and name != self.func.name:
+        if (
+            base is None
+            and name in self.local_function_nodes
+            and name != self.func.name
+        ):
             callee = self.local_function_nodes[name]
             callee_arg_names = [a.arg for a in callee.args.args]
             callee_arg_types = self._annotated_arg_types(callee, callee_arg_names)
@@ -3376,7 +3417,9 @@ class RustGenerator:
             if len(expr.args) == 1:
                 idx = self._strip_outer_parens(self._emit_expr(expr.args[0], "i64"))
                 return f"{target_str}.remove(({idx}) as usize)"
-            raise UnsupportedError("pop() supports at most one index argument", node=expr)
+            raise UnsupportedError(
+                "pop() supports at most one index argument", node=expr
+            )
 
         if base is not None and name == "get":
             target_node = expr.func.value
@@ -3386,12 +3429,16 @@ class RustGenerator:
                     "dict.get() is only supported on dict/BTreeMap types", node=expr
                 )
             if not expr.args:
-                raise UnsupportedError("dict.get() requires at least one argument", node=expr)
+                raise UnsupportedError(
+                    "dict.get() requires at least one argument", node=expr
+                )
             key_type, val_type = _kv_types(target_type)
             target_str = self._emit_expr(target_node, target_type)
             key_expr = self._strip_outer_parens(self._emit_expr(expr.args[0], key_type))
             if len(expr.args) >= 2:
-                default_expr = self._strip_outer_parens(self._emit_expr(expr.args[1], val_type))
+                default_expr = self._strip_outer_parens(
+                    self._emit_expr(expr.args[1], val_type)
+                )
             else:
                 default_expr = self._zero_for_type(val_type)
             return f"({target_str}).get(&{key_expr}).cloned().unwrap_or({default_expr})"
@@ -3804,9 +3851,10 @@ class ClassMethodGenerator(RustGenerator):
             body = "\n".join(["    Self {"] + field_lines + ["    }"])
             return f"{header}\n{body}\n}}"
 
+        allow_unused = "#[allow(unused_variables)]\n"
         if self.is_staticmethod:
             header = (
-                f'#[staticmethod]\n#[pyo3(name = "{self.orig_name}")]\n'
+                f'{allow_unused}#[staticmethod]\n#[pyo3(name = "{self.orig_name}")]\n'
                 f"fn {self.rust_function_name}({args}) -> {return_type} {{"
             )
         elif self.is_classmethod:
@@ -3815,7 +3863,7 @@ class ClassMethodGenerator(RustGenerator):
             else:
                 sig_args = "cls: &PyType"
             header = (
-                f'#[classmethod]\n#[pyo3(name = "{self.orig_name}")]\n'
+                f'{allow_unused}#[classmethod]\n#[pyo3(name = "{self.orig_name}")]\n'
                 f"fn {self.rust_function_name}({sig_args}) -> {return_type} {{"
             )
         else:
@@ -3825,18 +3873,21 @@ class ClassMethodGenerator(RustGenerator):
             else:
                 sig_args = receiver
             header = (
+                f"{allow_unused}"
                 f'#[pyo3(name = "{self.orig_name}")]\n'
                 f"fn {self.rust_function_name}({sig_args}) -> {return_type} {{"
             )
         defaults, body_stmts = self._initializers_and_body()
         body_lines = [self._emit_stmt(s) for s in body_stmts]
-        if (
-            body_stmts
-            and isinstance(body_stmts[-1], ast.If)
-            and not body_stmts[-1].orelse
-            and self._block_returns(body_stmts[-1].body)
-        ):
-            body_lines.append(f"return {self._zero()};")
+        if return_type not in ("()", "None", ""):
+            if not body_stmts:
+                body_lines.append(f"return {self._zero()};")
+            elif (
+                isinstance(body_stmts[-1], ast.If)
+                and not body_stmts[-1].orelse
+                and self._block_returns(body_stmts[-1].body)
+            ):
+                body_lines.append(f"return {self._zero()};")
         body = "\n".join(defaults + body_lines)
         indented = "\n".join("    " + line for line in body.splitlines())
         return f"{header}\n{indented}\n}}"
@@ -4245,7 +4296,7 @@ def _kv_types(rust_type: str) -> Tuple[str, str]:
     prefix = "BTreeMap<"
     if not (rust_type.startswith(prefix) and rust_type.endswith(">")):
         return "String", "String"
-    inner = rust_type[len(prefix):-1]
+    inner = rust_type[len(prefix) : -1]
     depth = 0
     for i, ch in enumerate(inner):
         if ch in "(<[{":
@@ -4253,7 +4304,7 @@ def _kv_types(rust_type: str) -> Tuple[str, str]:
         elif ch in ")>]}":
             depth -= 1
         elif ch == "," and depth == 0:
-            return inner[:i].strip(), inner[i + 1:].strip()
+            return inner[:i].strip(), inner[i + 1 :].strip()
     return "String", "String"
 
 
@@ -4395,25 +4446,21 @@ serde_json = "1"
 
         handlers = []
         for name in functions:
-            handlers.append(
-                f"""async fn {name}_handler(body: String) -> String {{
+            handlers.append(f"""async fn {name}_handler(body: String) -> String {{
     let values: Vec<f64> = serde_json::from_str(&body).unwrap_or_default();
     let result = compute::{name}(
         values.get(0).copied().unwrap_or(0.0),
         values.get(1).copied().unwrap_or(0.0),
     );
     serde_json::to_string(&result).unwrap()
-}}"""
-            )
+}}""")
         handler_lines = "\n\n".join(handlers)
 
         compute_functions = []
         for name in functions:
-            compute_functions.append(
-                f"""pub fn {name}(a: f64, b: f64) -> f64 {{
+            compute_functions.append(f"""pub fn {name}(a: f64, b: f64) -> f64 {{
     a {('+' if name == 'add' else '*')} b
-}}"""
-            )
+}}""")
         compute_lines = "\n\n".join(compute_functions)
 
         (src / "main.rs").write_text(
@@ -4468,31 +4515,25 @@ clap = {{ version = "=4.5.30", features = ["derive"] }}
         match_arms = []
         for name in functions:
             op = "+" if name == "add" else "*"
-            match_arms.append(
-                f"""        Commands::{name.capitalize()} {{ a, b }} => {{
+            match_arms.append(f"""        Commands::{name.capitalize()} {{ a, b }} => {{
             println!(\"{{}}\", compute::{name}(a, b));
-        }}"""
-            )
+        }}""")
         arm_lines = "\n".join(match_arms)
 
         commands = []
         for name in functions:
-            commands.append(
-                f"""    {name.capitalize()} {{
+            commands.append(f"""    {name.capitalize()} {{
         a: f64,
         b: f64,
-    }},"""
-            )
+    }},""")
         command_lines = "\n".join(commands)
 
         compute_functions = []
         for name in functions:
             op = "+" if name == "add" else "*"
-            compute_functions.append(
-                f"""pub fn {name}(a: f64, b: f64) -> f64 {{
+            compute_functions.append(f"""pub fn {name}(a: f64, b: f64) -> f64 {{
     a {op} b
-}}"""
-            )
+}}""")
         compute_lines = "\n\n".join(compute_functions)
 
         (src / "main.rs").write_text(
@@ -4559,9 +4600,7 @@ description = "Aero-Forge generated Python hybrid package"
 
         functions = function_names or ["add"]
         stubs = [f"def {name}(a: float, b: float) -> float: ..." for name in functions]
-        (pkg_dir / "_native.pyi").write_text(
-            "\n".join(stubs) + "\n", encoding="utf-8"
-        )
+        (pkg_dir / "_native.pyi").write_text("\n".join(stubs) + "\n", encoding="utf-8")
 
         tests_dir = out / "tests"
         tests_dir.mkdir(parents=True, exist_ok=True)
