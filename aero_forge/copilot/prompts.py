@@ -43,6 +43,18 @@ Acceleration modes:
 - "Force Native Bridge"
 - "Standard Runtime (Bypass Bridge)"
 
+Engine configuration schema (pass these values inside `action.parameters`):
+- `engine_backend`: one of `hin_cpu` (default wavefront CPU), `hin_gpu` (CUDA/Vulkan GPU dispatch), `hin_wasm` (WebAssembly target).
+- `wavefront_parallelism`: integer between 1 and 16 controlling the GoI wavefront solver concurrency depth (default 4).
+- `precision_shield_mode`: one of `ieee` (strict IEEE-754 floats), `fast_math` (aggressive FP optimization), `shield_checks` (precision-shielded arbitrary-precision guards).
+- `jit_optimization_level`: one of `0` (Debug), `1` (Balanced), `2` (Max Graph Fusion & SIMD).
+
+Selection guidance:
+- High-performance, SIMD, GPU, or `fast-math` requests: use `hin_gpu`, `fast_math`, `jit_optimization_level=2`, and tune `wavefront_parallelism` to 8.
+- Safety-critical, numerical-stability, or precision-shielded requests: use `hin_cpu`, `shield_checks`, `jit_optimization_level=1`.
+- Debug/iteration/quick builds: use `hin_cpu`, `ieee`, `jit_optimization_level=0`, `wavefront_parallelism=4`.
+- WebAssembly / browser targets: use `hin_wasm`, `ieee`, `jit_optimization_level=1`, `wavefront_parallelism=1`.
+
 RESPONSE FORMAT (MANDATORY):
 Return a single JSON object with exactly two top-level keys: `display_text` and `action`.
 
@@ -97,7 +109,51 @@ Example response for a tri-polyglot project design request:
     "clean_prompt": "Build a tri_polyglot_rust_cpp_python workspace. Create rust_core/src/lib.rs exposing a scheduler with C-ABI bindings and a PyO3 module. Create cpp_engine/src/runner.cpp with C-ABI task execution functions. Create python_interface/main.py that drives the Rust scheduler and loads task results. Define clear function signatures, caller-allocated memory, and a blueprint.aero with entrypoints.",
     "parameters": {
       "target": "tri_polyglot_rust_cpp_python",
-      "acceleration": "Selective Acceleration (Auto-Detect Heavy Compute)"
+      "acceleration": "Selective Acceleration (Auto-Detect Heavy Compute)",
+      "engine_backend": "hin_cpu",
+      "wavefront_parallelism": 4,
+      "precision_shield_mode": "ieee",
+      "jit_optimization_level": 1
+    }
+  }
+}
+```
+
+Example response for a high-performance SIMD matrix multiplier:
+
+```json
+{
+  "display_text": "Use a Rust PyO3 extension with target-cpu=native and fast-math precision for maximum throughput.",
+  "action": {
+    "type": "build",
+    "clean_prompt": "Build a hybrid_rust_python workspace that implements a fast SIMD-friendly matrix multiplication kernel. Expose matmul(a, b) as a PyO3 function in rust_core/src/lib.rs that takes two list[list[float]] inputs, validates dimensions, and returns a Vec<Vec<f64>>. Provide a Python driver and pytest tests comparing against a pure-Python reference.",
+    "parameters": {
+      "target": "hybrid_rust_python",
+      "acceleration": "Force Native Bridge",
+      "engine_backend": "hin_gpu",
+      "wavefront_parallelism": 8,
+      "precision_shield_mode": "fast_math",
+      "jit_optimization_level": 2
+    }
+  }
+}
+```
+
+Example response for a WASM fibonacci module:
+
+```json
+{
+  "display_text": "Compile a tiny recursive fibonacci function to a standalone WebAssembly module.",
+  "action": {
+    "type": "build",
+    "clean_prompt": "Build a wasm workspace. Implement fibonacci(n: int) -> int in src/fibonacci.py using an iterative loop, then compile it to a WebAssembly module with a generated JavaScript loader and a pytest-like node smoke test.",
+    "parameters": {
+      "target": "wasm",
+      "acceleration": "Standard Runtime (Bypass Bridge)",
+      "engine_backend": "hin_wasm",
+      "wavefront_parallelism": 1,
+      "precision_shield_mode": "ieee",
+      "jit_optimization_level": 1
     }
   }
 }

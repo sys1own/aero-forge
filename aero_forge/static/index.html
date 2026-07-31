@@ -2763,6 +2763,13 @@
       const cleanPrompt = (action && action.clean_prompt) ? action.clean_prompt : (msgCleanPrompt || '');
       const target = parameters.target || '';
       const acceleration = parameters.acceleration || '';
+      const engineConfig = {
+        build_profile: parameters.build_profile || '',
+        engine_backend: parameters.engine_backend || '',
+        wavefront_parallelism: parameters.wavefront_parallelism || '',
+        precision_shield_mode: parameters.precision_shield_mode || '',
+        hin_jit_opt_level: parameters.hin_jit_opt_level !== undefined ? parameters.hin_jit_opt_level : ''
+      };
 
       const content = document.createElement('div');
       content.className = 'msg-content';
@@ -2786,7 +2793,7 @@
 
         const meta = document.createElement('div');
         meta.className = 'action-meta';
-        meta.textContent = (target ? 'Target: ' + target + ' • ' : '') + (acceleration || 'Selective Acceleration');
+        meta.textContent = (target ? 'Target: ' + target + ' • ' : '') + (acceleration || 'Selective Acceleration') + (engineConfig.engine_backend ? ' • Backend: ' + engineConfig.engine_backend : '');
         card.appendChild(meta);
 
         const editor = document.createElement('textarea');
@@ -2812,13 +2819,13 @@
         const editBtn = document.createElement('button');
         editBtn.className = 'btn';
         editBtn.textContent = 'Edit in Builder';
-        editBtn.addEventListener('click', () => populateBuildTab(getLivePrompt(card), target, acceleration));
+        editBtn.addEventListener('click', () => populateBuildTab(getLivePrompt(card), target, acceleration, engineConfig));
         buttons.appendChild(editBtn);
 
         const triggerBtn = document.createElement('button');
         triggerBtn.className = 'btn btn-primary';
         triggerBtn.textContent = type === 'trigger_build' ? 'Trigger Build' : 'Send to Builder & Run';
-        triggerBtn.addEventListener('click', () => triggerBuildFromChat(getLivePrompt(card), target, acceleration));
+        triggerBtn.addEventListener('click', () => triggerBuildFromChat(getLivePrompt(card), target, acceleration, engineConfig));
         buttons.appendChild(triggerBtn);
 
         card.appendChild(buttons);
@@ -2839,14 +2846,41 @@
       if (state.editor) state.editor.layout();
     }
 
-    function setBuildForm(prompt, target, acceleration) {
+    function setBuildForm(prompt, target, acceleration, engineConfig = {}) {
       ui.promptInput.value = prompt || '';
       if (target && ui.targetLanguage) {
         const opts = Array.from(ui.targetLanguage.options);
         const match = opts.find(o => o.value === target);
         if (match) ui.targetLanguage.value = target;
       }
-      if (acceleration && ui.engineBackend) {
+
+      const profileName = String(engineConfig.build_profile || '');
+      const backend = String(engineConfig.engine_backend || '');
+      const parallelism = String(engineConfig.wavefront_parallelism || '');
+      const shield = String(engineConfig.precision_shield_mode || '');
+      const jit = String(engineConfig.hin_jit_opt_level || '');
+
+      if (backend && ui.engineBackend) ui.engineBackend.value = backend;
+      if (parallelism && ui.wavefrontParallelism) ui.wavefrontParallelism.value = parallelism;
+      if (shield && ui.precisionShieldMode) ui.precisionShieldMode.value = shield;
+      if (jit !== '' && ui.hinJitOptLevel) ui.hinJitOptLevel.value = jit;
+
+      if (profileName && BUILD_PROFILES[profileName] && ui.buildProfile) {
+        const expected = BUILD_PROFILES[profileName];
+        if (backend === expected.engineBackend &&
+            (parallelism || String(expected.wavefrontParallelism)) === String(expected.wavefrontParallelism) &&
+            (shield || expected.precisionShieldMode) === expected.precisionShieldMode &&
+            (jit !== '' ? parseInt(jit, 10) : expected.hinJitOptLevel) === expected.hinJitOptLevel) {
+          ui.buildProfile.value = profileName;
+        } else {
+          ui.buildProfile.value = 'custom';
+        }
+      } else if ((backend || parallelism || shield || jit !== '') && ui.buildProfile) {
+        ui.buildProfile.value = 'custom';
+      }
+
+      // Legacy acceleration label compatibility.
+      if (acceleration && !backend && ui.engineBackend) {
         const accMap = {
           'HIN-CPU Multi-Threaded (Wavefront solver)': 'hin_cpu',
           'HIN-GPU / CUDA / Vulkan': 'hin_gpu',
@@ -2860,14 +2894,14 @@
       }
     }
 
-    function triggerBuildFromChat(prompt, target, acceleration) {
-      setBuildForm(prompt, target, acceleration);
+    function triggerBuildFromChat(prompt, target, acceleration, engineConfig = {}) {
+      setBuildForm(prompt, target, acceleration, engineConfig);
       showBuildTab();
       runBuild();
     }
 
-    function populateBuildTab(prompt, target, acceleration) {
-      setBuildForm(prompt, target, acceleration);
+    function populateBuildTab(prompt, target, acceleration, engineConfig = {}) {
+      setBuildForm(prompt, target, acceleration, engineConfig);
       showBuildTab();
     }
 

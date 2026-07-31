@@ -42,6 +42,7 @@ from aero_forge.bundle_repo import (
     create_project_zip,
     zip_export_filename,
 )
+from aero_forge.builder.context import normalize_engine_options
 from aero_forge.chat import (
     ChatSession,
     get_session_metadata,
@@ -298,10 +299,13 @@ async def _handle_build_async(request: web.Request) -> web.Response:
     variants = 3 if body.get("variants") else 1
     target_language = body.get("target_language", body.get("target", "auto"))
     acceleration_policy = body.get("acceleration_policy", "selective")
-    engine_backend = body.get("engine_backend", acceleration_policy)
-    wavefront_parallelism = body.get("wavefront_parallelism")
-    precision_shield_mode = body.get("precision_shield_mode")
-    hin_jit_opt_level = body.get("hin_jit_opt_level")
+
+    engine_config = normalize_engine_options(body)
+    engine_backend = engine_config["engine_backend"]
+    wavefront_parallelism = engine_config["wavefront_parallelism"]
+    precision_shield_mode = engine_config["precision_shield_mode"]
+    hin_jit_opt_level = engine_config["hin_jit_opt_level"]
+
     architecture = body.get("architecture")
     config = ConfigOverride(
         llm_provider=body.get("provider"),
@@ -746,6 +750,9 @@ def _canonicalize_chat_action(result: Dict[str, Any]) -> Optional[Dict[str, Any]
         or params.get("acceleration")
         or "Selective Acceleration (Auto-Detect Heavy Compute)"
     )
+
+    engine_config = normalize_engine_options(parameters or params)
+
     action_type = "build"
     if legacy.get("type") == "PROPOSE_BUILD" and params.get("blueprint"):
         action_type = "apply_blueprint"
@@ -753,7 +760,15 @@ def _canonicalize_chat_action(result: Dict[str, Any]) -> Optional[Dict[str, Any]
     return {
         "type": action_type,
         "clean_prompt": prompt,
-        "parameters": {"target": target, "acceleration": acceleration},
+        "parameters": {
+            "target": target,
+            "acceleration": acceleration,
+            "build_profile": engine_config["build_profile"],
+            "engine_backend": engine_config["engine_backend"],
+            "wavefront_parallelism": engine_config["wavefront_parallelism"],
+            "precision_shield_mode": engine_config["precision_shield_mode"],
+            "hin_jit_opt_level": engine_config["hin_jit_opt_level"],
+        },
         "blueprint": params.get("blueprint"),
     }
 
