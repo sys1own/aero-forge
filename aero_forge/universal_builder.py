@@ -45,6 +45,7 @@ from aero_forge.orchestrator.stack_classifier import (
     StackClassification,
     classify_stack,
     default_manifest_for_architecture,
+    extract_source_directories,
 )
 from aero_forge.scaffold.cpp_materializer import CppPolyglotMaterializer
 from aero_forge.scaffold.hybrid_cpp_rust_materializer import HybridCppRustMaterializer
@@ -122,9 +123,23 @@ def _sanitize_module_name(name: str) -> str:
     return sanitized
 
 
-def _extract_explicit_paths(prompt: str) -> list[str]:
-    """Find Python file paths explicitly named in *prompt*."""
-    return re.findall(r"\b[A-Za-z_][\w/]*\.py\b", prompt)
+def _extract_explicit_file_paths(prompt: str) -> List[Tuple[str, str]]:
+    """Find source file paths explicitly named in a prompt.
+
+    Returns a list of ``(path, lang)`` tuples for .py, .cpp/.cc/.cxx, .h/.hpp,
+    and .rs files so the manifest can honor non-standard directory layouts.
+    """
+    pattern = re.compile(r"\b([A-Za-z_][\w/]*\.(?:py|cpp|cc|cxx|h|hpp|rs))\b")
+    result: List[Tuple[str, str]] = []
+    for p in pattern.findall(prompt):
+        suffix = p.rsplit(".", 1)[-1].lower()
+        if suffix == "py":
+            result.append((p, "python"))
+        elif suffix in ("cpp", "cc", "cxx", "h", "hpp"):
+            result.append((p, "cpp"))
+        elif suffix == "rs":
+            result.append((p, "rust"))
+    return result
 
 
 def _is_explicit_native_rust_update(prompt: str) -> bool:
@@ -145,12 +160,12 @@ def _augment_blueprint_with_explicit_paths(
     project_name: str,
     features: list[str],
 ) -> Blueprint:
-    """Add Python file paths explicitly requested in *prompt* to the manifest.
+    """Add source file paths explicitly requested in *prompt* to the manifest.
 
     Filters out bare file names (e.g. ``main.py`` mentioned in a ``python main.py``
     command) when the materializer already emits the same file inside a package.
     """
-    explicit = _extract_explicit_paths(prompt)
+    explicit = _extract_explicit_file_paths(prompt)
     if not explicit:
         return blueprint
     existing = {e.path for e in blueprint.manifest}
@@ -163,7 +178,7 @@ def _augment_blueprint_with_explicit_paths(
     }
 
     additions: List[ManifestEntry] = []
-    for p in explicit:
+    for p, lang in explicit:
         if p in existing:
             continue
         parts = Path(p).parts
@@ -171,7 +186,7 @@ def _augment_blueprint_with_explicit_paths(
         # ``<pkg>/main.py``, don't add a conflicting top-level main.py.
         if len(parts) == 1 and parts[0] in existing_names and existing_package_names:
             continue
-        additions.append(ManifestEntry(path=p, lang="python", purpose="user requested"))
+        additions.append(ManifestEntry(path=p, lang=lang, purpose="user requested"))
 
     if additions:
         fallback = _hybrid_fallback_blueprint(project_name, features, prompt=prompt)
@@ -264,25 +279,26 @@ def _hybrid_fallback_blueprint(
             ),
         ]
 
-    explicit = _extract_explicit_paths(prompt)
-    pkg_name = _sanitize_module_name(project_name)
+    explicit = _extract_explicit_file_paths(prompt)
+    dirs = extract_source_directories(prompt)
+    pkg_name = _sanitize_module_name(dirs["python_package"] or project_name)
     non_package_dirs = {"tests", "src", "scripts", "examples", "docs"}
     explicit_packages: set[str] = set()
-    for p in explicit:
+    for p, _ in explicit:
         parts = Path(p).parts
         if len(parts) > 1 and parts[0] not in non_package_dirs:
             explicit_packages.add(parts[0])
-    if explicit_packages:
-        pkg_name = _sanitize_module_name(sorted(explicit_packages)[0])
 
     if is_tri:
+        cpp_entry = dirs["cpp_source"] or "cpp_core/native.cpp"
+        rust_crate_dir = dirs["rust_crate_dir"] or "rust_core"
+        rust_cargo = f"{rust_crate_dir}/Cargo.toml"
+        rust_lib = f"{rust_crate_dir}/src/lib.rs"
         manifest = [
             ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust workspace manifest"),
-            ManifestEntry(path="rust_core/Cargo.toml", lang="toml", purpose="PyO3 crate manifest"),
-            ManifestEntry(path="rust_core/src/lib.rs", lang="rust", purpose="Rust native core"),
-            ManifestEntry(
-                path="cpp_core/native.cpp", lang="cpp", purpose="C-ABI shared library source"
-            ),
+            ManifestEntry(path=rust_cargo, lang="toml", purpose="PyO3 crate manifest"),
+            ManifestEntry(path=rust_lib, lang="rust", purpose="Rust native core"),
+            ManifestEntry(path=cpp_entry, lang="cpp", purpose="C-ABI shared library source"),
             ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python package manifest"),
             ManifestEntry(
                 path=f"{pkg_name}/__init__.py", lang="python", purpose="Python driver package"
@@ -294,6 +310,11 @@ def _hybrid_fallback_blueprint(
             ManifestEntry(path="tests/test_tri.py", lang="python", purpose="pytest tests"),
             ManifestEntry(path="README.md", lang="markdown", purpose="docs"),
         ]
+        if dirs["cpp_header"]:
+            manifest.insert(
+                3,
+                ManifestEntry(path=dirs["cpp_header"], lang="cpp", purpose="C-ABI header"),
+            )
         toolchains = ["python", "rust", "cpp", "cargo"]
         architecture = INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON
     elif is_cpp:
@@ -316,9 +337,9 @@ def _hybrid_fallback_blueprint(
         architecture = INTENT_HYBRID_RUST_PYTHON
 
     # Collect requested files per package and decide whether a default package is needed.
-    requested_root_files = {Path(p).name for p in explicit if len(Path(p).parts) == 1}
+    requested_root_files = {Path(p).name for p, _ in explicit if len(Path(p).parts) == 1}
     requested_package_files: Dict[str, List[str]] = {}
-    for p in explicit:
+    for p, _ in explicit:
         parts = Path(p).parts
         if len(parts) > 1 and parts[0] not in non_package_dirs:
             requested_package_files.setdefault(parts[0], []).append(Path(p).name)
@@ -361,10 +382,11 @@ def _hybrid_fallback_blueprint(
 
     # Add the exact files requested by the user, skipping ones already covered.
     covered = {Path(e.path).name for e in manifest}
-    for p in explicit:
+    for p, lang in explicit:
         if Path(p).name in covered or Path(p).name == "__init__.py":
             continue
-        manifest.append(ManifestEntry(path=p, lang="python", purpose="user requested"))
+        manifest.append(ManifestEntry(path=p, lang=lang, purpose="user requested"))
+        covered.add(Path(p).name)
 
     # Provide native test coverage.
     if not is_tri:

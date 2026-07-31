@@ -707,10 +707,12 @@ def _sanitize_project_name(name: str) -> str:
     return sanitized
 
 
-def required_manifest_for_intent(intent: str, project_name: str) -> List[Dict[str, str]]:
+def required_manifest_for_intent(
+    intent: str, project_name: str, prompt: str = ""
+) -> List[Dict[str, str]]:
     """Return required workspace files for the requested architecture."""
     main = "compute"
-    return default_manifest_for_architecture(intent, project_name, main)
+    return default_manifest_for_architecture(intent, project_name, main, prompt=prompt)
 
 
 __all__ = [

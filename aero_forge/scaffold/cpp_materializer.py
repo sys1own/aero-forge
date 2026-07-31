@@ -173,7 +173,7 @@ def _make_cpp_update(
     """Build the explicit-C++ update metadata dict."""
     test_m = re.search(r"tests?/(\S+\.py)", prompt)
     test_path = f"tests/test_{func}.py" if not test_m else f"tests/{test_m.group(1)}"
-    cpp_m = re.search(r"(src/[\w/]+/\w+\.cpp|cpp_core/[\w/]+\.cpp|native\.cpp)", prompt)
+    cpp_m = re.search(r"([A-Za-z_][\w/]*/\w+\.cpp|native\.cpp)", prompt)
     cpp_path = cpp_m.group(1) if cpp_m else None
     return {
         "function": func,
@@ -925,7 +925,13 @@ def _generate_fallback_body(name: str, args: List[Tuple[str, str]], return_type:
     return "    return None"
 
 
-def _generate_init(pkg_name: str, pkg_dir: Path, contracts: List[ContractEntry], so_path: Optional[Path] = None) -> str:
+def _generate_init(
+    pkg_name: str,
+    pkg_dir: Path,
+    contracts: List[ContractEntry],
+    so_path: Optional[Path] = None,
+    workspace_root: Optional[Path] = None,
+) -> str:
     """Generate ``__init__.py`` that loads the C-ABI .so via ctypes."""
     native_contracts = [c for c in contracts if _is_c_abi_contract(c)]
     fallback_contracts = [c for c in contracts if c not in native_contracts]
@@ -950,7 +956,16 @@ def _generate_init(pkg_name: str, pkg_dir: Path, contracts: List[ContractEntry],
     if native_names:
         stub_source = "\n".join(_contract_to_python_stub(c) for c in native_contracts)
         effective_so_path = so_path if so_path is not None else (pkg_dir / _so_name(pkg_name)).resolve()
-        pieces.append(_ctypes_loader_source(stub_source, effective_so_path, native_names))
+        loader_path = pkg_dir / "__init__.py"
+        pieces.append(
+            _ctypes_loader_source(
+                stub_source,
+                effective_so_path,
+                native_names,
+                workspace_root=workspace_root,
+                loader_path=loader_path,
+            )
+        )
 
     for contract in fallback_contracts:
         if not contract.signature:
@@ -1642,6 +1657,8 @@ class CppPolyglotMaterializer:
             f"def {func}({', '.join(f'{a}: {t}' for a, t in args)}) -> {return_type}:\n    pass\n",
             so_path,
             [func],
+            workspace_root=self.workspace,
+            loader_path=native_bridge_path,
         )
         if native_bridge_path.is_file():
             existing_bridge = native_bridge_path.read_text(encoding="utf-8")
@@ -1836,7 +1853,14 @@ class CppPolyglotMaterializer:
                 blueprint.manifest.append(ManifestEntry(path=header_path, lang="cpp", purpose="C-ABI header"))
 
         (pkg_dir / "__init__.py").write_text(
-            _generate_init(pkg_name, pkg_dir, contracts, so_path=build_config.output_path), encoding="utf-8"
+            _generate_init(
+                pkg_name,
+                pkg_dir,
+                contracts,
+                so_path=build_config.output_path,
+                workspace_root=self.workspace,
+            ),
+            encoding="utf-8",
         )
         (pkg_dir / "cli.py").write_text(
             _generate_cli(pkg_module, function_names, contracts=contracts), encoding="utf-8"
@@ -1925,7 +1949,12 @@ class CppPolyglotMaterializer:
                     content = "// C++ placeholder\n"
             elif entry.lang == "python":
                 if rel.name == "__init__.py":
-                    content = _generate_init(pkg_name, path.parent, contracts)
+                    content = _generate_init(
+                        pkg_name,
+                        path.parent,
+                        contracts,
+                        workspace_root=self.workspace,
+                    )
                 elif rel.name == "cli.py":
                     content = _generate_cli(pkg_module, function_names, contracts=contracts)
                 elif rel.name == "main.py":
@@ -1948,7 +1977,13 @@ class CppPolyglotMaterializer:
                     native_names = [n for n in function_names if _is_c_abi_contract(next((c for c in contracts if c.signature and _parse_signature(c.signature)[0] == n), ContractEntry(name="", signature="")))]
                     stub = "\n".join(_contract_to_python_stub(c) for c in contracts if _is_c_abi_contract(c))
                     so_path = (self.workspace / pkg_rel / _so_name(pkg_name)).resolve()
-                    content = _ctypes_loader_source(stub, so_path, native_names)
+                    content = _ctypes_loader_source(
+                        stub,
+                        so_path,
+                        native_names,
+                        workspace_root=self.workspace,
+                        loader_path=path,
+                    )
                 elif "test" in rel.name and rel.suffix == ".py":
                     content = _generate_tests(blueprint, pkg_module)
                 elif rel.suffix == ".py":

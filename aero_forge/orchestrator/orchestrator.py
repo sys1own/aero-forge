@@ -1312,7 +1312,7 @@ def plan_workspace(
     toolchains = classification.toolchains or toolchains_for_intent(intent)
     manifest_entries = [
         ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
-        for e in required_manifest_for_intent(intent, project_name)
+        for e in required_manifest_for_intent(intent, project_name, prompt=prompt)
     ]
     blueprint: Optional[Blueprint] = None
 
@@ -1442,12 +1442,12 @@ def plan_workspace(
         if is_hybrid_cpp_rust and not blueprint.manifest:
             update["manifest"] = [
                 ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
-                for e in default_manifest_for_architecture(BUILD_INTENT_HYBRID_CPP_RUST, project_name)
+                for e in default_manifest_for_architecture(BUILD_INTENT_HYBRID_CPP_RUST, project_name, prompt=prompt)
             ]
         elif is_cpp and not blueprint.manifest:
             update["manifest"] = [
                 ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
-                for e in default_manifest_for_architecture(BUILD_INTENT_HYBRID_CPP_PYTHON, project_name)
+                for e in default_manifest_for_architecture(BUILD_INTENT_HYBRID_CPP_PYTHON, project_name, prompt=prompt)
             ]
         if update:
             blueprint = blueprint.model_copy(update=update)
@@ -1470,7 +1470,7 @@ def plan_workspace(
                 "toolchains": toolchains_for_intent(architecture),
                 "manifest": [
                     ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
-                    for e in default_manifest_for_architecture(architecture, project_name)
+                    for e in default_manifest_for_architecture(architecture, project_name, prompt=prompt)
                 ],
             }
         )
