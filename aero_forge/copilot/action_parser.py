@@ -160,7 +160,7 @@ def _trigger_build_parameters(block: Dict[str, Any], text: str) -> Dict[str, Any
     builder_prompt = block["builder_prompt"]
     architecture = block["architecture"]
     target = _normalize_target(architecture) or _infer_target_from_text(builder_prompt)
-    return {
+    params = {
         "target": target or "pure_python",
         "target_language": block["target_language"]
         or ("rust" if "rust" in (target or "") else "cpp"),
@@ -168,6 +168,8 @@ def _trigger_build_parameters(block: Dict[str, Any], text: str) -> Dict[str, Any
         "target_files": block["target_files"],
         "acceleration": _normalize_acceleration(builder_prompt),
     }
+    params.update(_extract_engine_parameters(block))
+    return params
 
 
 def _normalize_target(raw: Any) -> Optional[str]:
@@ -210,6 +212,86 @@ def _normalize_acceleration(raw: Any) -> str:
     if "bypass" in lowered or "standard" in lowered:
         return "Standard Runtime (Bypass Bridge)"
     return "Selective Acceleration (Auto-Detect Heavy Compute)"
+
+
+def _normalize_engine_backend(raw: Any) -> Optional[str]:
+    """Return a recognized HIN engine backend name or None."""
+    if not isinstance(raw, str):
+        return None
+    value = raw.lower().replace("-", "_").replace(" ", "_")
+    if value in ("hin_cpu", "hin_gpu", "hin_wasm"):
+        return value
+    if value in ("cpu",):
+        return "hin_cpu"
+    if value in ("gpu", "cuda", "vulkan"):
+        return "hin_gpu"
+    if value in ("wasm", "wasm32"):
+        return "hin_wasm"
+    return None
+
+
+def _normalize_precision_shield(raw: Any) -> Optional[str]:
+    """Return a recognized precision shield mode or None."""
+    if not isinstance(raw, str):
+        return None
+    value = raw.lower().replace("-", "_").replace(" ", "_")
+    if value == "shield_checks":
+        value = "shield"
+    if value in ("ieee", "fast_math", "shield"):
+        return value
+    return None
+
+
+def _normalize_jit_level(raw: Any) -> Optional[int]:
+    """Return a recognized HIN JIT optimization level (0-2) or None."""
+    if isinstance(raw, int):
+        return raw if 0 <= raw <= 2 else None
+    if isinstance(raw, str):
+        try:
+            level = int(raw.strip())
+            return level if 0 <= level <= 2 else None
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_wavefront_parallelism(raw: Any) -> Optional[int]:
+    """Return an integer wavefront parallelism value clamped to 1-16."""
+    if isinstance(raw, int):
+        return max(1, min(16, raw))
+    if isinstance(raw, str):
+        try:
+            value = int(raw.strip())
+            return max(1, min(16, value))
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_engine_parameters(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract and normalize engine configuration fields from a parameter dict."""
+    engine_backend = _normalize_engine_backend(params.get("engine_backend"))
+    wavefront_parallelism = _extract_wavefront_parallelism(
+        params.get("wavefront_parallelism")
+    )
+    precision_shield_mode = _normalize_precision_shield(
+        params.get("precision_shield_mode")
+    )
+    hin_jit_opt_level = _normalize_jit_level(
+        params.get("jit_optimization_level")
+        if "jit_optimization_level" in params
+        else params.get("hin_jit_opt_level")
+    )
+    result: Dict[str, Any] = {}
+    if engine_backend:
+        result["engine_backend"] = engine_backend
+    if wavefront_parallelism is not None:
+        result["wavefront_parallelism"] = wavefront_parallelism
+    if precision_shield_mode:
+        result["precision_shield_mode"] = precision_shield_mode
+    if hin_jit_opt_level is not None:
+        result["hin_jit_opt_level"] = hin_jit_opt_level
+    return result
 
 
 def _infer_target_from_text(text: str) -> Optional[str]:
@@ -541,9 +623,12 @@ class ActionParser:
         target = _normalize_target(target) or target
         acceleration = _normalize_acceleration(acceleration)
 
+        engine_params = _extract_engine_parameters(params)
+
         result = {
             "target": target or "pure_python",
             "acceleration": acceleration,
+            **engine_params,
         }
         if target_files:
             result["target_files"] = list(target_files)
@@ -957,11 +1042,13 @@ def extract_build_contract(text: str) -> Optional[Dict[str, Any]]:
     if not prompt or not target:
         return None
 
-    return {
+    result = {
         "prompt": str(prompt).strip(),
         "target": target,
         "acceleration": _normalize_acceleration(parsed.get("acceleration")),
     }
+    result.update(_extract_engine_parameters(parsed))
+    return result
 
 
 def parse_suggested_build_prompt(text: str) -> Dict[str, Any]:
@@ -1071,7 +1158,7 @@ def _maybe_parse_json_object(
         prompt = params.get("prompt") or reply
         target = _normalize_target(params.get("target", params.get("architecture")))
         if prompt and target:
-            action = {
+            result = {
                 "type": "PROPOSE_BUILD",
                 "params": {
                     "prompt": str(prompt).strip(),
@@ -1079,7 +1166,8 @@ def _maybe_parse_json_object(
                     "acceleration": _normalize_acceleration(params.get("acceleration")),
                 },
             }
-            return reply, action
+            result["params"].update(_extract_engine_parameters(params))
+            return reply, result
     return reply, None
 
 

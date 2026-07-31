@@ -218,9 +218,7 @@ def fix(
             function_name=function,
             test_path=test_file,
             max_iterations=max_iterations,
-            llm_provider=llm_provider,
-            model=model,
-            max_retries=max_retries,
+            use_llm=False,
             cache_enabled=not no_cache,
         )
     except (UserError, ImportError) as exc:

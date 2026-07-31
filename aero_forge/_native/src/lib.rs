@@ -8,6 +8,8 @@ use pyo3::types::PyString;
 mod aeroc_compiler;
 mod aeroc_daemon;
 mod aeroc_unpacker;
+mod deterministic_healer;
+mod goi_solver;
 mod hin_engine;
 
 /// A BLAKE3 incremental hasher exposed to Python.
@@ -433,5 +435,8 @@ fn aero_forge_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(run_aeroc, m)?)?;
     m.add_function(wrap_pyfunction!(unpack_aeroc, m)?)?;
     m.add_function(wrap_pyfunction!(hin_engine::reduce_hin_uast, m)?)?;
+    m.add_function(wrap_pyfunction!(hin_engine::evaluate_hin_energy, m)?)?;
+    m.add_function(wrap_pyfunction!(deterministic_healer::repair_uast_expression, m)?)?;
+    m.add_function(wrap_pyfunction!(goi_solver::enforce_repair_isolation_py, m)?)?;
     Ok(())
 }

@@ -1,256 +1,339 @@
-"""Deterministic self-healing facade for cross-language build failures.
+"""Deterministic self-healing orchestrator backed by native proof-theoretic engines.
 
-The :class:`Healer` orchestrates the proof-theoretic repair pipeline:
-HIN energy checks are not performed here (they are part of the native build
-evaluation), but all structural rewrites, FFI morphism synthesis, and GoI
-matrix boundary validation flow through deterministic helpers.  LLM calls are
-kept out of the execution/repair loop; they are only used by upstream callers
-for intent interpretation and human-facing summaries.
+``DeterministicHealer.execute_healing_pass`` runs a strictly deterministic
+repair pipeline:
+
+1. HIN graph energy evaluation of the failing source.
+2. Static AST rewrites (``aero_forge.healing.router``).
+3. E-graph equality-saturation rewriting of UAST expressions.
+4. FFI morphism synthesis fallback for missing cross-language contracts.
+5. Geometry-of-Interaction matrix perturbation validation.
+
+No LLM API calls are made inside this loop.
 """
 
 from __future__ import annotations
 
+import difflib
 import json
+import logging
 import re
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-from aero_forge.healing.evaluator import HealingStrategy, LogEvaluator
-from aero_forge.healing.orchestrator import HealingOrchestrator
+from aero_forge._native import (
+    HinEngine,
+    enforce_repair_isolation_py,
+    evaluate_hin_energy,
+    repair_uast_expression,
+)
 from aero_forge.healing.router import try_auto_fix
-from aero_forge.overlay.apply import persist_text_to_disk
+from aero_forge.scaffold.contract_synth import ContractSynthesizer
+from aero_forge.translator.aero_frontend import python_source_to_uast
 
-_C_ABI_LOAD_RE = re.compile(
-    r"(?:OSError|FileNotFoundError|ImportError).*\b(?:cannot load library|Could not find native library|cannot find.*\.(?:so|dylib|dll))\b",
-    re.IGNORECASE,
-)
-
-_C_ABI_SYMBOL_RE = re.compile(
-    r"(?:undefined symbol:\s*(?P<sym1>\w+)|AttributeError:.*has no attribute ['\"](?P<sym2>\w+)['\"])",
-    re.IGNORECASE,
-)
+logger = logging.getLogger("aero_forge.healing.healer")
 
 
-def _extract_c_abi_symbol(error_log: str) -> Optional[str]:
-    match = _C_ABI_SYMBOL_RE.search(error_log)
-    if not match:
+def _recursively_repair_expressions(uast: Any) -> Any:
+    """Walk a UAST dict/list and apply e-graph rewriting to every expression node."""
+    if isinstance(uast, list):
+        return [_recursively_repair_expressions(item) for item in uast]
+    if not isinstance(uast, dict):
+        return uast
+
+    node_type = uast.get("type", "")
+    if node_type in {"literal", "reference", "call", "binop", "unaryop"}:
+        original = json.dumps(uast)
+        try:
+            rewritten = repair_uast_expression(original)
+        except Exception:
+            return uast
+        try:
+            parsed = json.loads(rewritten)
+        except json.JSONDecodeError:
+            return uast
+        if parsed != uast:
+            return parsed
+        return uast
+
+    return {k: _recursively_repair_expressions(v) for k, v in uast.items()}
+
+
+def _build_hin_arena(source_text: str) -> Optional[str]:
+    """Lower Python source to a HIN arena JSON description."""
+    try:
+        uast = python_source_to_uast(source_text)
+    except Exception as exc:
+        logger.debug("python_source_to_uast failed: %s", exc)
         return None
-    return match.group("sym1") or match.group("sym2")
+    try:
+        engine = HinEngine()
+        engine.build_from_json(json.dumps(uast))
+        return engine.to_json()
+    except Exception as exc:
+        logger.debug("HinEngine build failed: %s", exc)
+        return None
 
 
-def _discover_native_library(
-    workspace: Path, so_name: Optional[str] = None
-) -> Optional[Path]:
-    """Return the first compiled native library found under *workspace*."""
-    candidates: List[Path] = []
-    if so_name:
-        for ext in (".so", ".dylib", ".dll"):
-            candidates.extend(workspace.rglob(so_name + ext))
-            candidates.extend(workspace.rglob("lib" + so_name + ext))
-    candidates.extend(workspace.rglob("*.so"))
-    candidates.extend(workspace.rglob("*.dylib"))
-    candidates.extend(workspace.rglob("*.dll"))
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate.resolve()
+def _extract_target_file(error_log: str, workspace: Path) -> Optional[str]:
+    """Return a likely target file path extracted from a compiler/test traceback."""
+    # Python traceback file paths.
+    m = re.search(r'File "([^"]+)", line', error_log)
+    if m:
+        raw = Path(m.group(1))
+        candidates = [raw, workspace / raw]
+        for path in candidates:
+            if path.is_file():
+                try:
+                    return str(path.relative_to(workspace))
+                except ValueError:
+                    return str(path)
+    # Rust/Cargo error paths: "--> path:line:col"
+    m = re.search(r"-->\s+(\S+):\d+:\d+", error_log)
+    if m:
+        raw = Path(m.group(1))
+        candidates = [raw, workspace / raw]
+        for path in candidates:
+            if path.is_file():
+                try:
+                    return str(path.relative_to(workspace))
+                except ValueError:
+                    return str(path)
     return None
 
 
-def _patch_loader_candidates(code: str, so_path: Path) -> Optional[str]:
-    """Inject *so_path* as the first candidate in a generated ctypes loader.
-
-    The loader generated by ``_ctypes_loader_source`` declares ``_SO_CANDIDATES``
-    and uses ``_find_library`` to select the first existing candidate.  If the
-    compiled library exists but the loader's search path is stale, prepending the
-    discovered absolute path repairs directory mapping without brittle edits.
-    """
-    match = re.search(r"(_SO_CANDIDATES\s*=\s*\[)[^\]]*", code, re.DOTALL)
-    if not match:
-        return None
-    insert = match.end()
-    candidate = f"pathlib.Path({str(so_path)!r}), "
-    return code[:insert] + candidate + code[insert:]
+def _extract_missing_symbol(error_log: str) -> Optional[str]:
+    """Return the name referenced in a NameError/undefined reference."""
+    patterns = [
+        r"NameError: name ['\"](\w+)['\"] is not defined",
+        r"undefined reference to [`\"]?(\w+)[`\"]?",
+        r"cannot find (?:function|value|symbol) ['\"]?(\w+)['\"]?",
+    ]
+    for pat in patterns:
+        m = re.search(pat, error_log)
+        if m:
+            return m.group(1)
+    return None
 
 
-def _patch_missing_c_symbol_in_loader(code: str, symbol: str) -> Optional[str]:
-    """Make the ctypes loader tolerate a missing *symbol* by adding a fallback.
+class DeterministicHealer:
+    """Proof-theoretic build/test repair orchestrator.
 
-    When a C-ABI symbol is missing from the shared library, the Python wrapper
-    that does ``_LIB.<symbol>`` raises ``AttributeError``.  This patch wraps the
-    attribute lookup with ``getattr`` and, if the symbol is unavailable, raises
-    an actionable ``RuntimeError`` that preserves the original contract.
-    """
-    pattern = re.compile(
-        rf"(\s)({re.escape(symbol)})\s*=\s*_LIB\.{re.escape(symbol)}\b"
-    )
-    if not pattern.search(code):
-        return None
-
-    def repl(match: re.Match) -> str:
-        indent = match.group(1)
-        name = match.group(2)
-        return (
-            f"{indent}{name} = getattr(_LIB, {name!r}, None)\n"
-            f"{indent}if {name} is None:\n"
-            f'{indent}    raise RuntimeError(f"C-ABI symbol {name!r} is not exported by {{_SO}}")'
-        )
-
-    return pattern.sub(repl, code)
-
-
-class Healer:
-    """Deterministic, proof-theoretic self-healing entry point.
-
-    ``Healer`` is intentionally thin: it classifies failures, attempts the
-    cheapest deterministic AST/FFI patches first, and escalates to the full
-    ``HealingOrchestrator`` only when a deterministic repair is not available.
+    The healer operates on source text, UAST expressions, and blueprint contracts
+    without ever calling an LLM.
     """
 
     def __init__(
         self,
         workspace: Path,
-        llm_provider: str = "deepseek",
-        llm_model: Optional[str] = None,
-        log_callback: Optional[Callable[[str, str, str], None]] = None,
+        contract_synthesizer: Optional[ContractSynthesizer] = None,
+        log_callback: Optional[Any] = None,
     ) -> None:
         self.workspace = Path(workspace).resolve()
-        self.orchestrator = HealingOrchestrator(
-            workspace=self.workspace,
-            llm_provider=llm_provider,
-            llm_model=llm_model,
-            log_callback=log_callback,
-        )
-        self.log_callback = log_callback or self._default_log
+        self.contract_synthesizer = contract_synthesizer
+        self.log_callback = log_callback
 
-    @staticmethod
-    def _default_log(level: str, prefix: str, message: str) -> None:
-        pass
-
-    def diagnose(
-        self, error_log: str, command: str = "", exit_code: int = 1
-    ) -> Dict[str, Any]:
-        """Return a structured diagnosis for *error_log*."""
-        evaluator = LogEvaluator()
-        return evaluator.evaluate_log(command, exit_code, error_log)
-
-    def _target_path(self, target_file: Optional[str]) -> Path:
-        if not target_file:
-            return self.workspace / "main.py"
-        target = (self.workspace / target_file).resolve()
-        if not str(target).startswith(str(self.workspace)):
-            return self.workspace / "main.py"
-        return target
-
-    def _try_c_abi_directory_fix(
-        self,
-        error_log: str,
-        target_file: Optional[str],
-        diagnosis: Dict[str, Any],
-    ) -> Optional[Dict[str, Any]]:
-        """Attempt to repair a stale ctypes loader path."""
-        # The loader is usually the Python __init__/bridge file referenced by the traceback.
-        target = self._target_path(target_file or diagnosis.get("target_file"))
-        if target.suffix != ".py" or not target.is_file():
-            return None
-
-        original = target.read_text(encoding="utf-8")
-        if "_SO_CANDIDATES" not in original and "ctypes.CDLL" not in original:
-            return None
-
-        so_name_match = re.search(r"_SO_NAME\s*=\s*['\"]([^'\"]+)['\"]", original)
-        so_name = so_name_match.group(1) if so_name_match else None
-        so_path = _discover_native_library(self.workspace, so_name)
-        if not so_path:
-            return None
-
-        patched = _patch_loader_candidates(original, so_path)
-        if patched and patched != original:
-            persist_text_to_disk(target, patched)
-            self.log_callback(
-                "info", "HEAL", f"Patched ctypes loader candidates in {target.name}"
-            )
-            return {
-                "status": "success",
-                "strategy_used": HealingStrategy.AST.value,
-                "patched_files": [str(target.relative_to(self.workspace))],
-                "error_message": None,
-                "target_file": str(target.relative_to(self.workspace)),
-                "diagnosis": diagnosis,
-            }
-        return None
-
-    def _try_c_abi_symbol_fix(
-        self,
-        error_log: str,
-        target_file: Optional[str],
-        diagnosis: Dict[str, Any],
-    ) -> Optional[Dict[str, Any]]:
-        """Attempt a deterministic patch for a missing C-ABI symbol export."""
-        symbol = _extract_c_abi_symbol(error_log)
-        if not symbol:
-            return None
-
-        target = self._target_path(target_file or diagnosis.get("target_file"))
-        if target.suffix != ".py" or not target.is_file():
-            return None
-
-        original = target.read_text(encoding="utf-8")
-        patched = _patch_missing_c_symbol_in_loader(original, symbol)
-        if patched and patched != original:
-            persist_text_to_disk(target, patched)
-            self.log_callback(
-                "info",
-                "HEAL",
-                f"Protected ctypes loader against missing symbol {symbol!r}",
-            )
-            return {
-                "status": "success",
-                "strategy_used": HealingStrategy.AST.value,
-                "patched_files": [str(target.relative_to(self.workspace))],
-                "error_message": None,
-                "target_file": str(target.relative_to(self.workspace)),
-                "diagnosis": diagnosis,
-            }
-        return None
-
-    def heal(
-        self,
-        error_log: str,
-        command: str = "",
-        exit_code: int = 1,
-        target_file: Optional[str] = None,
-        force_llm: bool = False,
-    ) -> Dict[str, Any]:
-        """Classify *error_log*, apply deterministic repairs, and escalate if needed."""
-        diagnosis = self.diagnose(error_log, command, exit_code)
-        error_type = diagnosis.get("error_type") or "unknown"
-
-        if not force_llm and error_type == "c_abi_library_load_error":
-            result = self._try_c_abi_directory_fix(error_log, target_file, diagnosis)
-            if result:
-                return result
-
-        if not force_llm and error_type == "c_abi_symbol_error":
-            result = self._try_c_abi_symbol_fix(error_log, target_file, diagnosis)
-            if result:
-                return result
-
-        return self.orchestrator.heal(
-            error_log,
-            command=command,
-            exit_code=exit_code,
-            target_file=target_file,
-            force_llm=force_llm,
-        )
+    def _log(self, level: str, prefix: str, message: str) -> None:
+        if self.log_callback:
+            self.log_callback(level, prefix, message)
+        getattr(logger, level.lower(), logger.info)("[%s] %s", prefix, message)
 
     def execute_healing_pass(
         self,
         error_log: str,
+        source_text: Optional[str] = None,
+        source_path: Optional[Path] = None,
+        command: str = "",
+        exit_code: int = 1,
+        uast_json: Optional[str] = None,
+        expression_json: Optional[str] = None,
+        base_matrix: Optional[Dict[str, Any]] = None,
+        delta_matrix: Optional[Dict[str, Any]] = None,
+        apply: bool = False,
+    ) -> Dict[str, Any]:
+        """Run the full deterministic repair pipeline and return a structured result.
+
+        The result contains at least ``status``, ``strategy_used``,
+        ``patched_files``, and ``error_message``.  Additional keys include
+        ``energy``, ``expression_patch``, ``fallback_wrappers``, and ``goi_result``.
+        """
+        result: Dict[str, Any] = {
+            "status": "failed",
+            "strategy_used": None,
+            "patched_files": [],
+            "error_message": "No deterministic repair applicable.",
+        }
+
+        # ------------------------------------------------------------------
+        # (d) GoI boundary perturbation validation.  Run first because it may veto
+        # an unsafe repair plan before any source mutation.
+        # ------------------------------------------------------------------
+        if base_matrix is not None and delta_matrix is not None:
+            try:
+                goi_result = json.loads(
+                    enforce_repair_isolation_py(
+                        json.dumps(base_matrix), json.dumps(delta_matrix)
+                    )
+                )
+                result["goi_result"] = goi_result
+                if not goi_result.get("isolated", True):
+                    result["error_message"] = (
+                        f"GoI repair boundary violated (radius={goi_result.get('radius')} "
+                        f">= bound={goi_result.get('bound')})."
+                    )
+                    return result
+            except Exception as exc:
+                self._log("warning", "HEAL", f"GoI validation skipped: {exc}")
+
+        # ------------------------------------------------------------------
+        # (a) HIN graph energy evaluation.
+        # ------------------------------------------------------------------
+        arena: Optional[str] = None
+        if uast_json:
+            try:
+                engine = HinEngine()
+                engine.build_from_json(uast_json)
+                arena = engine.to_json()
+            except Exception as exc:
+                self._log("debug", "HEAL", f"HIN build failed: {exc}")
+        elif source_text:
+            arena = _build_hin_arena(source_text)
+
+        if arena:
+            try:
+                energy = json.loads(evaluate_hin_energy(arena))
+                result["energy"] = energy
+                self._log(
+                    "info",
+                    "HEAL",
+                    f"HIN energy: stalled={energy.get('stalled')}, "
+                    f"wires={energy.get('wires')}, dangling={energy.get('dangling')}, "
+                    f"total={energy.get('total')}",
+                )
+            except Exception as exc:
+                self._log("debug", "HEAL", f"HIN energy evaluation failed: {exc}")
+
+        # ------------------------------------------------------------------
+        # (b) Static AST rewrites.
+        # ------------------------------------------------------------------
+        if source_text:
+            try:
+                patch = try_auto_fix(error_log, source_text)
+                if patch is not None and patch != source_text:
+                    target = str(source_path or "source.py")
+                    result["status"] = "success"
+                    result["strategy_used"] = "ast"
+                    result["patch"] = patch
+                    result["target_file"] = target
+                    result["diff"] = "".join(
+                        difflib.unified_diff(
+                            source_text.splitlines(keepends=True),
+                            patch.splitlines(keepends=True),
+                            fromfile=target,
+                            tofile=target,
+                        )
+                    )
+                    result["error_message"] = None
+                    if apply and source_path:
+                        resolved = self.workspace / source_path
+                        resolved.write_text(patch, encoding="utf-8")
+                        result["patched_files"] = [target]
+                    else:
+                        result["patched_files"] = [target]
+                    return result
+            except Exception as exc:
+                self._log("warning", "HEAL", f"AST rewrite failed: {exc}")
+
+        # ------------------------------------------------------------------
+        # (b2) E-Graph equality saturation rewriting of a single UAST expression.
+        # ------------------------------------------------------------------
+        if expression_json:
+            try:
+                rewritten = repair_uast_expression(expression_json)
+                parsed = json.loads(rewritten)
+                original = json.loads(expression_json)
+                if parsed != original:
+                    result["status"] = "success"
+                    result["strategy_used"] = "egraph_rewrite"
+                    result["expression_patch"] = parsed
+                    result["error_message"] = None
+                    return result
+            except Exception as exc:
+                self._log("debug", "HEAL", f"E-graph rewrite failed: {exc}")
+
+        # Walk the whole module UAST and rewrite any expressions inside.
+        if uast_json:
+            try:
+                uast = json.loads(uast_json)
+                repaired = _recursively_repair_expressions(uast)
+                if repaired != uast:
+                    result["uast_repaired"] = repaired
+                    result["status"] = "success"
+                    result["strategy_used"] = "egraph_rewrite"
+                    result["error_message"] = None
+                    # No source patch available from UAST alone; caller must materialise.
+                    return result
+            except Exception as exc:
+                self._log("debug", "HEAL", f"UAST e-graph rewrite failed: {exc}")
+
+        # ------------------------------------------------------------------
+        # (c) FFI morphism synthesis fallback.
+        # ------------------------------------------------------------------
+        missing_symbol = _extract_missing_symbol(error_log)
+        if missing_symbol and self.contract_synthesizer:
+            try:
+                wrappers: Dict[str, Any] = {}
+                contract = self.contract_synthesizer.contracts.get(missing_symbol)
+                if contract:
+                    # Emit all supported bindings for the missing symbol.
+                    for pair in ("python/rust", "rust/cpp", "rust/rust"):
+                        wrappers[pair] = self.contract_synthesizer.synthesize_missing_morphism(
+                            missing_symbol, pair
+                        )
+                    result["status"] = "success"
+                    result["strategy_used"] = "ffi_synth"
+                    result["fallback_wrappers"] = wrappers
+                    result["error_message"] = None
+                    return result
+            except Exception as exc:
+                self._log("debug", "HEAL", f"FFI synthesis failed: {exc}")
+
+        target_file = _extract_target_file(error_log, self.workspace)
+        if target_file:
+            result["target_file"] = target_file
+
+        return result
+
+    def heal(
+        self,
+        error_logs: str,
         command: str = "",
         exit_code: int = 1,
         target_file: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Alias for :meth:`heal` matching the deterministic self-healing pipeline name."""
-        return self.heal(
-            error_log, command=command, exit_code=exit_code, target_file=target_file
+        """Convenience wrapper compatible with the legacy HealingOrchestrator API.
+
+        Reads the source from *target_file* (or extracts it from the error log)
+        under the workspace and dispatches to ``execute_healing_pass``.
+        """
+        target_file = target_file or _extract_target_file(error_logs, self.workspace)
+        if target_file:
+            path = self.workspace / target_file
+            try:
+                source = path.read_text(encoding="utf-8")
+            except OSError:
+                source = None
+            return self.execute_healing_pass(
+                error_log=error_logs,
+                source_text=source,
+                source_path=Path(target_file),
+                command=command,
+                exit_code=exit_code,
+                apply=True,
+            )
+
+        return self.execute_healing_pass(
+            error_log=error_logs,
+            command=command,
+            exit_code=exit_code,
         )
