@@ -1392,6 +1392,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 logger.debug("Auto-blueprint generation failed for files: %s", exc)
         metadata = get_session_metadata(session_id, session_dir)
+        commands = detect_runnable_commands(session_dir)
 
         return _send_json(
             self,
@@ -1399,6 +1400,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             {
                 "session_id": session_id,
                 "tree": _build_tree(session_dir),
+                "commands": commands,
+                "runnable_commands": commands,
                 **metadata,
             },
         )
@@ -1856,6 +1859,17 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                         write_v3_blueprint(draft, blueprint_path)
                     except Exception as exc:
                         logger.warning("Could not auto-generate v3 blueprint for file upload: %s", exc)
+            elif filename.lower().endswith(".aeroc"):
+                try:
+                    dest.write_bytes(body)
+                    unpack_aeroc_file(str(dest), str(dest_dir))
+                except Exception as exc:
+                    return _send_json(self, 400, {"error": f"Could not unpack .aeroc: {exc}"})
+                finally:
+                    try:
+                        dest.unlink(missing_ok=True)
+                    except OSError:
+                        pass
             else:
                 is_new_blueprint = filename.lower() == "blueprint.aero" and not dest.exists()
                 dest.write_bytes(body)

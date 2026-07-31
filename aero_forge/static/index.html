@@ -138,12 +138,23 @@
     .context-menu-sep { border-top: 1px solid var(--border); margin: 0.25rem 0; }
     .tree-node.file .icon { color: #dcb67a; }
     .tree-node.directory .icon { color: #75beff; }
-    .sidebar-footer { padding: 0.6rem; border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 0.5rem; background: var(--panel); }
     .drop-zone {
       border: 1px dashed var(--border); border-radius: 4px; padding: 0.6rem; text-align: center; color: var(--muted); font-size: 0.75rem;
       transition: all 0.15s ease; background: var(--panel-2);
     }
     .drop-zone.drag-over { border-color: var(--accent); background: rgba(0,122,204,0.1); color: var(--text); }
+    .drop-zone.compact {
+      display: flex; align-items: center; justify-content: center; gap: 0.35rem;
+      padding: 0.35rem 0.5rem; font-size: 0.75rem; cursor: pointer;
+    }
+    .sidebar-footer {
+      padding: 0.5rem; border-top: 1px solid var(--border);
+      display: flex; flex-direction: column; gap: 0.45rem;
+      background: var(--panel); flex: 0 0 auto;
+    }
+    .sidebar-actions {
+      display: flex; align-items: center; gap: 0.4rem;
+    }
     #blueprint-init-banner {
       position: fixed;
       top: 12px;
@@ -189,6 +200,19 @@
     .export-option small {
       display: block; color: var(--muted); font-size: 0.7rem; margin-top: 0.1rem; font-weight: 400;
     }
+    .export-menu {
+      display: flex; flex-direction: column;
+      padding: 0.25rem; border-radius: 4px; border: 1px solid var(--border);
+      background: var(--panel); z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+    }
+    .export-menu-item {
+      display: flex; align-items: center; gap: 0.4rem; cursor: pointer;
+      padding: 0.45rem 0.55rem; border-radius: 4px; border: 1px solid transparent;
+      background: transparent; color: var(--text); font-size: 0.75rem; text-align: left;
+    }
+    .export-menu-item:hover { background: var(--panel-2); border-color: var(--border); }
+    .export-popover.full { width: 100%; }
+    .export-popover.full summary { width: 100%; justify-content: center; }
     button.primary {
       background: var(--accent); border: none; color: #fff; font-weight: 600;
       padding: 0.45rem 0.75rem; border-radius: 4px; cursor: pointer; font-size: 0.8rem;
@@ -294,6 +318,15 @@
     .action-card .action-meta { font-size: 0.78rem; color: var(--muted); margin-bottom: 0.5rem; }
     .action-card .build-prompt-editor { width: 100%; min-height: 80px; background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 4px; padding: 0.45rem; font-family: Consolas, Monaco, monospace; font-size: 0.78rem; color: var(--text); resize: vertical; margin-bottom: 0.5rem; }
     .action-card .action-buttons { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    .action-card .action-buttons .btn {
+      display: inline-flex; align-items: center; gap: 0.35rem;
+      background: var(--panel); border: 1px solid var(--border); border-radius: 4px;
+      padding: 6px 12px; color: var(--text); font-weight: 600; font-size: 0.78rem;
+      cursor: pointer; transition: background 0.12s ease, border-color 0.12s ease;
+    }
+    .action-card .action-buttons .btn:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .action-card .action-buttons .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .action-card .action-buttons .btn-primary:hover { background: var(--accent-2); border-color: var(--accent-2); }
     .prompt-row { display: flex; gap: 0.5rem; }
     textarea#prompt-input, textarea#chat-input {
       flex: 1; background: var(--editor); border: 1px solid var(--border); border-radius: 4px; color: var(--text);
@@ -356,12 +389,13 @@
 
     /* Terminal command bar */
     #action-buttons {
-      display: flex; align-items: center; gap: 0.4rem;
+      display: none; align-items: center; gap: 0.4rem;
       height: 40px; min-height: 40px; max-height: 40px;
       padding: 0 0.6rem;
       border-bottom: 1px solid var(--border); background: var(--panel); flex-shrink: 0;
       overflow: hidden;
     }
+    #action-buttons.visible { display: flex; }
     .command-tab {
       background: transparent; color: var(--muted); border: 1px solid transparent;
       border-radius: 4px; padding: 0.2rem 0.5rem; font-size: 0.75rem; cursor: pointer;
@@ -513,15 +547,19 @@
         <div id="blueprint-init-banner" class="drop-zone" style="display:none;background:rgba(0,122,204,0.15);border-style:solid;border-color:var(--accent);color:var(--text);cursor:pointer;">
           &#128260; <strong>Initialize Project from Blueprint</strong><br><small>blueprint.aero detected in workspace</small>
         </div>
-        <div id="drop-zone" class="drop-zone">
-          Drop files, a .zip, or a .aeroc here, or click to upload
+        <div id="drop-zone" class="drop-zone compact" title="Drop files, a .zip, or a .aeroc here, or click to upload">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <span>Drop files / .zip / .aeroc</span>
         </div>
-        <div class="download-control" style="display:flex;flex-direction:column;gap:0.4rem;position:relative;z-index:20;">
-          <button id="download-aeroc-btn" class="secondary" title="Download compiled binary IR container">⬇️ Binary IR (.aeroc)</button>
-          <button id="export-scaffold-btn" class="secondary" title="Export Wavefront scaffold zip">📦 Wavefront Scaffold (.zip)</button>
-          <details id="export-options-popover" class="export-popover" style="width:100%">
-            <summary id="export-summary" title="Export options" aria-label="Export options">📦 Export Workspace ▾</summary>
+        <div class="sidebar-actions">
+          <details id="export-options-popover" class="export-popover full">
+            <summary id="export-summary" title="Export options" aria-label="Export options">Export &#9662;</summary>
             <div class="export-options" title="Choose what to include in the downloaded zip">
+              <div class="export-menu" role="menu">
+                <button id="download-aeroc-btn" class="export-menu-item" title="Download compiled binary IR container">&#11015; Binary IR (.aeroc)</button>
+                <button id="export-scaffold-btn" class="export-menu-item" title="Export Wavefront scaffold zip">&#128230; Wavefront Scaffold (.zip)</button>
+              </div>
+              <hr style="border:0;border-top:1px solid var(--border);margin:0.4rem 0;">
               <label class="export-option">
                 <input type="checkbox" name="export-pure-target" value="1" checked>
                 <span>Pure Target Source</span>
@@ -1039,6 +1077,8 @@
         state.initializedFromAeroc = !!data.initialized_from_aeroc;
         state.hasAeroc = !!data.has_aeroc;
         state.isBuilding = !!data.is_building;
+        mergeCommands(data.commands || data.runnable_commands || []);
+        renderCommandBar(state.commands);
         const scrollTop = ui.fileTree.scrollTop;
         const selected = state.activeTab ? state.activeTab.path : null;
         const rootNode = renderNode(data.tree, true);
@@ -1893,6 +1933,12 @@
     function renderCommandBar(commands) {
       if (!ui.actionButtons) return;
       state.commands = (commands || []).map(normalizeCommand).filter(c => c && c.cmd);
+      if (!state.commands.length) {
+        ui.actionButtons.classList.remove('visible');
+        ui.actionButtons.innerHTML = '';
+        return;
+      }
+      ui.actionButtons.classList.add('visible');
       ui.actionButtons.innerHTML = '';
 
       const categories = ['all', 'run', 'test', 'build'];
@@ -2136,55 +2182,58 @@
     async function handleFiles(files, targetPath) {
       if (!files || !files.length) return;
       setBusy(true);
-      const dest = targetPath === '.' ? 'root' : targetPath;
-      log(`Uploading ${files.length} item(s) to ${dest}...`);
-      let sessionId = state.sessionId;
-      let zipUploaded = false;
-      let aerocUploaded = false;
-      let zipMessage = '';
-      let aerocMessage = '';
-      for (const file of files) {
-        const lower = file.name.toLowerCase();
-        if (lower.endsWith('.zip')) {
-          try {
-            const data = await api('POST', `/api/upload-zip?session_id=${encodeURIComponent(sessionId)}&target_path=${encodeURIComponent(targetPath)}`, await file.arrayBuffer(), 'application/zip');
-            sessionId = data.session_id;
-            zipUploaded = true;
-            if (data.message) zipMessage = data.message;
-            mergeCommands(data.commands || data.runnable_commands || []);
-          } catch (e) { log(`Upload failed for ${file.name}: ${e.message}`, 'error'); continue; }
-        } else if (lower.endsWith('.aeroc')) {
-          try {
-            const data = await api('POST', `/api/upload-aeroc?session_id=${encodeURIComponent(sessionId)}&target_path=${encodeURIComponent(targetPath)}`, await file.arrayBuffer(), 'application/octet-stream');
-            sessionId = data.session_id;
-            aerocUploaded = true;
-            if (data.message) aerocMessage = data.message;
-            mergeCommands(data.commands || data.runnable_commands || []);
-          } catch (e) { log(`Upload failed for ${file.name}: ${e.message}`, 'error'); continue; }
-        } else {
-          let text;
-          try { text = await file.text(); }
-          catch (e) { log(`Could not read ${file.name} as text`, 'error'); continue; }
-          const path = targetPath === '.' ? file.name : `${targetPath}/${file.name}`;
-          try {
-            await api('POST', '/api/save-file', buildBody({ path, content: text }));
-          } catch (e) { log(`Upload failed for ${file.name}: ${e.message}`, 'error'); continue; }
+      try {
+        const dest = targetPath === '.' ? 'root' : targetPath;
+        log(`Uploading ${files.length} item(s) to ${dest}...`);
+        let sessionId = state.sessionId;
+        let zipUploaded = false;
+        let aerocUploaded = false;
+        let zipMessage = '';
+        let aerocMessage = '';
+        for (const file of files) {
+          const lower = file.name.toLowerCase();
+          if (lower.endsWith('.zip')) {
+            try {
+              const data = await api('POST', `/api/upload-zip?session_id=${encodeURIComponent(sessionId)}&target_path=${encodeURIComponent(targetPath)}`, await file.arrayBuffer(), 'application/zip');
+              sessionId = data.session_id;
+              zipUploaded = true;
+              if (data.message) zipMessage = data.message;
+              mergeCommands(data.commands || data.runnable_commands || []);
+            } catch (e) { log(`Upload failed for ${file.name}: ${e.message}`, 'error'); continue; }
+          } else if (lower.endsWith('.aeroc')) {
+            try {
+              const data = await api('POST', `/api/upload-aeroc?session_id=${encodeURIComponent(sessionId)}&target_path=${encodeURIComponent(targetPath)}`, await file.arrayBuffer(), 'application/octet-stream');
+              sessionId = data.session_id;
+              aerocUploaded = true;
+              if (data.message) aerocMessage = data.message;
+              mergeCommands(data.commands || data.runnable_commands || []);
+            } catch (e) { log(`Upload failed for ${file.name}: ${e.message}`, 'error'); continue; }
+          } else {
+            let text;
+            try { text = await file.text(); }
+            catch (e) { log(`Could not read ${file.name} as text`, 'error'); continue; }
+            const path = targetPath === '.' ? file.name : `${targetPath}/${file.name}`;
+            try {
+              await api('POST', '/api/save-file', buildBody({ path, content: text }));
+            } catch (e) { log(`Upload failed for ${file.name}: ${e.message}`, 'error'); continue; }
+          }
         }
+        state.sessionId = sessionId;
+        try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
+        ui.settingSession.value = state.sessionId;
+        if (aerocUploaded) {
+          log(aerocMessage || 'Aeroc extracted and build pipeline triggered', 'info');
+        } else if (zipUploaded) {
+          log(zipMessage || 'ZIP extracted & normalized to blueprint.aero', 'info');
+        } else {
+          log('Upload complete', 'success');
+        }
+        reconnectTerminal();
+        await loadTree();
+        renderCommandBar(state.commands);
+      } finally {
+        setBusy(false);
       }
-      state.sessionId = sessionId;
-      try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
-      ui.settingSession.value = state.sessionId;
-      if (aerocUploaded) {
-        log(aerocMessage || 'Aeroc extracted and build pipeline triggered', 'info');
-      } else if (zipUploaded) {
-        log(zipMessage || 'ZIP extracted & normalized to blueprint.aero', 'info');
-      } else {
-        log('Upload complete', 'success');
-      }
-      reconnectTerminal();
-      await loadTree();
-      renderCommandBar(state.commands);
-      setBusy(false);
     }
 
     async function downloadAeroc() {
