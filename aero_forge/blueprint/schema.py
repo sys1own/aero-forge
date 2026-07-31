@@ -146,6 +146,10 @@ class ExecutionStrategyV3(BaseModel):
     env: Dict[str, str] = Field(default_factory=dict)
     working_dir: str = "${WORKSPACE_ROOT}"
     timeout: float = 60.0
+    engine_backend: str = ""
+    wavefront_parallelism: int = 0
+    precision_shield_mode: str = ""
+    hin_jit_opt_level: int = 0
 
 
 class VerificationMetric(BaseModel):
@@ -226,7 +230,11 @@ class BlueprintV3(BaseModel):
             if artifact.type == ArtifactType.cargo_cdylib:
                 architecture = "hybrid_rust_python"
                 crate_root = Path(artifact.id)
-                manifest.append(ManifestEntry(path=str(crate_root / "Cargo.toml"), lang="toml", purpose="cargo cdylib"))
+                manifest.append(
+                    ManifestEntry(
+                        path=str(crate_root / "Cargo.toml"), lang="toml", purpose="cargo cdylib"
+                    )
+                )
                 for src in artifact.source_files:
                     rel = str(crate_root / src)
                     if not (workspace / rel).is_file():
@@ -240,7 +248,11 @@ class BlueprintV3(BaseModel):
                 for src in artifact.source_files:
                     if not (workspace / src).is_file():
                         continue
-                    manifest.append(ManifestEntry(path=src, lang=Path(src).suffix.lstrip("."), purpose="c/c++ source"))
+                    manifest.append(
+                        ManifestEntry(
+                            path=src, lang=Path(src).suffix.lstrip("."), purpose="c/c++ source"
+                        )
+                    )
             else:
                 # Treat as Python / generic binary artifact.
                 for src in artifact.source_files:
@@ -249,6 +261,7 @@ class BlueprintV3(BaseModel):
                     manifest.append(ManifestEntry(path=src, lang="python", purpose="python source"))
                     if self._looks_like_python_artifact(artifact):
                         from aero_forge.blueprint.core import discover_functions as _discover
+
                         src_path = workspace / src
                         try:
                             for func in _discover(src_path):
@@ -318,7 +331,9 @@ class BlueprintV3(BaseModel):
         run_env = dict(os.environ)
         if env:
             run_env.update(env)
-        run_env.update({k: self._resolve(v, workspace) for k, v in self.execution_strategy.env.items()})
+        run_env.update(
+            {k: self._resolve(v, workspace) for k, v in self.execution_strategy.env.items()}
+        )
 
         # Build DAG order.
         order = self._artifact_order()
@@ -383,7 +398,11 @@ class BlueprintV3(BaseModel):
             vcmd = self._resolve(node.command, workspace)
             vparts = vcmd.split() if vcmd else []
             venv = dict(run_env)
-            venv.update({k: self._resolve(v, workspace) for k, v in node.env.items()} if hasattr(node, "env") else {})
+            venv.update(
+                {k: self._resolve(v, workspace) for k, v in node.env.items()}
+                if hasattr(node, "env")
+                else {}
+            )
             try:
                 if vparts:
                     vproc = subprocess.run(
@@ -412,16 +431,22 @@ class BlueprintV3(BaseModel):
 
             passed = node_exit == node.expected_exit_code
             if passed and node.stdout_match_patterns:
-                passed = all(re.search(p, node_stdout) is not None for p in node.stdout_match_patterns)
+                passed = all(
+                    re.search(p, node_stdout) is not None for p in node.stdout_match_patterns
+                )
             if passed and node.stderr_prohibited_patterns:
-                passed = all(re.search(p, node_stderr) is None for p in node.stderr_prohibited_patterns)
-            verification.append({
-                "node_id": node.node_id,
-                "passed": passed,
-                "exit_code": node_exit,
-                "stdout": node_stdout,
-                "stderr": node_stderr,
-            })
+                passed = all(
+                    re.search(p, node_stderr) is None for p in node.stderr_prohibited_patterns
+                )
+            verification.append(
+                {
+                    "node_id": node.node_id,
+                    "passed": passed,
+                    "exit_code": node_exit,
+                    "stdout": node_stdout,
+                    "stderr": node_stderr,
+                }
+            )
 
         all_passed = exit_code == 0 and all(v["passed"] for v in verification)
         return {
@@ -467,7 +492,11 @@ class BlueprintV3(BaseModel):
         srcs = [workspace / self._resolve(s, workspace) for s in artifact.source_files]
         missing = [str(s) for s in srcs if not s.is_file()]
         if missing:
-            return {"artifact": artifact.id, "success": False, "error": f"Missing source files: {missing}"}
+            return {
+                "artifact": artifact.id,
+                "success": False,
+                "error": f"Missing source files: {missing}",
+            }
 
         output_path = self._resolve(artifact.output_path, workspace)
         resolved_output: Optional[Path] = None
@@ -479,7 +508,11 @@ class BlueprintV3(BaseModel):
                 cmd = self._resolve(cmd, workspace)
                 cmd_parts = cmd.split()
                 if not shutil.which(cmd_parts[0]):
-                    return {"artifact": artifact.id, "success": False, "error": f"Command not found: {cmd_parts[0]}"}
+                    return {
+                        "artifact": artifact.id,
+                        "success": False,
+                        "error": f"Command not found: {cmd_parts[0]}",
+                    }
                 try:
                     subprocess.run(
                         cmd_parts,
@@ -493,7 +526,10 @@ class BlueprintV3(BaseModel):
                     return {"artifact": artifact.id, "success": False, "error": str(exc)}
             return {"artifact": artifact.id, "success": True}
 
-        if artifact.type in (ArtifactType.binary, ArtifactType.python_extension) and self._looks_like_python_artifact(artifact):
+        if artifact.type in (
+            ArtifactType.binary,
+            ArtifactType.python_extension,
+        ) and self._looks_like_python_artifact(artifact):
             # Python artifacts do not require a compilation step for execution.
             if resolved_output:
                 resolved_output.parent.mkdir(parents=True, exist_ok=True)
@@ -501,7 +537,11 @@ class BlueprintV3(BaseModel):
 
         if artifact.type == ArtifactType.cargo_cdylib:
             if not shutil.which("cargo"):
-                return {"artifact": artifact.id, "success": False, "error": "cargo is not installed"}
+                return {
+                    "artifact": artifact.id,
+                    "success": False,
+                    "error": "cargo is not installed",
+                }
             try:
                 subprocess.run(
                     ["cargo", "build", "--release"] + artifact.compiler_flags,
@@ -519,7 +559,11 @@ class BlueprintV3(BaseModel):
             # Simple C/C++ build: use the first detected C/C++ compiler.
             compiler = shutil.which("gcc") or shutil.which("clang") or shutil.which("cl")
             if not compiler:
-                return {"artifact": artifact.id, "success": False, "error": "No C/C++ compiler found"}
+                return {
+                    "artifact": artifact.id,
+                    "success": False,
+                    "error": "No C/C++ compiler found",
+                }
             obj_files: List[Path] = []
             build_dir = workspace / "build"
             build_dir.mkdir(parents=True, exist_ok=True)
@@ -544,12 +588,20 @@ class BlueprintV3(BaseModel):
                 obj_files.append(obj)
             if resolved_output and obj_files:
                 if artifact.type == ArtifactType.shared_library:
-                    link_args = ["-shared", "-o", str(resolved_output)] + [str(o) for o in obj_files] + artifact.linker_flags
+                    link_args = (
+                        ["-shared", "-o", str(resolved_output)]
+                        + [str(o) for o in obj_files]
+                        + artifact.linker_flags
+                    )
                 else:
                     link_args = ["rcs", str(resolved_output)] + [str(o) for o in obj_files]
                 try:
                     subprocess.run(
-                        link_args if artifact.type == ArtifactType.shared_library else ["ar"] + link_args,
+                        (
+                            link_args
+                            if artifact.type == ArtifactType.shared_library
+                            else ["ar"] + link_args
+                        ),
                         cwd=str(workspace),
                         env=env,
                         check=True,
@@ -572,4 +624,6 @@ def write_v3_blueprint(blueprint: BlueprintV3, path: Path) -> None:
     if path.suffix.lower() == ".json":
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     else:
-        path.write_text(yaml.safe_dump(data, sort_keys=False, default_flow_style=False), encoding="utf-8")
+        path.write_text(
+            yaml.safe_dump(data, sort_keys=False, default_flow_style=False), encoding="utf-8"
+        )

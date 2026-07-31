@@ -110,7 +110,7 @@ from aero_forge.blueprint.schema import ArtifactType, BuildArtifact, ContextStat
 from aero_forge.blueprint.validator import InvalidBlueprintError
 from aero_forge.scaffold.pre_write_validator import BlueprintValidationError
 from aero_forge.scaffold.aeroc_export import export_scaffold_zip
-from aero_forge.scaffold.export_options import export_workspace
+from aero_forge.scaffold.export_options import _build_hin_manifest, export_workspace
 from aero_forge.scaffold.workspace import BlueprintRegenerator
 from aero_forge.universal_builder import build_universal_project
 
@@ -135,6 +135,7 @@ def _resolve_port(port: Optional[int] = None) -> int:
 def _resolve_llm_provider(body: Dict[str, Any]) -> str:
     """Return the effective LLM provider from the request body or environment."""
     return body.get("provider") or os.getenv("AERO_FORGE_LLM_PROVIDER") or "deepseek"
+
 
 _CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
@@ -178,6 +179,8 @@ def _classification_for_target(
         languages=classification.languages,
         features=features,
     )
+
+
 _active_ws_lock = threading.Lock()
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -229,8 +232,11 @@ def _notify_tree_changed(session_id: str) -> None:
         pass
 
 
-def _make_progress_sender(response: web.StreamResponse, session_id: str) -> Callable[[str, Dict[str, Any]], None]:
+def _make_progress_sender(
+    response: web.StreamResponse, session_id: str
+) -> Callable[[str, Dict[str, Any]], None]:
     """Return a sync callback that writes `goi_wave_state` / `hin_reduction_steps` NDJSON chunks."""
+
     def _send_progress(event: str, payload: Dict[str, Any]) -> None:
         try:
             loop = asyncio.get_running_loop()
@@ -239,6 +245,7 @@ def _make_progress_sender(response: web.StreamResponse, session_id: str) -> Call
         line = json.dumps({"type": event, "session_id": session_id, **payload}) + "\n"
         data = line.encode("utf-8")
         loop.call_soon(lambda: asyncio.create_task(response.write(data)))
+
     return _send_progress
 
 
@@ -294,6 +301,10 @@ async def _handle_build_async(request: web.Request) -> web.Response:
     variants = 3 if body.get("variants") else 1
     target_language = body.get("target_language", body.get("target", "auto"))
     acceleration_policy = body.get("acceleration_policy", "selective")
+    engine_backend = body.get("engine_backend", acceleration_policy)
+    wavefront_parallelism = body.get("wavefront_parallelism")
+    precision_shield_mode = body.get("precision_shield_mode")
+    hin_jit_opt_level = body.get("hin_jit_opt_level")
     architecture = body.get("architecture")
     config = ConfigOverride(
         llm_provider=body.get("provider"),
@@ -320,9 +331,7 @@ async def _handle_build_async(request: web.Request) -> web.Response:
 
     heartbeat_task: asyncio.Task = asyncio.create_task(heartbeat())
     try:
-        classification = _classification_for_target(
-            classify_stack(prompt), target_language
-        )
+        classification = _classification_for_target(classify_stack(prompt), target_language)
         if classification.architecture in (
             INTENT_HYBRID_RUST_PYTHON,
             INTENT_HYBRID_CPP_PYTHON,
@@ -342,6 +351,10 @@ async def _handle_build_async(request: web.Request) -> web.Response:
                 progress_callback=progress_callback,
                 architecture=architecture or classification.architecture,
                 acceleration_policy=acceleration_policy,
+                engine_backend=engine_backend,
+                wavefront_parallelism=wavefront_parallelism,
+                precision_shield_mode=precision_shield_mode,
+                hin_jit_opt_level=hin_jit_opt_level,
                 workspace_path=output_dir,
             )
             result: Dict[str, Any] = {
@@ -362,6 +375,10 @@ async def _handle_build_async(request: web.Request) -> web.Response:
                 progress_callback=progress_callback,
                 target_language=target_language,
                 acceleration_policy=acceleration_policy,
+                engine_backend=engine_backend,
+                wavefront_parallelism=wavefront_parallelism,
+                precision_shield_mode=precision_shield_mode,
+                hin_jit_opt_level=hin_jit_opt_level,
             )
         _notify_tree_changed(session_id)
         set_session_blueprint_metadata(session_id, source="auto_generated", auto_initialized=True)
@@ -394,7 +411,9 @@ def _send_json(handler: BaseHTTPRequestHandler, status: int, data: Any) -> None:
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(body)))
     handler.send_header("Access-Control-Allow-Origin", "*")
-    handler.send_header("Access-Control-Allow-Headers", "Content-Type, X-Api-Key, X-API-Key, Authorization")
+    handler.send_header(
+        "Access-Control-Allow-Headers", "Content-Type, X-Api-Key, X-API-Key, Authorization"
+    )
     handler.end_headers()
     handler.wfile.write(body)
 
@@ -410,7 +429,9 @@ def _send_bytes(
     handler.send_header("Content-Type", content_type)
     handler.send_header("Content-Length", str(len(data)))
     handler.send_header("Access-Control-Allow-Origin", "*")
-    handler.send_header("Access-Control-Allow-Headers", "Content-Type, X-Api-Key, X-API-Key, Authorization")
+    handler.send_header(
+        "Access-Control-Allow-Headers", "Content-Type, X-Api-Key, X-API-Key, Authorization"
+    )
     if headers:
         for key, value in headers.items():
             handler.send_header(key, value)
@@ -671,9 +692,7 @@ def _build_web_response(
     build = result.get("build") or {}
     variants = result.get("variants", [])
     if variants:
-        success_count = sum(
-            1 for v in variants if (v.get("build") or {}).get("success")
-        )
+        success_count = sum(1 for v in variants if (v.get("build") or {}).get("success"))
         if success_count == len(variants):
             status = "success"
         elif success_count > 0:
@@ -725,7 +744,11 @@ def _canonicalize_chat_action(result: Dict[str, Any]) -> Optional[Dict[str, Any]
 
     parameters = result.get("parameters") or params.get("parameters") or {}
     target = parameters.get("target") or params.get("target") or "pure_python"
-    acceleration = parameters.get("acceleration") or params.get("acceleration") or "Selective Acceleration (Auto-Detect Heavy Compute)"
+    acceleration = (
+        parameters.get("acceleration")
+        or params.get("acceleration")
+        or "Selective Acceleration (Auto-Detect Heavy Compute)"
+    )
     action_type = "build"
     if legacy.get("type") == "PROPOSE_BUILD" and params.get("blueprint"):
         action_type = "apply_blueprint"
@@ -829,6 +852,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return self._handle_workspace_accelerate()
             if path == "/api/workspace/export":
                 return self._handle_workspace_export()
+            if path == "/api/workspace/hinb-manifest":
+                return self._handle_hinb_manifest()
             if path == "/api/workspace/download-aeroc":
                 return self._handle_workspace_download_aeroc()
             if path == "/api/workspace/export-scaffold":
@@ -855,7 +880,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Api-Key, X-API-Key, Authorization")
+        self.send_header(
+            "Access-Control-Allow-Headers", "Content-Type, X-Api-Key, X-API-Key, Authorization"
+        )
         self.end_headers()
 
     def _api_key(self, body: Dict[str, Any]) -> Optional[str]:
@@ -890,6 +917,10 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             variants = 3 if body.get("variants") else 1
             target_language = body.get("target_language", body.get("target", "auto"))
             acceleration_policy = body.get("acceleration_policy", "selective")
+            engine_backend = body.get("engine_backend", acceleration_policy)
+            wavefront_parallelism = body.get("wavefront_parallelism")
+            precision_shield_mode = body.get("precision_shield_mode")
+            hin_jit_opt_level = body.get("hin_jit_opt_level")
             architecture = body.get("architecture")
             config = ConfigOverride(
                 llm_provider=body.get("provider"),
@@ -898,9 +929,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 max_retries=3,
             )
 
-            classification = _classification_for_target(
-                classify_stack(prompt), target_language
-            )
+            classification = _classification_for_target(classify_stack(prompt), target_language)
             if classification.architecture in (
                 INTENT_HYBRID_RUST_PYTHON,
                 INTENT_HYBRID_CPP_PYTHON,
@@ -917,6 +946,10 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     config_override=config,
                     architecture=architecture or classification.architecture,
                     acceleration_policy=acceleration_policy,
+                    engine_backend=engine_backend,
+                    wavefront_parallelism=wavefront_parallelism,
+                    precision_shield_mode=precision_shield_mode,
+                    hin_jit_opt_level=hin_jit_opt_level,
                     workspace_path=output_dir,
                 )
                 result: Dict[str, Any] = {
@@ -937,10 +970,16 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     config_override=config,
                     target_language=target_language,
                     acceleration_policy=acceleration_policy,
+                    engine_backend=engine_backend,
+                    wavefront_parallelism=wavefront_parallelism,
+                    precision_shield_mode=precision_shield_mode,
+                    hin_jit_opt_level=hin_jit_opt_level,
                 )
 
             _notify_tree_changed(session_id)
-            set_session_blueprint_metadata(session_id, source="auto_generated", auto_initialized=True)
+            set_session_blueprint_metadata(
+                session_id, source="auto_generated", auto_initialized=True
+            )
             return _send_json(self, 200, _build_web_response(session_id, session_dir, result))
         except Exception as exc:  # pragma: no cover
             logger.exception("Build endpoint failed")
@@ -981,7 +1020,11 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             from aero_forge._native import run_aeroc
 
             run_aeroc(str(target), str(workspace), jobs)
-            return _send_json(self, 200, {"status": "success", "executed": str(target), "workspace": str(workspace)})
+            return _send_json(
+                self,
+                200,
+                {"status": "success", "executed": str(target), "workspace": str(workspace)},
+            )
         except Exception as exc:  # pragma: no cover
             logger.exception("aeroc exec failed")
             return _send_json(self, 500, {"error": str(exc)})
@@ -1015,7 +1058,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     logger.info("Repaired syntax truncation in saved file %s", target)
 
             if is_new_blueprint:
-                set_session_blueprint_metadata(session_id, source="user_drop", auto_initialized=False)
+                set_session_blueprint_metadata(
+                    session_id, source="user_drop", auto_initialized=False
+                )
 
             _notify_tree_changed(session_id)
 
@@ -1088,9 +1133,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             session_id = body.get("session_id") or str(uuid.uuid4())
             session_dir = _session_dir(session_id)
             workspace_dir = (
-                body.get("workspace_path")
-                or body.get("workspace_dir")
-                or body.get("workspace_id")
+                body.get("workspace_path") or body.get("workspace_dir") or body.get("workspace_id")
             )
             if workspace_dir:
                 workspace_arg = Path(workspace_dir)
@@ -1147,7 +1190,10 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             # optional SUGGEST_BUILD_PROMPT Action Card for the Builder tab. The
             # one exception is a deterministic AST self-heal request.
             lowered = user_text.lower()
-            if any(phrase in lowered for phrase in ("fix error", "fix build", "apply self heal", "self heal", "heal")):
+            if any(
+                phrase in lowered
+                for phrase in ("fix error", "fix build", "apply self heal", "self heal", "heal")
+            ):
                 command_action = chat.handle_command(user_text)
                 if command_action is not None:
                     reply_text = chat._format_action_result(command_action, user_text)
@@ -1171,7 +1217,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 )
 
             canonical_action = _canonicalize_chat_action(result)
-            clean_prompt = (canonical_action or {}).get("clean_prompt") or result.get("build_prompt")
+            clean_prompt = (canonical_action or {}).get("clean_prompt") or result.get(
+                "build_prompt"
+            )
             response_payload = {
                 "status": "success",
                 "session_id": session_id,
@@ -1237,7 +1285,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 draft=draft,
                 output_path=draft_path,
             )
-            BlueprintV3Validator(finalized.model_dump(mode="json"), workspace=workspace).check_exportable()
+            BlueprintV3Validator(
+                finalized.model_dump(mode="json"), workspace=workspace
+            ).check_exportable()
 
             return _send_json(
                 self,
@@ -1257,7 +1307,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             BlueprintValidationError,
             ValidationError,
         ) as exc:
-            logger.warning("Blueprint synthesize endpoint failed: %s. Attempting local fallback...", exc)
+            logger.warning(
+                "Blueprint synthesize endpoint failed: %s. Attempting local fallback...", exc
+            )
             try:
                 workspace = locals().get("workspace")
                 draft_path = locals().get("draft_path")
@@ -1281,7 +1333,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                         )
                     )
                 write_v3_blueprint(fallback, draft_path)
-                BlueprintV3Validator(fallback.model_dump(mode="json"), workspace=workspace).check_exportable()
+                BlueprintV3Validator(
+                    fallback.model_dump(mode="json"), workspace=workspace
+                ).check_exportable()
 
                 return _send_json(
                     self,
@@ -1299,7 +1353,10 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return _send_json(
                     self,
                     500,
-                    {"status": "failed", "error": f"Synthesis failed and fallback failed: {fallback_exc}"},
+                    {
+                        "status": "failed",
+                        "error": f"Synthesis failed and fallback failed: {fallback_exc}",
+                    },
                 )
         except Exception as exc:
             logger.exception("Blueprint synthesize endpoint failed")
@@ -1322,7 +1379,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
         if not blueprint_path.is_file() and not _has_materialized_sources(session_dir):
             try:
                 ensure_workspace_blueprint(session_dir)
-                set_session_blueprint_metadata(session_id, source="auto_generated", auto_initialized=True)
+                set_session_blueprint_metadata(
+                    session_id, source="auto_generated", auto_initialized=True
+                )
             except Exception as exc:
                 logger.debug("Auto-blueprint generation failed for status: %s", exc)
 
@@ -1388,7 +1447,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 from aero_forge.blueprint import ensure_workspace_blueprint
 
                 ensure_workspace_blueprint(session_dir)
-                set_session_blueprint_metadata(session_id, source="auto_generated", auto_initialized=True)
+                set_session_blueprint_metadata(
+                    session_id, source="auto_generated", auto_initialized=True
+                )
             except Exception as exc:
                 logger.debug("Auto-blueprint generation failed for files: %s", exc)
         metadata = get_session_metadata(session_id, session_dir)
@@ -1410,9 +1471,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
         session_id = _first(query, "session_id")
         file_path = _first(query, "path")
         if not session_id or not file_path:
-            return _send_json(
-                self, 400, {"error": "Missing 'session_id' and/or 'path'"}
-            )
+            return _send_json(self, 400, {"error": "Missing 'session_id' and/or 'path'"})
 
         session_dir = _session_dir(session_id)
         try:
@@ -1460,7 +1519,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
 
             content_type = self.headers.get("Content-Type", "")
             if "multipart/form-data" in content_type:
-                match = re.search(r'boundary=([^;\s]+)', content_type)
+                match = re.search(r"boundary=([^;\s]+)", content_type)
                 if not match:
                     return _send_json(self, 400, {"error": "Missing multipart boundary"})
                 boundary = match.group(1).encode("utf-8")
@@ -1498,6 +1557,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             if not blueprint_path.is_file():
                 try:
                     from aero_forge.blueprint.schema import write_v3_blueprint
+
                     draft = generate_draft_v3_blueprint(session_dir)
                     write_v3_blueprint(draft, blueprint_path)
                     blueprint_generated = True
@@ -1555,7 +1615,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
 
             content_type = self.headers.get("Content-Type", "")
             if "multipart/form-data" in content_type:
-                match = re.search(r'boundary=([^;\s]+)', content_type)
+                match = re.search(r"boundary=([^;\s]+)", content_type)
                 if not match:
                     return _send_json(self, 400, {"error": "Missing multipart boundary"})
                 boundary = match.group(1).encode("utf-8")
@@ -1566,7 +1626,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 aeroc_bytes = body
 
             if len(aeroc_bytes) < 8 or aeroc_bytes[:8] != b"AEROFOG\0":
-                return _send_json(self, 400, {"error": "Invalid .aeroc file: missing AEROFOG magic"})
+                return _send_json(
+                    self, 400, {"error": "Invalid .aeroc file: missing AEROFOG magic"}
+                )
 
             parsed = urlparse(self.path)
             query = parse_qs(parsed.query)
@@ -1691,7 +1753,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             old_path = body.get("old_path", "").strip()
             new_path = body.get("new_path", "").strip()
             if not session_id or not old_path or not new_path:
-                return _send_json(self, 400, {"error": "Missing 'session_id', 'old_path', and/or 'new_path'"})
+                return _send_json(
+                    self, 400, {"error": "Missing 'session_id', 'old_path', and/or 'new_path'"}
+                )
 
             session_dir = _manager.create_session_sandbox(session_id)
             try:
@@ -1812,7 +1876,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
 
             content_type = self.headers.get("Content-Type", "")
             if "multipart/form-data" in content_type and not filename:
-                match = re.search(r'boundary=([^;\s]+)', content_type)
+                match = re.search(r"boundary=([^;\s]+)", content_type)
                 if match:
                     boundary = match.group(1).encode("utf-8")
                     file_bytes = _parse_multipart(body, boundary)
@@ -1855,10 +1919,13 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 if not blueprint_path.is_file():
                     try:
                         from aero_forge.blueprint.schema import write_v3_blueprint
+
                         draft = generate_draft_v3_blueprint(session_dir)
                         write_v3_blueprint(draft, blueprint_path)
                     except Exception as exc:
-                        logger.warning("Could not auto-generate v3 blueprint for file upload: %s", exc)
+                        logger.warning(
+                            "Could not auto-generate v3 blueprint for file upload: %s", exc
+                        )
             elif filename.lower().endswith(".aeroc"):
                 try:
                     dest.write_bytes(body)
@@ -1874,7 +1941,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 is_new_blueprint = filename.lower() == "blueprint.aero" and not dest.exists()
                 dest.write_bytes(body)
                 if is_new_blueprint:
-                    set_session_blueprint_metadata(session_id, source="user_drop", auto_initialized=False)
+                    set_session_blueprint_metadata(
+                        session_id, source="user_drop", auto_initialized=False
+                    )
 
             _notify_tree_changed(session_id)
             commands = detect_runnable_commands(session_dir)
@@ -1937,15 +2006,11 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             workspace_dir = body.get("workspace_dir") or str(session_dir)
             workspace_path = Path(workspace_dir).resolve()
             if not workspace_path.is_dir():
-                return _send_json(
-                    self, 400, {"error": f"Workspace not found: {workspace_dir}"}
-                )
+                return _send_json(self, 400, {"error": f"Workspace not found: {workspace_dir}"})
 
             blueprint_path = workspace_path / "blueprint.aero"
             if not blueprint_path.is_file():
-                return _send_json(
-                    self, 400, {"error": "blueprint.aero not found in workspace"}
-                )
+                return _send_json(self, 400, {"error": "blueprint.aero not found in workspace"})
 
             blueprint = load_blueprint(blueprint_path)
             if not blueprint or not is_blueprint_ready(blueprint):
@@ -1964,7 +2029,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             force_overwrite = bool(body.get("force_overwrite", False))
             if not force_overwrite:
                 has_user_files = any(
-                    e.name not in {"blueprint.aero", "workspace_blueprint.yaml", "workspace_blueprint.yml"}
+                    e.name
+                    not in {"blueprint.aero", "workspace_blueprint.yaml", "workspace_blueprint.yml"}
                     and not e.name.startswith(".")
                     for e in workspace_path.iterdir()
                 )
@@ -2003,9 +2069,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             result = regenerator.run()
 
             # The workspace has now been materialized from the blueprint.
-            set_session_blueprint_metadata(
-                session_id, source="user_drop", auto_initialized=True
-            )
+            set_session_blueprint_metadata(session_id, source="user_drop", auto_initialized=True)
 
             _notify_tree_changed(session_id)
             commands = detect_runnable_commands(workspace_path)
@@ -2119,9 +2183,17 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                         session_dir, log_callback=_accel
                     )
                 if native_active:
-                    _accel("success", "ACCEL", "Native acceleration active (crates/native_core loaded).")
+                    _accel(
+                        "success",
+                        "ACCEL",
+                        "Native acceleration active (crates/native_core loaded).",
+                    )
                 else:
-                    _accel("info", "ACCEL", "Native acceleration engine not active; using pure-Python fallback.")
+                    _accel(
+                        "info",
+                        "ACCEL",
+                        "Native acceleration engine not active; using pure-Python fallback.",
+                    )
             else:
                 _accel("info", "ACCEL", "Scaffolding PyO3 / Cargo.toml bindings into workspace...")
                 workspace_inspector.scaffold_pyo3_workspace(session_dir)
@@ -2183,6 +2255,39 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             logger.exception("Workspace export endpoint failed")
             return _send_json(self, 500, {"error": str(exc)})
 
+    def _handle_hinb_manifest(self) -> None:
+        """Return the portable ``manifest.json`` for the session's ``.hinb`` bundle."""
+        try:
+            body = _parse_json_body(self)
+            session_id = body.get("session_id", "").strip()
+            project_name = body.get("project_name", "aero-forge-export").strip()
+            options = body.get("options", {})
+            if not session_id:
+                return _send_json(self, 400, {"error": "Missing 'session_id'"})
+
+            session_dir = _session_dir(session_id)
+            if not session_dir.is_dir():
+                return _send_json(
+                    self,
+                    404,
+                    {"error": f"Sandbox for session '{session_id}' does not exist"},
+                )
+
+            from aero_forge.scaffold.export_options import ExportOptions
+
+            opts = ExportOptions.from_dict(options, project_name=project_name)
+            manifest = _build_hin_manifest(
+                session_dir,
+                project_name,
+                engine_backend=opts.engine_backend,
+                precision_mode=opts.precision_mode,
+                hin_version=opts.hin_version,
+            )
+            return _send_json(self, 200, {"manifest": manifest})
+        except Exception as exc:
+            logger.exception("HIN bundle manifest endpoint failed")
+            return _send_json(self, 500, {"error": str(exc)})
+
     def _handle_workspace_download_aeroc(self) -> None:
         """Serve the compiled binary IR container ``workspace.aeroc`` directly.
 
@@ -2210,7 +2315,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 return _send_json(
                     self,
                     409,
-                    {"error": "Workspace build or LLM materialization is in progress; cannot export .aeroc now."},
+                    {
+                        "error": "Workspace build or LLM materialization is in progress; cannot export .aeroc now."
+                    },
                 )
 
             aeroc_path = session_dir / "workspace.aeroc"
@@ -2433,7 +2540,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 error_logs=log_text,
                 command=command,
                 exit_code=exit_code,
-                target_file=body.get("target_file") or failure_ctx.get("affected_files", [None])[0] or None,
+                target_file=body.get("target_file")
+                or failure_ctx.get("affected_files", [None])[0]
+                or None,
                 force_llm=bool(body.get("force_llm", False)),
             )
 
@@ -2464,7 +2573,11 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             )
             _log("info", "HEAL_LLM", f"Re-running: {resolved}")
             run_result = run_command(resolved, session_dir, env=proc_env, timeout=300)
-            _log("info" if run_result["exit_code"] == 0 else "error", "HEAL_LLM", f"Re-run exit code: {run_result['exit_code']}")
+            _log(
+                "info" if run_result["exit_code"] == 0 else "error",
+                "HEAL_LLM",
+                f"Re-run exit code: {run_result['exit_code']}",
+            )
 
             if run_result["exit_code"] == 0:
                 _notify_tree_changed(session_id)
@@ -2502,13 +2615,17 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             )
         except Exception as exc:
             logger.exception("Workspace heal/llm endpoint failed")
-            return _send_json(self, 200, {"status": "failed", "reason": str(exc), "verified": False})
+            return _send_json(
+                self, 200, {"status": "failed", "reason": str(exc), "verified": False}
+            )
 
     def _handle_blueprint_templates(self) -> None:
         """List available blueprint template names."""
         try:
             templates = sorted(
-                p.name for p in _blueprint_templates_dir.iterdir() if p.is_file() and p.suffix == ".aero"
+                p.name
+                for p in _blueprint_templates_dir.iterdir()
+                if p.is_file() and p.suffix == ".aero"
             )
             return _send_json(self, 200, {"templates": templates})
         except Exception as exc:
@@ -2612,7 +2729,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             # Set stdout and stderr to non-blocking so reader threads never hang.
             for pipe in (proc.stdout, proc.stderr):
                 if pipe is not None:
-                    fcntl.fcntl(pipe, fcntl.F_SETFL, fcntl.fcntl(pipe, fcntl.F_GETFL) | os.O_NONBLOCK)
+                    fcntl.fcntl(
+                        pipe, fcntl.F_SETFL, fcntl.fcntl(pipe, fcntl.F_GETFL) | os.O_NONBLOCK
+                    )
 
             q: queue.Queue = queue.Queue()
             buffers: Dict[str, bytes] = {"stdout": b"", "stderr": b""}
@@ -2666,7 +2785,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                             continue
                         level = "info"
                         if line.startswith("[") and "]" in line:
-                            level = line[1:line.index("]")].lower() or "info"
+                            level = line[1 : line.index("]")].lower() or "info"
                         _write_chunk({"type": "accel", "data": line, "level": level})
                     accel_offset = f.tell()
 
@@ -2722,7 +2841,9 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
         )
 
         if not session_dir.is_dir():
-            return _send_json(self, 404, {"error": f"Sandbox for session '{session_id}' does not exist"})
+            return _send_json(
+                self, 404, {"error": f"Sandbox for session '{session_id}' does not exist"}
+            )
 
         archive_bytes = create_project_zip(session_dir, profile=profile)
         filename = zip_export_filename(profile)
@@ -2732,9 +2853,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             200,
             archive_bytes,
             "application/zip",
-            {
-                "Content-Disposition": f'attachment; filename="{filename}"'
-            },
+            {"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
     def _serve_static(self, path: str) -> None:
@@ -3054,12 +3173,16 @@ async def _aiohttp_ws_handler(request: web.Request) -> web.WebSocketResponse:
     session_dir = _session_dir(session_id)
     try:
         metadata = get_session_metadata(session_id, session_dir)
-        await ws.send_str(json.dumps({
-            "type": "status",
-            "has_aeroc": metadata.get("has_aeroc", False),
-            "initialized_from_aeroc": metadata.get("initialized_from_aeroc", False),
-            "is_building": metadata.get("is_building", False),
-        }))
+        await ws.send_str(
+            json.dumps(
+                {
+                    "type": "status",
+                    "has_aeroc": metadata.get("has_aeroc", False),
+                    "initialized_from_aeroc": metadata.get("initialized_from_aeroc", False),
+                    "is_building": metadata.get("is_building", False),
+                }
+            )
+        )
     except Exception as exc:
         logger.debug("Could not send initial status on WS: %s", exc)
     adapter = _AioWSAdapter(request, ws)
@@ -3082,7 +3205,9 @@ async def _handle_terminal_run_async(request: web.Request) -> web.StreamResponse
     session_id = (body.get("session_id") or "").strip()
     command = (body.get("command") or "").strip()
     if not session_id:
-        return web.json_response({"error": "Missing 'session_id'"}, status=400, headers=_CORS_HEADERS)
+        return web.json_response(
+            {"error": "Missing 'session_id'"}, status=400, headers=_CORS_HEADERS
+        )
     if not command:
         return web.json_response({"error": "Missing 'command'"}, status=400, headers=_CORS_HEADERS)
 
@@ -3103,18 +3228,36 @@ async def _handle_terminal_run_async(request: web.Request) -> web.StreamResponse
     try:
         command, env, logs = await sandbox_runner.resolve_command(command, env, session_dir)
     except Exception as exc:
-        await response.write((json.dumps({"type": "stderr", "data": f"Toolchain resolution failed: {exc}"}) + "\n").encode("utf-8"))
-        await response.write((json.dumps({"type": "summary", "exit_code": -1, "duration_ms": 0, "cwd": str(session_dir)}) + "\n").encode("utf-8"))
+        await response.write(
+            (
+                json.dumps({"type": "stderr", "data": f"Toolchain resolution failed: {exc}"}) + "\n"
+            ).encode("utf-8")
+        )
+        await response.write(
+            (
+                json.dumps(
+                    {"type": "summary", "exit_code": -1, "duration_ms": 0, "cwd": str(session_dir)}
+                )
+                + "\n"
+            ).encode("utf-8")
+        )
         await response.write_eof()
         return response
 
     for level, prefix, message in logs:
-        await response.write((json.dumps({"type": "accel", "data": f"[{prefix}] {message}", "level": level}) + "\n").encode("utf-8"))
+        await response.write(
+            (
+                json.dumps({"type": "accel", "data": f"[{prefix}] {message}", "level": level})
+                + "\n"
+            ).encode("utf-8")
+        )
 
     start = time.time()
 
     def _wave_log(level: str, prefix: str, message: str) -> None:
-        payload = json.dumps({"type": "accel", "data": f"[{prefix}] {message}", "level": level}) + "\n"
+        payload = (
+            json.dumps({"type": "accel", "data": f"[{prefix}] {message}", "level": level}) + "\n"
+        )
         # Schedule the write on the response writer; safe because we are inside the handler coroutine.
         data = payload.encode("utf-8")
         loop = asyncio.get_running_loop()
@@ -3130,8 +3273,19 @@ async def _handle_terminal_run_async(request: web.Request) -> web.StreamResponse
         )
         result = results[0]
     except Exception as exc:
-        await response.write((json.dumps({"type": "stderr", "data": f"Wavefront execution failed: {exc}"}) + "\n").encode("utf-8"))
-        await response.write((json.dumps({"type": "summary", "exit_code": -1, "duration_ms": 0, "cwd": str(session_dir)}) + "\n").encode("utf-8"))
+        await response.write(
+            (
+                json.dumps({"type": "stderr", "data": f"Wavefront execution failed: {exc}"}) + "\n"
+            ).encode("utf-8")
+        )
+        await response.write(
+            (
+                json.dumps(
+                    {"type": "summary", "exit_code": -1, "duration_ms": 0, "cwd": str(session_dir)}
+                )
+                + "\n"
+            ).encode("utf-8")
+        )
         await response.write_eof()
         return response
 
@@ -3140,15 +3294,24 @@ async def _handle_terminal_run_async(request: web.Request) -> web.StreamResponse
     for line in result.get("stderr", "").splitlines():
         await response.write((json.dumps({"type": "stderr", "data": line}) + "\n").encode("utf-8"))
     if result.get("timed_out"):
-        await response.write((json.dumps({"type": "stderr", "data": f"Command timed out after {timeout}s"}) + "\n").encode("utf-8"))
+        await response.write(
+            (
+                json.dumps({"type": "stderr", "data": f"Command timed out after {timeout}s"}) + "\n"
+            ).encode("utf-8")
+        )
 
     duration = (time.time() - start) * 1000
-    summary = json.dumps({
-        "type": "summary",
-        "exit_code": result["returncode"],
-        "duration_ms": round(duration, 1),
-        "cwd": str(session_dir),
-    }) + "\n"
+    summary = (
+        json.dumps(
+            {
+                "type": "summary",
+                "exit_code": result["returncode"],
+                "duration_ms": round(duration, 1),
+                "cwd": str(session_dir),
+            }
+        )
+        + "\n"
+    )
     await response.write(summary.encode("utf-8"))
     await response.write_eof()
     return response
@@ -3159,17 +3322,23 @@ async def _handle_blueprint_async(request: web.Request) -> web.Response:
     query = parse_qs(request.query_string)
     session_id = _first(query, "session_id") or ""
     if not session_id:
-        return web.json_response({"error": "Missing 'session_id'"}, status=400, headers=_CORS_HEADERS)
+        return web.json_response(
+            {"error": "Missing 'session_id'"}, status=400, headers=_CORS_HEADERS
+        )
 
     session_dir = _manager.create_session_sandbox(session_id)
     blueprint_path = session_dir / "blueprint.aero"
     if not blueprint_path.is_file():
-        return web.json_response({"error": "Blueprint not found"}, status=404, headers=_CORS_HEADERS)
+        return web.json_response(
+            {"error": "Blueprint not found"}, status=404, headers=_CORS_HEADERS
+        )
 
     try:
         data = yaml.safe_load(blueprint_path.read_text(encoding="utf-8")) or {}
     except Exception as exc:
-        return web.json_response({"error": f"Failed to parse blueprint: {exc}"}, status=500, headers=_CORS_HEADERS)
+        return web.json_response(
+            {"error": f"Failed to parse blueprint: {exc}"}, status=500, headers=_CORS_HEADERS
+        )
 
     return web.json_response(
         {
@@ -3204,7 +3373,9 @@ class AioForgeServer:
         self.app.router.add_get("/ws/terminal", _aiohttp_ws_handler)
         self.app.router.add_post("/api/terminal/run", _handle_terminal_run_async)
         self.app.router.add_get("/api/blueprint", _handle_blueprint_async)
-        self.app.router.add_route("*", "/{tail:.*}", functools.partial(_aiohttp_http_handler, port=self.port))
+        self.app.router.add_route(
+            "*", "/{tail:.*}", functools.partial(_aiohttp_http_handler, port=self.port)
+        )
 
     async def _serve(self) -> None:
         self.runner = web.AppRunner(self.app)
@@ -3269,7 +3440,9 @@ class AioForgeServer:
         return (self.host, self.port)
 
 
-def make_server(port: Optional[int] = None, host: str = AioForgeServer.DEFAULT_HOST) -> AioForgeServer:
+def make_server(
+    port: Optional[int] = None, host: str = AioForgeServer.DEFAULT_HOST
+) -> AioForgeServer:
     """Return an aiohttp-based server bound to the given port."""
     return AioForgeServer(port=port, host=host)
 
@@ -3294,6 +3467,7 @@ def run_server(
 
     # Wait briefly for the server to bind so the URL reflects the actual port.
     import time
+
     for _ in range(50):
         if server.port != server.requested_port or server._serve_error is not None:
             break

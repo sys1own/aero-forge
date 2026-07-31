@@ -100,6 +100,7 @@
       flex-shrink: 0;
     }
     #sidebar.collapsed { width: 40px !important; min-width: 40px !important; max-width: 40px !important; overflow: hidden; }
+    #sidebar.collapsed > * { display: none; }
     .sidebar-header {
       height: 34px; padding: 0 0.5rem; border-bottom: 1px solid var(--border);
       display: flex; align-items: center; justify-content: space-between; background: var(--panel); gap: 0.3rem;
@@ -476,6 +477,19 @@
     .spinner { width: 12px; height: 12px; border: 2px solid rgba(255,255,255,0.2); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; vertical-align: middle; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0,0,0,0); }
+
+    /* Export success drawer with integration snippets */
+    #export-success-modal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.6); display: flex; align-items: center; justify-content: center; z-index: 100; }
+    #export-success-modal.hidden { display: none; }
+    #export-success-modal .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; width: min(720px, 90vw); max-height: 80vh; display: flex; flex-direction: column; box-shadow: 0 10px 30px rgba(0,0,0,0.4); }
+    #export-success-modal .modal header { padding: 0.75rem 1rem; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+    #export-success-modal .modal .body { padding: 1rem; overflow: auto; }
+    #export-success-modal .modal .tabs { display: flex; gap: 0.3rem; margin-bottom: 0.6rem; }
+    #export-success-modal .modal .tab { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); padding: 0.35rem 0.7rem; border-radius: 4px; cursor: pointer; }
+    #export-success-modal .modal .tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+    #export-success-modal pre { background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; padding: 0.6rem; overflow: auto; font-size: 0.8rem; max-height: 240px; white-space: pre-wrap; word-break: break-word; }
+    #export-success-modal .copy-row { display: flex; justify-content: flex-end; margin-top: 0.4rem; }
+    #export-success-modal .copy-row button { font-size: 0.75rem; padding: 0.25rem 0.6rem; }
   </style>
 </head>
 <body>
@@ -555,30 +569,30 @@
           <details id="export-options-popover" class="export-popover full">
             <summary id="export-summary" title="Export options" aria-label="Export options">Export &#9662;</summary>
             <div class="export-options" title="Choose what to include in the downloaded zip">
-              <div class="export-menu" role="menu">
-                <button id="download-aeroc-btn" class="export-menu-item" title="Download compiled binary IR container">&#11015; Binary IR (.aeroc)</button>
-                <button id="export-scaffold-btn" class="export-menu-item" title="Export Wavefront scaffold zip">&#128230; Wavefront Scaffold (.zip)</button>
-              </div>
-              <hr style="border:0;border-top:1px solid var(--border);margin:0.4rem 0;">
               <label class="export-option">
                 <input type="checkbox" name="export-pure-target" value="1" checked>
-                <span>Pure Target Source</span>
-                <small>Generated source files and tests only.</small>
+                <span>Generated Target Source</span>
+                <small>Human-readable source files and tests.</small>
               </label>
               <label class="export-option">
-                <input type="checkbox" name="export-native-crate" value="1">
-                <span>Include Native Acceleration Crate (PyO3 / Rust)</span>
-                <small>Adds crates/native_core for maturin builds.</small>
+                <input type="checkbox" name="export-hybrid-polyglot" value="1">
+                <span>Hybrid / Polyglot Package (.aerozip)</span>
+                <small>HIN graph artifacts, compiled manifests, and dynamic libraries.</small>
               </label>
               <label class="export-option">
-                <input type="checkbox" name="export-wavefront-runtime" value="1">
-                <span>Include Standalone Wavefront Micro-Runtime</span>
-                <small>Adds the zero-dependency aero_core crate.</small>
+                <input type="checkbox" name="export-native-libraries" value="1">
+                <span>Native Libraries (C++ / Rust)</span>
+                <small>Dynamic bindings linked against hin_engine.</small>
               </label>
               <label class="export-option">
-                <input type="checkbox" name="export-standalone-aeroc" value="1">
-                <span>Export Wavefront Scaffold (.aerozip)</span>
-                <small>Includes the aero_core runtime and Python wrapper entrypoints.</small>
+                <input type="checkbox" name="export-hin-native-bundle" value="1">
+                <span>HIN Native Bundle (.hinb)</span>
+                <small>Single-file HIN bytecode, pre-computed graph data, and metadata.</small>
+              </label>
+              <label class="export-option">
+                <input type="checkbox" name="export-pyo3-c-api" value="1">
+                <span>PyO3 / C-API Native Wrapper</span>
+                <small>Direct Python native extension export.</small>
               </label>
               <button id="download-btn" class="secondary" style="width:100%;margin-top:0.3rem;">Download Zip</button>
             </div>
@@ -639,11 +653,31 @@
                   </select>
                 </div>
                 <div class="deck-control-group">
-                  <label for="acceleration-policy">Acceleration</label>
-                  <select id="acceleration-policy">
-                    <option value="selective">Selective Acceleration (Auto-Detect Heavy Compute)</option>
-                    <option value="force">Force Native Bridge</option>
-                    <option value="bypass">Standard Runtime (Bypass Bridge)</option>
+                  <label for="engine-backend">Engine Backend</label>
+                  <select id="engine-backend">
+                    <option value="hin_cpu">HIN-CPU Multi-Threaded (Wavefront solver)</option>
+                    <option value="hin_gpu">HIN-GPU / CUDA / Vulkan</option>
+                    <option value="hin_wasm">HIN-WASM (Web target)</option>
+                  </select>
+                </div>
+                <div class="deck-control-group">
+                  <label for="wavefront-parallelism">Wavefront Solver Parallelism</label>
+                  <input id="wavefront-parallelism" type="number" min="1" max="64" value="4" style="width: 100%; padding: 0.3rem 0.4rem; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 4px;">
+                </div>
+                <div class="deck-control-group">
+                  <label for="precision-shield-mode">Precision Shield Mode</label>
+                  <select id="precision-shield-mode">
+                    <option value="ieee">IEEE Float Precision</option>
+                    <option value="fast_math">Fast-Math</option>
+                    <option value="shield">Precision Shield checks</option>
+                  </select>
+                </div>
+                <div class="deck-control-group">
+                  <label for="hin-jit-opt-level">HIN JIT Optimization Level</label>
+                  <select id="hin-jit-opt-level">
+                    <option value="0">0 - Debug</option>
+                    <option value="1">1 - Balanced</option>
+                    <option value="2">2 - Max Graph Fusion & SIMD</option>
                   </select>
                 </div>
                 <div class="status-bar">
@@ -827,6 +861,8 @@
       treeRefreshInterval: null,
       lastTerminalCommand: '',
       lastTerminalExitCode: null,
+      exportManifest: null,
+      exportSnippetLang: 'python',
       lastTerminalLog: '',
       treeExpanded: new Set(),
       blueprintSource: 'unknown',
@@ -865,9 +901,13 @@
       uploadInput: document.getElementById('upload-input'),
       uploadRoot: document.getElementById('upload-root'),
       downloadBtn: document.getElementById('download-btn'),
-      downloadAerocBtn: document.getElementById('download-aeroc-btn'),
-      exportScaffoldBtn: document.getElementById('export-scaffold-btn'),
       exportPopover: document.getElementById('export-options-popover'),
+      exportSuccessModal: document.getElementById('export-success-modal'),
+      closeExportModal: document.getElementById('close-export-modal'),
+      snippetCode: document.getElementById('snippet-code'),
+      snippetTabs: document.getElementById('snippet-tabs'),
+      copySnippet: document.getElementById('copy-snippet'),
+      exportSuccessMessage: document.getElementById('export-success-message'),
       gutterLeft: document.getElementById('gutter-left'),
       gutterRight: document.getElementById('gutter-right'),
       gutterBottom: document.getElementById('gutter-bottom'),
@@ -895,7 +935,10 @@
       cancelAccelerate: document.getElementById('cancel-accelerate'),
       confirmAccelerate: document.getElementById('confirm-accelerate'),
       targetLanguage: document.getElementById('target-language'),
-      accelerationPolicy: document.getElementById('acceleration-policy'),
+      engineBackend: document.getElementById('engine-backend'),
+      wavefrontParallelism: document.getElementById('wavefront-parallelism'),
+      precisionShieldMode: document.getElementById('precision-shield-mode'),
+      hinJitOptLevel: document.getElementById('hin-jit-opt-level'),
       templateSelect: document.getElementById('template-select'),
       loadTemplate: document.getElementById('load-template'),
       acceleratorLog: document.getElementById('accelerator-log'),
@@ -2267,7 +2310,7 @@
       if (!state.sessionId) { log('No workspace session', 'error'); return; }
       setBusy(true);
       try {
-        const includeNative = !!document.querySelector('input[name="export-native-crate"]:checked');
+        const includeNative = !!document.querySelector('input[name="export-pyo3-c-api"]:checked');
         const res = await fetch('/api/workspace/export-scaffold', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -2295,27 +2338,104 @@
       if (!state.sessionId) return;
       const options = {
         pure_target: !!document.querySelector('input[name="export-pure-target"]:checked'),
-        include_native_crate: !!document.querySelector('input[name="export-native-crate"]:checked'),
-        include_wavefront_runtime: !!document.querySelector('input[name="export-wavefront-runtime"]:checked'),
-        standalone_aeroc: !!document.querySelector('input[name="export-standalone-aeroc"]:checked'),
+        hybrid_polyglot: !!document.querySelector('input[name="export-hybrid-polyglot"]:checked'),
+        native_libraries: !!document.querySelector('input[name="export-native-libraries"]:checked'),
+        hin_native_bundle: !!document.querySelector('input[name="export-hin-native-bundle"]:checked'),
+        pyo3_c_api: !!document.querySelector('input[name="export-pyo3-c-api"]:checked'),
       };
-      const res = await fetch('/api/workspace/export', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: state.sessionId, options }),
+      try {
+        const res = await fetch('/api/workspace/export', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: state.sessionId, options }),
+        });
+        if (!res.ok) { throw new Error('Export request failed'); }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        const disposition = res.headers.get('Content-Disposition') || '';
+        const match = disposition.match(/filename="?([^";]+)"?/);
+        a.href = url; a.download = match ? match[1] : `${state.sessionId}.zip`;
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+
+        const parts = Object.keys(options).filter(k => options[k]).map(k => k.replace(/_/g, ' '));
+        log(`Download started (${parts.join(', ') || 'target source only'})`, 'success');
+
+        if (options.hin_native_bundle) {
+          await openExportDrawer(options);
+        }
+      } catch (e) {
+        log(`Download failed: ${e.message}`, 'error');
+      } finally {
+        if (ui.exportPopover) ui.exportPopover.removeAttribute('open');
+      }
+    }
+
+    async function openExportDrawer(options) {
+      let manifest = null;
+      try {
+        const res = await fetch('/api/workspace/hinb-manifest', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: state.sessionId, options }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          manifest = data.manifest || null;
+        }
+      } catch (e) { /* manifest not available */ }
+      if (!manifest) return;
+      state.exportManifest = manifest;
+      state.exportSnippetLang = 'python';
+      renderSnippet();
+      ui.exportSuccessModal.classList.remove('hidden');
+      ui.exportSuccessMessage.textContent = `HIN bundle ${manifest.project || ''} exported. Default backend: ${manifest.default_backend}, precision: ${manifest.precision_mode}.`;
+    }
+
+    function sampleValue(dtype, shape) {
+      let scalar;
+      if (dtype && dtype.includes('int')) scalar = '0';
+      else if (dtype && dtype.includes('bool')) scalar = 'false';
+      else if (dtype && dtype.includes('str')) scalar = '""';
+      else scalar = '0.0';
+      const dims = (shape || []).length;
+      if (dims === 0) return scalar;
+      if (dims === 1) return `[${scalar}, ${scalar}, ${scalar}]`;
+      return `[[${scalar}, ${scalar}], [${scalar}, ${scalar}]]`;
+    }
+
+    function generateSnippet(lang, manifest) {
+      const ep = (manifest.entrypoints && manifest.entrypoints[0]) || {};
+      const fname = ep.name || 'entry';
+      const inputs = ep.inputs || [];
+      const inArgs = inputs.map(i => i.name).join(', ');
+      const inKwargs = inputs.map(i => `${i.name}=${sampleValue(i.dtype, i.shape)}`).join(', ');
+      const inDecls = inputs.map(i => {
+        if (lang === 'cpp') return `double ${i.name} = ${sampleValue(i.dtype, []).replace(/"/g, "'").replace(/false/g, '0')};
+    std::vector<double> ${i.name}_buf = {${i.name}};`;
+        return '';
+      }).filter(Boolean);
+      const project = manifest.project || 'model';
+      if (lang === 'python') {
+        return `# pip install aero-forge (provides aero_forge.hin_runtime)\nfrom aero_forge.hin_runtime import load_hin_bundle\n\nbundle = load_hin_bundle("${project}.hinb")\nresult = bundle.run("${fname}"${inArgs ? ', ' + inKwargs : ''})\nprint(result)`;
+      }
+      if (lang === 'cpp') {
+        return `#include <aero/hin_runtime.hpp>\n#include <iostream>\n\nint main() {\n    aero::HINBundle bundle("${project}.hinb");\n    ${inDecls.join('\\n    ')}\n    double result = bundle.run("${fname}"${inputs.length ? ', ' + inputs.map(i => `${i.name}_buf.data()`).join(', ') : ''});\n    std::cout << result << std::endl;\n    return 0;\n}`;
+      }
+      if (lang === 'rust') {
+        return `use aero_hin::Bundle;\n\nfn main() -> Result<(), Box<dyn std::error::Error>> {\n    let bundle = Bundle::open("${project}.hinb")?;\n    ${inputs.map(i => `let ${i.name} = ${sampleValue(i.dtype, i.shape).replace(/"/g, '"')};`).join('\\n    ')}\n    let result = bundle.run("${fname}"${inputs.length ? ', ' + inArgs : ''});\n    println!("{}", result);\n    Ok(())\n}`;
+      }
+      return '';
+    }
+
+    function renderSnippet() {
+      const lang = state.exportSnippetLang || 'python';
+      if (!state.exportManifest) return;
+      ui.snippetCode.textContent = generateSnippet(lang, state.exportManifest);
+      Array.from(ui.snippetTabs.children).forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.lang === lang);
       });
-      if (!res.ok) { log('Download failed', 'error'); return; }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      const disposition = res.headers.get('Content-Disposition') || '';
-      const match = disposition.match(/filename="?([^";]+)"?/);
-      a.href = url; a.download = match ? match[1] : `${state.sessionId}.zip`;
-      document.body.appendChild(a); a.click(); a.remove();
-      URL.revokeObjectURL(url);
-      const parts = Object.keys(options).filter(k => options[k]).map(k => k.replace(/_/g, ' '));
-      log(`Download started (${parts.join(', ') || 'target source only'})`, 'success');
-      if (ui.exportPopover) ui.exportPopover.removeAttribute('open');
     }
 
     async function downloadFile(path) {
@@ -2478,7 +2598,16 @@
       log(`Building: ${prompt}`);
       addChat('system', `Building: ${prompt}`);
       try {
-        const data = await api('POST', '/api/build', buildBody({ prompt, variants: ui.variantToggle.checked, target_language: ui.targetLanguage.value, acceleration_policy: ui.accelerationPolicy.value, model: state.provider === 'deepseek' ? 'deepseek-v4-flash' : undefined }));
+        const data = await api('POST', '/api/build', buildBody({
+          prompt,
+          variants: ui.variantToggle.checked,
+          target_language: ui.targetLanguage.value,
+          engine_backend: ui.engineBackend ? ui.engineBackend.value : 'hin_cpu',
+          wavefront_parallelism: ui.wavefrontParallelism ? parseInt(ui.wavefrontParallelism.value, 10) : null,
+          precision_shield_mode: ui.precisionShieldMode ? ui.precisionShieldMode.value : 'ieee',
+          hin_jit_opt_level: ui.hinJitOptLevel ? parseInt(ui.hinJitOptLevel.value, 10) : null,
+          model: state.provider === 'deepseek' ? 'deepseek-v4-flash' : undefined
+        }));
         state.sessionId = data.session_id;
         state.blueprintSource = data.blueprint_source || state.blueprintSource;
         state.autoInitialized = !!data.auto_initialized;
@@ -2659,14 +2788,14 @@
         const match = opts.find(o => o.value === target);
         if (match) ui.targetLanguage.value = target;
       }
-      if (acceleration && ui.accelerationPolicy) {
+      if (acceleration && ui.engineBackend) {
         const accMap = {
-          'Selective Acceleration (Auto-Detect Heavy Compute)': 'selective',
-          'Force Native Bridge': 'force',
-          'Standard Runtime (Bypass Bridge)': 'bypass'
+          'HIN-CPU Multi-Threaded (Wavefront solver)': 'hin_cpu',
+          'HIN-GPU / CUDA / Vulkan': 'hin_gpu',
+          'HIN-WASM (Web target)': 'hin_wasm'
         };
         const val = accMap[acceleration];
-        if (val) ui.accelerationPolicy.value = val;
+        if (val) ui.engineBackend.value = val;
       }
     }
 
@@ -2806,14 +2935,28 @@
       e.stopPropagation();
       downloadZip();
     });
-    if (ui.downloadAerocBtn) ui.downloadAerocBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      downloadAeroc();
+    if (ui.closeExportModal) ui.closeExportModal.addEventListener('click', () => {
+      ui.exportSuccessModal.classList.add('hidden');
     });
-    if (ui.exportScaffoldBtn) ui.exportScaffoldBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      downloadScaffold();
+    if (ui.exportSuccessModal) ui.exportSuccessModal.addEventListener('click', (e) => {
+      if (e.target === ui.exportSuccessModal) ui.exportSuccessModal.classList.add('hidden');
     });
+    if (ui.snippetTabs) ui.snippetTabs.addEventListener('click', (e) => {
+      if (e.target.dataset.lang) {
+        state.exportSnippetLang = e.target.dataset.lang;
+        renderSnippet();
+      }
+    });
+    if (ui.copySnippet) ui.copySnippet.addEventListener('click', async () => {
+      const text = ui.snippetCode.textContent;
+      if (!text) return;
+      try {
+        await navigator.clipboard.writeText(text);
+        ui.copySnippet.textContent = 'Copied!';
+        setTimeout(() => ui.copySnippet.textContent = 'Copy', 1200);
+      } catch (e) { log('Copy failed', 'error'); }
+    });
+
     // Collapse the export options popover when clicking outside it.
     document.addEventListener('click', (e) => {
       if (ui.exportPopover && !ui.exportPopover.contains(e.target)) {
@@ -2881,5 +3024,26 @@
     startTreeRefresh();
     log('Aero Forge UI loaded');
   </script>
+
+  <div id="export-success-modal" class="hidden">
+    <div class="modal">
+      <header>
+        <strong>Export Successful</strong>
+        <button id="close-export-modal" class="icon-btn" title="Close">&times;</button>
+      </header>
+      <div class="body">
+        <p id="export-success-message">Your HIN bundle is ready. Use the integration snippets below.</p>
+        <div class="tabs" id="snippet-tabs">
+          <button class="tab active" data-lang="python">Python</button>
+          <button class="tab" data-lang="cpp">C++</button>
+          <button class="tab" data-lang="rust">Rust</button>
+        </div>
+        <pre id="snippet-code"></pre>
+        <div class="copy-row">
+          <button id="copy-snippet" class="secondary">Copy</button>
+        </div>
+      </div>
+    </div>
+  </div>
 </body>
 </html>

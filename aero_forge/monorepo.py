@@ -82,11 +82,7 @@ def _default_pyproject(
     project_name: str,
     dependencies: List[str],
 ) -> str:
-    deps = (
-        "\n".join(f'    "{dep}",' for dep in dependencies).rstrip(",")
-        if dependencies
-        else ""
-    )
+    deps = "\n".join(f'    "{dep}",' for dep in dependencies).rstrip(",") if dependencies else ""
     deps_block = f"\ndependencies = [\n{deps}\n]\n" if deps else ""
     return (
         "[build-system]\n"
@@ -109,11 +105,7 @@ def _default_pyproject(
 
 
 def _top_level_cargo_toml() -> str:
-    return (
-        "[workspace]\n"
-        'members = ["rust_core"]\n'
-        'resolver = "2"\n'
-    )
+    return "[workspace]\n" 'members = ["rust_core"]\n' 'resolver = "2"\n'
 
 
 def _service_source(
@@ -245,8 +237,18 @@ def module_name_from_tests(tests: str) -> str:
 def _rewrite_test_imports(tests: str, package_name: str, primary: str) -> str:
     """Point generated tests at the packaged module and fix typing imports."""
     typing_names = {
-        "List", "Dict", "Tuple", "Any", "Optional", "Union", "Set",
-        "FrozenSet", "Callable", "Mapping", "Sequence", "Iterator",
+        "List",
+        "Dict",
+        "Tuple",
+        "Any",
+        "Optional",
+        "Union",
+        "Set",
+        "FrozenSet",
+        "Callable",
+        "Mapping",
+        "Sequence",
+        "Iterator",
     }
     result: List[str] = []
     for line in tests.splitlines(keepends=True):
@@ -287,9 +289,7 @@ def _run_pytest(project_root: Path) -> subprocess.CompletedProcess:
     """Run the generated pytest suite from the project root."""
     logger.info("Running Python tests in %s", project_root)
     env = dict(os.environ)
-    env["PYTHONPATH"] = (
-        f"{project_root}{os.pathsep}{env.get('PYTHONPATH', '')}"
-    ).strip(os.pathsep)
+    env["PYTHONPATH"] = (f"{project_root}{os.pathsep}{env.get('PYTHONPATH', '')}").strip(os.pathsep)
     return subprocess.run(
         ["python", "-m", "pytest", str(project_root), "-q"],
         cwd=project_root,
@@ -333,6 +333,7 @@ def generate_monorepo(
     max_tokens: Optional[int] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
     config_override: Optional[ConfigOverride] = None,
+    **kwargs: Any,
 ) -> Dict[str, Any]:
     """Build a Python-Rust monorepo from a computational prompt.
 
@@ -390,6 +391,7 @@ def generate_monorepo(
             "target_mode": TargetMode.PYO3,
         },
         config_override=config_override,
+        **kwargs,
     )
 
     build = core_result.get("build") or {}
@@ -536,13 +538,9 @@ def generate_monorepo(
 
     pytest = _run_pytest(python_dir)
     success = pytest.returncode == 0
-    test_total, test_passed, test_failed = _parse_pytest_summary(
-        pytest.stdout + pytest.stderr
-    )
+    test_total, test_passed, test_failed = _parse_pytest_summary(pytest.stdout + pytest.stderr)
     full_logs = (
-        f"{cargo_logs}\n\n"
-        f"--- Python test output ---\n"
-        f"{pytest.stdout}\n{pytest.stderr}"
+        f"{cargo_logs}\n\n" f"--- Python test output ---\n" f"{pytest.stdout}\n{pytest.stderr}"
     ).strip()
 
     files = sorted(
@@ -562,7 +560,9 @@ def generate_monorepo(
         ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python package manifest"),
         ManifestEntry(path=f"{package_name}/__init__.py", lang="python", purpose="Package exports"),
         ManifestEntry(path=f"{package_name}/{primary}.py", lang="python", purpose="Native loader"),
-        ManifestEntry(path=f"{package_name}/_pure.py", lang="python", purpose="Pure-Python fallback"),
+        ManifestEntry(
+            path=f"{package_name}/_pure.py", lang="python", purpose="Pure-Python fallback"
+        ),
         ManifestEntry(path=f"tests/test_{primary}.py", lang="python", purpose="Pytest tests"),
         ManifestEntry(path="service.py", lang="python", purpose="Async HTTP service"),
         ManifestEntry(path="bench.py", lang="python", purpose="Benchmark script"),

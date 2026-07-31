@@ -33,6 +33,7 @@ def generate_variants(
     explain: bool = False,
     review: bool = False,
     config_override: Optional["ConfigOverride"] = None,
+    **kwargs: Any,
 ) -> List[Dict[str, Any]]:
     """Generate and build ``variants`` implementations of ``prompt``.
 
@@ -69,6 +70,7 @@ def generate_variants(
                 review=review,
                 build_kwargs={"max_workers": 1, "cache_enabled": False},
                 config_override=config_override,
+                **kwargs,
             )
         except Exception as exc:
             logger.exception("Variant %d failed", i)
@@ -170,7 +172,9 @@ def _build_summary(results: List[Dict[str, Any]]) -> Dict[str, Any]:
         "total": total_tests,
         "error": "; ".join(errors) if errors else "",
         "logs": "\n".join(
-            (r.get("build") or {}).get("logs", "") for r in results if not (r.get("build") or {}).get("success")
+            (r.get("build") or {}).get("logs", "")
+            for r in results
+            if not (r.get("build") or {}).get("success")
         ),
     }
 

@@ -43,6 +43,7 @@ def _function_uast_node(source_text: str, function_name: str) -> Optional[Dict[s
             return child
     return None
 
+
 logger = logging.getLogger("aero_forge.build")
 
 
@@ -116,12 +117,8 @@ class BuildTaskDAG:
             for name in order:
                 results[name] = self._run_task(name)
         else:
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=self.max_workers
-            ) as executor:
-                futures = {
-                    executor.submit(self._run_task, name): name for name in order
-                }
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                futures = {executor.submit(self._run_task, name): name for name in order}
                 for future in concurrent.futures.as_completed(futures):
                     name = futures[future]
                     results[name] = future.result()
@@ -223,6 +220,10 @@ class BuildRunner:
         progress: bool = False,
         config_override: Optional[ConfigOverride] = None,
         blueprint_path: Optional[Path] = None,
+        engine_backend: Optional[str] = None,
+        wavefront_parallelism: Optional[int] = None,
+        precision_shield_mode: Optional[str] = None,
+        hin_jit_opt_level: Optional[int] = None,
     ):
         self.blueprint = blueprint
         self.blueprint_path = Path(blueprint_path) if blueprint_path else None
@@ -238,12 +239,56 @@ class BuildRunner:
         self.distributed = distributed
         self.progress = progress and sys.stderr.isatty()
         self.config_override = config_override
+        self.engine_backend = engine_backend
+        self.precision_shield_mode = precision_shield_mode
+        self.hin_jit_opt_level = hin_jit_opt_level
         self._host_target = _host_target()
+
+        if wavefront_parallelism is not None and wavefront_parallelism > 0:
+            self.max_workers = max(1, int(wavefront_parallelism))
+
+        # Apply HIN engine backend mapping when the caller did not already
+        # pin a specific target triple or GPU flag.
+        if engine_backend:
+            backend = str(engine_backend).lower().replace("-", "_")
+            if backend in ("hin_gpu", "gpu", "hin_cuda", "hin_vulkan"):
+                self.gpu = True
+            if backend in ("hin_wasm", "wasm"):
+                self.target = "wasm32-unknown-unknown"
+
+        # Fallback to Blueprint execution_strategy when acceleration options
+        # were not supplied directly.
+        if (
+            not engine_backend
+            and not wavefront_parallelism
+            and not precision_shield_mode
+            and not hin_jit_opt_level
+            and blueprint.execution_strategy
+        ):
+            es = blueprint.execution_strategy
+            if getattr(es, "engine_backend", None):
+                self.engine_backend = es.engine_backend
+                if es.engine_backend.lower() in ("hin_gpu", "gpu", "hin_cuda", "hin_vulkan"):
+                    self.gpu = True
+                if es.engine_backend.lower() in ("hin_wasm", "wasm"):
+                    self.target = "wasm32-unknown-unknown"
+            if getattr(es, "wavefront_parallelism", None):
+                self.max_workers = max(1, int(es.wavefront_parallelism))
+            if getattr(es, "precision_shield_mode", None):
+                self.precision_shield_mode = es.precision_shield_mode
+            if getattr(es, "hin_jit_opt_level", None):
+                self.hin_jit_opt_level = int(es.hin_jit_opt_level)
 
         # Ensure Python child processes flush stdout/stderr immediately and that
         # acceleration telemetry has a fallback destination.
         os.environ.setdefault("PYTHONUNBUFFERED", "1")
-        os.environ.setdefault("AERO_FORGE_ACCEL_LOG", str((cache_dir or _cache_dir_from_env() or Path(".aero_cache")) / ".aero_forge_accel.log"))
+        os.environ.setdefault(
+            "AERO_FORGE_ACCEL_LOG",
+            str(
+                (cache_dir or _cache_dir_from_env() or Path(".aero_cache"))
+                / ".aero_forge_accel.log"
+            ),
+        )
 
         env_cache = os.getenv("AERO_FORGE_CACHE_ENABLED", "true").lower() not in (
             "0",
@@ -267,9 +312,7 @@ class BuildRunner:
         # read-only source directories so the original workspace is never mutated.
         if self._is_v3_draft():
             result = self._run_draft_sandbox_build(output_dir)
-            self._maybe_synthesize_blueprint(
-                self._workspace_root(), result.get("success", False)
-            )
+            self._maybe_synthesize_blueprint(self._workspace_root(), result.get("success", False))
             return result
 
         expanded = self._expand_specs()
@@ -305,7 +348,10 @@ class BuildRunner:
                 f"functions:{','.join(sorted(function_names))};"
                 f"flags:{','.join(sorted(flags))};"
                 f"target:{self.target};"
-                f"target_mode:{self.target_mode}"
+                f"target_mode:{self.target_mode};"
+                f"engine_backend:{self.engine_backend or 'default'};"
+                f"precision_shield_mode:{self.precision_shield_mode or 'default'};"
+                f"hin_jit_opt_level:{self.hin_jit_opt_level or 'default'}"
             )
             # Include the source path so identical files in different projects do
             # not share a task cache entry.
@@ -314,9 +360,7 @@ class BuildRunner:
             task_outputs = [output_dir / source.name]
             dag.add_task(
                 name=f"compile:{source.name}",
-                func=lambda s=source, sp=specs: self._safe_build_source(
-                    output_dir, s, sp
-                ),
+                func=lambda s=source, sp=specs: self._safe_build_source(output_dir, s, sp),
                 inputs=inputs,
                 outputs=task_outputs,
             )
@@ -360,9 +404,7 @@ class BuildRunner:
                 return summary
 
         summary = self._summarize(results)
-        self._maybe_synthesize_blueprint(
-            self._workspace_root(), summary.get("success", False)
-        )
+        self._maybe_synthesize_blueprint(self._workspace_root(), summary.get("success", False))
         return summary
 
     def _is_v3_draft(self) -> bool:
@@ -416,9 +458,7 @@ class BuildRunner:
 
         blueprint_v3 = BlueprintV3.load(blueprint_path)
         if blueprint_v3.metadata.status.value != "draft":
-            raise UserError(
-                f"Expected draft blueprint, got status={blueprint_v3.metadata.status}"
-            )
+            raise UserError(f"Expected draft blueprint, got status={blueprint_v3.metadata.status}")
 
         builder = DraftSandboxBuilder(
             blueprint_v3,
@@ -488,9 +528,7 @@ class BuildRunner:
     ) -> BuildResult:
         function_names = [spec.name for spec in specs]
         primary = function_names[0]
-        all_tests = sorted(
-            {str(t.resolve()) for spec in specs for t in spec.tests if t.is_file()}
-        )
+        all_tests = sorted({str(t.resolve()) for spec in specs for t in spec.tests if t.is_file()})
         # Recursively discover additional test files next to the source file and
         # in the project root so nested src/**/tests/ suites are not missed.  Only
         # include tests whose filename is clearly associated with this source to
@@ -499,7 +537,16 @@ class BuildRunner:
         source_stem = source.stem.lower()
         project_root = self.blueprint.output_dir.resolve()
         search_roots = {project_root, source.parent.resolve()}
-        excluded = {"target", "dist", "build", ".cargo", "__pycache__", ".pytest_cache", ".git", ".aero_core"}
+        excluded = {
+            "target",
+            "dist",
+            "build",
+            ".cargo",
+            "__pycache__",
+            ".pytest_cache",
+            ".git",
+            ".aero_core",
+        }
         for search_root in search_roots:
             for test_path in search_root.rglob("test_*.py"):
                 if any(part in excluded for part in test_path.parts):
@@ -577,9 +624,7 @@ class BuildRunner:
                 self._write_loader(
                     source_output, cached.name, function_names, source.name, module_name
                 )
-                _generate_pyi(
-                    source_text, function_names, source_output / f"{source.name}i"
-                )
+                _generate_pyi(source_text, function_names, source_output / f"{source.name}i")
                 return BuildResult(
                     source=source,
                     function_names=function_names,
@@ -606,9 +651,7 @@ class BuildRunner:
                     self._write_loader(
                         source_output, node_cached.name, function_names, source.name, module_name
                     )
-                    _generate_pyi(
-                        source_text, function_names, source_output / f"{source.name}i"
-                    )
+                    _generate_pyi(source_text, function_names, source_output / f"{source.name}i")
                     return BuildResult(
                         source=source,
                         function_names=function_names,
@@ -732,9 +775,7 @@ class BuildRunner:
         )
         return loader
 
-    def _summarize(
-        self, results: List[BuildResult], dry_run: bool = False
-    ) -> Dict[str, Any]:
+    def _summarize(self, results: List[BuildResult], dry_run: bool = False) -> Dict[str, Any]:
         total_functions = sum(len(r.function_names) for r in results)
         passed_functions = sum(len(r.function_names) for r in results if r.success)
         failed_functions = total_functions - passed_functions
