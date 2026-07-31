@@ -61,7 +61,7 @@ def test_incremental_speedup_on_large_graph() -> None:
     """Incremental update should be much faster than a full GoI recompute when
     the influence zone is small relative to the whole graph."""
     scheduler = WavefrontScheduler()
-    n = 2000
+    n = 3000
     adj = {f"node_{i}": [f"node_{i - 1}"] if i > 0 else [] for i in range(n)}
 
     old = scheduler.compute_wavefronts(adj)

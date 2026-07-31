@@ -1,0 +1,824 @@
+//! Hierarchical Interaction Net (HIN) engine.
+//!
+//! This is a zero-heap, arena-based implementation of the MELL-typed
+//! interaction-net reducer used by Aero-Future.  It accepts the same UAST
+//! dialect produced by ``aero_forge.translator.aero_frontend`` and builds a
+//! flat graph of ``Node`` / ``Port`` indices.  Reduction runs with the Python
+//! GIL released.
+
+use std::collections::{HashMap, VecDeque};
+
+use pyo3::exceptions::PyValueError;
+use pyo3::prelude::*;
+use serde::Serialize;
+use serde_json::Value;
+
+/// MELL structural type used for port annotations.
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind")]
+pub enum MellType {
+    I,
+    Any,
+    Tensor { left: Box<MellType>, right: Box<MellType> },
+    Implication { left: Box<MellType>, right: Box<MellType> },
+    Bang { inner: Box<MellType> },
+}
+
+impl MellType {
+    fn any() -> Self {
+        MellType::Any
+    }
+    fn unit() -> Self {
+        MellType::I
+    }
+    fn bang(inner: MellType) -> Self {
+        MellType::Bang {
+            inner: Box::new(inner),
+        }
+    }
+}
+
+/// Payload carried by a ``Value`` node.
+#[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+pub enum NodeValue {
+    Null,
+    Bool(bool),
+    Number(f64),
+    String(String),
+}
+
+impl NodeValue {
+    fn truthy(&self) -> bool {
+        match self {
+            NodeValue::Null => false,
+            NodeValue::Bool(b) => *b,
+            NodeValue::Number(n) => *n != 0.0,
+            NodeValue::String(s) => !s.is_empty(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeKind {
+    Constructor,
+    Destructor,
+    Duplicator,
+    Eraser,
+    Value,
+    Switch,
+    CausalProjection,
+}
+
+struct Port {
+    owner: usize,
+    name: String,
+    is_principal: bool,
+    target: Option<usize>,
+    #[allow(dead_code)]
+    mell_type: MellType,
+}
+
+struct Node {
+    id: String,
+    kind: NodeKind,
+    principal: Option<usize>,
+    aux: Vec<usize>,
+    retired: bool,
+    value: Option<NodeValue>,
+}
+
+/// A single variable scope.
+struct Scope {
+    bindings: HashMap<String, usize>,
+}
+
+/// Arena-based HIN network and reducer.
+pub struct HinEngine {
+    nodes: Vec<Node>,
+    ports: Vec<Port>,
+    active: VecDeque<(usize, usize)>,
+    gensym: usize,
+    scopes: Vec<Scope>,
+}
+
+impl HinEngine {
+    pub fn new() -> Self {
+        Self {
+            nodes: Vec::new(),
+            ports: Vec::new(),
+            active: VecDeque::new(),
+            gensym: 0,
+            scopes: Vec::new(),
+        }
+    }
+
+    fn fresh_id(&mut self, prefix: &str) -> String {
+        let n = self.gensym;
+        self.gensym += 1;
+        format!("{}#{}", prefix, n)
+    }
+
+    fn add_port(
+        &mut self,
+        owner: usize,
+        name: &str,
+        is_principal: bool,
+        mell_type: MellType,
+    ) -> usize {
+        let idx = self.ports.len();
+        self.ports.push(Port {
+            owner,
+            name: name.to_string(),
+            is_principal,
+            target: None,
+            mell_type,
+        });
+        idx
+    }
+
+    fn add_node(
+        &mut self,
+        kind: NodeKind,
+        aux_count: usize,
+        value: Option<NodeValue>,
+    ) -> usize {
+        let id = self.fresh_id(match kind {
+            NodeKind::Constructor => "γ",
+            NodeKind::Destructor => "app",
+            NodeKind::Duplicator => "δ",
+            NodeKind::Eraser => "ε",
+            NodeKind::Value => "V",
+            NodeKind::Switch => "σ",
+            NodeKind::CausalProjection => "P",
+        });
+        let idx = self.nodes.len();
+        let principal = self.add_port(idx, "p", true, MellType::any());
+        let mut aux = Vec::with_capacity(aux_count);
+        for i in 0..aux_count {
+            let name = format!("a_{}", i + 1);
+            let p = self.add_port(idx, &name, false, MellType::any());
+            aux.push(p);
+        }
+        self.nodes.push(Node {
+            id,
+            kind,
+            principal: Some(principal),
+            aux,
+            retired: false,
+            value,
+        });
+        idx
+    }
+
+    fn node_principal(&self, node: usize) -> usize {
+        self.nodes[node].principal.unwrap()
+    }
+
+    fn node_aux(&self, node: usize, idx: usize) -> usize {
+        self.nodes[node].aux[idx]
+    }
+
+    fn connect(&mut self, a: usize, b: usize) {
+        self.ports[a].target = Some(b);
+        self.ports[b].target = Some(a);
+        if self.ports[a].is_principal && self.ports[b].is_principal {
+            let owner_a = self.ports[a].owner;
+            let owner_b = self.ports[b].owner;
+            if owner_a != owner_b {
+                self.active.push_back((owner_a, owner_b));
+            }
+        }
+    }
+
+    fn _link(&mut self, a: Option<usize>, b: Option<usize>) {
+        if let Some(a_idx) = a {
+            if let Some(b_idx) = b {
+                self.connect(a_idx, b_idx);
+            }
+        }
+    }
+
+    fn terminate(&mut self, port: usize) {
+        if self.ports[port].target.is_some() {
+            return;
+        }
+        let eraser = self.add_node(NodeKind::Eraser, 0, None);
+        let eraser_p = self.node_principal(eraser);
+        self.connect(port, eraser_p);
+    }
+
+    fn retire(&mut self, a: usize, b: usize) {
+        self.nodes[a].retired = true;
+        self.nodes[b].retired = true;
+    }
+
+    fn push_scope(&mut self) {
+        self.scopes.push(Scope {
+            bindings: HashMap::new(),
+        });
+    }
+
+    fn pop_scope(&mut self) {
+        if let Some(scope) = self.scopes.pop() {
+            for (_, port) in scope.bindings {
+                if self.ports[port].target.is_none() {
+                    self.terminate(port);
+                }
+            }
+        }
+    }
+
+    fn bind(&mut self, name: &str, port: usize) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.bindings.insert(name.to_string(), port);
+        }
+    }
+
+    fn resolve(&mut self, name: &str) -> Option<usize> {
+        let mut found: Option<(usize, usize)> = None;
+        for (i, scope) in self.scopes.iter().enumerate().rev() {
+            if let Some(&src) = scope.bindings.get(name) {
+                found = Some((i, src));
+                break;
+            }
+        }
+        if let Some((scope_idx, src)) = found {
+            let dup = self.add_node(NodeKind::Duplicator, 2, None);
+            let dup_p = self.node_principal(dup);
+            let dup_a1 = self.node_aux(dup, 0);
+            let dup_a2 = self.node_aux(dup, 1);
+            self.connect(src, dup_p);
+            self.scopes[scope_idx].bindings.insert(name.to_string(), dup_a2);
+            return Some(dup_a1);
+        }
+        None
+    }
+
+    fn kind_of(node: &Value) -> String {
+        node.get("type")
+            .or_else(|| node.get("canonical_kind"))
+            .or_else(|| node.get("kind"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string()
+    }
+
+    fn name_of(node: &Value) -> String {
+        node.get("name")
+            .or_else(|| node.get("text"))
+            .or_else(|| node.get("value"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    fn children_of(node: &Value) -> Vec<&Value> {
+        if let Some(arr) = node.get("children").and_then(|v| v.as_array()) {
+            return arr.iter().collect();
+        }
+        if let Some(arr) = node.get("body").and_then(|v| v.as_array()) {
+            return arr.iter().collect();
+        }
+        Vec::new()
+    }
+
+    /// Build an interaction-net graph from a UAST JSON value.
+    pub fn build_uast(&mut self, uast: &Value) -> Result<(), String> {
+        self.scopes.clear();
+        self.push_scope();
+        let result = self.build(uast)?;
+        if let Some(p) = result {
+            if self.ports[p].target.is_none() {
+                self.terminate(p);
+            }
+        }
+        self.pop_scope();
+        Ok(())
+    }
+
+    fn build(&mut self, node: &Value) -> Result<Option<usize>, String> {
+        let kind = Self::kind_of(node);
+        match kind.as_str() {
+            "module" | "translation_unit" | "block" | "sequence" | "program" | "body" => {
+                self.build_container(node)
+            }
+            "function_declaration" | "function_definition" | "function" | "lambda" => {
+                self.build_function(node)
+            }
+            "binding" | "assignment" | "let" | "variable_declaration" => self.build_binding(node),
+            "reference" | "identifier" | "name" | "var" => self.build_reference(node),
+            "literal" | "constant" | "number" | "string" | "value" => self.build_literal(node),
+            "if" | "if_statement" | "conditional" | "if_else" => self.build_if(node),
+            "call" | "application" | "apply" | "call_expression" | "user_function_call" => {
+                self.build_call(node)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn build_container(&mut self, node: &Value) -> Result<Option<usize>, String> {
+        let children = Self::children_of(node);
+        let mut last: Option<usize> = None;
+        for child in children {
+            let out = self.build(child)?;
+            if let Some(prev) = last {
+                if self.ports[prev].target.is_none() {
+                    self.terminate(prev);
+                }
+            }
+            last = out;
+        }
+        Ok(last)
+    }
+
+    fn build_function(&mut self, node: &Value) -> Result<Option<usize>, String> {
+        // Constructor: a_1 = parameter, a_2 = result.
+        let ctor = self.add_node(NodeKind::Constructor, 2, None);
+        let ctor_p = self.node_principal(ctor);
+        let ctor_a1 = self.node_aux(ctor, 0);
+        let ctor_a2 = self.node_aux(ctor, 1);
+
+        let params = node.get("params").and_then(|v| v.as_array());
+        let param = node
+            .get("param")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        self.push_scope();
+
+        if let Some(ps) = params {
+            if !ps.is_empty() {
+                let first = ps[0].as_str().unwrap_or("").to_string();
+                self.bind(&first, ctor_a1);
+            } else {
+                self.terminate(ctor_a1);
+            }
+        } else if let Some(p) = param {
+            self.bind(&p, ctor_a1);
+        } else {
+            self.terminate(ctor_a1);
+        }
+
+        let body_port = if let Some(body) = node.get("body") {
+            self.build(body)?
+        } else {
+            let children = Self::children_of(node);
+            let mut last: Option<usize> = None;
+            for child in children {
+                let out = self.build(child)?;
+                if let Some(prev) = last {
+                    if self.ports[prev].target.is_none() {
+                        self.terminate(prev);
+                    }
+                }
+                last = out;
+            }
+            last
+        };
+
+        if let Some(p) = body_port {
+            self.connect(p, ctor_a2);
+        } else {
+            let v = self.add_node(NodeKind::Value, 0, Some(NodeValue::Null));
+            self.connect(self.node_principal(v), ctor_a2);
+        }
+
+        self.pop_scope();
+
+        if let Some(name) = node.get("name").and_then(|v| v.as_str()) {
+            self.bind(name, ctor_p);
+        }
+
+        Ok(Some(ctor_p))
+    }
+
+    fn build_binding(&mut self, node: &Value) -> Result<Option<usize>, String> {
+        let name = node.get("name").and_then(|v| v.as_str());
+        let value_port = if let Some(value) = node.get("value") {
+            self.build(value)?
+        } else if let Some(init) = node.get("init") {
+            self.build(init)?
+        } else if let Some(expr) = node.get("expr") {
+            self.build(expr)?
+        } else {
+            None
+        };
+
+        if let Some(n) = name {
+            if let Some(p) = value_port {
+                self.bind(n, p);
+            } else {
+                let v = self.add_node(NodeKind::Value, 0, Some(NodeValue::Null));
+                self.bind(n, self.node_principal(v));
+            }
+        } else if let Some(p) = value_port {
+            if self.ports[p].target.is_none() {
+                self.terminate(p);
+            }
+        }
+        Ok(None)
+    }
+
+    fn build_reference(&mut self, node: &Value) -> Result<Option<usize>, String> {
+        let name = Self::name_of(node);
+        if name.is_empty() {
+            let v = self.add_node(NodeKind::Value, 0, Some(NodeValue::Null));
+            return Ok(Some(self.node_principal(v)));
+        }
+        if let Some(p) = self.resolve(&name) {
+            Ok(Some(p))
+        } else {
+            let v = self.add_node(NodeKind::Value, 0, Some(NodeValue::Null));
+            Ok(Some(self.node_principal(v)))
+        }
+    }
+
+    fn build_literal(&mut self, node: &Value) -> Result<Option<usize>, String> {
+        let val = if let Some(n) = node.get("value") {
+            Self::json_to_value(n)
+        } else if let Some(t) = node.get("text").and_then(|v| v.as_str()) {
+            NodeValue::String(t.to_string())
+        } else {
+            NodeValue::Null
+        };
+        let vnode = self.add_node(NodeKind::Value, 0, Some(val));
+        Ok(Some(self.node_principal(vnode)))
+    }
+
+    fn build_call(&mut self, node: &Value) -> Result<Option<usize>, String> {
+        let dtor = self.add_node(NodeKind::Destructor, 2, None);
+        let dtor_p = self.node_principal(dtor);
+        let dtor_a1 = self.node_aux(dtor, 0);
+        let dtor_a2 = self.node_aux(dtor, 1);
+
+        let func_port = if let Some(func) = node.get("function") {
+            self.build(func)?
+        } else if let Some(func) = node.get("callee") {
+            self.build(func)?
+        } else {
+            None
+        };
+
+        if let Some(p) = func_port {
+            self.connect(p, dtor_p);
+        } else {
+            let v = self.add_node(NodeKind::Value, 0, Some(NodeValue::Null));
+            self.connect(self.node_principal(v), dtor_p);
+        }
+
+        let arg_port = if let Some(args) = node.get("arguments").and_then(|v| v.as_array()) {
+            if !args.is_empty() {
+                self.build(&args[0])?
+            } else {
+                None
+            }
+        } else if let Some(arg) = node.get("argument") {
+            self.build(arg)?
+        } else if let Some(arg) = node.get("arg") {
+            self.build(arg)?
+        } else {
+            None
+        };
+
+        if let Some(p) = arg_port {
+            self.connect(p, dtor_a1);
+        } else {
+            self.terminate(dtor_a1);
+        }
+
+        Ok(Some(dtor_a2))
+    }
+
+    fn build_if(&mut self, node: &Value) -> Result<Option<usize>, String> {
+        let sw = self.add_node(NodeKind::Switch, 3, None);
+        let sw_p = self.node_principal(sw);
+        let sw_a1 = self.node_aux(sw, 0);
+        let sw_a2 = self.node_aux(sw, 1);
+        let sw_a3 = self.node_aux(sw, 2);
+
+        let cond_port = if let Some(cond) = node.get("condition") {
+            self.build(cond)?
+        } else if let Some(cond) = node.get("test") {
+            self.build(cond)?
+        } else if let Some(cond) = node.get("cond") {
+            self.build(cond)?
+        } else {
+            None
+        };
+
+        if let Some(p) = cond_port {
+            self.connect(p, sw_p);
+        } else {
+            let v = self.add_node(NodeKind::Value, 0, Some(NodeValue::Bool(false)));
+            self.connect(self.node_principal(v), sw_p);
+        }
+
+        let then_port = self.branch_port(node.get("then").or_else(|| node.get("consequent")))?;
+        let else_port = self.branch_port(node.get("else").or_else(|| node.get("alternate")))?;
+
+        self.connect(then_port, sw_a1);
+        self.connect(else_port, sw_a2);
+
+        Ok(Some(sw_a3))
+    }
+
+    fn branch_port(&mut self, branch: Option<&Value>) -> Result<usize, String> {
+        if let Some(b) = branch {
+            if let Some(p) = self.build(b)? {
+                Ok(p)
+            } else {
+                let v = self.add_node(NodeKind::Value, 0, Some(NodeValue::Null));
+                Ok(self.node_principal(v))
+            }
+        } else {
+            let v = self.add_node(NodeKind::Value, 0, Some(NodeValue::Null));
+            Ok(self.node_principal(v))
+        }
+    }
+
+    fn json_to_value(v: &Value) -> NodeValue {
+        match v {
+            Value::Null => NodeValue::Null,
+            Value::Bool(b) => NodeValue::Bool(*b),
+            Value::Number(n) => NodeValue::Number(n.as_f64().unwrap_or(0.0)),
+            Value::String(s) => NodeValue::String(s.clone()),
+            _ => NodeValue::Null,
+        }
+    }
+
+    /// Run active-pair reductions until the net is stable or ``max_steps`` is hit.
+    pub fn reduce_to_completion(&mut self, max_steps: usize) -> usize {
+        let mut steps = 0usize;
+        while steps < max_steps && self.reduce_step() {
+            steps += 1;
+        }
+        steps
+    }
+
+    fn reduce_step(&mut self) -> bool {
+        while let Some((a, b)) = self.active.pop_front() {
+            if self.nodes[a].retired || self.nodes[b].retired {
+                continue;
+            }
+            // Verify the active pair is still connected through principal ports.
+            let pa = self.nodes[a].principal.unwrap();
+            let pb = self.nodes[b].principal.unwrap();
+            if self.ports[pa].target != Some(pb) || self.ports[pb].target != Some(pa) {
+                continue;
+            }
+            if !self.has_rule(a, b) {
+                // Inert pair; ignore and continue.
+                continue;
+            }
+            self.apply_rule(a, b);
+            return true;
+        }
+        false
+    }
+
+    fn has_rule(&self, a: usize, b: usize) -> bool {
+        let kinds = (&self.nodes[a].kind, &self.nodes[b].kind);
+        matches!(
+            kinds,
+            (_, NodeKind::Eraser)
+                | (NodeKind::Eraser, _)
+                | (_, NodeKind::Duplicator)
+                | (NodeKind::Duplicator, _)
+                | (NodeKind::Switch, NodeKind::Value)
+                | (NodeKind::Value, NodeKind::Switch)
+                | (NodeKind::CausalProjection, NodeKind::Value)
+                | (NodeKind::Value, NodeKind::CausalProjection)
+                | (NodeKind::Constructor, NodeKind::Destructor)
+                | (NodeKind::Destructor, NodeKind::Constructor)
+        ) || self.nodes[a].kind == self.nodes[b].kind
+    }
+
+    fn apply_rule(&mut self, a: usize, b: usize) {
+        match (self.nodes[a].kind.clone(), self.nodes[b].kind.clone()) {
+            (_, NodeKind::Eraser) => self.rule_erase(b, a),
+            (NodeKind::Eraser, _) => self.rule_erase(a, b),
+            (NodeKind::Duplicator, NodeKind::Duplicator) => self.rule_annihilate(a, b),
+            (NodeKind::Duplicator, _) => self.rule_duplicate(a, b),
+            (_, NodeKind::Duplicator) => self.rule_duplicate(b, a),
+            (NodeKind::Switch, NodeKind::Value) => self.rule_switch(a, b),
+            (NodeKind::Value, NodeKind::Switch) => self.rule_switch(b, a),
+            (NodeKind::CausalProjection, NodeKind::Value) => self.rule_project(a, b),
+            (NodeKind::Value, NodeKind::CausalProjection) => self.rule_project(b, a),
+            _ => self.rule_annihilate(a, b),
+        }
+    }
+
+    fn rule_annihilate(&mut self, a: usize, b: usize) {
+        let aux_a: Vec<usize> = self.nodes[a].aux.clone();
+        let aux_b: Vec<usize> = self.nodes[b].aux.clone();
+        for (pa, pb) in aux_a.iter().zip(aux_b.iter()) {
+            self._link(self.ports[*pa].target, self.ports[*pb].target);
+        }
+        self.retire(a, b);
+    }
+
+    fn rule_duplicate(&mut self, dup: usize, other: usize) {
+        let dup_aux: Vec<usize> = self.nodes[dup].aux.clone();
+        let other_aux: Vec<usize> = self.nodes[other].aux.clone();
+
+        // External wires leaving the duplicator outputs and the other agent's aux wires.
+        let dup_externals: Vec<Option<usize>> =
+            dup_aux.iter().map(|&p| self.ports[p].target).collect();
+        let other_externals: Vec<Option<usize>> =
+            other_aux.iter().map(|&p| self.ports[p].target).collect();
+
+        // One clone of `other` per duplicator output.
+        let mut clones = Vec::with_capacity(dup_aux.len());
+        for _ in 0..dup_aux.len() {
+            clones.push(self.clone_node(other));
+        }
+
+        // One fresh duplicator per auxiliary port of `other`.
+        let mut sub_dups = Vec::with_capacity(other_aux.len());
+        for _ in 0..other_aux.len() {
+            sub_dups.push(self.add_node(NodeKind::Duplicator, 2, None));
+        }
+
+        for (i, clone) in clones.iter().enumerate() {
+            let clone_p = self.node_principal(*clone);
+            self._link(Some(clone_p), dup_externals[i]);
+        }
+
+        for (j, sub) in sub_dups.iter().enumerate() {
+            let sub_p = self.node_principal(*sub);
+            self._link(Some(sub_p), other_externals[j]);
+        }
+
+        for (i, clone) in clones.iter().enumerate() {
+            for (j, sub) in sub_dups.iter().enumerate() {
+                let clone_aux = self.node_aux(*clone, j);
+                let sub_aux = self.node_aux(*sub, i);
+                self.connect(clone_aux, sub_aux);
+            }
+        }
+
+        self.retire(dup, other);
+    }
+
+    fn rule_erase(&mut self, eraser: usize, other: usize) {
+        let other_aux: Vec<usize> = self.nodes[other].aux.clone();
+        for &aux in &other_aux {
+            let new_eraser = self.add_node(NodeKind::Eraser, 0, None);
+            let ep = self.node_principal(new_eraser);
+            self._link(Some(ep), self.ports[aux].target);
+        }
+        self.retire(eraser, other);
+    }
+
+    fn rule_switch(&mut self, switch: usize, value: usize) {
+        let val = self.nodes[value].value.clone().unwrap_or(NodeValue::Null);
+        let take_true = val.truthy();
+
+        let selected = if take_true {
+            self.node_aux(switch, 0)
+        } else {
+            self.node_aux(switch, 1)
+        };
+        let discarded = if take_true {
+            self.node_aux(switch, 1)
+        } else {
+            self.node_aux(switch, 0)
+        };
+        let output = self.node_aux(switch, 2);
+
+        self._link(self.ports[selected].target, self.ports[output].target);
+
+        let new_eraser = self.add_node(NodeKind::Eraser, 0, None);
+        let ep = self.node_principal(new_eraser);
+        self._link(Some(ep), self.ports[discarded].target);
+
+        self.retire(switch, value);
+    }
+
+    fn rule_project(&mut self, proj: usize, coord: usize) {
+        let path = self.nodes[coord].value.clone().unwrap_or(NodeValue::Null);
+        let emitted = self.add_node(NodeKind::Value, 0, Some(path));
+        let proj_a1 = self.node_aux(proj, 0);
+        self._link(Some(self.node_principal(emitted)), self.ports[proj_a1].target);
+        self.retire(proj, coord);
+    }
+
+    fn clone_node(&mut self, node: usize) -> usize {
+        let kind = self.nodes[node].kind.clone();
+        let value = self.nodes[node].value.clone();
+        let aux_count = self.nodes[node].aux.len();
+        let new_node = self.add_node(kind, aux_count, value);
+        new_node
+    }
+
+    /// Serialize the remaining live graph as JSON.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        #[derive(Serialize)]
+        struct PortRepr {
+            name: String,
+            target_node: Option<String>,
+            target_port: Option<String>,
+        }
+
+        #[derive(Serialize)]
+        struct NodeRepr {
+            id: String,
+            kind: NodeKind,
+            value: Option<NodeValue>,
+            ports: Vec<PortRepr>,
+        }
+
+        let mut nodes = Vec::new();
+        for (_idx, node) in self.nodes.iter().enumerate() {
+            if node.retired {
+                continue;
+            }
+            let mut ports = Vec::new();
+            let mut add_port = |p: usize| {
+                let port = &self.ports[p];
+                let (t_node, t_port) = port.target.map_or((None, None), |t| {
+                    let owner = self.ports[t].owner;
+                    (Some(self.nodes[owner].id.clone()), Some(self.ports[t].name.clone()))
+                });
+                ports.push(PortRepr {
+                    name: port.name.clone(),
+                    target_node: t_node,
+                    target_port: t_port,
+                });
+            };
+            if let Some(p) = node.principal {
+                add_port(p);
+            }
+            for &p in &node.aux {
+                add_port(p);
+            }
+            nodes.push(NodeRepr {
+                id: node.id.clone(),
+                kind: node.kind.clone(),
+                value: node.value.clone(),
+                ports,
+            });
+        }
+        serde_json::to_string(&nodes)
+    }
+}
+
+#[pyclass(name = "HinEngine")]
+pub struct PyHinEngine {
+    engine: HinEngine,
+}
+
+#[pymethods]
+impl PyHinEngine {
+    #[new]
+    fn new() -> Self {
+        Self {
+            engine: HinEngine::new(),
+        }
+    }
+
+    /// Build an interaction-net from a UAST JSON string.
+    fn build_from_json(&mut self, json: &str) -> PyResult<()> {
+        let uast: Value = serde_json::from_str(json)
+            .map_err(|e| PyValueError::new_err(format!("invalid UAST JSON: {}", e)))?;
+        self.engine
+            .build_uast(&uast)
+            .map_err(|e| PyValueError::new_err(e))?;
+        Ok(())
+    }
+
+    /// Reduce active pairs until the net is stable or ``max_steps`` is reached.
+    fn reduce_to_completion(&mut self, max_steps: usize) -> PyResult<usize> {
+        Ok(self.engine.reduce_to_completion(max_steps))
+    }
+
+    /// Return the live graph as a JSON string.
+    fn to_json(&self) -> PyResult<String> {
+        self.engine
+            .to_json()
+            .map_err(|e| PyValueError::new_err(format!("serialization failed: {}", e)))
+    }
+}
+
+/// Build and reduce a UAST JSON string in one call (GIL released during reduction).
+#[pyfunction]
+#[pyo3(signature = (json, max_steps=None))]
+pub fn reduce_hin_uast(json: &str, max_steps: Option<usize>) -> PyResult<String> {
+    let uast: Value = serde_json::from_str(json)
+        .map_err(|e| PyValueError::new_err(format!("invalid UAST JSON: {}", e)))?;
+    let mut engine = HinEngine::new();
+    engine
+        .build_uast(&uast)
+        .map_err(|e| PyValueError::new_err(e))?;
+    let steps = if let Some(ms) = max_steps {
+        engine.reduce_to_completion(ms)
+    } else {
+        engine.reduce_to_completion(1_000_000)
+    };
+    let out = engine
+        .to_json()
+        .map_err(|e| PyValueError::new_err(format!("serialization failed: {}", e)))?;
+    Ok(format!("{{\"steps\":{},\"graph\":{}}}", steps, out))
+}

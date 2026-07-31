@@ -8,6 +8,7 @@ use pyo3::types::PyString;
 mod aeroc_compiler;
 mod aeroc_daemon;
 mod aeroc_unpacker;
+mod hin_engine;
 
 /// A BLAKE3 incremental hasher exposed to Python.
 #[pyclass(name = "Hasher")]
@@ -425,10 +426,12 @@ fn aero_forge_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Hasher>()?;
     m.add_class::<GraphEngine>()?;
     m.add_class::<WavefrontEngine>()?;
+    m.add_class::<hin_engine::PyHinEngine>()?;
     m.add_function(wrap_pyfunction!(hash_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(hash_file, m)?)?;
     m.add_function(wrap_pyfunction!(compile_aeroc, m)?)?;
     m.add_function(wrap_pyfunction!(run_aeroc, m)?)?;
     m.add_function(wrap_pyfunction!(unpack_aeroc, m)?)?;
+    m.add_function(wrap_pyfunction!(hin_engine::reduce_hin_uast, m)?)?;
     Ok(())
 }
