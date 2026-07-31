@@ -7,9 +7,11 @@ try:
     from .aero_forge_native import (  # type: ignore[import-not-found]
         GraphEngine,
         Hasher,
+        HinEngine,
         compile_aeroc,
         hash_bytes,
         hash_file,
+        reduce_hin_uast,
         run_aeroc,
         unpack_aeroc,
     )
@@ -19,4 +21,14 @@ except ImportError as exc:  # pragma: no cover
         "Run 'cargo build --release' in aero_forge/_native."
     ) from exc
 
-__all__ = ["Hasher", "GraphEngine", "compile_aeroc", "run_aeroc", "unpack_aeroc", "hash_bytes", "hash_file"]
+__all__ = [
+    "Hasher",
+    "GraphEngine",
+    "HinEngine",
+    "compile_aeroc",
+    "run_aeroc",
+    "unpack_aeroc",
+    "hash_bytes",
+    "hash_file",
+    "reduce_hin_uast",
+]

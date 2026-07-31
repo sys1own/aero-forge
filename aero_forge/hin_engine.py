@@ -7,7 +7,10 @@ from typing import Any, Dict, Optional
 try:
     from aero_forge_native import HinEngine  # type: ignore[attr-defined]
 except Exception:  # pragma: no cover - native module is optional at import time
-    HinEngine = None  # type: ignore[misc,assignment]
+    try:
+        from aero_forge._native import HinEngine  # type: ignore[attr-defined]
+    except Exception:
+        HinEngine = None  # type: ignore[misc,assignment]
 
 
 # MELL structural type helpers used by the emitters.
