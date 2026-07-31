@@ -134,7 +134,7 @@ class ABIContract(BaseModel):
         if value is None:
             return "cpp"
         value = str(value).lower().strip()
-        synonyms = {"c++": "cpp", "py": "python"}
+        synonyms = {"c++": "cpp", "cxx": "cpp", "c": "cpp", "c-abi": "cpp", "py": "python"}
         value = synonyms.get(value, value)
         allowed = {"cpp", "rust", "python"}
         if value not in allowed:
@@ -150,8 +150,10 @@ class ABIContract(BaseModel):
         synonyms = {
             "pyo3": "pyo3",
             "ctypes": "ctypes",
+            "c": "c_abi",
             "cabi": "c_abi",
             "c-abi": "c_abi",
+            "raw_c": "c_abi",
             "native_c": "c_abi",
             "native_bridge": "c_abi",
             "c_abi_bridge": "c_abi",

@@ -468,13 +468,17 @@ def generate_smoke_tests(implementation: str, module_name: str = "generated") ->
 def _abi_type_to_py(abi_type: str) -> str:
     """Map a supported ABI scalar/pointer type to a Python type hint."""
     t = (abi_type or "").strip().lower()
-    if t in {"f64", "double", "float"}:
+    if t in {"f64", "double", "float", "c_double", "c_float", "f32"}:
         return "float"
-    if t in {"i32", "i64", "int", "int32_t", "int64_t", "usize", "u32"}:
+    if t in {
+        "i32", "i64", "int", "int32_t", "int64_t",
+        "usize", "size_t", "u32", "u64", "uint32_t", "uint64_t",
+        "c_int", "c_long", "c_ulong", "c_size_t",
+    }:
         return "int"
     if t in {"bool"}:
         return "bool"
-    if t in {"const char*", "char*", "c_str"}:
+    if t in {"const char*", "char*", "c_str", "c_char", "*const c_char", "*mut c_char"}:
         return "str"
     if t in {"void"}:
         return "None"

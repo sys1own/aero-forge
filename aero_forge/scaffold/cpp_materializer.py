@@ -201,9 +201,12 @@ def _is_c_abi_scalar(type_hint: str) -> bool:
 
 
 def _is_c_abi_list(type_hint: str) -> bool:
+    """Return True for ``list[T]`` where ``T`` is a C-ABI scalar type.
+
+    A bare ``list`` is intentionally rejected because the C-ABI emitter needs to
+    know the element type (e.g. ``list[float]``) to emit a valid ``double*``.
+    """
     th = (type_hint or "").strip()
-    if th == "list":
-        return True
     if th.startswith("list[") and th.endswith("]"):
         inner = th[5:-1].strip()
         return _is_c_abi_scalar(inner)
@@ -211,13 +214,17 @@ def _is_c_abi_list(type_hint: str) -> bool:
 
 
 def _tuple_list_inner(type_hint: str) -> Optional[str]:
-    """Return the list element type for ``tuple[int, list[T]]`` style returns."""
+    """Return the list element type for ``tuple[int, list[T]]`` style returns.
+
+    Only ``tuple[<size>, list[T]]`` patterns are valid C-ABI returns; a tuple of
+    two lists (``tuple[list[T], list[T]]``) is not directly expressible.
+    """
     th = (type_hint or "").strip()
     if not (th.startswith("tuple[") and th.endswith("]")):
         return None
     inner = th[6:-1].strip()
     parts = [p.strip() for p in inner.split(",")]
-    if len(parts) == 2 and _is_c_abi_list(parts[1]):
+    if len(parts) == 2 and _is_c_abi_scalar(parts[0]) and _is_c_abi_list(parts[1]):
         return parts[1]
     return None
 
@@ -600,8 +607,9 @@ def _special_cpp_source(pkg_name: str, contract: ContractEntry) -> str:
         return_list = _is_c_abi_list(return_type) or _is_c_abi_tuple_return(return_type)
         out_arg = list_args[-1] if (not return_list and len(list_args) > 2) else None
 
-        # The last list argument is the output buffer for scalar-return contracts.
-        output_list_arg = list_args[-1] if (not return_list and list_args) else None
+        # The last list argument is the output buffer only when an explicit output
+        # array is supplied (more than two list parameters or a list return type).
+        output_list_arg = list_args[-1] if (not return_list and len(list_args) > 2) else None
         c_params = [
             _special_cpp_param_decl(a, t, is_output=(a == output_list_arg))
             for a, t in args
@@ -698,8 +706,10 @@ def _special_cpp_source(pkg_name: str, contract: ContractEntry) -> str:
         if len(list_args) == 2 and len(scalar_args) == 1 and _map_py_type(return_type) == "float":
             a_name, b_name = list_args[0], list_args[1]
             window_name = scalar_args[0]
+            return_list = _is_c_abi_list(return_type) or _is_c_abi_tuple_return(return_type)
+            output_list_arg = list_args[-1] if (not return_list and len(list_args) > 2) else None
             c_params = [
-                _special_cpp_param_decl(a, t)
+                _special_cpp_param_decl(a, t, is_output=(a == output_list_arg))
                 for a, t in args
             ]
             sig = f'extern "C" AERO_EXPORT double {name}({", ".join(c_params)})'
@@ -746,7 +756,9 @@ def _c_function_decl(contract: ContractEntry) -> str:
     if _is_special_cpp_contract(contract):
         list_args = [a for a, t in args if _is_c_abi_list(t)]
         return_list = _is_c_abi_list(return_type) or _is_c_abi_tuple_return(return_type)
-        output_list_arg = list_args[-1] if (not return_list and list_args) else None
+        # Only the last list argument is an output buffer when there are more than
+        # two list parameters or the return type is itself a list.
+        output_list_arg = list_args[-1] if (not return_list and len(list_args) > 2) else None
         c_params = [
             _special_cpp_param_decl(a, t, is_output=(a == output_list_arg))
             for a, t in args
