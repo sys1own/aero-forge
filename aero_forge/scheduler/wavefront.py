@@ -67,11 +67,19 @@ class WavefrontScheduler:
     thread_limit: int = field(default_factory=lambda: int(os.environ.get("AERO_MAX_THREADS", "0")) or max(1, os.cpu_count() or 1))
     memory_limit_mb: int = field(default_factory=lambda: int(os.environ.get("AERO_MAX_MEMORY_MB", "0")) or 2048)
     log_callback: Optional[Callable[[str, str, str], None]] = None
+    progress_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None
 
     def _log(self, level: str, prefix: str, message: str) -> None:
         if self.log_callback:
             self.log_callback(level, prefix, message)
         logger.log(getattr(logging, level.upper(), logging.INFO), "[%s] %s", prefix, message)
+
+    def _emit(self, event: str, payload: Dict[str, Any]) -> None:
+        if self.progress_callback:
+            try:
+                self.progress_callback(event, payload)
+            except Exception as exc:  # pragma: no cover - callers must not crash scheduler
+                logger.debug("progress callback failed: %s", exc)
 
     def compute_wavefronts(
         self,
@@ -131,6 +139,7 @@ class WavefrontScheduler:
         if any(d > 0 for d in in_degree.values()):
             raise CycleError("Graph contains a cycle; cannot compute wavefront schedule")
 
+        self._emit("goi_wave_state", {"waves": waves, "goi": use_goi, "damping": goi_damping})
         return waves
 
     def _z3_available(self) -> bool:
@@ -358,12 +367,22 @@ class WavefrontScheduler:
         waves = self.compute_wavefronts(adj, roots=roots, use_goi=use_goi, goi_weights=goi_weights)
 
         results: List[Dict[str, Any]] = []
+        total_waves = len(waves)
         for wave_idx, wave in enumerate(waves):
             wave_tasks = [tasks[n] for n in wave if n in tasks]
             if not wave_tasks:
                 continue
 
             self._log("info", "WAVE", f"Wave {wave_idx}: {len(wave_tasks)} task(s) ({', '.join(t.name for t in wave_tasks)})")
+            self._emit(
+                "goi_wave_state",
+                {
+                    "wave": wave_idx,
+                    "total_waves": total_waves,
+                    "tasks": [t.name for t in wave_tasks],
+                    "status": "running",
+                },
+            )
 
             if not self._verify_resource_limits(wave_tasks):
                 self._log("error", "WAVE", f"Wave {wave_idx} exceeds resource limits")
@@ -376,6 +395,10 @@ class WavefrontScheduler:
                         "stderr": "Resource limit check failed",
                         "timed_out": False,
                     })
+                self._emit(
+                    "goi_wave_state",
+                    {"wave": wave_idx, "total_waves": total_waves, "tasks": [t.name for t in wave_tasks], "status": "resource_limited"},
+                )
                 continue
 
             wave_results = await asyncio.gather(*[self._run_task(t) for t in wave_tasks])
@@ -388,7 +411,18 @@ class WavefrontScheduler:
                     f"Task {result['name']} finished with exit code {result['returncode']} ({status})",
                 )
 
-            if any(r["returncode"] != 0 for _t, r in wave_results):
+            failed = any(r["returncode"] != 0 for _t, r in wave_results)
+            self._emit(
+                "goi_wave_state",
+                {
+                    "wave": wave_idx,
+                    "total_waves": total_waves,
+                    "tasks": [t.name for t in wave_tasks],
+                    "status": "failed" if failed else "completed",
+                    "results": [r["returncode"] for _t, r in wave_results],
+                },
+            )
+            if failed:
                 self._log("warning", "WAVE", f"Wave {wave_idx} had failures; continuing to next wave")
 
         return results

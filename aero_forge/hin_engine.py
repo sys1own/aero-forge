@@ -2,7 +2,7 @@
 
 import json
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 try:
     from aero_forge_native import HinEngine  # type: ignore[attr-defined]
@@ -58,7 +58,9 @@ class MELLType:
         return d
 
 
-def reduce_uast(uast: Any, max_steps: int = 1_000_000) -> Dict[str, Any]:
+def reduce_uast(
+    uast: Any, max_steps: int = 1_000_000, progress_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None
+) -> Dict[str, Any]:
     """Build and reduce a HIN graph from a UAST value.
 
     Returns ``{"steps": int, "graph": list}``.  Falls back to a no-op
@@ -68,10 +70,20 @@ def reduce_uast(uast: Any, max_steps: int = 1_000_000) -> Dict[str, Any]:
     if HinEngine is None:
         return {"steps": 0, "graph": [], "native": False}
 
+    def _emit(event: str, payload: Dict[str, Any]) -> None:
+        if progress_callback:
+            try:
+                progress_callback(event, payload)
+            except Exception:
+                pass
+
     engine = HinEngine()
     engine.build_from_json(json.dumps(uast))
+    _emit("hin_reduction_steps", {"phase": "build", "nodes": engine.node_count()})
     steps = engine.reduce_to_completion(max_steps)
-    return {"steps": steps, "graph": json.loads(engine.to_json()), "native": True}
+    graph = json.loads(engine.to_json())
+    _emit("hin_reduction_steps", {"phase": "complete", "steps": steps, "nodes": len(graph)})
+    return {"steps": steps, "graph": graph, "native": True}
 
 
 def native_available() -> bool:

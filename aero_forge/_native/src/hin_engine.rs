@@ -557,6 +557,11 @@ impl HinEngine {
         steps
     }
 
+    /// Number of allocated nodes (including retired nodes).
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
     fn reduce_step(&mut self) -> bool {
         while let Some((a, b)) = self.active.pop_front() {
             if self.nodes[a].retired || self.nodes[b].retired {
@@ -799,6 +804,11 @@ impl PyHinEngine {
         self.engine
             .to_json()
             .map_err(|e| PyValueError::new_err(format!("serialization failed: {}", e)))
+    }
+
+    /// Number of allocated nodes (including retired nodes).
+    fn node_count(&self) -> usize {
+        self.engine.node_count()
     }
 }
 

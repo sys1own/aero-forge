@@ -27,7 +27,7 @@ from http.client import HTTPResponse
 from http.server import BaseHTTPRequestHandler
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
 import aiohttp
@@ -227,6 +227,19 @@ def _notify_tree_changed(session_id: str) -> None:
         asyncio.run_coroutine_threadsafe(_broadcast_tree(session_id), _event_loop)
     except Exception:
         pass
+
+
+def _make_progress_sender(response: web.StreamResponse, session_id: str) -> Callable[[str, Dict[str, Any]], None]:
+    """Return a sync callback that writes `goi_wave_state` / `hin_reduction_steps` NDJSON chunks."""
+    def _send_progress(event: str, payload: Dict[str, Any]) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        line = json.dumps({"type": event, "session_id": session_id, **payload}) + "\n"
+        data = line.encode("utf-8")
+        loop.call_soon(lambda: asyncio.create_task(response.write(data)))
+    return _send_progress
 
 
 def _session_dir(session_id: str) -> Path:
@@ -3099,6 +3112,7 @@ async def _handle_terminal_run_async(request: web.Request) -> web.StreamResponse
             sandbox_dir=session_dir,
             env=env,
             log_callback=_wave_log,
+            progress_callback=_make_progress_sender(response, session_id),
         )
         result = results[0]
     except Exception as exc:
