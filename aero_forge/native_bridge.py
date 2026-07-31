@@ -134,8 +134,19 @@ def _find_cpp_compiler() -> Optional[str]:
     return None
 
 
-def _ctypes_loader_source(source: str, so_path: Path, function_names: List[str]) -> str:
-    """Generate a ``ctypes`` Python loader for the C-ABI ``.so`` at *so_path*."""
+def _ctypes_loader_source(
+    source: str,
+    so_path: Path,
+    function_names: List[str],
+    workspace_root: Optional[Path] = None,
+    loader_path: Optional[Path] = None,
+) -> str:
+    """Generate a ``ctypes`` Python loader for the C-ABI ``.so`` at *so_path*.
+
+    When *workspace_root* and *loader_path* are supplied, the generated loader
+    resolves the shared library relative to the project root and searches a
+    small set of candidate build directories, avoiding brittle hardcoded paths.
+    """
     tree = ast.parse(source)
 
     def _py_ann(node: Optional[ast.expr]) -> str:
@@ -157,19 +168,72 @@ def _ctypes_loader_source(source: str, so_path: Path, function_names: List[str])
         "bool": "free_buffer_bool",
     }
 
-    lines: List[str] = [
-        "import ctypes",
-        "import pathlib",
-        "",
-        "_HERE = pathlib.Path(__file__).parent",
-        f'_SO = pathlib.Path({str(so_path)!r})',
-        "_LIB = ctypes.CDLL(str(_SO))",
-        "",
+    so_path_obj = Path(so_path)
+    so_name = so_path_obj.name
+    stem = so_path_obj.stem
+    bare_stem = stem[3:] if stem.startswith("lib") else stem
+
+    if workspace_root is not None and loader_path is not None:
+        root = Path(workspace_root).resolve()
+        loader = Path(loader_path).resolve()
+        try:
+            rel = loader.parent.relative_to(root)
+            n_parents = len(rel.parts)
+        except ValueError:
+            n_parents = 0
+        try:
+            so_rel = so_path_obj.resolve().relative_to(root)
+            so_candidates = [f'_ROOT / {str(so_rel)!r}']
+        except ValueError:
+            so_candidates = [f'pathlib.Path({str(so_path_obj.resolve())!r})']
+        search_block = (
+            "    for _d in _SO_CANDIDATES:\n"
+            "        if _d.is_file():\n"
+            "            return _d\n"
+            "    for _ext in (\".so\", \".dylib\", \".dll\"):\n"
+            "        for _d in (\"dist\", \"target/release\", \"cpp_core\", \"cpp_engine\", \"src\"):\n"
+            "            _dp = _ROOT / _d\n"
+            "            if not _dp.is_dir():\n"
+            "                continue\n"
+            "            for _f in _dp.iterdir():\n"
+            f"                if _f.suffix == _ext and ({bare_stem!r} in _f.name or {stem!r} in _f.name):\n"
+            "                    return _f\n"
+            f"    raise FileNotFoundError(f\"Could not find native library {so_name!r} under {{_ROOT}}\")"
+        )
+        prelude = [
+            "import ctypes",
+            "import pathlib",
+            "",
+            f"_ROOT = pathlib.Path(__file__).resolve().parents[{n_parents}]",
+            "",
+            f"_SO_NAME = {so_name!r}",
+            f"_SO_CANDIDATES = [{', '.join(so_candidates)}]",
+            "",
+            "def _find_library():",
+            search_block,
+            "",
+            "_SO = _find_library()",
+            "_LIB = ctypes.CDLL(str(_SO))",
+            "",
+        ]
+    else:
+        prelude = [
+            "import ctypes",
+            "import pathlib",
+            "",
+            "_HERE = pathlib.Path(__file__).parent",
+            f'_SO = pathlib.Path({str(so_path_obj)!r})',
+            "_LIB = ctypes.CDLL(str(_SO))",
+            "",
+        ]
+
+    lines: List[str] = prelude
+    lines.extend([
         "_LIB.free_buffer_i64.argtypes = [ctypes.POINTER(ctypes.c_int64), ctypes.c_size_t]",
         "_LIB.free_buffer_f64.argtypes = [ctypes.POINTER(ctypes.c_double), ctypes.c_size_t]",
         "_LIB.free_buffer_bool.argtypes = [ctypes.POINTER(ctypes.c_bool), ctypes.c_size_t]",
         "",
-    ]
+    ])
 
     all_names: List[str] = []
     for func in tree.body:
@@ -443,8 +507,14 @@ class NativeAccelerator:
                 so_path = cached
 
         try:
-            loader_source = _ctypes_loader_source(source, so_path, [name])
             loader_path = so_path.parent / f"_{name}_ctypes_loader.py"
+            loader_source = _ctypes_loader_source(
+                source,
+                so_path,
+                [name],
+                workspace_root=so_path.parent,
+                loader_path=loader_path,
+            )
             loader_path.write_text(loader_source, encoding="utf-8")
             module_name = f"aero_cpp_loader_{_sanitize(name)}_{so_path.stat().st_ino}"
             spec = importlib.util.spec_from_file_location(module_name, loader_path)

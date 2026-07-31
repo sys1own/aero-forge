@@ -137,8 +137,18 @@ class DraftSandboxBuilder:
             elif item.is_file():
                 shutil.copy2(item, dest)
 
+    def _source_dir_names(self) -> Set[str]:
+        """Derive source directory names from the blueprint manifest plus defaults."""
+        names = set(_SOURCE_DIR_NAMES)
+        for entry in getattr(self.blueprint, "manifest", []) or []:
+            parts = Path(entry.path).parts
+            if parts and parts[0] not in _SKIP_DIR_NAMES:
+                names.add(parts[0])
+        return names
+
     def _make_source_dirs_read_only(self, sandbox_root: Path) -> None:
         """Set source directories and their contents to read-only in the sandbox."""
+        source_dirs = self._source_dir_names()
         for root, dirs, files in os.walk(sandbox_root, topdown=True):
             current = Path(root)
             if any(part in _SKIP_DIR_NAMES for part in current.parts):
@@ -146,7 +156,7 @@ class DraftSandboxBuilder:
                 continue
 
             # If the current directory is a recognized source tree, make it read-only.
-            if current.name in _SOURCE_DIR_NAMES or current == sandbox_root:
+            if current.name in source_dirs or current == sandbox_root:
                 try:
                     current.chmod(0o755)
                 except OSError:
@@ -154,7 +164,7 @@ class DraftSandboxBuilder:
 
             for d in list(dirs):
                 dpath = current / d
-                if d in _SOURCE_DIR_NAMES:
+                if d in source_dirs:
                     self._chmod_recursive(dpath, dir_mode=0o555, file_mode=0o444)
                     dirs.remove(d)
 

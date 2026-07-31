@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Dict, List, Set, Tuple
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple
 
 
 def _lower_tokens(prompt: str) -> Set[str]:
@@ -156,18 +158,103 @@ def architecture_intent(classification: StackClassification) -> str:
     return classification.architecture
 
 
+def _explicit_source_paths(prompt: str) -> Dict[str, List[str]]:
+    """Find explicit source file paths mentioned in a prompt.
+
+    Returns a mapping: ``python``, ``cpp``, ``header``, ``rust``.
+    """
+    pattern = re.compile(r"\b([A-Za-z_][\w/]*\.(?:py|cpp|cc|cxx|h|hpp|rs))\b")
+    raw = pattern.findall(prompt)
+    result: Dict[str, List[str]] = {
+        "python": [],
+        "cpp": [],
+        "header": [],
+        "rust": [],
+    }
+    for p in raw:
+        suffix = p.rsplit(".", 1)[-1].lower()
+        if suffix == "py":
+            result["python"].append(p)
+        elif suffix in ("cpp", "cc", "cxx"):
+            result["cpp"].append(p)
+        elif suffix in ("h", "hpp"):
+            result["header"].append(p)
+        elif suffix == "rs":
+            result["rust"].append(p)
+    return result
+
+
+def extract_source_directories(prompt: str) -> Dict[str, Optional[str]]:
+    """Extract canonical directory names from explicit paths in *prompt*.
+
+    Keys:
+      - ``python_package``: first non-test package directory from a ``.py`` path.
+      - ``cpp_source``: first ``.cpp``/``.cc``/``.cxx`` path.
+      - ``cpp_header``: first ``.h``/``.hpp`` path.
+      - ``rust_crate_dir``: directory containing ``Cargo.toml`` or the first ``.rs`` crate.
+    """
+    paths = _explicit_source_paths(prompt)
+    result: Dict[str, Optional[str]] = {
+        "python_package": None,
+        "cpp_source": None,
+        "cpp_header": None,
+        "rust_crate_dir": None,
+    }
+    non_package = {"tests", "src", "scripts", "examples", "docs"}
+    for p in paths["python"]:
+        parts = Path(p).parts
+        if len(parts) > 1 and parts[0] not in non_package:
+            if "test" not in Path(p).name.lower():
+                result["python_package"] = parts[0]
+                break
+
+    if paths["cpp"]:
+        result["cpp_source"] = paths["cpp"][0]
+
+    if paths["header"]:
+        result["cpp_header"] = paths["header"][0]
+
+    # Prefer an explicit Cargo.toml directory, then infer from .rs layout.
+    for p in paths["rust"]:
+        if Path(p).name == "Cargo.toml":
+            result["rust_crate_dir"] = str(Path(p).parent)
+            break
+    if not result["rust_crate_dir"] and paths["rust"]:
+        p = Path(paths["rust"][0])
+        if p.name == "lib.rs" and p.parent.name == "src":
+            result["rust_crate_dir"] = str(p.parent.parent)
+        else:
+            result["rust_crate_dir"] = str(p.parent)
+
+    return result
+
+
 def default_manifest_for_architecture(
-    architecture: str, project_name: str, main_function: str = "compute"
+    architecture: str,
+    project_name: str,
+    main_function: str = "compute",
+    prompt: str = "",
 ) -> List[Dict[str, str]]:
-    """Return a generic manifest for an architecture when the LLM omits one."""
+    """Return a generic manifest for an architecture when the LLM omits one.
+
+    When *prompt* contains explicit file paths (e.g. ``cpp_engine/src/kernels.cpp``),
+    the generated manifest uses those locations instead of hardcoded defaults.
+    """
     pkg = _sanitize_name(project_name)
+    dirs = extract_source_directories(prompt)
+    python_package = dirs["python_package"] or pkg
+    cpp_source = dirs["cpp_source"] or None
+    rust_crate_dir = dirs["rust_crate_dir"] or "rust_core"
+    rust_cargo = f"{rust_crate_dir}/Cargo.toml"
+    rust_lib = f"{rust_crate_dir}/src/lib.rs"
+
     if architecture == INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON:
-        python_package = pkg
-        return [
+        cpp_entry = cpp_source or "cpp_core/native.cpp"
+        manifest = [
             {"path": "Cargo.toml", "lang": "toml", "purpose": "Rust workspace manifest"},
-            {"path": "rust_core/Cargo.toml", "lang": "toml", "purpose": "PyO3 crate manifest"},
-            {"path": "rust_core/src/lib.rs", "lang": "rust", "purpose": "Rust native core"},
-            {"path": "cpp_core/native.cpp", "lang": "cpp", "purpose": "C-ABI dynamic shared library source"},
+            {"path": rust_cargo, "lang": "toml", "purpose": "PyO3 crate manifest"},
+            {"path": rust_lib, "lang": "rust", "purpose": "Rust native core"},
+            {"path": cpp_entry, "lang": "cpp", "purpose": "C-ABI dynamic shared library source"},
             {"path": "pyproject.toml", "lang": "toml", "purpose": "Python package manifest"},
             {"path": f"{python_package}/__init__.py", "lang": "python", "purpose": "Python driver package"},
             {"path": f"{python_package}/main.py", "lang": "python", "purpose": "Python CLI / REPL entrypoint"},
@@ -175,21 +262,24 @@ def default_manifest_for_architecture(
             {"path": "tests/test_tri.py", "lang": "python", "purpose": "pytest tests"},
             {"path": "README.md", "lang": "markdown", "purpose": "Project README"},
         ]
+        if dirs["cpp_header"]:
+            manifest.insert(3, {"path": dirs["cpp_header"], "lang": "cpp", "purpose": "C-ABI header"})
+        return manifest
     if architecture == INTENT_HYBRID_CPP_RUST:
+        cpp_entry = cpp_source or "src/cpp_core/native.cpp"
         return [
             {"path": "Cargo.toml", "lang": "toml", "purpose": "Rust package manifest"},
             {"path": "build.rs", "lang": "rust", "purpose": "C++ build and link script"},
             {"path": "src/main.rs", "lang": "rust", "purpose": "Rust CLI binary"},
-            {"path": "src/cpp_core/native.cpp", "lang": "cpp", "purpose": "C-ABI math source"},
+            {"path": cpp_entry, "lang": "cpp", "purpose": "C-ABI math source"},
             {"path": "tests/test_hybrid_cpp_rust.rs", "lang": "rust", "purpose": "Rust integration test"},
             {"path": "README.md", "lang": "markdown", "purpose": "Project README"},
         ]
     if architecture == INTENT_HYBRID_RUST_PYTHON:
-        python_package = pkg
         return [
             {"path": "Cargo.toml", "lang": "toml", "purpose": "Rust workspace manifest"},
-            {"path": "rust_core/Cargo.toml", "lang": "toml", "purpose": "PyO3 crate manifest"},
-            {"path": "rust_core/src/lib.rs", "lang": "rust", "purpose": "Rust native core"},
+            {"path": rust_cargo, "lang": "toml", "purpose": "PyO3 crate manifest"},
+            {"path": rust_lib, "lang": "rust", "purpose": "Rust native core"},
             {"path": "pyproject.toml", "lang": "toml", "purpose": "Python package manifest"},
             {"path": f"{python_package}/__init__.py", "lang": "python", "purpose": "Python driver package"},
             {"path": f"{python_package}/core.py", "lang": "python", "purpose": "Python wrapper"},
@@ -204,9 +294,10 @@ def default_manifest_for_architecture(
             {"path": "README.md", "lang": "markdown", "purpose": "Project README"},
         ]
     if architecture == INTENT_HYBRID_CPP_PYTHON:
+        cpp_entry = cpp_source or "src/cpp_core/extension.cpp"
         return [
             {"path": "CMakeLists.txt", "lang": "cmake", "purpose": "CMake build"},
-            {"path": "src/cpp_core/extension.cpp", "lang": "cpp", "purpose": "C++ extension"},
+            {"path": cpp_entry, "lang": "cpp", "purpose": "C++ extension"},
             {"path": "pyproject.toml", "lang": "toml", "purpose": "Python package manifest"},
             {"path": f"src/{pkg}/__init__.py", "lang": "python", "purpose": "Python package"},
             {"path": f"src/{pkg}/core.py", "lang": "python", "purpose": "Python wrapper"},

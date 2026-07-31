@@ -123,13 +123,25 @@ class RustEmitter(BaseEmitter):
         self._write("")
         if self.is_pyo3:
             self._write(f'#[pyfunction(name = "{node.name}")]')
+        self._write("#[allow(unused_variables)]", indent_level)
         self._write(f"pub {sig} {{", indent_level)
         body = node.body
         if body:
             self._emit_children(body, indent_level + 1)
         else:
-            self._write("todo!()", indent_level + 1)
+            self._write(self._default_return_expr(node.type_hint), indent_level + 1)
         self._write("}", indent_level)
+
+    def _default_return_expr(self, type_hint: Optional[str]) -> str:
+        """Return a value-initialized default expression for a function with no body."""
+        t = (type_hint or "").strip()
+        if t in ("", "void", "None", "()"):
+            return "()"
+        if t.startswith("PyResult<") or t.startswith("Result<"):
+            return "Ok(Default::default())"
+        if t.startswith("Option<"):
+            return "None"
+        return "Default::default()"
 
     def _emit_struct(self, node: ASTNode, indent_level: int) -> None:
         self._write("")

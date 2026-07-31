@@ -91,7 +91,13 @@ class CppEmitter(BaseEmitter):
         elif self.c_abi and self._is_known_algorithm(node.name or ""):
             self._emit_known_algorithm(node, indent_level + 1)
         else:
-            self._write("// TODO", indent_level + 1)
+            for p in params:
+                if p.name != "self":
+                    self._write(f"(void){p.name};", indent_level + 1)
+            if ret == "void":
+                self._write("return;", indent_level + 1)
+            else:
+                self._write("return {};", indent_level + 1)
         self._write("}", indent_level)
 
         self._declared_vars = declared_before

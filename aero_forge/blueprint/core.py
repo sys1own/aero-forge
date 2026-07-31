@@ -23,6 +23,7 @@ from aero_forge.orchestrator.stack_classifier import (
     INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON,
     classify_stack,
     default_manifest_for_architecture,
+    extract_source_directories,
     suggested_blueprint_template,
 )
 
@@ -621,20 +622,25 @@ def generate_blueprint(
     classification = classify_stack(prompt or "")
     intent = classification.architecture
     toolchains = classification.toolchains or ["python"]
+    dirs = extract_source_directories(prompt or "")
     # For a single generated project, emit a minimal Rust/PyO3 crate manifest.
     # The full monorepo layout (rust_core/, python_engine/) is added later by
     # the monorepo packager / plan_workspace.
     if intent in (INTENT_HYBRID_RUST_PYTHON, INTENT_PURE_RUST):
+        rust_dir = dirs["rust_crate_dir"] or ""
+        rust_cargo = f"{rust_dir}/Cargo.toml" if rust_dir else "Cargo.toml"
+        rust_lib = f"{rust_dir}/src/lib.rs" if rust_dir else "src/lib.rs"
         manifest_entries = [
-            ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust crate manifest"),
-            ManifestEntry(path="src/lib.rs", lang="rust", purpose="Rust core library"),
+            ManifestEntry(path=rust_cargo, lang="toml", purpose="Rust crate manifest"),
+            ManifestEntry(path=rust_lib, lang="rust", purpose="Rust core library"),
         ]
     elif intent == INTENT_HYBRID_CPP_RUST:
+        cpp_entry = dirs["cpp_source"] or "src/cpp_core/native.cpp"
         manifest_entries = [
             ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust package manifest"),
             ManifestEntry(path="build.rs", lang="rust", purpose="C++ build and link script"),
             ManifestEntry(path="src/main.rs", lang="rust", purpose="Rust CLI binary"),
-            ManifestEntry(path="src/cpp_core/native.cpp", lang="cpp", purpose="C-ABI math source"),
+            ManifestEntry(path=cpp_entry, lang="cpp", purpose="C-ABI math source"),
             ManifestEntry(
                 path="tests/test_hybrid_cpp_rust.rs", lang="rust", purpose="Rust integration test"
             ),
@@ -642,23 +648,10 @@ def generate_blueprint(
         ]
     elif intent == INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON:
         manifest_entries = [
-            ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust workspace manifest"),
-            ManifestEntry(path="rust_core/Cargo.toml", lang="toml", purpose="PyO3 crate manifest"),
-            ManifestEntry(path="rust_core/src/lib.rs", lang="rust", purpose="Rust native core"),
-            ManifestEntry(
-                path="cpp_core/native.cpp",
-                lang="cpp",
-                purpose="C-ABI dynamic shared library source",
-            ),
-            ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python package manifest"),
-            ManifestEntry(
-                path="src/python/__init__.py", lang="python", purpose="Python driver package"
-            ),
-            ManifestEntry(
-                path="src/python/main.py", lang="python", purpose="Python CLI / REPL entrypoint"
-            ),
-            ManifestEntry(path="tests/test_tri.py", lang="python", purpose="pytest tests"),
-            ManifestEntry(path="README.md", lang="markdown", purpose="Project README"),
+            ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
+            for e in default_manifest_for_architecture(
+                INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON, project, prompt=prompt or ""
+            )
         ]
     else:
         manifest_entries = []

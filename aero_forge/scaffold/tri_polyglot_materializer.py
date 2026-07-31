@@ -380,6 +380,8 @@ def _generate_python_init(
     rust_crate_name: str,
     native_bridge_module: Optional[str] = None,
     rust_dir: str = "rust_core",
+    workspace_root: Optional[Path] = None,
+    pkg_dir: Optional[Path] = None,
 ) -> str:
     """Generate ``<pkg>/__init__.py`` that loads both the Rust extension and C++ .so."""
     lines: List[str] = ['"""Tri-polyglot driver package."""', "", "from __future__ import annotations", ""]
@@ -422,7 +424,16 @@ def _generate_python_init(
         else:
             stub_source = "\n".join(_cpp_contract_to_python_stub(c) for c in cpp_contracts)
             so_path = (cpp_dir / _so_name(f"{pkg_name}_cpp")).resolve()
-            lines.append(_ctypes_loader_source(stub_source, so_path, cpp_names))
+            loader_path = (pkg_dir / "__init__.py") if pkg_dir else (so_path.parent / "__init__.py")
+            lines.append(
+                _ctypes_loader_source(
+                    stub_source,
+                    so_path,
+                    cpp_names,
+                    workspace_root=workspace_root,
+                    loader_path=loader_path,
+                )
+            )
             lines.append("")
 
     # Fallback pure-Python implementations
@@ -709,14 +720,26 @@ def _generate_test_file(
     return test_generator.generate_blueprint_tests(blueprint, module_name=pkg_module)
 
 
-def _generate_native_bridge_py(pkg_name: str, cpp_dir: Path, cpp_contracts: List[ContractEntry]) -> str:
+def _generate_native_bridge_py(
+    pkg_name: str,
+    cpp_dir: Path,
+    cpp_contracts: List[ContractEntry],
+    workspace_root: Optional[Path] = None,
+    loader_path: Optional[Path] = None,
+) -> str:
     """Generate a root-level ``native_bridge.py`` that loads the C++ shared library."""
     cpp_names = _function_names(cpp_contracts)
     if not cpp_names:
         return "# native bridge placeholder\n"
     stub_source = "\n".join(_cpp_contract_to_python_stub(c) for c in cpp_contracts)
     so_path = (cpp_dir / _so_name(f"{pkg_name}_cpp")).resolve()
-    return _ctypes_loader_source(stub_source, so_path, cpp_names)
+    return _ctypes_loader_source(
+        stub_source,
+        so_path,
+        cpp_names,
+        workspace_root=workspace_root,
+        loader_path=loader_path or (so_path.parent / "native_bridge.py"),
+    )
 
 
 def _generate_readme_tri(
@@ -958,6 +981,8 @@ class TriPolyglotMaterializer:
                 rust_crate_name,
                 native_bridge_module,
                 rust_dir=str(rust_dir_rel),
+                workspace_root=self.workspace,
+                pkg_dir=pkg_dir,
             ),
             encoding="utf-8",
         )
@@ -1117,6 +1142,8 @@ class TriPolyglotMaterializer:
                         rust_crate_name,
                         native_bridge_module,
                         rust_dir=str(rust_dir_rel),
+                        workspace_root=self.workspace,
+                        pkg_dir=pkg_dir,
                     )
                 elif path.name == "main.py":
                     execution_strategy = blueprint.execution_strategy.model_dump() if blueprint.execution_strategy else {
@@ -1137,7 +1164,13 @@ class TriPolyglotMaterializer:
                     ).synthesize_root_entrypoint()
                     continue
                 elif path.name == "native_bridge.py":
-                    content = _generate_native_bridge_py(pkg_name, cpp_dir, cpp_contracts)
+                    content = _generate_native_bridge_py(
+                        pkg_name,
+                        cpp_dir,
+                        cpp_contracts,
+                        workspace_root=self.workspace,
+                        loader_path=path,
+                    )
                 elif "test" in path.name and path.suffix == ".py":
                     content = _generate_test_file(rel, blueprint, pkg_module)
                 elif path.suffix == ".py":

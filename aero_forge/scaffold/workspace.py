@@ -246,8 +246,9 @@ def _rust_stub_from_signature(signature: str) -> str:
         f"{n}: {_python_type_to_rust(t)}" for n, t in params
     )
     rust_ret = _python_type_to_rust(return_type or "float")
-    return f"""pub fn {name}({rust_params}) -> {rust_ret} {{
-    unimplemented!()
+    return f"""#[allow(unused_variables)]
+pub fn {name}({rust_params}) -> {rust_ret} {{
+    Default::default()
 }}
 """
 
@@ -257,7 +258,9 @@ def _cpp_stub_from_signature(signature: str) -> str:
     name, params, return_type = _parse_signature(signature)
     c_params = ", ".join(f"{_python_type_to_c(t)} {n}" for n, t in params)
     c_ret = _python_type_to_c(return_type or "float")
-    body = "return 0;" if c_ret in {"double", "int64_t", "int", "float"} else ("return nullptr;" if c_ret.endswith("*") else "return;")
+    voids = "\n    ".join(f"(void){n};" for n, _ in params)
+    ret = "return {};" if c_ret != "void" else "return;"
+    body = f"{voids}\n    {ret}" if voids else ret
     return f"""#include <cstdint>
 
 extern "C" {c_ret} {name}({c_params}) {{
