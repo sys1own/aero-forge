@@ -449,6 +449,11 @@ class RustGenerator:
         if self.return_type:
             self.return_type = resolve(self.return_type)
 
+        # Track the most likely return variable when the function body ends in a
+        # loop without an explicit ``return``.  This prevents Rust errors where a
+        # ``for``/``while`` block becomes the terminating expression.
+        self._return_var = self._preferred_return_var()
+
         if not self.annotated_return:
             ret_type = resolve(types.get("__return__"))
             if ret_type:
@@ -1453,6 +1458,35 @@ class RustGenerator:
     def _zero(self) -> str:
         return self._zero_for_type(self.return_type)
 
+    def _preferred_return_var(
+        self, return_type: Optional[str] = None
+    ) -> Optional[str]:
+        """Return the name of a local variable matching *return_type*.
+
+        This is used to synthesise a trailing ``return`` when the Python source
+        ends in a loop without an explicit ``return`` statement.
+        """
+        if return_type is None:
+            return_type = self.return_type
+        if not return_type or return_type in ("()", "None", ""):
+            return None
+        candidates = [
+            name
+            for name, typ in self.type_env.items()
+            if typ == return_type
+            and name not in self.arg_names
+            and name not in self.loop_vars
+            and not name.startswith("__")
+        ]
+        if not candidates:
+            return None
+        preferred = ("result", "out", "output", "results", "ret", "answer",
+                     "return_value", "values", "weighted_scores", "scores")
+        for name in reversed(candidates):
+            if name in preferred:
+                return name
+        return candidates[-1]
+
     def _zero_for_type(self, typ: str) -> str:
         if typ in ("()", "None"):
             return "()"
@@ -1596,13 +1630,25 @@ class RustGenerator:
 
         defaults, body_stmts = self._initializers_and_body()
         body_lines = [self._emit_stmt(stmt) for stmt in body_stmts]
+        # Recompute the most likely return variable against the actual signature
+        # type, then synthesise a trailing ``return`` if the body does not end
+        # with an explicit ``return`` statement and the function is not unit.
         if (
             body_stmts
-            and isinstance(body_stmts[-1], ast.If)
-            and not body_stmts[-1].orelse
-            and self._block_returns(body_stmts[-1].body)
+            and not isinstance(body_stmts[-1], ast.Return)
+            and return_type not in ("()", "None", "")
         ):
-            body_lines.append(f"return {self._zero()};")
+            return_var = self._preferred_return_var(return_type)
+            if (
+                isinstance(body_stmts[-1], ast.If)
+                and not body_stmts[-1].orelse
+                and self._block_returns(body_stmts[-1].body)
+            ):
+                body_lines.append(f"return {self._zero_for_type(return_type)};")
+            elif return_var:
+                body_lines.append(f"return {return_var};")
+            else:
+                body_lines.append(f"return {self._zero_for_type(return_type)};")
         body = "\n".join(defaults + body_lines)
         indented = "\n".join("    " + line for line in body.splitlines())
         return f"{header}\n{indented}\n}}"
@@ -1779,6 +1825,14 @@ class RustGenerator:
                     rhs_type = self.type_env[name]
                 else:
                     rhs_type = self._type_of(stmt.value)
+                if (
+                    rhs_type == self.return_type
+                    and name not in self.arg_names
+                    and name not in self.loop_vars
+                    and not name.startswith(("__", "tmp"))
+                    and (self._return_var is None or self._return_var.startswith("__") or self._return_var.startswith("tmp"))
+                ):
+                    self._return_var = name
                 value = self._strip_outer_parens(self._emit_expr(stmt.value, rhs_type))
                 return f"{name} = {value};"
             if isinstance(target, ast.Subscript):

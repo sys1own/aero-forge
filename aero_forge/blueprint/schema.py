@@ -60,6 +60,8 @@ class MemoryModel(str, Enum):
 class BindingFramework(str, Enum):
     ctypes = "ctypes"
     c_abi = "c_abi"
+    raw_c = "raw_c"
+    c = "c"
     cffi = "cffi"
     pyo3 = "pyo3"
     cxx = "cxx"

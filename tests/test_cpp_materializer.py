@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 
@@ -12,7 +13,10 @@ from aero_forge.blueprint import Blueprint, ContractEntry
 from aero_forge.blueprint.schema import ArtifactType, BlueprintV3, BuildArtifact, Metadata
 from aero_forge.scaffold.cpp_materializer import (
     CppPolyglotMaterializer,
+    _c_function_decl,
     _find_cpp_compiler,
+    _generate_native_cpp,
+    _is_special_cpp_contract,
 )
 
 
@@ -104,3 +108,27 @@ def test_materialize_uses_blueprint_cpp_artifact_paths_and_flags(
         [sys.executable, str(script)], cwd=workspace, capture_output=True, text=True
     )
     assert result.returncode == 0, f"C++ smoke test failed: {result.stderr}"
+
+
+def test_sliding_window_dtw_header_matches_source_const_qualifiers():
+    """Generated header and C++ source for sliding_window_dtw use matching const qualifiers."""
+    contract = ContractEntry(
+        name="sliding_window_dtw",
+        signature="def sliding_window_dtw(a: list[float], b: list[float], window: int) -> float",
+    )
+    assert _is_special_cpp_contract(contract)
+    header = _c_function_decl(contract)
+    source = _generate_native_cpp("test", [contract])
+    # Both header and source should declare both array inputs as const pointers.
+    assert "const double* a" in header
+    assert "const double* b" in header
+    assert "const double* a" in source
+    assert "const double* b" in source
+    # Neither should mark the input arrays as mutable.
+    assert re.search(r"(?<!const\s)double\s*\*\s+a\b", header) is None
+    assert re.search(r"(?<!const\s)double\s*\*\s+b\b", header) is None
+    assert re.search(r"(?<!const\s)double\s*\*\s+a\b", source) is None
+    assert re.search(r"(?<!const\s)double\s*\*\s+b\b", source) is None
+    # The scalar return type should be double.
+    assert "double sliding_window_dtw" in source
+    assert "double sliding_window_dtw" in header
