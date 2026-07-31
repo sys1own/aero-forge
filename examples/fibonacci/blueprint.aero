@@ -1,9 +1,72 @@
-project: fibonacci_example
-functions:
-  - file: src/generated.py
-    compile_all: true
-    tests:
-      - tests/test_generated.py
-output_dir: dist
-llm:
-  provider: none
+metadata:
+  schema_version: 3.0.0
+  project_name: fibonacci
+  status: finalized
+  generation_method: static_heuristic
+  transferable: true
+  llm_initialized: false
+  description: Auto-generated draft blueprint for hybrid_rust_python project
+llm_context:
+  state: synthesized
+  repository_summary: Auto-generated hybrid_rust_python draft; run synthesis to enrich
+    context.
+  dependency_graph: {}
+  exported_api_signatures: {}
+  polyglot_boundaries: []
+  compute_hotspots: []
+toolchains:
+- name: CPython
+  version: 3.x
+  channel: null
+  env: {}
+- name: Rust
+  version: null
+  channel: stable
+  env: {}
+- name: Cargo
+  version: null
+  channel: null
+  env: {}
+build_pipeline:
+- id: python_app
+  type: python_extension
+  source_files:
+  - dist/.build_cache/home/ubuntu/repos/aero-forge/examples/fibonacci/src/generated.py
+  - dist/generated.py
+  - src/generated.py
+  output_path: dist/python_app
+  compiler_flags: []
+  linker_flags: []
+  dependencies: []
+  commands: []
+  description: Python application sources
+- id: rust_core
+  type: cargo_cdylib
+  source_files:
+  - src/lib.rs
+  output_path: target/release/librust_core.so
+  compiler_flags: []
+  linker_flags: []
+  dependencies: []
+  commands: []
+  description: Rust core crate
+abi_contracts: []
+execution_strategy:
+  primary_entrypoint: dist/.build_cache/home/ubuntu/repos/aero-forge/examples/fibonacci/src/generated.py
+  runtime: python3
+  args: []
+  env: {}
+  working_dir: ${WORKSPACE_ROOT}
+  timeout: 60.0
+  engine_backend: ''
+  wavefront_parallelism: 0
+  precision_shield_mode: ''
+  hin_jit_opt_level: 0
+verification_nodes:
+- node_id: smoke_test
+  command: python3 ${WORKSPACE_ROOT}/dist/.build_cache/home/ubuntu/repos/aero-forge/examples/fibonacci/src/generated.py
+  expected_exit_code: 0
+  stdout_match_patterns: []
+  stderr_prohibited_patterns: []
+  metrics: []
+  timeout: 60.0

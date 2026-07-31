@@ -67,13 +67,10 @@ from aero_forge.context_bundler import get_blueprint_status
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
 from aero_forge import runner as sandbox_runner
-from aero_forge.healing.context_builder import ContextBuilder
 from aero_forge.orchestrator.orchestrator import purge_workspace_state
 from aero_forge.healing.evaluator import LogEvaluator
-from aero_forge.healing.llm_healer import LLMHealer, run_command
-from aero_forge.healing.orchestrator import HealingOrchestrator
-from aero_forge.healing.router import try_auto_fix
-from aero_forge.healing.structural_merger import apply_overlay, MergeConflictError
+from aero_forge.healing.healer import DeterministicHealer
+from aero_forge.healing.llm_healer import run_command
 from aero_forge.errors import UserError
 from aero_forge.orchestrator.router import toolchains_for_intent
 from aero_forge._native import run_aeroc
@@ -2409,7 +2406,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             return _send_json(self, 500, {"error": str(exc)})
 
     def _handle_workspace_heal(self) -> None:
-        """Apply a smart heal (AST-first, then full-workspace LLM fallback)."""
+        """Apply a deterministic proof-theoretic heal."""
         try:
             body = _parse_json_body(self)
             session_id = body.get("session_id", "").strip()
@@ -2429,9 +2426,6 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     {"error": f"Sandbox for session '{session_id}' does not exist"},
                 )
 
-            provider = _resolve_llm_provider(body)
-            model = body.get("model") or os.getenv("AERO_FORGE_MODEL")
-
             logs: list[str] = []
 
             def _log(level: str, prefix: str, message: str) -> None:
@@ -2439,18 +2433,12 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 logs.append(line)
                 logger.log(getattr(logging, level.upper(), logging.INFO), message)
 
-            orchestrator = HealingOrchestrator(
-                session_dir,
-                llm_provider=provider,
-                llm_model=model,
-                log_callback=_log,
-            )
-            result = orchestrator.heal(
+            healer = DeterministicHealer(session_dir, log_callback=_log)
+            result = healer.heal(
                 error_logs=log_text,
                 command=command,
                 exit_code=exit_code,
                 target_file=target_file or None,
-                force_llm=force_llm,
             )
             if result.get("status") == "success":
                 _notify_tree_changed(session_id)
@@ -2483,7 +2471,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             )
 
     def _handle_workspace_heal_llm(self) -> None:
-        """Apply an LLM-generated directive-based fix and re-run the command."""
+        """Apply a deterministic fix and re-run the command."""
         try:
             body = _parse_json_body(self)
             session_id = body.get("session_id", "").strip()
@@ -2528,22 +2516,14 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             tags = tag_files_for_feedback(session_dir, log_text, user_prompt=prompt)
             _log("info", "HEAL_LLM", f"Workspace context packaged; tags: {tags}")
 
-            provider = _resolve_llm_provider(body)
-            model = body.get("model") or os.getenv("AERO_FORGE_MODEL")
-            orchestrator = HealingOrchestrator(
-                session_dir,
-                llm_provider=provider,
-                llm_model=model,
-                log_callback=_log,
-            )
-            fix_result = orchestrator.heal(
+            healer = DeterministicHealer(session_dir, log_callback=_log)
+            fix_result = healer.heal(
                 error_logs=log_text,
                 command=command,
                 exit_code=exit_code,
                 target_file=body.get("target_file")
                 or failure_ctx.get("affected_files", [None])[0]
                 or None,
-                force_llm=bool(body.get("force_llm", False)),
             )
 
             if fix_result.get("status") != "success":

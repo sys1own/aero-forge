@@ -55,7 +55,7 @@ from aero_forge.errors import (
     check_toolchain,
     classify_cargo_error,
 )
-from aero_forge.healing.router import try_auto_fix
+from aero_forge.healing.healer import DeterministicHealer
 from aero_forge.llm import LLMError, get_llm_client
 from aero_forge.orchestrator.error_classifier import (
     ErrorClass,
@@ -279,9 +279,9 @@ def purge_workspace_state(workspace: Path) -> Dict[str, Any]:
 class Orchestrator:
     """Drive the deterministic transpile/build/test/heal loop.
 
-    Healing is performed by the static ``try_auto_fix`` router and the
-    deterministic fix cache. No LLM calls occur during compilation or test
-    execution.
+    Healing is performed by the native ``DeterministicHealer`` (HIN energy,
+    e-graph rewriting, FFI morphism synthesis) and the deterministic fix cache.
+    No LLM calls occur during compilation or test execution.
     """
 
     def __init__(
@@ -737,16 +737,24 @@ class Orchestrator:
         return output
 
     def _attempt_fix(self, source: str, error_log: str) -> Optional[str]:
-        """Try deterministic router and cached fixes.
+        """Try deterministic native self-healing.
 
-        The orchestrator never invokes an LLM during the build loop. All
-        repairs are static AST rewrites or pattern-based patches produced by
-        ``aero_forge.healing.router``.
+        The orchestrator never invokes an LLM during the build loop. Repairs are
+        produced by ``DeterministicHealer`` using HIN energy, e-graph rewriting,
+        and FFI morphism synthesis.
         """
-        fixed = try_auto_fix(error_log, source)
-        if fixed is not None and fixed != source:
-            logger.info("Self-healing router produced a fix")
-            return fixed
+        healer = DeterministicHealer(self.output_dir)
+        result = healer.execute_healing_pass(
+            error_log=error_log,
+            source_text=source,
+            source_path=self.source_path,
+            command="",
+            exit_code=1,
+        )
+        patch = result.get("patch")
+        if patch is not None and patch != source:
+            logger.info("DeterministicHealer produced a source patch")
+            return patch
 
         cached = self.cache.get(error_log, source)
         if cached is not None and cached != source:

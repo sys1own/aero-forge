@@ -20,6 +20,7 @@ from aero_forge.build_runner import BuildRunner
 from aero_forge.config import ConfigOverride, Tier
 from aero_forge.errors import UserError
 from aero_forge.builder.intent_compiler import IntentCompiler
+from aero_forge.healing.healer import DeterministicHealer
 from aero_forge.llm.clients import get_llm_client
 from aero_forge.overlay import OverlayManager
 from aero_forge.overlay.store import OverlayStore
@@ -1245,54 +1246,15 @@ def _ask_for_fix(
     prompt_template: Optional[str] = None,
     config_override: Optional[ConfigOverride] = None,
 ) -> Optional[str]:
-    """Ask the LLM to fix compilation errors in the generated implementation."""
-    client = get_llm_client(
-        llm_provider,
-        model=model,
-        max_retries=max_retries,
-        config_override=config_override,
-        tier=Tier.REASONING,
-    )
-    if client is None:
-        return None
+    """Apply deterministic proof-theoretic repair to a failing implementation.
 
-    system = (
-        "You are an expert Python and Rust engineer. The implementation below "
-        "was generated from a user request but failed to compile or pass tests. "
-        "Fix only the implementation; keep the same function signature and public function "
-        "names. If the error is an IndexError, out-of-bounds access, or any out-of-order "
-        "execution issue, make sure all lists, tuples, dictionaries, and data structures "
-        "are fully initialized and populated before any calculation, indexing, or method call. "
-        "Return the corrected Python code in a single fenced code block."
+    The build/repair loop never calls an LLM; healing is performed by
+    ``DeterministicHealer`` using HIN energy, e-graph rewriting, and FFI
+    morphism synthesis.
+    """
+    healer = DeterministicHealer(Path("."))
+    result = healer.execute_healing_pass(
+        error_log=error_log,
+        source_text=implementation,
     )
-    user = (
-        f"Original request: {prompt}\n"
-        f"Constraints: {constraints or 'None'}\n\n"
-        f"Implementation:\n```python\n{implementation}\n```\n\n"
-        f"Compiler/test errors:\n```\n{error_log[:2000]}\n```\n\n"
-        "Return the corrected implementation only."
-    )
-    response = client.generate(
-        [
-            {
-                "role": "system",
-                "content": (
-                    get_template(prompt_template).system_prompt
-                    if prompt_template
-                    else get_default_template().system_prompt
-                ),
-            },
-            {"role": "user", "content": user},
-        ],
-        temperature=0.2,
-    )
-    if not response:
-        return None
-    try:
-        blocks = extract_code_blocks(response)
-        for lang, code in blocks:
-            if lang in (None, "python", "py"):
-                return code
-        return blocks[0][1]
-    except Exception:
-        return None
+    return result.get("patch")
