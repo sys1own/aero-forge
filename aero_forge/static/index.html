@@ -379,6 +379,12 @@
     .log-line.error { color: var(--terminal-error); }
     .deck-control-group { display: flex; align-items: center; gap: 0.35rem; font-size: 0.75rem; color: var(--muted); }
     .deck-control-group select { background: var(--editor); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 0.25rem 0.4rem; font-size: 0.75rem; }
+    .advanced-engine-details { width: 100%; border: 1px solid var(--border); border-radius: 4px; padding: 0.4rem 0.6rem; margin-top: 0.25rem; background: var(--panel); }
+    .advanced-engine-details summary { list-style: none; cursor: pointer; font-size: 0.75rem; color: var(--muted); display: flex; align-items: center; user-select: none; }
+    .advanced-engine-details summary::-webkit-details-marker { display: none; }
+    .advanced-engine-details summary::before { content: '▸'; margin-right: 0.4rem; color: var(--accent); transition: transform 0.15s; }
+    .advanced-engine-details[open] summary::before { content: '▾'; }
+    .advanced-engine-details .deck-control-group { margin-top: 0.5rem; }
     .template-bar { padding: 0.5rem; border-bottom: 1px solid var(--border); display: flex; gap: 0.4rem; align-items: center; background: var(--panel); }
     .template-bar select { flex: 1; background: var(--editor); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 0.35rem 0.4rem; font-size: 0.75rem; }
     .template-bar button { font-size: 0.75rem; padding: 0.35rem 0.6rem; }
@@ -653,33 +659,46 @@
                   </select>
                 </div>
                 <div class="deck-control-group">
-                  <label for="engine-backend">Engine Backend</label>
-                  <select id="engine-backend">
-                    <option value="hin_cpu">HIN-CPU Multi-Threaded (Wavefront solver)</option>
-                    <option value="hin_gpu">HIN-GPU / CUDA / Vulkan</option>
-                    <option value="hin_wasm">HIN-WASM (Web target)</option>
+                  <label for="build-profile">Build Profile</label>
+                  <select id="build-profile">
+                    <option value="debug" selected>Debug / Quick Build</option>
+                    <option value="performance">Maximum Performance</option>
+                    <option value="safety">Strict Safety</option>
+                    <option value="wasm">Web Assembly (WASM)</option>
+                    <option value="custom">Custom</option>
                   </select>
                 </div>
-                <div class="deck-control-group">
-                  <label for="wavefront-parallelism">Wavefront Solver Parallelism</label>
-                  <input id="wavefront-parallelism" type="number" min="1" max="64" value="4" style="width: 100%; padding: 0.3rem 0.4rem; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 4px;">
-                </div>
-                <div class="deck-control-group">
-                  <label for="precision-shield-mode">Precision Shield Mode</label>
-                  <select id="precision-shield-mode">
-                    <option value="ieee">IEEE Float Precision</option>
-                    <option value="fast_math">Fast-Math</option>
-                    <option value="shield">Precision Shield checks</option>
-                  </select>
-                </div>
-                <div class="deck-control-group">
-                  <label for="hin-jit-opt-level">HIN JIT Optimization Level</label>
-                  <select id="hin-jit-opt-level">
-                    <option value="0">0 - Debug</option>
-                    <option value="1">1 - Balanced</option>
-                    <option value="2">2 - Max Graph Fusion & SIMD</option>
-                  </select>
-                </div>
+                <details id="advanced-engine-settings" class="advanced-engine-details">
+                  <summary>Advanced Engine Settings</summary>
+                  <div class="deck-control-group">
+                    <label for="engine-backend">Engine Backend</label>
+                    <select id="engine-backend">
+                      <option value="hin_cpu">HIN-CPU Multi-Threaded (Wavefront solver)</option>
+                      <option value="hin_gpu">HIN-GPU / CUDA / Vulkan</option>
+                      <option value="hin_wasm">HIN-WASM (Web target)</option>
+                    </select>
+                  </div>
+                  <div class="deck-control-group">
+                    <label for="wavefront-parallelism">Wavefront Solver Parallelism</label>
+                    <input id="wavefront-parallelism" type="number" min="1" max="64" value="4" style="width: 100%; padding: 0.3rem 0.4rem; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 4px;">
+                  </div>
+                  <div class="deck-control-group">
+                    <label for="precision-shield-mode">Precision Shield Mode</label>
+                    <select id="precision-shield-mode">
+                      <option value="ieee">IEEE Float Precision</option>
+                      <option value="fast_math">Fast-Math</option>
+                      <option value="shield">Precision Shield checks</option>
+                    </select>
+                  </div>
+                  <div class="deck-control-group">
+                    <label for="hin-jit-opt-level">HIN JIT Optimization Level</label>
+                    <select id="hin-jit-opt-level">
+                      <option value="0">0 - Debug</option>
+                      <option value="1">1 - Balanced</option>
+                      <option value="2">2 - Max Graph Fusion &amp; SIMD</option>
+                    </select>
+                  </div>
+                </details>
                 <div class="status-bar">
                   <span id="status-dot" class="dot"></span>
                   <span id="status-text">Ready</span>
@@ -935,6 +954,7 @@
       cancelAccelerate: document.getElementById('cancel-accelerate'),
       confirmAccelerate: document.getElementById('confirm-accelerate'),
       targetLanguage: document.getElementById('target-language'),
+      buildProfile: document.getElementById('build-profile'),
       engineBackend: document.getElementById('engine-backend'),
       wavefrontParallelism: document.getElementById('wavefront-parallelism'),
       precisionShieldMode: document.getElementById('precision-shield-mode'),
@@ -1041,6 +1061,46 @@
       ui.settingProvider.value = state.provider;
       ui.settingApiKey.value = state.apiKey;
       ui.settingSession.value = state.sessionId;
+    }
+
+    const BUILD_PROFILES = {
+      debug:          { engineBackend: 'hin_cpu', wavefrontParallelism: 4,  precisionShieldMode: 'ieee',     hinJitOptLevel: 0 },
+      performance:    { engineBackend: 'hin_gpu', wavefrontParallelism: 8,  precisionShieldMode: 'fast_math', hinJitOptLevel: 2 },
+      safety:         { engineBackend: 'hin_cpu', wavefrontParallelism: 4,  precisionShieldMode: 'shield',   hinJitOptLevel: 1 },
+      wasm:           { engineBackend: 'hin_wasm', wavefrontParallelism: 1,  precisionShieldMode: 'ieee',     hinJitOptLevel: 1 },
+      custom:         null
+    };
+
+    function applyBuildProfile(name) {
+      const profile = BUILD_PROFILES[name];
+      if (!profile) return;
+      ui.engineBackend.value = profile.engineBackend;
+      ui.wavefrontParallelism.value = profile.wavefrontParallelism;
+      ui.precisionShieldMode.value = profile.precisionShieldMode;
+      ui.hinJitOptLevel.value = profile.hinJitOptLevel;
+    }
+
+    function onBuildProfileChange() {
+      const name = ui.buildProfile.value;
+      if (name !== 'custom') {
+        applyBuildProfile(name);
+      }
+    }
+
+    function onAdvancedSettingChange() {
+      if (ui.buildProfile.value !== 'custom') {
+        ui.buildProfile.value = 'custom';
+      }
+    }
+
+    function buildProfilePayload() {
+      return {
+        build_profile: ui.buildProfile.value,
+        engine_backend: ui.engineBackend.value,
+        wavefront_parallelism: parseInt(ui.wavefrontParallelism.value, 10),
+        precision_shield_mode: ui.precisionShieldMode.value,
+        hin_jit_opt_level: parseInt(ui.hinJitOptLevel.value, 10)
+      };
     }
 
     function generateId() {
@@ -2598,14 +2658,12 @@
       log(`Building: ${prompt}`);
       addChat('system', `Building: ${prompt}`);
       try {
+        const profile = buildProfilePayload();
         const data = await api('POST', '/api/build', buildBody({
           prompt,
           variants: ui.variantToggle.checked,
           target_language: ui.targetLanguage.value,
-          engine_backend: ui.engineBackend ? ui.engineBackend.value : 'hin_cpu',
-          wavefront_parallelism: ui.wavefrontParallelism ? parseInt(ui.wavefrontParallelism.value, 10) : null,
-          precision_shield_mode: ui.precisionShieldMode ? ui.precisionShieldMode.value : 'ieee',
-          hin_jit_opt_level: ui.hinJitOptLevel ? parseInt(ui.hinJitOptLevel.value, 10) : null,
+          ...profile,
           model: state.provider === 'deepseek' ? 'deepseek-v4-flash' : undefined
         }));
         state.sessionId = data.session_id;
@@ -2795,7 +2853,10 @@
           'HIN-WASM (Web target)': 'hin_wasm'
         };
         const val = accMap[acceleration];
-        if (val) ui.engineBackend.value = val;
+        if (val) {
+          ui.engineBackend.value = val;
+          if (ui.buildProfile) ui.buildProfile.value = 'custom';
+        }
       }
     }
 
@@ -2987,6 +3048,16 @@
 
     // Blueprint templates
     ui.loadTemplate.addEventListener('click', loadBlueprintTemplate);
+
+    // Build profile wiring
+    if (ui.buildProfile) {
+      ui.buildProfile.addEventListener('change', onBuildProfileChange);
+      applyBuildProfile(ui.buildProfile.value);
+    }
+    if (ui.engineBackend) ui.engineBackend.addEventListener('change', onAdvancedSettingChange);
+    if (ui.wavefrontParallelism) ui.wavefrontParallelism.addEventListener('input', onAdvancedSettingChange);
+    if (ui.precisionShieldMode) ui.precisionShieldMode.addEventListener('change', onAdvancedSettingChange);
+    if (ui.hinJitOptLevel) ui.hinJitOptLevel.addEventListener('change', onAdvancedSettingChange);
 
     // Prompts
     ui.buildBtn.addEventListener('click', runBuild);
