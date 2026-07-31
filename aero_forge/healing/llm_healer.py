@@ -19,7 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 from aero_forge.config import Tier
 from aero_forge.healing.context_builder import ContextBuilder
 from aero_forge.healing.router import try_auto_fix
-from aero_forge.healing.structural_merger import MergeConflictError, apply_overlay
+from aero_forge.overlay.structural_merger import MergeConflictError, apply_overlay
 from aero_forge.overlay.apply import persist_text_to_disk
 from aero_forge.llm.clients import BaseLLMClient, get_llm_client, LLMError
 from aero_forge.orchestrator.error_classifier import extract_signature_mismatch_symbol

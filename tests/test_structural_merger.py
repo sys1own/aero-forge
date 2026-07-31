@@ -1,8 +1,8 @@
-"""Tests for aero_forge.healing.structural_merger."""
+"""Tests for aero_forge.overlay.structural_merger legacy primitives."""
 
 import pytest
 
-from aero_forge.healing.structural_merger import MergeConflictError, apply_overlay, structural_merge
+from aero_forge.overlay.structural_merger import MergeConflictError, apply_overlay, structural_merge
 
 
 def test_python_function_overlay():
