@@ -50,6 +50,7 @@ from aero_forge.scaffold.pre_write_validator import (
 )
 from aero_forge.scaffold.workspace import OutOfTreeWorkspace
 from aero_forge.errors import (
+    BuildStageError,
     UnsupportedError,
     UserError,
     check_toolchain,
@@ -147,7 +148,9 @@ def _strip_main_guard(source: str) -> str:
     removed = set()
     for stmt in tree.body:
         if _is_main_guard(stmt):
-            for lineno in range(stmt.lineno, getattr(stmt, "end_lineno", stmt.lineno) + 1):
+            for lineno in range(
+                stmt.lineno, getattr(stmt, "end_lineno", stmt.lineno) + 1
+            ):
                 removed.add(lineno - 1)
     if not removed:
         return source
@@ -180,9 +183,9 @@ class DeterministicVerificationRunner:
             if src_dir.is_dir():
                 pythonpath_parts.append(str(src_dir))
             pythonpath_parts.append(env.get("PYTHONPATH", ""))
-            env["PYTHONPATH"] = os.pathsep.join(
-                p for p in pythonpath_parts if p
-            ).strip(os.pathsep)
+            env["PYTHONPATH"] = os.pathsep.join(p for p in pythonpath_parts if p).strip(
+                os.pathsep
+            )
 
             proc = subprocess.run(
                 cmd,
@@ -194,7 +197,9 @@ class DeterministicVerificationRunner:
             )
 
             if proc.returncode != expected_code:
-                print(f"[FAIL] Task {test_id} exited with code {proc.returncode}, expected {expected_code}")
+                print(
+                    f"[FAIL] Task {test_id} exited with code {proc.returncode}, expected {expected_code}"
+                )
                 print(f"[STDERR]: {proc.stderr}")
                 return False
 
@@ -206,16 +211,22 @@ class DeterministicVerificationRunner:
 
             for pattern in node.get("stderr_prohibited_patterns", []):
                 if re.search(pattern, proc.stderr):
-                    print(f"[FAIL] Task {test_id} detected prohibited stderr pattern: '{pattern}'")
+                    print(
+                        f"[FAIL] Task {test_id} detected prohibited stderr pattern: '{pattern}'"
+                    )
                     return False
 
             if "numerical_assertions" in node:
-                if not self._verify_numeric_metrics(proc.stdout, node["numerical_assertions"]):
+                if not self._verify_numeric_metrics(
+                    proc.stdout, node["numerical_assertions"]
+                ):
                     return False
 
         return True
 
-    def _verify_numeric_metrics(self, stdout: str, assertions: List[Dict[str, Any]]) -> bool:
+    def _verify_numeric_metrics(
+        self, stdout: str, assertions: List[Dict[str, Any]]
+    ) -> bool:
         for assertion in assertions:
             metric = assertion["target_metric"]
             expected = float(assertion["expected_value"])
@@ -229,7 +240,9 @@ class DeterministicVerificationRunner:
 
             val = float(match.group(1))
             if abs(val - expected) > atol:
-                print(f"[FAIL] Metric '{metric}' tolerance breach: got {val}, expected {expected} ± {atol}")
+                print(
+                    f"[FAIL] Metric '{metric}' tolerance breach: got {val}, expected {expected} ± {atol}"
+                )
                 return False
         return True
 
@@ -242,7 +255,9 @@ def validate_blueprint_for_export(blueprint_path: Path) -> None:
     """
     from aero_forge.blueprint.validator import BlueprintV3Validator
 
-    BlueprintV3Validator(blueprint_path, workspace=blueprint_path.parent).check_exportable()
+    BlueprintV3Validator(
+        blueprint_path, workspace=blueprint_path.parent
+    ).check_exportable()
 
 
 def purge_workspace_state(workspace: Path) -> Dict[str, Any]:
@@ -329,7 +344,9 @@ class Orchestrator:
             overrides["LLM_PROVIDER"] = "none"
 
         file_config = load_config()
-        self.settings = resolve_settings(file_config, override=config_override, **overrides)
+        self.settings = resolve_settings(
+            file_config, override=config_override, **overrides
+        )
 
         self.source_path = Path(source_path)
         self.function_name = function_name
@@ -405,7 +422,9 @@ class Orchestrator:
 
         reapply_status = self.overlay_manager.reapply(self.source_path)
         if reapply_status == ReapplyStatus.CONFLICT:
-            logger.warning("Overlay conflict for %s; keeping generated baseline", self.source_path)
+            logger.warning(
+                "Overlay conflict for %s; keeping generated baseline", self.source_path
+            )
 
         original_source = self.source_path.read_text(encoding="utf-8")
         source = original_source
@@ -455,7 +474,9 @@ class Orchestrator:
 
                 compile_logs = ""
                 try:
-                    artifact, compile_logs = self._compile_to_native(source, sandbox.root)
+                    artifact, compile_logs = self._compile_to_native(
+                        source, sandbox.root
+                    )
                 except _BuildFailure as exc:
                     error_log = exc.log
                     if is_fatal(error_log):
@@ -499,7 +520,9 @@ class Orchestrator:
                     self._install_native_module(sandbox, artifact)
 
                 result = sandbox.run_tests()
-                full_logs = f"{compile_logs}\n\n--- Test output ---\n{result['logs']}".strip()
+                full_logs = (
+                    f"{compile_logs}\n\n--- Test output ---\n{result['logs']}".strip()
+                )
                 if result["passed"]:
                     self._merge_back(sandbox, artifact)
                     self.overlay_manager.record_generated(self.source_path)
@@ -520,7 +543,9 @@ class Orchestrator:
                 self.prompt_builder.add_error(result["logs"])
                 fixed = self._attempt_fix(source, result["logs"])
                 if fixed is None:
-                    reason = f"Tests failed and could not be fixed: {result['logs'][:500]}"
+                    reason = (
+                        f"Tests failed and could not be fixed: {result['logs'][:500]}"
+                    )
                     return self._partial_result(
                         iteration,
                         last_working_artifact,
@@ -676,12 +701,17 @@ class Orchestrator:
             (
                 r
                 for r in route_payload["reasons"]
-                if any(k in r for k in ("uses ", "calls ", "contains ", "imports ", "not found"))
+                if any(
+                    k in r
+                    for k in ("uses ", "calls ", "contains ", "imports ", "not found")
+                )
             ),
             None,
         )
         base_error = specific or (
-            route_payload["reasons"][0] if route_payload["reasons"] else "non-numerical logic detected"
+            route_payload["reasons"][0]
+            if route_payload["reasons"]
+            else "non-numerical logic detected"
         )
 
         # Hard routing blocks (missing functions) still fail immediately.
@@ -954,7 +984,11 @@ class Orchestrator:
                         dirs_exist_ok=True,
                     )
             except Exception as exc:
-                logger.warning("Could not persist generated Rust crate to %s: %s", native_rust_dir, exc)
+                logger.warning(
+                    "Could not persist generated Rust crate to %s: %s",
+                    native_rust_dir,
+                    exc,
+                )
             shutil.rmtree(crate_root, ignore_errors=True)
 
     def _install_native_module(self, sandbox: Sandbox, artifact: Path) -> None:
@@ -1016,8 +1050,16 @@ class Orchestrator:
             except AttributeError:
                 return "Any"
 
-        type_map = {"int": "ctypes.c_int64", "float": "ctypes.c_double", "bool": "ctypes.c_bool"}
-        free_map = {"int": "free_buffer_i64", "float": "free_buffer_f64", "bool": "free_buffer_bool"}
+        type_map = {
+            "int": "ctypes.c_int64",
+            "float": "ctypes.c_double",
+            "bool": "ctypes.c_bool",
+        }
+        free_map = {
+            "int": "free_buffer_i64",
+            "float": "free_buffer_f64",
+            "bool": "free_buffer_bool",
+        }
 
         lines: List[str] = [
             "import ctypes",
@@ -1052,7 +1094,9 @@ class Orchestrator:
 
             ret_ann = _py_ann(func.returns)
             ret_array = ret_ann.startswith(("list[", "List["))
-            ret_elem = ret_ann.split("[", 1)[1].split("]", 1)[0] if ret_array else ret_ann
+            ret_elem = (
+                ret_ann.split("[", 1)[1].split("]", 1)[0] if ret_array else ret_ann
+            )
             ret_ctype = type_map.get(ret_elem, "ctypes.c_void_p")
 
             # Configure argument and return types on the C symbol.
@@ -1099,9 +1143,7 @@ class Orchestrator:
                     f"    _result = [_ptr[i] for i in range(_out_len.value)]"
                 )
                 free_name = free_map.get(ret_elem, "free_buffer_i64")
-                body_lines.append(
-                    f"    _LIB.{free_name}(_ptr, _out_len.value)"
-                )
+                body_lines.append(f"    _LIB.{free_name}(_ptr, _out_len.value)")
                 body_lines.append("    return _result")
             else:
                 body_lines.append(
@@ -1133,11 +1175,12 @@ class Orchestrator:
             # Build outputs are isolated; do not turn them into packages.
             pass
 
-class _BuildFailure(UserError):
+
+class _BuildFailure(BuildStageError):
     """Internal exception used to signal a compilation failure with logs."""
 
     def __init__(self, message: str):
-        super().__init__(message)
+        super().__init__(message, stage="compile", logs=message)
         self.log = message
 
 
@@ -1254,7 +1297,9 @@ def _llm_plan_blueprint(
         raw = client.generate(plan_prompt, max_tokens=max_tokens)
     except Exception as exc:
         logger.warning("LLM planning call failed: %s", exc)
-        raise UserError(f"LLM planning call failed for provider '{llm_provider}': {exc}") from exc
+        raise UserError(
+            f"LLM planning call failed for provider '{llm_provider}': {exc}"
+        ) from exc
 
     return _parse_llm_blueprint(raw, llm_provider, model)
 
@@ -1337,7 +1382,9 @@ def plan_workspace(
         except UserError:
             raise
         except Exception as exc:
-            logger.warning("IntentCompiler failed, falling back to YAML planner: %s", exc)
+            logger.warning(
+                "IntentCompiler failed, falling back to YAML planner: %s", exc
+            )
             blueprint = None
 
     if llm_provider and llm_provider != "none" and blueprint is None:
@@ -1361,7 +1408,9 @@ def plan_workspace(
                 # not silently converted to a deterministic fallback.
                 raise
             except Exception as exc:
-                logger.warning("LLM planning failed, using deterministic fallback: %s", exc)
+                logger.warning(
+                    "LLM planning failed, using deterministic fallback: %s", exc
+                )
                 break
 
             if blueprint is None:
@@ -1372,11 +1421,15 @@ def plan_workspace(
             if mismatch is None:
                 break
 
-            logger.warning("Blueprint intent mismatch on attempt %s: %s", attempt + 1, mismatch)
+            logger.warning(
+                "Blueprint intent mismatch on attempt %s: %s", attempt + 1, mismatch
+            )
             correction_context = mismatch
             blueprint = None
         else:
-            logger.warning("Blueprint intent correction exhausted; using deterministic fallback.")
+            logger.warning(
+                "Blueprint intent correction exhausted; using deterministic fallback."
+            )
 
     # Normalize ambiguous "hybrid_polyglot" to the concrete C++ intent when the
     # prompt or requested toolchains are C++ oriented.
@@ -1401,8 +1454,9 @@ def plan_workspace(
     is_hybrid_cpp_rust = is_cpp and is_rust and not has_python
     if blueprint is None:
         chosen_intent = (
-            BUILD_INTENT_HYBRID_CPP_RUST if is_hybrid_cpp_rust else
-            BUILD_INTENT_HYBRID_CPP_PYTHON if is_cpp else intent
+            BUILD_INTENT_HYBRID_CPP_RUST
+            if is_hybrid_cpp_rust
+            else BUILD_INTENT_HYBRID_CPP_PYTHON if is_cpp else intent
         )
         blueprint = Blueprint(
             project=project_name,
@@ -1436,18 +1490,24 @@ def plan_workspace(
             update["toolchains"] = toolchains_for_intent(BUILD_INTENT_HYBRID_CPP_PYTHON)
         elif blueprint.architecture == "hybrid_polyglot":
             update["architecture"] = BUILD_INTENT_HYBRID_RUST_PYTHON
-            update["toolchains"] = toolchains_for_intent(BUILD_INTENT_HYBRID_RUST_PYTHON)
+            update["toolchains"] = toolchains_for_intent(
+                BUILD_INTENT_HYBRID_RUST_PYTHON
+            )
         if intent == BUILD_INTENT_HYBRID_RUST_PYTHON and not blueprint.manifest:
             update["manifest"] = manifest_entries
         if is_hybrid_cpp_rust and not blueprint.manifest:
             update["manifest"] = [
                 ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
-                for e in default_manifest_for_architecture(BUILD_INTENT_HYBRID_CPP_RUST, project_name, prompt=prompt)
+                for e in default_manifest_for_architecture(
+                    BUILD_INTENT_HYBRID_CPP_RUST, project_name, prompt=prompt
+                )
             ]
         elif is_cpp and not blueprint.manifest:
             update["manifest"] = [
                 ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
-                for e in default_manifest_for_architecture(BUILD_INTENT_HYBRID_CPP_PYTHON, project_name, prompt=prompt)
+                for e in default_manifest_for_architecture(
+                    BUILD_INTENT_HYBRID_CPP_PYTHON, project_name, prompt=prompt
+                )
             ]
         if update:
             blueprint = blueprint.model_copy(update=update)
@@ -1470,7 +1530,9 @@ def plan_workspace(
                 "toolchains": toolchains_for_intent(architecture),
                 "manifest": [
                     ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
-                    for e in default_manifest_for_architecture(architecture, project_name, prompt=prompt)
+                    for e in default_manifest_for_architecture(
+                        architecture, project_name, prompt=prompt
+                    )
                 ],
             }
         )

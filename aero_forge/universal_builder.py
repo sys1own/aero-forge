@@ -29,6 +29,7 @@ from aero_forge.blueprint import (
     write_blueprint,
 )
 from aero_forge.builder.aeroc_compiler import compile_directory_to_aeroc
+from aero_forge.errors import BuildStageError
 from aero_forge.builder.executor import ExecutionReport
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
@@ -195,7 +196,9 @@ def _augment_blueprint_with_explicit_paths(
         for entry in fallback.manifest:
             if entry.path not in existing:
                 additions.append(entry)
-        blueprint = blueprint.model_copy(update={"manifest": list(blueprint.manifest) + additions})
+        blueprint = blueprint.model_copy(
+            update={"manifest": list(blueprint.manifest) + additions}
+        )
     return blueprint
 
 
@@ -295,32 +298,52 @@ def _hybrid_fallback_blueprint(
         rust_cargo = f"{rust_crate_dir}/Cargo.toml"
         rust_lib = f"{rust_crate_dir}/src/lib.rs"
         manifest = [
-            ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust workspace manifest"),
+            ManifestEntry(
+                path="Cargo.toml", lang="toml", purpose="Rust workspace manifest"
+            ),
             ManifestEntry(path=rust_cargo, lang="toml", purpose="PyO3 crate manifest"),
             ManifestEntry(path=rust_lib, lang="rust", purpose="Rust native core"),
-            ManifestEntry(path=cpp_entry, lang="cpp", purpose="C-ABI shared library source"),
-            ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python package manifest"),
             ManifestEntry(
-                path=f"{pkg_name}/__init__.py", lang="python", purpose="Python driver package"
+                path=cpp_entry, lang="cpp", purpose="C-ABI shared library source"
             ),
             ManifestEntry(
-                path=f"{pkg_name}/main.py", lang="python", purpose="Python CLI / REPL entrypoint"
+                path="pyproject.toml", lang="toml", purpose="Python package manifest"
             ),
-            ManifestEntry(path="run_shell.py", lang="python", purpose="Headless launcher"),
-            ManifestEntry(path="tests/test_tri.py", lang="python", purpose="pytest tests"),
+            ManifestEntry(
+                path=f"{pkg_name}/__init__.py",
+                lang="python",
+                purpose="Python driver package",
+            ),
+            ManifestEntry(
+                path=f"{pkg_name}/main.py",
+                lang="python",
+                purpose="Python CLI / REPL entrypoint",
+            ),
+            ManifestEntry(
+                path="run_shell.py", lang="python", purpose="Headless launcher"
+            ),
+            ManifestEntry(
+                path="tests/test_tri.py", lang="python", purpose="pytest tests"
+            ),
             ManifestEntry(path="README.md", lang="markdown", purpose="docs"),
         ]
         if dirs["cpp_header"]:
             manifest.insert(
                 3,
-                ManifestEntry(path=dirs["cpp_header"], lang="cpp", purpose="C-ABI header"),
+                ManifestEntry(
+                    path=dirs["cpp_header"], lang="cpp", purpose="C-ABI header"
+                ),
             )
         toolchains = ["python", "rust", "cpp", "cargo"]
         architecture = INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON
     elif is_cpp:
         manifest: list[ManifestEntry] = [
-            ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python packaging"),
-            ManifestEntry(path="setup.py", lang="python", purpose="setuptools build script"),
+            ManifestEntry(
+                path="pyproject.toml", lang="toml", purpose="Python packaging"
+            ),
+            ManifestEntry(
+                path="setup.py", lang="python", purpose="setuptools build script"
+            ),
             ManifestEntry(path="README.md", lang="markdown", purpose="docs"),
         ]
         toolchains = ["python", "cpp"]
@@ -328,16 +351,24 @@ def _hybrid_fallback_blueprint(
     else:
         manifest = [
             ManifestEntry(path="Cargo.toml", lang="toml", purpose="workspace manifest"),
-            ManifestEntry(path="rust_core/Cargo.toml", lang="toml", purpose="crate manifest"),
-            ManifestEntry(path="rust_core/src/lib.rs", lang="rust", purpose="Rust core"),
-            ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python packaging"),
+            ManifestEntry(
+                path="rust_core/Cargo.toml", lang="toml", purpose="crate manifest"
+            ),
+            ManifestEntry(
+                path="rust_core/src/lib.rs", lang="rust", purpose="Rust core"
+            ),
+            ManifestEntry(
+                path="pyproject.toml", lang="toml", purpose="Python packaging"
+            ),
             ManifestEntry(path="README.md", lang="markdown", purpose="docs"),
         ]
         toolchains = ["python", "rust", "cargo"]
         architecture = INTENT_HYBRID_RUST_PYTHON
 
     # Collect requested files per package and decide whether a default package is needed.
-    requested_root_files = {Path(p).name for p, _ in explicit if len(Path(p).parts) == 1}
+    requested_root_files = {
+        Path(p).name for p, _ in explicit if len(Path(p).parts) == 1
+    }
     requested_package_files: Dict[str, List[str]] = {}
     for p, _ in explicit:
         parts = Path(p).parts
@@ -353,7 +384,9 @@ def _hybrid_fallback_blueprint(
     if not is_tri:
         for pkg_dir in sorted(packages):
             manifest.append(
-                ManifestEntry(path=f"{pkg_dir}/__init__.py", lang="python", purpose="package init")
+                ManifestEntry(
+                    path=f"{pkg_dir}/__init__.py", lang="python", purpose="package init"
+                )
             )
             if is_cpp:
                 if "native.cpp" not in requested_package_files.get(pkg_dir, []):
@@ -368,17 +401,23 @@ def _hybrid_fallback_blueprint(
                 if "native.py" not in requested_package_files.get(pkg_dir, []):
                     manifest.append(
                         ManifestEntry(
-                            path=f"{pkg_dir}/native.py", lang="python", purpose="native wrapper"
+                            path=f"{pkg_dir}/native.py",
+                            lang="python",
+                            purpose="native wrapper",
                         )
                     )
             if "cli.py" not in requested_package_files.get(pkg_dir, []):
                 manifest.append(
-                    ManifestEntry(path=f"{pkg_dir}/cli.py", lang="python", purpose="CLI module")
+                    ManifestEntry(
+                        path=f"{pkg_dir}/cli.py", lang="python", purpose="CLI module"
+                    )
                 )
 
     # Launcher and entry point requested or defaulted.
     if "run_shell.py" not in requested_root_files:
-        manifest.append(ManifestEntry(path="run_shell.py", lang="python", purpose="demo"))
+        manifest.append(
+            ManifestEntry(path="run_shell.py", lang="python", purpose="demo")
+        )
 
     # Add the exact files requested by the user, skipping ones already covered.
     covered = {Path(e.path).name for e in manifest}
@@ -395,7 +434,9 @@ def _hybrid_fallback_blueprint(
             "test_native.py" not in requested_root_files
             and "test_cli.py" not in requested_root_files
         ):
-            manifest.append(ManifestEntry(path=test_file, lang="python", purpose="native tests"))
+            manifest.append(
+                ManifestEntry(path=test_file, lang="python", purpose="native tests")
+            )
 
     python_prefix = f"{pkg_name}.native." if packages and not is_cpp else ""
     for contract in contracts:
@@ -464,6 +505,19 @@ def _run_polyglot_materializer(
         materializer_name = "PolyglotMaterializer"
     try:
         updated = materializer.materialize(blueprint, build=True, force_overwrite=True)
+    except BuildStageError as exc:
+        stage_logs = f"{materializer.build_logs}\n\n{exc.logs}".strip()
+        return {
+            "success": False,
+            "project_name": project_name,
+            "error": str(exc),
+            "core_error": str(exc),
+            "core_logs": stage_logs,
+            "logs": stage_logs,
+            "stage": exc.stage,
+            "files": [],
+            "materializer": materializer_name,
+        }
     except Exception as exc:
         return {
             "success": False,
@@ -480,7 +534,9 @@ def _run_polyglot_materializer(
     if (output_dir / "src").is_dir():
         pythonpath_parts.append(str(output_dir / "src"))
     pythonpath_parts.append(test_env.get("PYTHONPATH", ""))
-    test_env["PYTHONPATH"] = os.pathsep.join(p for p in pythonpath_parts if p).strip(os.pathsep)
+    test_env["PYTHONPATH"] = os.pathsep.join(p for p in pythonpath_parts if p).strip(
+        os.pathsep
+    )
     pytest_result = subprocess.run(
         [sys.executable, "-m", "pytest", str(output_dir), "-q"],
         cwd=output_dir,
@@ -497,7 +553,9 @@ def _run_polyglot_materializer(
         f"{pytest_result.stdout}\n{pytest_result.stderr}"
     ).strip()
     files = ExecutionReport(output_dir).filter_paths(
-        sorted(str(p.relative_to(output_dir)) for p in output_dir.rglob("*") if p.is_file())
+        sorted(
+            str(p.relative_to(output_dir)) for p in output_dir.rglob("*") if p.is_file()
+        )
     )
     return {
         "success": pytest_result.returncode == 0,
@@ -529,6 +587,19 @@ def _run_hybrid_cpp_rust_materializer(
     materializer = HybridCppRustMaterializer(output_dir)
     try:
         updated = materializer.materialize(blueprint, build=True, force_overwrite=True)
+    except BuildStageError as exc:
+        stage_logs = f"{materializer.build_logs}\n\n{exc.logs}".strip()
+        return {
+            "success": False,
+            "project_name": project_name,
+            "error": str(exc),
+            "core_error": str(exc),
+            "core_logs": stage_logs,
+            "logs": stage_logs,
+            "stage": exc.stage,
+            "files": [],
+            "materializer": "HybridCppRustMaterializer",
+        }
     except Exception as exc:
         return {
             "success": False,
@@ -540,13 +611,18 @@ def _run_hybrid_cpp_rust_materializer(
         }
     write_blueprint(updated, output_dir / "blueprint.aero")
     files = ExecutionReport(output_dir).filter_paths(
-        sorted(str(p.relative_to(output_dir)) for p in output_dir.rglob("*") if p.is_file())
+        sorted(
+            str(p.relative_to(output_dir)) for p in output_dir.rglob("*") if p.is_file()
+        )
     )
     return {
-        "success": "BUILD: hybrid C++/Rust binary compiled successfully" in materializer.build_logs
+        "success": "BUILD: hybrid C++/Rust binary compiled successfully"
+        in materializer.build_logs
         or (
             (output_dir / "target" / "release" / project_name).is_file()
-            or (output_dir / "target" / "release" / project_name.replace("-", "_")).is_file()
+            or (
+                output_dir / "target" / "release" / project_name.replace("-", "_")
+            ).is_file()
         ),
         "project_name": project_name,
         "files": files,
@@ -555,7 +631,9 @@ def _run_hybrid_cpp_rust_materializer(
     }
 
 
-def _classification_for_architecture(architecture: str, features: List[str]) -> StackClassification:
+def _classification_for_architecture(
+    architecture: str, features: List[str]
+) -> StackClassification:
     """Create a StackClassification for an explicitly chosen architecture."""
     languages_map = {
         INTENT_PURE_PYTHON: ["python"],
@@ -618,7 +696,9 @@ def build_universal_project(
                 existing_manifest = list(existing.manifest or [])
             except Exception as exc:
                 logger.warning(
-                    "Could not read existing workspace blueprint %s: %s", existing_path, exc
+                    "Could not read existing workspace blueprint %s: %s",
+                    existing_path,
+                    exc,
                 )
 
     if progress_callback:
@@ -627,7 +707,9 @@ def build_universal_project(
     # Pass 1: classify and write blueprint.aero.
     classification = classify_stack(prompt)
     if architecture:
-        classification = _classification_for_architecture(architecture, classification.features)
+        classification = _classification_for_architecture(
+            architecture, classification.features
+        )
     effective_constraints = constraints or ""
     accel_parts = []
     if acceleration_policy and acceleration_policy != "selective":
@@ -641,7 +723,9 @@ def build_universal_project(
     if hin_jit_opt_level is not None:
         accel_parts.append(f"HIN JIT opt level: {hin_jit_opt_level}")
     if accel_parts:
-        effective_constraints = (f"{effective_constraints}\n\n" + "\n".join(accel_parts)).strip()
+        effective_constraints = (
+            f"{effective_constraints}\n\n" + "\n".join(accel_parts)
+        ).strip()
     blueprint = plan_workspace(
         prompt,
         output_dir,
@@ -720,7 +804,9 @@ def build_universal_project(
         # by the polyglot materializer so the concrete requested function is built
         # instead of a generic monorepo stub.
         if _is_explicit_native_rust_update(prompt):
-            logger.info("Explicit native Rust update detected; routing to PolyglotMaterializer")
+            logger.info(
+                "Explicit native Rust update detected; routing to PolyglotMaterializer"
+            )
             result = _run_polyglot_materializer(
                 project_name or blueprint.project or "generated",
                 classification.features,
@@ -752,7 +838,8 @@ def build_universal_project(
                 )
             except Exception as exc:
                 logger.warning(
-                    "generate_monorepo failed: %s; falling back to PolyglotMaterializer", exc
+                    "generate_monorepo failed: %s; falling back to PolyglotMaterializer",
+                    exc,
                 )
                 result = {"success": False, "error": str(exc)}
             if not result.get("success"):
@@ -799,7 +886,11 @@ def build_universal_project(
     }
     if not result.get("files"):
         result["files"] = ExecutionReport(output_dir).filter_paths(
-            sorted(str(p.relative_to(output_dir)) for p in output_dir.rglob("*") if p.is_file())
+            sorted(
+                str(p.relative_to(output_dir))
+                for p in output_dir.rglob("*")
+                if p.is_file()
+            )
         )
 
     # Produce a portable standalone ``workspace.aeroc`` artifact from the materialized tree.

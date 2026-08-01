@@ -12,7 +12,13 @@ import subprocess
 from pathlib import Path
 from typing import Any, List, Optional
 
-from aero_forge.blueprint import Blueprint, ContractEntry, ManifestEntry, write_blueprint
+from aero_forge.blueprint import (
+    Blueprint,
+    ContractEntry,
+    ManifestEntry,
+    write_blueprint,
+)
+from aero_forge.errors import BuildStageError
 from aero_forge.builder import language_router
 from aero_forge.scaffold.cpp_materializer import (
     _contract_to_python_stub,
@@ -24,7 +30,6 @@ from aero_forge.scaffold.cpp_materializer import (
     _is_c_abi_scalar,
 )
 from aero_forge.scaffold.python_repo_generator import _sanitize_module_name
-
 
 logger = logging.getLogger("aero_forge.scaffold.hybrid_cpp_rust")
 
@@ -59,7 +64,9 @@ def _function_names(contracts: List[ContractEntry]) -> List[str]:
     return names
 
 
-def _parse_contract(c: ContractEntry) -> Optional[tuple[str, list[tuple[str, str]], str]]:
+def _parse_contract(
+    c: ContractEntry,
+) -> Optional[tuple[str, list[tuple[str, str]], str]]:
     from aero_forge.scaffold.polyglot_materializer import _parse_signature
 
     if not c.signature:
@@ -83,7 +90,11 @@ def _is_native_cpp_contract(c: ContractEntry) -> bool:
 
 def _is_nested_list(type_hint: str) -> bool:
     th = (type_hint or "").strip()
-    return th.startswith("list[") and th.endswith("]") and th[5:-1].strip().startswith("list[")
+    return (
+        th.startswith("list[")
+        and th.endswith("]")
+        and th[5:-1].strip().startswith("list[")
+    )
 
 
 def _element_type(type_hint: str) -> str:
@@ -146,39 +157,39 @@ def _generate_build_rs(compiler: str, cpp_source: str, include_dirs: List[str]) 
         "use std::process::Command;\n"
         "\n"
         "fn main() {\n"
-        f"    let compiler = \"{compiler}\";\n"
+        f'    let compiler = "{compiler}";\n'
         f'    let cpp = Path::new("{cpp_source}");\n'
-        "    let out_dir = env::var(\"OUT_DIR\").unwrap();\n"
-        "    let obj = Path::new(&out_dir).join(\"native.o\");\n"
-        "    let lib = Path::new(&out_dir).join(\"libnative.a\");\n"
+        '    let out_dir = env::var("OUT_DIR").unwrap();\n'
+        '    let obj = Path::new(&out_dir).join("native.o");\n'
+        '    let lib = Path::new(&out_dir).join("libnative.a");\n'
         f"    let include_dirs: &[&str] = {include_slice};\n"
         "    let mut compile_args = vec![\n"
-        "        \"-c\",\n"
-        "        \"-O2\",\n"
-        "        \"-fPIC\",\n"
-        "        \"-std=c++17\",\n"
+        '        "-c",\n'
+        '        "-O2",\n'
+        '        "-fPIC",\n'
+        '        "-std=c++17",\n'
         "        cpp.to_str().unwrap(),\n"
-        "        \"-o\",\n"
+        '        "-o",\n'
         "        obj.to_str().unwrap(),\n"
         "    ];\n"
         "    for inc in include_dirs {\n"
-        "        compile_args.push(\"-I\");\n"
+        '        compile_args.push("-I");\n'
         "        compile_args.push(inc);\n"
         "    }\n"
         "    let status = Command::new(compiler)\n"
         "        .args(&compile_args)\n"
         "        .status()\n"
-        "        .expect(\"failed to compile C++ source\");\n"
+        '        .expect("failed to compile C++ source");\n'
         "    assert!(status.success());\n"
-        "    let status = Command::new(\"ar\")\n"
-        "        .args(&[\"rcs\", lib.to_str().unwrap(), obj.to_str().unwrap()])\n"
+        '    let status = Command::new("ar")\n'
+        '        .args(&["rcs", lib.to_str().unwrap(), obj.to_str().unwrap()])\n'
         "        .status()\n"
-        "        .expect(\"failed to archive C++ object\");\n"
+        '        .expect("failed to archive C++ object");\n'
         "    assert!(status.success());\n"
-        "    println!(\"cargo:rustc-link-search=native={}\", out_dir);\n"
-        "    println!(\"cargo:rustc-link-lib=static=native\");\n"
-        "    println!(\"cargo:rustc-link-lib=dylib=stdc++\");\n"
-        "    println!(\"cargo:rerun-if-changed={}\", cpp.display());\n"
+        '    println!("cargo:rustc-link-search=native={}", out_dir);\n'
+        '    println!("cargo:rustc-link-lib=static=native");\n'
+        '    println!("cargo:rustc-link-lib=dylib=stdc++");\n'
+        '    println!("cargo:rerun-if-changed={}", cpp.display());\n'
         "}\n"
     )
 
@@ -311,9 +322,13 @@ def _generate_lib_rs(contracts: List[ContractEntry]) -> str:
                 wrapper_lines.append(
                     f"    let flat_{arg_name}: Vec<{inner_rust}> = {arg_name}.iter().flat_map(|row| row.iter().copied()).collect();"
                 )
-                wrapper_lines.append(f"    let {arg_name}_ptr = flat_{arg_name}.as_ptr();")
+                wrapper_lines.append(
+                    f"    let {arg_name}_ptr = flat_{arg_name}.as_ptr();"
+                )
                 wrapper_lines.append(f"    let {arg_name}_len = flat_{arg_name}.len();")
-                wrapper_lines.append(f"    let {arg_name}_cols = {arg_name}.get(0).map(|r| r.len()).unwrap_or(0);")
+                wrapper_lines.append(
+                    f"    let {arg_name}_cols = {arg_name}.get(0).map(|r| r.len()).unwrap_or(0);"
+                )
                 if first_nested_cols is None:
                     first_nested_cols = f"{arg_name}_cols"
                 c_call_args.append(f"{arg_name}_ptr")
@@ -352,19 +367,25 @@ def _generate_lib_rs(contracts: List[ContractEntry]) -> str:
         wrapper_lines.append("}")
         wrappers.append("\n".join(wrapper_lines))
 
-    lines = [
-        "#![allow(dead_code)]",
-        "",
-        "extern \"C\" {",
-        "    fn free_buffer_i64(ptr: *mut i64, len: usize);",
-        "    fn free_buffer_f64(ptr: *mut f64, len: usize);",
-        "    fn free_buffer_bool(ptr: *mut bool, len: usize);",
-    ] + extern_decls + [
-        "}",
-        "",
-    ] + wrappers + [
-        "",
-    ]
+    lines = (
+        [
+            "#![allow(dead_code)]",
+            "",
+            'extern "C" {',
+            "    fn free_buffer_i64(ptr: *mut i64, len: usize);",
+            "    fn free_buffer_f64(ptr: *mut f64, len: usize);",
+            "    fn free_buffer_bool(ptr: *mut bool, len: usize);",
+        ]
+        + extern_decls
+        + [
+            "}",
+            "",
+        ]
+        + wrappers
+        + [
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -402,33 +423,43 @@ def _generate_main_rs(crate_name: str, contracts: List[ContractEntry]) -> str:
             continue
 
         call_args = _sample_rust_call_args(args) if args else ""
-        benchmark_calls.append(f"        let _ = {crate_name}::{name}_rust({call_args});")
-        main_calls.append(f"    println!(\"{name}: {{:?}}\", {crate_name}::{name}_rust({call_args}));")
+        benchmark_calls.append(
+            f"        let _ = {crate_name}::{name}_rust({call_args});"
+        )
+        main_calls.append(
+            f'    println!("{name}: {{:?}}", {crate_name}::{name}_rust({call_args}));'
+        )
 
-    lines = [
-        "use std::env;",
-        "use std::time::Instant;",
-        "",
-        f"fn main() {{",
-        "    let args: Vec<String> = env::args().collect();",
-        "    if args.len() > 1 && args[1] == \"--benchmark\" {",
-        "        let _data: Vec<f64> = (0..100).map(|i| i as f64).collect();",
-        "        let _matrix: Vec<Vec<f64>> = (0..10).map(|i| (0..10).map(|j| (i * 10 + j) as f64).collect()).collect();",
-        "        let iterations: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100000);",
-        "        let start = Instant::now();",
-        "        for _ in 0..iterations {",
-    ] + benchmark_calls + [
-        "        }",
-        "        let elapsed = start.elapsed();",
-        "        println!(\"Benchmark: {} iterations in {:?}\", iterations, elapsed);",
-        "    } else {",
-        "        let _data: Vec<f64> = vec![1.0, 2.0, 3.0];",
-        "        let _matrix: Vec<Vec<f64>> = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];",
-    ] + main_calls + [
-        "    }",
-        "}",
-        "",
-    ]
+    lines = (
+        [
+            "use std::env;",
+            "use std::time::Instant;",
+            "",
+            f"fn main() {{",
+            "    let args: Vec<String> = env::args().collect();",
+            '    if args.len() > 1 && args[1] == "--benchmark" {',
+            "        let _data: Vec<f64> = (0..100).map(|i| i as f64).collect();",
+            "        let _matrix: Vec<Vec<f64>> = (0..10).map(|i| (0..10).map(|j| (i * 10 + j) as f64).collect()).collect();",
+            "        let iterations: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(100000);",
+            "        let start = Instant::now();",
+            "        for _ in 0..iterations {",
+        ]
+        + benchmark_calls
+        + [
+            "        }",
+            "        let elapsed = start.elapsed();",
+            '        println!("Benchmark: {} iterations in {:?}", iterations, elapsed);',
+            "    } else {",
+            "        let _data: Vec<f64> = vec![1.0, 2.0, 3.0];",
+            "        let _matrix: Vec<Vec<f64>> = vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]];",
+        ]
+        + main_calls
+        + [
+            "    }",
+            "}",
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -446,15 +477,21 @@ def _generate_test_rs(crate_name: str, contracts: List[ContractEntry]) -> str:
         found = True
         call_args = _sample_rust_call_args(args) if args else ""
         lines.extend(["", f"#[test]", f"fn test_hybrid_cpp_rust_{name}() {{"])
-        has_nested = any(_is_nested_list(t) for _, t in args) or _is_nested_list(return_type)
+        has_nested = any(_is_nested_list(t) for _, t in args) or _is_nested_list(
+            return_type
+        )
         has_1d = any(_is_c_abi_list(t) and not _is_nested_list(t) for _, t in args)
         if has_1d or (not has_nested and _is_c_abi_list(return_type)):
             lines.append("    let _data: Vec<f64> = vec![1.0, 2.0, 3.0];")
         if has_nested:
-            lines.append("    let _matrix: Vec<Vec<f64>> = vec![vec![1.0, 2.0], vec![3.0, 4.0]];")
+            lines.append(
+                "    let _matrix: Vec<Vec<f64>> = vec![vec![1.0, 2.0], vec![3.0, 4.0]];"
+            )
         if _is_nested_list(return_type):
             lines.append(f"    let result = {name}_rust({call_args});")
-            lines.append("    assert_eq!(result, vec![vec![2.0, 4.0], vec![6.0, 8.0]]);")
+            lines.append(
+                "    assert_eq!(result, vec![vec![2.0, 4.0], vec![6.0, 8.0]]);"
+            )
         elif return_type.lower() in ("float", "f64", "double"):
             lines.append(f"    let result = {name}_rust({call_args});")
             # The only scalar contract tested here is the dot product of [1,2,3] with itself.
@@ -464,13 +501,15 @@ def _generate_test_rs(crate_name: str, contracts: List[ContractEntry]) -> str:
             lines.append("    assert_eq!(result, vec![2.0, 4.0, 6.0]);")
         lines.append("}")
     if not found:
-        lines.extend([
-            "",
-            "#[test]",
-            "fn test_hybrid_cpp_rust_dummy() {",
-            "    assert!(true);",
-            "}",
-        ])
+        lines.extend(
+            [
+                "",
+                "#[test]",
+                "fn test_hybrid_cpp_rust_dummy() {",
+                "    assert!(true);",
+                "}",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -500,44 +539,64 @@ class HybridCppRustMaterializer:
         """Write the hybrid C++/Rust workspace and optionally build the binary."""
         from aero_forge.scaffold.polyglot_materializer import guard_materialization
 
-        guard_materialization(self.workspace, blueprint, force_overwrite=force_overwrite)
+        guard_materialization(
+            self.workspace, blueprint, force_overwrite=force_overwrite
+        )
         project = blueprint.project or "hybrid_cpp_rust_project"
         crate_name = _sanitize_module_name(project).replace("_", "_")
         if crate_name[0].isdigit():
             crate_name = "aero_" + crate_name
 
-        contracts = list(blueprint.contracts) if blueprint.contracts else [
-            ContractEntry(
-                name="fast_vector_transform",
-                signature="def fast_vector_transform(v: list[float], scalar: float) -> list[float]",
-            ),
-        ]
+        contracts = (
+            list(blueprint.contracts)
+            if blueprint.contracts
+            else [
+                ContractEntry(
+                    name="fast_vector_transform",
+                    signature="def fast_vector_transform(v: list[float], scalar: float) -> list[float]",
+                ),
+            ]
+        )
         if not blueprint.contracts:
             blueprint.contracts = contracts
         if not blueprint.abi_contracts:
             from aero_forge.blueprint import _contracts_to_abi_contracts
-            blueprint.abi_contracts = _contracts_to_abi_contracts(contracts, list(blueprint.manifest))
-        cpp_contracts = [c for c in contracts if _is_c_abi_contract(c) or _is_native_cpp_contract(c)]
+
+            blueprint.abi_contracts = _contracts_to_abi_contracts(
+                contracts, list(blueprint.manifest)
+            )
+        cpp_contracts = [
+            c for c in contracts if _is_c_abi_contract(c) or _is_native_cpp_contract(c)
+        ]
         cpp_contracts_flat = [_flatten_contract(c) for c in cpp_contracts]
 
         accel_log = self.workspace / ".aero_forge_accel.log"
         os.environ["AERO_FORGE_ACCEL_LOG"] = str(accel_log)
 
-        _accel_log("info", "Routing hybrid C++/Rust build through Rust binary with C-ABI static link")
+        _accel_log(
+            "info",
+            "Routing hybrid C++/Rust build through Rust binary with C-ABI static link",
+        )
         for c in cpp_contracts:
-            language_router.select_native_backend(_contract_to_python_stub(c), hint="cpp")
+            language_router.select_native_backend(
+                _contract_to_python_stub(c), hint="cpp"
+            )
 
         # Resolve C++ source and header paths from the blueprint manifest / module graph.
         cpp_entries = [
-            e for e in blueprint.manifest
-            if e.lang == "cpp" or Path(e.path).suffix in (".cpp", ".cc", ".cxx", ".h", ".hpp")
+            e
+            for e in blueprint.manifest
+            if e.lang == "cpp"
+            or Path(e.path).suffix in (".cpp", ".cc", ".cxx", ".h", ".hpp")
         ]
         cpp_source_entry = next(
             (e for e in cpp_entries if Path(e.path).suffix in (".cpp", ".cc", ".cxx")),
             None,
         )
         if cpp_source_entry is None:
-            cpp_source_entry = ManifestEntry(path="src/cpp_core/native.cpp", lang="cpp", purpose="C-ABI math source")
+            cpp_source_entry = ManifestEntry(
+                path="src/cpp_core/native.cpp", lang="cpp", purpose="C-ABI math source"
+            )
             blueprint.manifest.append(cpp_source_entry)
         cpp_source_path = self.workspace / cpp_source_entry.path
         cpp_source_path.parent.mkdir(parents=True, exist_ok=True)
@@ -554,7 +613,7 @@ class HybridCppRustMaterializer:
         cpp_source = _generate_native_cpp(
             crate_name,
             cpp_contracts_flat,
-            header_includes=[Path(h).name for h in header_paths],
+            header_includes=header_paths,
         )
         cpp_source_path.write_text(cpp_source, encoding="utf-8")
 
@@ -562,32 +621,68 @@ class HybridCppRustMaterializer:
             hdr_path = self.workspace / header_path
             hdr_path.parent.mkdir(parents=True, exist_ok=True)
             if not hdr_path.exists():
-                hdr_path.write_text(_generate_cpp_header(crate_name, cpp_contracts_flat), encoding="utf-8")
+                hdr_path.write_text(
+                    _generate_cpp_header(crate_name, cpp_contracts_flat),
+                    encoding="utf-8",
+                )
             if not any(e.path == header_path for e in blueprint.manifest):
-                blueprint.manifest.append(ManifestEntry(path=header_path, lang="cpp", purpose="C-ABI header"))
+                blueprint.manifest.append(
+                    ManifestEntry(path=header_path, lang="cpp", purpose="C-ABI header")
+                )
 
         compiler = _find_cpp_compiler() or "g++"
-        include_dirs = [str(Path(h).parent) for h in header_paths if Path(h).parent != Path(".")]
+        # ``build.rs`` runs from the workspace root, so the workspace root must be
+        # on the include path for the workspace-relative ``#include`` directives
+        # emitted by ``_generate_native_cpp`` to resolve correctly.
+        include_dirs = ["."] if header_paths else []
+        include_dirs.extend(
+            str(Path(h).parent) for h in header_paths if Path(h).parent != Path(".")
+        )
         (self.workspace / "src" / "cpp_core").mkdir(parents=True, exist_ok=True)
         (self.workspace / "tests").mkdir(exist_ok=True)
-        (self.workspace / "Cargo.toml").write_text(_generate_cargo_toml(crate_name), encoding="utf-8")
-        (self.workspace / "build.rs").write_text(_generate_build_rs(compiler, str(cpp_source_entry.path), include_dirs), encoding="utf-8")
-        (self.workspace / "src" / "lib.rs").write_text(_generate_lib_rs(cpp_contracts), encoding="utf-8")
-        (self.workspace / "src" / "main.rs").write_text(_generate_main_rs(crate_name, cpp_contracts), encoding="utf-8")
-        (self.workspace / "tests" / "test_hybrid_cpp_rust.rs").write_text(_generate_test_rs(crate_name, cpp_contracts), encoding="utf-8")
-        (self.workspace / "README.md").write_text(_generate_readme(project), encoding="utf-8")
+        (self.workspace / "Cargo.toml").write_text(
+            _generate_cargo_toml(crate_name), encoding="utf-8"
+        )
+        (self.workspace / "build.rs").write_text(
+            _generate_build_rs(compiler, str(cpp_source_entry.path), include_dirs),
+            encoding="utf-8",
+        )
+        (self.workspace / "src" / "lib.rs").write_text(
+            _generate_lib_rs(cpp_contracts), encoding="utf-8"
+        )
+        (self.workspace / "src" / "main.rs").write_text(
+            _generate_main_rs(crate_name, cpp_contracts), encoding="utf-8"
+        )
+        (self.workspace / "tests" / "test_hybrid_cpp_rust.rs").write_text(
+            _generate_test_rs(crate_name, cpp_contracts), encoding="utf-8"
+        )
+        (self.workspace / "README.md").write_text(
+            _generate_readme(project), encoding="utf-8"
+        )
 
         manifest: List[ManifestEntry] = [
-            ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust package manifest"),
-            ManifestEntry(path="build.rs", lang="rust", purpose="C++ build and link script"),
-            ManifestEntry(path="src/lib.rs", lang="rust", purpose="Rust library wrappers"),
+            ManifestEntry(
+                path="Cargo.toml", lang="toml", purpose="Rust package manifest"
+            ),
+            ManifestEntry(
+                path="build.rs", lang="rust", purpose="C++ build and link script"
+            ),
+            ManifestEntry(
+                path="src/lib.rs", lang="rust", purpose="Rust library wrappers"
+            ),
             ManifestEntry(path="src/main.rs", lang="rust", purpose="Rust CLI binary"),
-            ManifestEntry(path=cpp_source_entry.path, lang="cpp", purpose="C-ABI math source"),
+            ManifestEntry(
+                path=cpp_source_entry.path, lang="cpp", purpose="C-ABI math source"
+            ),
             *[
                 ManifestEntry(path=hp, lang="cpp", purpose="C-ABI header")
                 for hp in header_paths
             ],
-            ManifestEntry(path="tests/test_hybrid_cpp_rust.rs", lang="rust", purpose="Rust integration test"),
+            ManifestEntry(
+                path="tests/test_hybrid_cpp_rust.rs",
+                lang="rust",
+                purpose="Rust integration test",
+            ),
             ManifestEntry(path="README.md", lang="markdown", purpose="Project README"),
         ]
         existing_paths = {e.path for e in blueprint.manifest}
@@ -601,7 +696,7 @@ class HybridCppRustMaterializer:
 
         return blueprint
 
-    def _build(self) -> bool:
+    def _build(self) -> None:
         from aero_forge.scaffold.cargo_runner import cargo_build
 
         _accel_log("info", "BUILD: building hybrid C++/Rust binary with cargo")
@@ -614,7 +709,11 @@ class HybridCppRustMaterializer:
         if result.returncode != 0:
             logger.error("Hybrid C++/Rust build failed:\n%s", output)
             _accel_log("error", f"Hybrid C++/Rust build failed: {output}")
-            return False
+            raise BuildStageError(
+                "Hybrid C++/Rust build failed",
+                stage="rust_compile",
+                logs=output,
+            )
 
         _accel_log("success", "BUILD: hybrid C++/Rust binary compiled successfully")
         self._log("BUILD: hybrid C++/Rust binary compiled successfully")
@@ -631,7 +730,10 @@ class HybridCppRustMaterializer:
         if run_result.returncode != 0:
             logger.error("Hybrid C++/Rust run failed:\n%s", run_output)
             _accel_log("error", f"Hybrid C++/Rust run failed: {run_output}")
-            return False
+            raise BuildStageError(
+                "Hybrid C++/Rust benchmark run failed",
+                stage="rust_run",
+                logs=run_output,
+            )
 
         _accel_log("success", "Hybrid C++/Rust binary ran --benchmark successfully")
-        return True
