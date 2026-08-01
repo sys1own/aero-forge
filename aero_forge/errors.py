@@ -8,8 +8,6 @@ import shutil
 from pathlib import Path
 from typing import Optional
 
-
-
 IO_ERROR = "Unsupported I/O operation detected. Aborting."
 
 
@@ -20,7 +18,9 @@ class AeroForgeError(Exception):
 class ExportVerificationError(AeroForgeError):
     """Raised when a strict export fails pre-flight verification."""
 
-    def __init__(self, message: str, verification: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(
+        self, message: str, verification: Optional[Dict[str, Any]] = None
+    ) -> None:
         super().__init__(message)
         self.verification = verification or {}
 
@@ -43,8 +43,16 @@ def check_toolchain() -> None:
     from aero_forge.scaffold.cargo_runner import ensure_rust_toolchain
 
     env = ensure_rust_toolchain()
-    if shutil.which("cargo", path=env.get("PATH")) and shutil.which("rustc", path=env.get("PATH")):
-        os.environ.update({k: v for k, v in env.items() if k in ("PATH", "CARGO_HOME", "RUSTUP_HOME") and k not in os.environ})
+    if shutil.which("cargo", path=env.get("PATH")) and shutil.which(
+        "rustc", path=env.get("PATH")
+    ):
+        os.environ.update(
+            {
+                k: v
+                for k, v in env.items()
+                if k in ("PATH", "CARGO_HOME", "RUSTUP_HOME") and k not in os.environ
+            }
+        )
         return
     path_dirs = env.get("PATH", "").split(os.pathsep)
     raise UserError(
@@ -131,6 +139,25 @@ def format_unsupported_error(
 
 class UserError(Exception):
     """A runtime error that should be shown to the user without a traceback."""
+
+
+class BuildStageError(UserError):
+    """Raised when a native compilation or build stage fails with captured logs.
+
+    Carrying the stage name and full logs lets callers route the failure to the
+    deterministic error classifier / healer without being masked by downstream
+    test collection failures.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        stage: str = "",
+        logs: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.stage = stage
+        self.logs = logs
 
 
 class SemanticRegressionError(Exception):

@@ -39,6 +39,7 @@ from aero_forge.blueprint import (
     ManifestEntry,
     write_blueprint,
 )
+from aero_forge.errors import BuildStageError
 from aero_forge.builder import language_router
 from aero_forge.builder.emitters.cpp_emitter import CppEmitter
 from aero_forge.builder.spec import (
@@ -967,7 +968,8 @@ def _generate_native_cpp(
     include_block = ""
     if header_includes:
         include_block = (
-            "\n".join(f'#include "{Path(h).name}"' for h in header_includes) + "\n"
+            "\n".join(f'#include "{Path(h).as_posix()}"' for h in header_includes)
+            + "\n"
         )
 
     if special_contracts:
@@ -1544,6 +1546,11 @@ def _collect_include_dirs(
     if base_dir.is_dir():
         dirs.add(str(base_dir.resolve()))
 
+    # Always include the workspace root so headers emitted at the project root
+    # (e.g. ``cpp_kernel.hpp``) are discoverable by ``#include`` directives
+    # regardless of which subdirectory the C++ source file lives in.
+    dirs.add(str(workspace.resolve()))
+
     for h in header_paths:
         parent = Path(h).parent
         if parent.as_posix() not in (".", ""):
@@ -1811,7 +1818,11 @@ class CppPolyglotMaterializer:
         """Compile the configured C++ sources into a single shared library."""
         compiler = _find_cpp_compiler()
         if compiler is None:
-            raise RuntimeError("No C++ compiler found (g++, clang++, or c++)")
+            raise BuildStageError(
+                "No C++ compiler found (g++, clang++, or c++)",
+                stage="cpp_compile",
+                logs="",
+            )
 
         output_path = config.output_path
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1843,7 +1854,12 @@ class CppPolyglotMaterializer:
         self._log(build_proc.stderr)
 
         if build_proc.returncode != 0:
-            raise RuntimeError(f"C++ shared library build failed: {build_proc.stderr}")
+            full_output = f"{build_proc.stdout}\n{build_proc.stderr}".strip()
+            raise BuildStageError(
+                f"C++ shared library build failed: {build_proc.stderr}",
+                stage="cpp_compile",
+                logs=full_output,
+            )
         _accel_log("success", f"BUILD: dynamic shared object compiled: {output_path}")
 
     def _materialize_explicit_cpp_update(
@@ -2172,7 +2188,7 @@ class CppPolyglotMaterializer:
             _generate_native_cpp(
                 pkg_name,
                 contracts,
-                header_includes=[Path(h).name for h in build_config.header_paths],
+                header_includes=build_config.header_paths,
             ),
             encoding="utf-8",
         )
@@ -2225,7 +2241,13 @@ class CppPolyglotMaterializer:
         # Manifest integrity: ensure every declared entry exists, including
         # any extra files requested by the module_graph/manifest (e.g. CMakeLists.txt).
         self._write_missing_manifest_entries(
-            blueprint, pkg_name, pkg_module, pkg_rel, contracts, function_names
+            blueprint,
+            pkg_name,
+            pkg_module,
+            pkg_rel,
+            contracts,
+            function_names,
+            build_config.header_paths,
         )
 
         manifest: List[ManifestEntry] = [
@@ -2293,6 +2315,7 @@ class CppPolyglotMaterializer:
         pkg_rel: Path,
         contracts: List[ContractEntry],
         function_names: List[str],
+        header_paths: List[str],
     ) -> None:
         """Materialize any manifest entry that has not already been written."""
         for entry in list(blueprint.manifest):
@@ -2305,7 +2328,9 @@ class CppPolyglotMaterializer:
                 if rel.suffix in (".h", ".hpp"):
                     content = _generate_cpp_header(pkg_name, contracts)
                 elif rel.suffix in (".cpp", ".cc", ".cxx"):
-                    content = _generate_native_cpp(pkg_name, contracts)
+                    content = _generate_native_cpp(
+                        pkg_name, contracts, header_includes=header_paths
+                    )
                 else:
                     content = "// C++ placeholder\n"
             elif entry.lang == "python":

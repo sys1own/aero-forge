@@ -20,9 +20,12 @@ from aero_forge.cache.build_cache import BuildCache
 from aero_forge.config import ConfigOverride
 from aero_forge.context_bundler import ContextBundler
 from aero_forge.error_explainer import explain_error
-from aero_forge.errors import UserError
+from aero_forge.errors import BuildStageError, UserError
 from aero_forge.gpu import compile_gpu_kernel, find_gpu_functions
-from aero_forge.orchestrator.orchestrator import DeterministicVerificationRunner, Orchestrator
+from aero_forge.orchestrator.orchestrator import (
+    DeterministicVerificationRunner,
+    Orchestrator,
+)
 from aero_forge.scaffold.engine import _generate_pyi
 from aero_forge.scaffold.pre_write_validator import (
     ValidationError,
@@ -32,14 +35,19 @@ from aero_forge.translator import TargetMode, python_source_to_uast
 from aero_forge.wasm import build_wasm_module
 
 
-def _function_uast_node(source_text: str, function_name: str) -> Optional[Dict[str, Any]]:
+def _function_uast_node(
+    source_text: str, function_name: str
+) -> Optional[Dict[str, Any]]:
     """Return the UAST node for *function_name* in *source_text* if it lowers."""
     try:
         uast = python_source_to_uast(source_text)
     except Exception:
         return None
     for child in uast.get("children", []):
-        if child.get("type") == "function_declaration" and child.get("name") == function_name:
+        if (
+            child.get("type") == "function_declaration"
+            and child.get("name") == function_name
+        ):
             return child
     return None
 
@@ -117,8 +125,12 @@ class BuildTaskDAG:
             for name in order:
                 results[name] = self._run_task(name)
         else:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                futures = {executor.submit(self._run_task, name): name for name in order}
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=self.max_workers
+            ) as executor:
+                futures = {
+                    executor.submit(self._run_task, name): name for name in order
+                }
                 for future in concurrent.futures.as_completed(futures):
                     name = futures[future]
                     results[name] = future.result()
@@ -268,7 +280,12 @@ class BuildRunner:
             es = blueprint.execution_strategy
             if getattr(es, "engine_backend", None):
                 self.engine_backend = es.engine_backend
-                if es.engine_backend.lower() in ("hin_gpu", "gpu", "hin_cuda", "hin_vulkan"):
+                if es.engine_backend.lower() in (
+                    "hin_gpu",
+                    "gpu",
+                    "hin_cuda",
+                    "hin_vulkan",
+                ):
                     self.gpu = True
                 if es.engine_backend.lower() in ("hin_wasm", "wasm"):
                     self.target = "wasm32-unknown-unknown"
@@ -312,7 +329,9 @@ class BuildRunner:
         # read-only source directories so the original workspace is never mutated.
         if self._is_v3_draft():
             result = self._run_draft_sandbox_build(output_dir)
-            self._maybe_synthesize_blueprint(self._workspace_root(), result.get("success", False))
+            self._maybe_synthesize_blueprint(
+                self._workspace_root(), result.get("success", False)
+            )
             return result
 
         expanded = self._expand_specs()
@@ -360,12 +379,27 @@ class BuildRunner:
             task_outputs = [output_dir / source.name]
             dag.add_task(
                 name=f"compile:{source.name}",
-                func=lambda s=source, sp=specs: self._safe_build_source(output_dir, s, sp),
+                func=lambda s=source, sp=specs: self._safe_build_source(
+                    output_dir, s, sp
+                ),
                 inputs=inputs,
                 outputs=task_outputs,
             )
 
-        dag_results = dag.run()
+        try:
+            dag_results = dag.run()
+        except BuildStageError as exc:
+            logger.error("Build stage %s failed; halting DAG: %s", exc.stage, exc)
+            failed = BuildResult(
+                source=Path(exc.stage) if exc.stage else Path("native_compile"),
+                function_names=[],
+                success=False,
+                logs=exc.logs or str(exc),
+            )
+            summary = self._summarize([failed])
+            self._maybe_synthesize_blueprint(self._workspace_root(), False)
+            return summary
+
         results: List[BuildResult] = list(dag_results.values())
         try:
             validate_build_outputs(output_dir, self.blueprint)
@@ -404,7 +438,9 @@ class BuildRunner:
                 return summary
 
         summary = self._summarize(results)
-        self._maybe_synthesize_blueprint(self._workspace_root(), summary.get("success", False))
+        self._maybe_synthesize_blueprint(
+            self._workspace_root(), summary.get("success", False)
+        )
         return summary
 
     def _is_v3_draft(self) -> bool:
@@ -458,7 +494,9 @@ class BuildRunner:
 
         blueprint_v3 = BlueprintV3.load(blueprint_path)
         if blueprint_v3.metadata.status.value != "draft":
-            raise UserError(f"Expected draft blueprint, got status={blueprint_v3.metadata.status}")
+            raise UserError(
+                f"Expected draft blueprint, got status={blueprint_v3.metadata.status}"
+            )
 
         builder = DraftSandboxBuilder(
             blueprint_v3,
@@ -474,9 +512,15 @@ class BuildRunner:
         source: Path,
         specs: List[FunctionSpec],
     ) -> BuildResult:
-        """Wrap ``_build_source`` so one broken source file cannot crash the whole build."""
+        """Wrap ``_build_source`` so one broken source file cannot crash the whole build.
+
+        ``BuildStageError`` is a deliberate stage failure and is re-raised so the
+        DAG can fail-fast instead of letting downstream tests mask the root cause.
+        """
         try:
             return self._build_source(output_dir, source, specs)
+        except BuildStageError:
+            raise
         except Exception as exc:
             logger.error("Unexpected error building %s: %s", source, exc)
             return BuildResult(
@@ -528,7 +572,9 @@ class BuildRunner:
     ) -> BuildResult:
         function_names = [spec.name for spec in specs]
         primary = function_names[0]
-        all_tests = sorted({str(t.resolve()) for spec in specs for t in spec.tests if t.is_file()})
+        all_tests = sorted(
+            {str(t.resolve()) for spec in specs for t in spec.tests if t.is_file()}
+        )
         # Recursively discover additional test files next to the source file and
         # in the project root so nested src/**/tests/ suites are not missed.  Only
         # include tests whose filename is clearly associated with this source to
@@ -552,7 +598,10 @@ class BuildRunner:
                 if any(part in excluded for part in test_path.parts):
                     continue
                 parts = test_path.stem.lower().split("_")
-                if source_stem not in parts and source_stem not in test_path.name.lower():
+                if (
+                    source_stem not in parts
+                    and source_stem not in test_path.name.lower()
+                ):
                     continue
                 all_tests.append(str(test_path.resolve()))
         all_tests = sorted({str(Path(t).resolve()) for t in all_tests})
@@ -613,7 +662,11 @@ class BuildRunner:
 
         cache_key_name = f"{source.stem}_{'_'.join(function_names)}"
         cached = self.cache.get(
-            source_text, flags, cache_key_name, target=self.target, target_mode=self.target_mode
+            source_text,
+            flags,
+            cache_key_name,
+            target=self.target,
+            target_mode=self.target_mode,
         )
 
         if cached is not None:
@@ -624,7 +677,9 @@ class BuildRunner:
                 self._write_loader(
                     source_output, cached.name, function_names, source.name, module_name
                 )
-                _generate_pyi(source_text, function_names, source_output / f"{source.name}i")
+                _generate_pyi(
+                    source_text, function_names, source_output / f"{source.name}i"
+                )
                 return BuildResult(
                     source=source,
                     function_names=function_names,
@@ -641,7 +696,11 @@ class BuildRunner:
         uast_node = _function_uast_node(source_text, primary)
         if uast_node is not None:
             node_cached = self.cache.get_node(
-                uast_node, primary, flags, target=self.target, target_mode=self.target_mode
+                uast_node,
+                primary,
+                flags,
+                target=self.target,
+                target_mode=self.target_mode,
             )
             if node_cached is not None and node_cached.is_file():
                 try:
@@ -649,9 +708,15 @@ class BuildRunner:
                     shutil.copy(node_cached, so_dest)
                     module_name = f"aero_forge_{source.stem}"
                     self._write_loader(
-                        source_output, node_cached.name, function_names, source.name, module_name
+                        source_output,
+                        node_cached.name,
+                        function_names,
+                        source.name,
+                        module_name,
                     )
-                    _generate_pyi(source_text, function_names, source_output / f"{source.name}i")
+                    _generate_pyi(
+                        source_text, function_names, source_output / f"{source.name}i"
+                    )
                     return BuildResult(
                         source=source,
                         function_names=function_names,
@@ -775,7 +840,9 @@ class BuildRunner:
         )
         return loader
 
-    def _summarize(self, results: List[BuildResult], dry_run: bool = False) -> Dict[str, Any]:
+    def _summarize(
+        self, results: List[BuildResult], dry_run: bool = False
+    ) -> Dict[str, Any]:
         total_functions = sum(len(r.function_names) for r in results)
         passed_functions = sum(len(r.function_names) for r in results if r.success)
         failed_functions = total_functions - passed_functions

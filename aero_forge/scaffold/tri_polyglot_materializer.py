@@ -21,6 +21,7 @@ from aero_forge.blueprint import (
     ManifestEntry,
     write_blueprint,
 )
+from aero_forge.errors import BuildStageError
 from aero_forge.builder import language_router
 from aero_forge.native_bridge import _ctypes_loader_source
 from aero_forge.scaffold.cargo_runner import cargo_build
@@ -1055,7 +1056,7 @@ class TriPolyglotMaterializer:
             _generate_native_cpp(
                 cpp_pkg_name,
                 cpp_contracts,
-                header_includes=[Path(h).name for h in header_paths],
+                header_includes=header_paths,
             ),
             encoding="utf-8",
         )
@@ -1158,6 +1159,7 @@ class TriPolyglotMaterializer:
             all_names,
             rust_crate_name,
             native_bridge_module,
+            header_paths,
         )
 
         # Standard tri-polyglot manifest entries.
@@ -1263,6 +1265,7 @@ class TriPolyglotMaterializer:
         function_names: List[str],
         rust_crate_name: str,
         native_bridge_module: Optional[str],
+        header_paths: List[str],
     ) -> None:
         """Write any manifest entry that has not already been materialized."""
         pkg_dir = self._resolve_pkg_dir(blueprint, pkg_name)
@@ -1335,7 +1338,11 @@ class TriPolyglotMaterializer:
                 if path.suffix in (".h", ".hpp"):
                     content = _generate_cpp_header(pkg_name, cpp_contracts)
                 elif path.suffix in (".cpp", ".cc", ".cxx"):
-                    content = _generate_native_cpp(f"{pkg_name}_cpp", cpp_contracts)
+                    content = _generate_native_cpp(
+                        f"{pkg_name}_cpp",
+                        cpp_contracts,
+                        header_includes=header_paths,
+                    )
                 else:
                     content = "// C++ placeholder\n"
             elif entry.lang == "rust":
@@ -1350,10 +1357,14 @@ class TriPolyglotMaterializer:
 
     def _build_cpp(
         self, cpp_pkg_name: str, cpp_source: Path, header_paths: List[str]
-    ) -> bool:
+    ) -> None:
         compiler = _find_cpp_compiler()
         if compiler is None:
-            raise RuntimeError("No C++ compiler found (g++, clang++, or c++)")
+            raise BuildStageError(
+                "No C++ compiler found (g++, clang++, or c++)",
+                stage="cpp_compile",
+                logs="",
+            )
 
         so_name = _so_name(cpp_pkg_name)
         cpp_dir = cpp_source.parent
@@ -1392,18 +1403,25 @@ class TriPolyglotMaterializer:
         self._log(build_proc.stderr)
 
         if build_proc.returncode != 0:
-            logger.error("C++ shared library build failed:\n%s", build_proc.stderr)
-            _accel_log("error", f"C++ shared library build failed: {build_proc.stderr}")
-            return False
+            full_output = f"{build_proc.stdout}\n{build_proc.stderr}".strip()
+            logger.error("C++ shared library build failed:\n%s", full_output)
+            _accel_log("error", f"C++ shared library build failed: {full_output}")
+            raise BuildStageError(
+                f"C++ shared library build failed for {cpp_pkg_name}",
+                stage="cpp_compile",
+                logs=full_output,
+            )
 
         _accel_log("success", f"BUILD: dynamic shared library compiled: {so_path}")
-        return True
 
-    def _build_rust(self, rust_dir: Path) -> bool:
+    def _build_rust(self, rust_dir: Path) -> None:
         cargo_toml = rust_dir / "Cargo.toml"
         if not cargo_toml.is_file():
-            logger.error("Rust crate manifest not found: %s", cargo_toml)
-            return False
+            raise BuildStageError(
+                f"Rust crate manifest not found: {cargo_toml}",
+                stage="rust_compile",
+                logs="",
+            )
 
         self._log(f"Building Rust PyO3 crate in {rust_dir}")
         _accel_log("info", "BUILD: building Rust PyO3 extension with cargo")
@@ -1415,7 +1433,10 @@ class TriPolyglotMaterializer:
         if result.returncode != 0:
             logger.error("Rust PyO3 build failed:\n%s", output)
             _accel_log("error", f"Rust PyO3 build failed: {output}")
-            return False
+            raise BuildStageError(
+                f"Rust PyO3 build failed in {rust_dir}",
+                stage="rust_compile",
+                logs=output,
+            )
 
         _accel_log("success", "BUILD: Rust PyO3 extension compiled successfully")
-        return True
