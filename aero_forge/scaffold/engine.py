@@ -121,6 +121,7 @@ class Engine:
         function_blocks: List[str] = []
         module_init_lines: List[str] = []
         all_traits: Set[str] = set()
+        emitted_classes: Set[str] = set()
 
         for name in sorted(expanded_names):
             node, is_class = _find_top_level(tree, name)
@@ -134,6 +135,10 @@ class Engine:
                     raise UnsupportedError(
                         "C-ABI target does not support Python classes", node=node
                     )
+                class_name = node.name
+                if class_name in emitted_classes:
+                    continue
+                emitted_classes.add(class_name)
                 generator = ClassGenerator(
                     node,
                     module_name,
@@ -363,6 +368,10 @@ class RustGenerator:
             arg_types = traits.get("arg_types") or [self.function_type] * len(arg_names)
         if len(arg_types) != len(arg_names):
             arg_types = [self.function_type] * len(arg_names)
+        # ``self``/``cls`` are valid in Python methods, but a free Rust function
+        # cannot declare a ``self`` receiver. Strip them before lowering; methods
+        # are routed to ``ClassGenerator`` via ``_find_top_level``.
+        arg_names, arg_types = self._strip_self_params(arg_names, arg_types)
         self.arg_names = arg_names
         self.arg_types = arg_types
 
@@ -1189,6 +1198,18 @@ class RustGenerator:
     # ------------------------------------------------------------------
     # Collection helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _strip_self_params(
+        arg_names: List[str], arg_types: List[str]
+    ) -> Tuple[List[str], List[str]]:
+        """Remove ``self``/``cls`` receivers from free-function signatures."""
+        filtered = [
+            (name, typ)
+            for name, typ in zip(arg_names, arg_types)
+            if name not in ("self", "cls")
+        ]
+        return [n for n, _ in filtered], [t for _, t in filtered]
+
     def _collect_assigned(self) -> set[str]:
         names: set[str] = set()
         for node in ast.walk(self.func):
@@ -1199,6 +1220,9 @@ class RustGenerator:
                 names.update(_names_in_target(node.target))
             elif isinstance(node, ast.AugAssign):
                 names.update(_names_in_target(node.target))
+        # ``self``/``cls`` are receivers, not local variables.
+        names.discard("self")
+        names.discard("cls")
         return names
 
     def _collect_loop_vars(self) -> set[str]:
@@ -1608,6 +1632,13 @@ class RustGenerator:
         return f"_accel_tmp{self._tmp_counter}"
 
     @staticmethod
+    def _for_target(names: List[str]) -> str:
+        """Format a ``for`` loop binding target without unnecessary parentheses."""
+        if len(names) == 1:
+            return names[0]
+        return f"({', '.join(names)})"
+
+    @staticmethod
     def _strip_outer_parens(expr: str) -> str:
         while len(expr) >= 2 and expr[0] == "(" and expr[-1] == ")":
             depth = 0
@@ -1630,11 +1661,11 @@ class RustGenerator:
     # Statement emission
     # ------------------------------------------------------------------
     def _emit_function(self) -> str:
-        def _needs_mut_binding(typ: str) -> bool:
-            return typ.startswith("Vec<") or typ.startswith("BTreeMap<")
-
+        # Only mark a parameter ``mut`` when the function body actually assigns
+        # to it or mutates it via ``append``/``extend``/``sort``/``reverse``.
+        # This prevents ``unused_mut`` warnings for generated stubs.
         args = ", ".join(
-            f"mut {name}: {typ}" if _needs_mut_binding(typ) else f"{name}: {typ}"
+            f"mut {name}: {typ}" if self._is_mutable(name) else f"{name}: {typ}"
             for name, typ in zip(self.arg_names, self.arg_types)
         )
         return_type = self._return_type()
@@ -2169,7 +2200,7 @@ class RustGenerator:
         body = self._emit_body(stmt.body)
         self._restore_type(val_name, old)
         return (
-            f"for ({idx_name}, {val_name}) in {iterator} {{\n"
+            f"for {self._for_target([idx_name, val_name])} in {iterator} {{\n"
             f"    let {idx_name} = ({idx_name} as i64) + ({start});\n"
             f"{body}\n"
             f"}}"
@@ -2211,7 +2242,7 @@ class RustGenerator:
         body = self._emit_body(stmt.body)
         for name, old in old_types.items():
             self._restore_type(name, old)
-        return f"for ({', '.join(names)}) in {zip_expr} {{\n{body}\n}}"
+        return f"for {self._for_target(names)} in {zip_expr} {{\n{body}\n}}"
 
     def _emit_for_list_variable(
         self, target: ast.AST, iter_expr: ast.Name, stmt: ast.For
@@ -2357,7 +2388,7 @@ class RustGenerator:
         self._restore_type(k_name, old_k)
         self._restore_type(v_name, old_v)
         return (
-            f"for ({k_ref}, {v_ref}) in {dict_expr}.iter() {{\n"
+            f"for {self._for_target([k_ref, v_ref])} in {dict_expr}.iter() {{\n"
             f"    let {k_name} = {k_ref}.clone();\n"
             f"    let {v_name} = {v_ref}.clone();\n"
             f"{body}\n"
@@ -2609,7 +2640,7 @@ class RustGenerator:
                 self.type_env.pop(name, None)
         return (
             f"{{ let mut {tmp} = Vec::<{element_type}>::new(); "
-            f"for ({', '.join(loop_vars)}) in {iterator} {{\n{body}\n}} "
+            f"for {self._for_target(loop_vars)} in {iterator} {{\n{body}\n}} "
             f"{tmp} }}"
         )
 
@@ -3830,11 +3861,11 @@ class ClassMethodGenerator(RustGenerator):
         return super()._return_type()
 
     def _emit_function(self) -> str:
-        def _needs_mut_binding(typ: str) -> bool:
-            return typ.startswith("Vec<") or typ.startswith("BTreeMap<")
-
+        # Only mark a parameter ``mut`` when the function body actually assigns
+        # to it or mutates it via ``append``/``extend``/``sort``/``reverse``.
+        # This prevents ``unused_mut`` warnings for generated stubs.
         args = ", ".join(
-            f"mut {name}: {typ}" if _needs_mut_binding(typ) else f"{name}: {typ}"
+            f"mut {name}: {typ}" if self._is_mutable(name) else f"{name}: {typ}"
             for name, typ in zip(self.arg_names, self.arg_types)
         )
         return_type = self._return_type()
@@ -3952,6 +3983,10 @@ def _find_top_level(tree: ast.AST, name: str) -> Tuple[Optional[ast.AST], bool]:
     When multiple top-level definitions share the same name, the last one is
     returned so it matches Python's runtime semantics and the final variant
     produced by multi-attempt LLM outputs.
+
+    If *name* refers to a method nested inside a class, the enclosing class is
+    returned so it can be emitted as a PyO3 ``#[pyclass]``/``#[pymethods]`` impl
+    instead of an invalid free function with a ``self`` receiver.
     """
     found: Optional[Tuple[ast.AST, bool]] = None
     for node in getattr(tree, "body", []):
@@ -3970,8 +4005,19 @@ def _find_top_level(tree: ast.AST, name: str) -> Tuple[Optional[ast.AST], bool]:
     for node in ast.walk(tree):
         if isinstance(node, ast.ClassDef) and node.name == name:
             return node, True
+
+    parent_map: Dict[ast.AST, Optional[ast.AST]] = {tree: None}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parent_map[child] = parent
+
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef) and node.name == name:
+            parent = parent_map.get(node)
+            while parent is not None:
+                if isinstance(parent, ast.ClassDef):
+                    return parent, True
+                parent = parent_map.get(parent)
             return node, False
     return None, False
 

@@ -104,10 +104,12 @@
     .sidebar-header {
       height: 34px; padding: 0 0.5rem; border-bottom: 1px solid var(--border);
       display: flex; align-items: center; justify-content: space-between; background: var(--panel); gap: 0.3rem;
+      overflow: hidden; box-sizing: border-box;
     }
+    .sidebar-header .sidebar-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
     .sidebar-title { font-size: 0.7rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
-    .tree-actions { display: flex; align-items: center; gap: 0.15rem; }
-    .tree-actions .icon-btn { width: 24px; height: 24px; color: var(--muted); }
+    .tree-actions { display: flex; align-items: center; gap: 0.15rem; flex-shrink: 0; }
+    .tree-actions .icon-btn { width: 24px; height: 24px; color: var(--muted); flex-shrink: 0; }
     .tree-actions .icon-btn:hover { color: var(--accent); background: var(--panel-2); }
     .file-tree { flex: 1; overflow-y: auto; min-height: 0; padding: 0.35rem 0; font-size: 0.82rem; }
     .tree ul { list-style: none; padding-left: 1.1rem; margin: 0; }
@@ -385,9 +387,9 @@
     .advanced-engine-details summary::before { content: '▸'; margin-right: 0.4rem; color: var(--accent); transition: transform 0.15s; }
     .advanced-engine-details[open] summary::before { content: '▾'; }
     .advanced-engine-details .deck-control-group { margin-top: 0.5rem; }
-    .template-bar { padding: 0.5rem; border-bottom: 1px solid var(--border); display: flex; gap: 0.4rem; align-items: center; background: var(--panel); }
-    .template-bar select { flex: 1; background: var(--editor); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 0.35rem 0.4rem; font-size: 0.75rem; }
-    .template-bar button { font-size: 0.75rem; padding: 0.35rem 0.6rem; }
+    .template-bar { padding: 0.5rem; border-bottom: 1px solid var(--border); display: flex; gap: 0.4rem; align-items: center; background: var(--panel); overflow: hidden; box-sizing: border-box; }
+    .template-bar select { flex: 1; min-width: 0; background: var(--editor); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 0.35rem 0.4rem; font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .template-bar button { flex-shrink: 0; font-size: 0.75rem; padding: 0.35rem 0.6rem; }
     #accelerator-log { flex: 1; overflow: auto; padding: 0.5rem 0.75rem; font-size: 0.8rem; color: var(--terminal-text); height: 100%; }
     .accel-line { border-bottom: 1px solid rgba(255,255,255,0.03); padding: 0.15rem 0; }
     .accel-line.info { color: var(--terminal-info); }
@@ -2535,7 +2537,9 @@
         state.activeTab = null;
         renderTabs();
         hideHealBanner();
-        if (ui.actionButtons) ui.actionButtons.innerHTML = '';
+        state.commands = [];
+        state.commandFilter = 'all';
+        renderCommandBar([]);
         ui.runOutput.innerHTML = '<div class="placeholder" style="color:var(--muted);padding:0.5rem 0">Click Run or press Ctrl+Enter to execute the active file.</div>';
         ui.acceleratorLog.innerHTML = '<div class="placeholder" style="color:var(--muted);padding:0.5rem 0">Accelerator events appear here when native code is executed.</div>';
         ui.logLines.innerHTML = '';

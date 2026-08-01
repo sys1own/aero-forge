@@ -43,13 +43,13 @@ class RustEmitter(BaseEmitter):
         self.uses_rayon = self._uses_rayon(spec)
 
         module_files = spec.metadata.get("module_files") or []
-        root_functions = [
-            c for c in spec.root.children if c.kind == "function"
-        ]
+        root_functions = [c for c in spec.root.children if c.kind == "function"]
         module_registrations: List[Tuple[str, str]] = []
 
         for mf in module_files:
-            mod_root = mf.get("root") or ASTNode(kind="module", name="module", children=[])
+            mod_root = mf.get("root") or ASTNode(
+                kind="module", name="module", children=[]
+            )
             mod_path = str(mf.get("path", "src/mod.rs"))
             mod_name = self._module_name_from_path(mod_path)
             mod_source = self._emit_module_file(mod_root, mod_name)
@@ -109,9 +109,10 @@ class RustEmitter(BaseEmitter):
         params = node.params
         param_strs: List[str] = []
         for p in params:
-            if p.name == "self":
-                param_strs.append("&self")
-            elif p.type_hint:
+            if p.name in ("self", "cls"):
+                # Free Rust functions cannot declare ``self`` receivers; skip them.
+                continue
+            if p.type_hint:
                 param_strs.append(f"{p.name}: {self._map_type(p.type_hint)}")
             else:
                 param_strs.append(f"{p.name}: ()")
@@ -154,7 +155,9 @@ class RustEmitter(BaseEmitter):
         self._write("}", indent_level)
 
     def _emit_binding(self, node: ASTNode, indent_level: int) -> None:
-        value_str = self._expr(node.children[0]) if node.children else self._literal(node.value)
+        value_str = (
+            self._expr(node.children[0]) if node.children else self._literal(node.value)
+        )
         if node.type_hint:
             self._write(
                 f"let {node.name}: {self._map_type(node.type_hint)} = {value_str};",
@@ -164,7 +167,9 @@ class RustEmitter(BaseEmitter):
             self._write(f"let {node.name} = {value_str};", indent_level)
 
     def _emit_return(self, node: ASTNode, indent_level: int) -> None:
-        value_str = self._expr(node.children[0]) if node.children else self._literal(node.value)
+        value_str = (
+            self._expr(node.children[0]) if node.children else self._literal(node.value)
+        )
         self._write(f"return {value_str};", indent_level)
 
     def _emit_import(self, node: ASTNode, indent_level: int) -> None:
@@ -186,6 +191,34 @@ class RustEmitter(BaseEmitter):
             self._write("else {", indent_level)
             self._emit_children(node.children[2].children, indent_level + 1)
             self._write("}", indent_level)
+
+    def _emit_for(self, node: ASTNode, indent_level: int) -> None:
+        """Emit a ``for`` loop without unnecessary parentheses around the target."""
+        if len(node.children) < 2:
+            return
+        iter_node = node.children[0]
+        body = node.children[1]
+        var = node.name or "i"
+
+        if iter_node.kind == "call" and iter_node.name == "range":
+            args = iter_node.children
+            if len(args) == 1:
+                start = "0"
+                stop = self._expr(args[0])
+            elif len(args) >= 2:
+                start = self._expr(args[0])
+                stop = self._expr(args[1])
+            else:
+                start = "0"
+                stop = "0"
+            iter_expr = f"{start}..{stop}"
+        else:
+            iter_expr = self._expr(iter_node)
+
+        target = var
+        self._write(f"for {target} in {iter_expr} {{", indent_level)
+        self._emit_children(body.children, indent_level + 1)
+        self._write("}", indent_level)
 
     def _emit_gil_release(self, node: ASTNode, indent_level: int) -> None:
         """Emit ``py.allow_threads(|| { ... })`` around a block of statements."""
@@ -361,9 +394,11 @@ class RustEmitter(BaseEmitter):
         self._write(f"fn {module_name}(_py: Python, m: &PyModule) -> PyResult<()> {{")
         for func in root_functions:
             if func.name:
-                self._write(f'    m.add_wrapped(wrap_pyfunction!({func.name}))?;')
+                self._write(f"    m.add_wrapped(wrap_pyfunction!({func.name}))?;")
         for mod_name, func_name in module_registrations:
-            self._write(f'    m.add_wrapped(wrap_pyfunction!({mod_name}::{func_name}))?;')
+            self._write(
+                f"    m.add_wrapped(wrap_pyfunction!({mod_name}::{func_name}))?;"
+            )
         self._write("    Ok(())")
         self._write("}")
 
