@@ -256,19 +256,22 @@ def _ctypes_loader_source(
 
         ret_ann = _py_ann(func.returns)
         ret_array = ret_ann.startswith(("list[", "List["))
-        ret_tuple = False
+        ret_size_array = False
+        ret_scalar_tuple: Optional[List[str]] = None
         ret_elem = ""
         if ret_ann.startswith(("tuple[", "Tuple[")) and ret_ann.endswith("]"):
             inner = ret_ann[6:-1] if ret_ann.startswith("tuple[") else ret_ann[6:-1]
-            parts = [p.strip() for p in inner.split(",")]
+            parts = [p.strip() for p in inner.split(",") if p.strip()]
             if len(parts) == 2 and (parts[1].startswith(("list[", "List[")) or parts[1] in ("list", "List")):
-                ret_tuple = True
+                ret_size_array = True
                 ret_array = True
                 ret_elem = (
                     parts[1][5:-1].strip()
                     if parts[1].startswith(("list[", "List["))
                     else "float"
                 )
+            elif all(p in type_map for p in parts):
+                ret_scalar_tuple = parts
         if not ret_elem:
             ret_elem = ret_ann.split("[", 1)[1].split("]", 1)[0] if ret_array else ret_ann
         ret_ctype = type_map.get(ret_elem, "ctypes.c_void_p")
@@ -282,10 +285,15 @@ def _ctypes_loader_source(
                 c_args.append("ctypes.c_size_t")
         if ret_array:
             c_args.append("ctypes.POINTER(ctypes.c_size_t)")
+        if ret_scalar_tuple:
+            for t in ret_scalar_tuple:
+                c_args.append(f"ctypes.POINTER({type_map[t]})")
 
         lines.append(f"_LIB.{func.name}.argtypes = [{', '.join(c_args)}]")
         if ret_array:
             lines.append(f"_LIB.{func.name}.restype = ctypes.POINTER({ret_ctype})")
+        elif ret_scalar_tuple:
+            lines.append(f"_LIB.{func.name}.restype = ctypes.c_int")
         else:
             lines.append(f"_LIB.{func.name}.restype = {ret_ctype}")
         lines.append("")
@@ -314,10 +322,19 @@ def _ctypes_loader_source(
             body_lines.append(f"    _result = [_ptr[i] for i in range(_out_len.value)]")
             free_name = free_map.get(ret_elem, "free_buffer_i64")
             body_lines.append(f"    _LIB.{free_name}(_ptr, _out_len.value)")
-            if ret_tuple:
+            if ret_size_array:
                 body_lines.append("    return (_out_len.value, _result)")
             else:
                 body_lines.append("    return _result")
+        elif ret_scalar_tuple:
+            for i, t in enumerate(ret_scalar_tuple):
+                body_lines.append(f"    _out_{i} = {type_map[t]}()")
+                call_args.append(f"ctypes.byref(_out_{i})")
+            body_lines.append(f"    _status = _LIB.{func.name}({', '.join(call_args)})")
+            body_lines.append("    if _status != 0:")
+            body_lines.append(f"        raise RuntimeError(f\"{func.name} failed with status {{_status}}\")")
+            values = ", ".join(f"_out_{i}.value" for i in range(len(ret_scalar_tuple)))
+            body_lines.append(f"    return ({values},)")
         else:
             body_lines.append(
                 f"    _result = _LIB.{func.name}({', '.join(call_args)})"
