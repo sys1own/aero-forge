@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import ast
+
 from aero_forge.scaffold.syntax_guard import (
+    ClassInitNormalizer,
     ensure_typing_imports,
+    normalize_python_module,
     repair_file,
     repair_source,
     repair_workspace,
@@ -85,3 +89,37 @@ def test_ensure_typing_imports_does_not_add_unused_names() -> None:
     source = "x = 1\n"
     result = ensure_typing_imports(source)
     assert "from typing import" not in result
+
+
+def test_class_init_normalizer_injects_default_init() -> None:
+    source = "class Foo:\n    x: int = 1\n"
+    tree = ast.parse(source)
+    normalized = ClassInitNormalizer().visit(tree)
+    ast.fix_missing_locations(normalized)
+    assert "def __init__" in ast.unparse(normalized)
+
+
+def test_class_init_normalizer_preserves_existing_init() -> None:
+    source = "class Foo:\n    def __init__(self, a: int):\n        self.a = a\n"
+    tree = ast.parse(source)
+    normalized = ClassInitNormalizer().visit(tree)
+    assert ast.dump(normalized) == ast.dump(ast.parse(source))
+
+
+def test_normalize_python_module_generates_init_from_fields() -> None:
+    source = "class Counter:\n    value: int\n"
+    result = normalize_python_module(source)
+    assert "def __init__(self, value: int):" in result
+    assert "self.value = value" in result
+
+
+def test_normalize_python_module_generates_permissive_init_for_empty_class() -> None:
+    source = "class Empty:\n    pass\n"
+    result = normalize_python_module(source)
+    assert "def __init__(self, *args, **kwargs):" in result
+
+
+def test_normalize_python_module_preserves_source_when_no_changes() -> None:
+    source = "class Foo:\n    def __init__(self):\n        pass\n"
+    result = normalize_python_module(source)
+    assert result == source

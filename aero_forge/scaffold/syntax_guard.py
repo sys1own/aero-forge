@@ -9,6 +9,7 @@ Repairs common LLM truncation failures:
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 from typing import List, Tuple
@@ -316,3 +317,165 @@ def ensure_typing_imports(source: str) -> str:
     from aero_forge.scaffold.import_pruner import ensure_typing_imports as _ensure
 
     return _ensure(source)
+
+
+def _is_auto_initialized_class(node: ast.ClassDef) -> bool:
+    """Classes decorated with ``@dataclass`` or inheriting ``Enum`` already get init."""
+    for decorator in node.decorator_list:
+        name = ""
+        if isinstance(decorator, ast.Name):
+            name = decorator.id
+        elif isinstance(decorator, ast.Attribute):
+            name = decorator.attr
+        elif isinstance(decorator, ast.Call):
+            func = decorator.func
+            if isinstance(func, ast.Name):
+                name = func.id
+            elif isinstance(func, ast.Attribute):
+                name = func.attr
+        if name == "dataclass":
+            return True
+
+    enum_bases = {"Enum", "IntEnum", "Flag", "IntFlag"}
+    for base in node.bases:
+        if isinstance(base, ast.Name) and base.id in enum_bases:
+            return True
+        if (
+            isinstance(base, ast.Attribute)
+            and isinstance(base.value, ast.Name)
+            and base.value.id == "enum"
+            and base.attr in enum_bases
+        ):
+            return True
+    return False
+
+
+class ClassInitNormalizer(ast.NodeTransformer):
+    """Guarantee every class has an explicit ``__init__`` method.
+
+    Classes that already define ``__init__`` are left unchanged.  For classes
+    without one, a default ``__init__`` is synthesized from class-level attribute
+    assignments/annotations when possible, otherwise a permissive
+    ``__init__(self, *args, **kwargs)`` stub is injected.
+
+    ``@dataclass`` and ``Enum``/``IntEnum`` classes are skipped because those
+    mechanisms already provide an appropriate constructor.
+    """
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> ast.ClassDef:  # noqa: N802
+        has_init = any(
+            isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and stmt.name == "__init__"
+            for stmt in node.body
+        )
+        if has_init or _is_auto_initialized_class(node):
+            return self.generic_visit(node)
+
+        fields: List[Tuple[str, ast.expr | None, ast.expr | None]] = []
+        body: List[ast.stmt] = []
+
+        for stmt in node.body:
+            name: str | None = None
+            annotation: ast.expr | None = None
+            default: ast.expr | None = None
+
+            if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                name = stmt.target.id
+                annotation = stmt.annotation
+                default = stmt.value
+            elif isinstance(stmt, ast.Assign):
+                # Only consider simple single-target assignments to a name.
+                if (
+                    len(stmt.targets) == 1
+                    and isinstance(stmt.targets[0], ast.Name)
+                ):
+                    name = stmt.targets[0].id
+                    default = stmt.value
+
+            if name is None or name.startswith("_"):
+                continue
+
+            fields.append((name, annotation, default))
+            body.append(
+                ast.Assign(
+                    targets=[
+                        ast.Attribute(
+                            value=ast.Name(id="self", ctx=ast.Load()),
+                            attr=name,
+                            ctx=ast.Store(),
+                        )
+                    ],
+                    value=ast.Name(id=name, ctx=ast.Load()),
+                )
+            )
+
+        if not fields:
+            # No meaningful fields discovered: use a permissive stub.
+            args = ast.arguments(
+                posonlyargs=[],
+                args=[ast.arg(arg="self", annotation=None)],
+                kwonlyargs=[],
+                kw_defaults=[],
+                defaults=[],
+                vararg=ast.arg(arg="args", annotation=None),
+                kwarg=ast.arg(arg="kwargs", annotation=None),
+            )
+            init_body: List[ast.stmt] = [ast.Pass()]
+        else:
+            # Build arguments with defaults from annotated/assigned class fields.
+            # All parameters without defaults must precede those with defaults.
+            args_without_default: List[ast.arg] = []
+            args_with_default: List[ast.arg] = []
+            defaults: List[ast.expr] = []
+            for name, annotation, default in fields:
+                arg = ast.arg(arg=name, annotation=annotation)
+                if default is not None:
+                    args_with_default.append(arg)
+                    defaults.append(default)
+                else:
+                    args_without_default.append(arg)
+
+            all_params = [ast.arg(arg="self", annotation=None)] + args_without_default + args_with_default
+            args = ast.arguments(
+                posonlyargs=[],
+                args=all_params,
+                kwonlyargs=[],
+                kw_defaults=[],
+                defaults=defaults,
+                vararg=None,
+                kwarg=None,
+            )
+            init_body = body
+
+        init = ast.FunctionDef(
+            name="__init__",
+            args=args,
+            body=init_body,
+            decorator_list=[],
+            returns=None,
+            type_comment=None,
+        )
+        node.body.insert(0, init)
+        return ast.fix_missing_locations(self.generic_visit(node))
+
+
+def normalize_python_module(source: str) -> str:
+    """Parse *source*, ensure every class has ``__init__``, and re-emit.
+
+    If no transformation is applied, the original *source* text is returned so
+    comments and formatting are preserved whenever possible.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+
+    original_dump = ast.dump(tree)
+    tree = ClassInitNormalizer().visit(tree)
+    ast.fix_missing_locations(tree)
+    if ast.dump(tree) == original_dump:
+        return source
+    try:
+        return ast.unparse(tree)
+    except Exception:  # pragma: no cover
+        return source
