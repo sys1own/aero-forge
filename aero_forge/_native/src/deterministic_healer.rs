@@ -222,3 +222,153 @@ pub fn repair_uast_expression(expr_json: &str) -> PyResult<String> {
     serde_json::to_string(&out)
         .map_err(|e| PyValueError::new_err(format!("output JSON serialization failed: {}", e)))
 }
+
+/// An in-memory AST rewrite patch produced before any source files are written.
+#[derive(Clone, Debug)]
+#[pyclass(name = "ASTRewritePatch")]
+pub struct ASTRewritePatch {
+    pub target_node_id: String,
+    pub replacement_type: String,
+    pub inject_wrapper: bool,
+}
+
+#[pymethods]
+impl ASTRewritePatch {
+    #[new]
+    fn new(target_node_id: String, replacement_type: String, inject_wrapper: bool) -> Self {
+        Self {
+            target_node_id,
+            replacement_type,
+            inject_wrapper,
+        }
+    }
+
+    #[getter]
+    fn target_node_id(&self) -> String {
+        self.target_node_id.clone()
+    }
+
+    #[getter]
+    fn replacement_type(&self) -> String {
+        self.replacement_type.clone()
+    }
+
+    #[getter]
+    fn inject_wrapper(&self) -> bool {
+        self.inject_wrapper
+    }
+}
+
+/// Pre-materialization healer that consumes SMT/GoI failure traces and
+/// produces in-memory AST patches for the HIN graph schema.
+#[derive(Clone, Debug, Default)]
+#[pyclass(name = "PreWriteHealer")]
+pub struct PreWriteHealer {
+    pub pending_patches: Vec<ASTRewritePatch>,
+}
+
+fn extract_target_node_id(trace: &str) -> String {
+    for pattern in &["\"node_id\":\"", "\"id\":\"", "node_id \"", "id \"", "node_id ", "id "] {
+        if let Some(start) = trace.find(pattern) {
+            let after = &trace[start + pattern.len()..];
+            let after = after.trim_start_matches(|c: char| c == '"' || c.is_whitespace());
+            if let Some(end) = after.find(|c: char| c == '"' || c.is_whitespace()) {
+                let candidate = &after[..end];
+                if !candidate.is_empty() {
+                    return candidate.to_string();
+                }
+            }
+        }
+    }
+    "node_err_borrow".to_string()
+}
+
+fn choose_replacement_type(trace: &str) -> String {
+    let lower = trace.to_lowercase();
+    if lower.contains("ownership") || lower.contains("borrow") || lower.contains("linear") {
+        "Arc<Mutex<T>>".to_string()
+    } else if lower.contains("align") || lower.contains("ffi") || lower.contains("layout") {
+        "SerializationBuffer".to_string()
+    } else if lower.contains("nilpot") || lower.contains("deadlock") || lower.contains("goi") {
+        "DeadlockFreeChannel".to_string()
+    } else {
+        "Arc<Mutex<T>>".to_string()
+    }
+}
+
+#[pymethods]
+impl PreWriteHealer {
+    #[new]
+    fn new() -> Self {
+        Self {
+            pending_patches: Vec::new(),
+        }
+    }
+
+    /// Parse an SMT UNSAT core trace or GoI non-nilpotency failure and queue
+    /// a compensating AST rewrite patch.
+    fn analyze_smt_unsat_core(&mut self, unsat_core_trace: &str) {
+        let lower = unsat_core_trace.to_lowercase();
+        if lower.contains("ownership mismatch")
+            || lower.contains("alignment")
+            || lower.contains("ffi layout")
+            || lower.contains("non-nilpotent")
+            || lower.contains("deadlock")
+        {
+            self.pending_patches.push(ASTRewritePatch {
+                target_node_id: extract_target_node_id(unsat_core_trace),
+                replacement_type: choose_replacement_type(unsat_core_trace),
+                inject_wrapper: true,
+            });
+        }
+    }
+
+    /// Return the list of pending patches as plain tuples
+    /// ``(target_node_id, replacement_type, inject_wrapper)``.
+    fn patches(&self) -> Vec<(String, String, bool)> {
+        self.pending_patches
+            .iter()
+            .map(|p| (p.target_node_id.clone(), p.replacement_type.clone(), p.inject_wrapper))
+            .collect()
+    }
+
+    /// Apply pending patches to the in-memory HIN graph JSON and return the
+    /// modified JSON string. No source files are written.
+    fn apply_pre_write_patches(&self, graph_json: &str) -> PyResult<String> {
+        let mut graph: Value = serde_json::from_str(graph_json)
+            .map_err(|e| PyValueError::new_err(format!("invalid graph JSON: {}", e)))?;
+
+        for patch in &self.pending_patches {
+            if patch.inject_wrapper {
+                inject_wrapped_type(&mut graph, &patch.target_node_id, &patch.replacement_type);
+            }
+        }
+
+        serde_json::to_string(&graph)
+            .map_err(|e| PyValueError::new_err(format!("graph serialization failed: {}", e)))
+    }
+}
+
+fn inject_wrapped_type(value: &mut Value, target_id: &str, wrapped_type: &str) {
+    match value {
+        Value::Object(map) => {
+            if let Some(Value::String(id)) = map.get("id") {
+                if id == target_id {
+                    map.insert(
+                        "wrapped_type".to_string(),
+                        Value::String(wrapped_type.to_string()),
+                    );
+                }
+            }
+            for v in map.values_mut() {
+                inject_wrapped_type(v, target_id, wrapped_type);
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr.iter_mut() {
+                inject_wrapped_type(v, target_id, wrapped_type);
+            }
+        }
+        _ => {}
+    }
+}

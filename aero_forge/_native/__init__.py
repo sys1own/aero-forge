@@ -5,10 +5,12 @@ The compiled extension is loaded from ``aero_forge_native``.
 
 try:
     from .aero_forge_native import (  # type: ignore[import-not-found]
+        ASTRewritePatch,
         GoIProofNet,
         GraphEngine,
         Hasher,
         HinEngine,
+        PreWriteHealer,
         compile_aeroc,
         enforce_repair_isolation_py,
         evaluate_hin_energy,
@@ -32,6 +34,8 @@ __all__ = [
     "HinEngine",
     "GoIProofNet",
     "verify_goi_proof_net",
+    "ASTRewritePatch",
+    "PreWriteHealer",
     "compile_aeroc",
     "run_aeroc",
     "unpack_aeroc",
