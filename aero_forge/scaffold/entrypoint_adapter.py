@@ -333,7 +333,7 @@ class EntrypointAdapterEngine:
                     "    return 0",
                 ])
 
-        run_all_calls: List[str] = []
+        run_all_calls: List[List[str]] = []
         for name, args, _ in func_specs:
             arg_names = [a for a, _ in args if a != "self"]
             call_args = ", ".join(
@@ -341,9 +341,15 @@ class EntrypointAdapterEngine:
                 for a, t in args if a != "self"
             )
             if arg_names:
-                run_all_calls.append(f"print('{name}:', funcs['{name}']({call_args}))")
+                call = f"funcs['{name}']({call_args})"
             else:
-                run_all_calls.append(f"print('{name}:', funcs['{name}']())")
+                call = f"funcs['{name}']()"
+            run_all_calls.append([
+                f"try:",
+                f"    print('{name}:', {call})",
+                f"except Exception as _e:",
+                f"    print('{name} failed:', _e)",
+            ])
 
         benchmark_calls: List[List[str]] = []
         for name, args, _ in func_specs:
@@ -416,8 +422,9 @@ class EntrypointAdapterEngine:
             '        print(f"Aero-Forge CLI ready: cmd={cmd} args={args}")',
             "        return 0",
         ])
-        for line in run_all_calls:
-            lines.append("    " + line)
+        for block in run_all_calls:
+            for line in block:
+                lines.append("    " + line)
         if not run_all_calls:
             lines.append('    print("No functions defined")')
         lines.append("    return 0")

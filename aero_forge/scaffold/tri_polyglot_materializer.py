@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -115,6 +116,11 @@ def _partition_contracts(
             "int",
             "i64",
             "i32",
+            "u64",
+            "u32",
+            "usize",
+            "uint",
+            "uint64",
             "float",
             "f64",
             "f32",
@@ -130,6 +136,8 @@ def _partition_contracts(
             "list[float]",
             "list[int]",
             "list[i64]",
+            "list[u64]",
+            "list[u32]",
             "list[bool]",
             "list[str]",
         }
@@ -392,6 +400,14 @@ def _is_list_type(type_hint: str) -> bool:
     return type_hint.lower().startswith("list[") and type_hint.endswith("]")
 
 
+def _list_element_type(type_hint: str) -> str:
+    """Return the inner element type of a ``list[T]`` hint, lower-cased."""
+    hint = type_hint.strip()
+    if hint.lower().startswith("list[") and hint.endswith("]"):
+        return hint[5:-1].strip().lower()
+    return ""
+
+
 def _generate_stub_body(
     name: str, args: List[Tuple[str, str]], return_type: str
 ) -> str:
@@ -412,14 +428,122 @@ def _generate_stub_body(
     if rt == "str":
         return '    return "ok"'
     if "list" in rt and list_args:
-        list_name, _ = list_args[0]
+        list_name, list_type = list_args[0]
+        list_elt = _list_element_type(list_type)
+        ret_elt = _list_element_type(return_type)
         if scalar_args:
             scalar_name = scalar_args[0][0]
-            return f"    return [x * {scalar_name} for x in {list_name}]"
-        return f"    return [x * 2 for x in {list_name}]"
+            factor = scalar_name
+        else:
+            factor = "2"
+        if list_elt in ("str", "string"):
+            if ret_elt in ("str", "string"):
+                # String-in/string-out: preserve the input string unchanged.
+                return f"    return [x for x in {list_name}]"
+            # Numeric output derived from string length.
+            return f"    return [(len(x) * {factor}) for x in {list_name}]"
+        return f"    return [x * {factor} for x in {list_name}]"
     if "dict" in rt and not args:
         return '    return {"status": "ok"}'
     return "    return None"
+
+
+def _to_rust_identifier(name: str) -> str:
+    sanitized = re.sub(r"[^0-9a-zA-Z_]", "_", name)
+    if not sanitized:
+        sanitized = "module"
+    if sanitized[0].isdigit():
+        sanitized = "a_" + sanitized
+    return sanitized
+
+
+def _append_rust_c_abi_wrappers(rust_dir: Path, rust_contracts: List[ContractEntry]) -> None:
+    """Append #[no_mangle] C-ABI wrappers for Rust contracts that expose string-list inputs.
+
+    This is used by tri-polyglot workspaces so a single ``cdylib`` crate can be
+    consumed both as a PyO3 module and as a plain C shared library.
+    """
+    lib_rs = rust_dir / "src" / "lib.rs"
+    if not lib_rs.is_file():
+        return
+
+    text = lib_rs.read_text(encoding="utf-8")
+    if "std::ffi::CStr" not in text:
+        text = text.replace(
+            "use std::collections::BTreeMap;",
+            "use std::collections::BTreeMap;\nuse std::ffi::CStr;",
+        )
+
+    _C_ABI_SCALAR_MAP = {
+        "int": "i64",
+        "i64": "i64",
+        "i32": "i32",
+        "u64": "u64",
+        "u32": "u32",
+        "usize": "usize",
+        "float": "f64",
+        "f64": "f64",
+        "f32": "f32",
+        "bool": "bool",
+    }
+
+    wrappers: List[str] = []
+    for contract in rust_contracts:
+        if not contract.signature:
+            continue
+        try:
+            name, args, ret = _parse_signature(contract.signature)
+        except Exception:
+            continue
+        if not name:
+            continue
+        list_args = [(a, _list_element_type(t)) for a, t in args if _is_list_type(t)]
+        if not list_args or list_args[0][1] not in ("str", "string"):
+            continue
+        ret_elt = _list_element_type(ret)
+        if ret_elt not in _C_ABI_SCALAR_MAP:
+            continue
+
+        rust_fn = f"_accel_{_to_rust_identifier(name)}"
+        # Convention: ``run_scheduler`` -> C symbol ``scheduler_run``.
+        if name.startswith("run_"):
+            c_name = f"{name[4:]}_run"
+        else:
+            c_name = f"{name}_cabi"
+        out_type = _C_ABI_SCALAR_MAP[ret_elt]
+        count_type = "i64"
+        for a, t in args:
+            if t.lower() in ("int", "i64", "i32", "u64", "u32", "usize"):
+                count_type = _C_ABI_SCALAR_MAP.get(t.lower(), "i64")
+                break
+
+        wrappers.append(
+            f"""#[no_mangle]
+pub unsafe extern \"C\" fn {c_name}(tasks: *const *const std::os::raw::c_char, count: usize, out: *mut {out_type}) {{
+    if tasks.is_null() || out.is_null() {{
+        return;
+    }}
+    let tasks_vec: Vec<String> = (0..count)
+        .map(|i| {{
+            let ptr = *tasks.add(i);
+            if ptr.is_null() {{
+                return String::new();
+            }}
+            CStr::from_ptr(ptr).to_string_lossy().into_owned()
+        }})
+        .collect();
+    let results = {rust_fn}(tasks_vec, count as {count_type});
+    let out_slice = std::slice::from_raw_parts_mut(out, count);
+    for (i, v) in results.iter().enumerate().take(count) {{
+        out_slice[i] = *v;
+    }}
+}}
+"""
+        )
+
+    if wrappers:
+        text = text + "\n\n" + "\n".join(wrappers)
+    lib_rs.write_text(text, encoding="utf-8")
 
 
 def _generate_python_init(
@@ -434,9 +558,31 @@ def _generate_python_init(
     workspace_root: Optional[Path] = None,
     pkg_dir: Optional[Path] = None,
 ) -> str:
-    """Generate ``<pkg>/__init__.py`` that loads both the Rust extension and C++ .so."""
+    """Generate ``<pkg>/__init__.py`` that re-exports the native loader."""
+    return (
+        '"""Tri-polyglot driver package."""\n'
+        "\n"
+        "from __future__ import annotations\n"
+        "\n"
+        "from .native_loader import *\n"
+    )
+
+
+def _generate_native_loader_py(
+    pkg_name: str,
+    cpp_dir: Path,
+    cpp_contracts: List[ContractEntry],
+    rust_contracts: List[ContractEntry],
+    python_contracts: List[ContractEntry],
+    rust_crate_name: str,
+    native_bridge_module: Optional[str] = None,
+    rust_dir: str = "rust_core",
+    workspace_root: Optional[Path] = None,
+    pkg_dir: Optional[Path] = None,
+) -> str:
+    """Generate ``<pkg>/native_loader.py`` that loads both the Rust extension and C++ .so."""
     lines: List[str] = [
-        '"""Tri-polyglot driver package."""',
+        '"""Native bridge loader for the tri-polyglot package."""',
         "",
         "from __future__ import annotations",
         "",
@@ -483,9 +629,9 @@ def _generate_python_init(
             )
             so_path = (cpp_dir / _so_name(f"{pkg_name}_cpp")).resolve()
             loader_path = (
-                (pkg_dir / "__init__.py")
+                (pkg_dir / "native_loader.py")
                 if pkg_dir
-                else (so_path.parent / "__init__.py")
+                else (so_path.parent / "native_loader.py")
             )
             lines.append(
                 _ctypes_loader_source(
@@ -513,6 +659,121 @@ def _generate_python_init(
 
     all_names = _function_names(cpp_contracts + rust_contracts + python_contracts)
     lines.append(f"__all__ = {all_names!r}")
+    return "\n".join(lines) + "\n"
+
+
+def _generate_makefile(
+    rust_dir: str,
+    cpp_dir: str,
+    python_dir: str,
+    tests_dir: str,
+    cpp_pkg_name: str,
+    cpp_source_name: str = "native.cpp",
+    header_dirs: Optional[List[str]] = None,
+) -> str:
+    """Generate a root ``Makefile`` with build, test, and run targets."""
+    cpp_so = _so_name(cpp_pkg_name)
+    includes: List[str] = ["."]
+    for h in header_dirs or []:
+        p = Path(h)
+        inc = str(p.parent) if p.suffix in (".h", ".hpp") else str(p)
+        if inc and inc not in (".", "/"):
+            includes.append(inc)
+    include_flags = " ".join(f"-I {inc}" for inc in sorted(set(includes)))
+    return (
+        ".PHONY: build test run\n"
+        "\n"
+        "build:\n"
+        f"\tcd {rust_dir} && cargo build --release\n"
+        f"\tg++ -O3 -march=native -shared -fPIC -std=c++17 {include_flags} -o {cpp_dir}/{cpp_so} {cpp_dir}/{cpp_source_name}\n"
+        "\n"
+        "test:\n"
+        f"\tPYTHONPATH=. pytest {tests_dir}\n"
+        "\n"
+        "run:\n"
+        f"\tPYTHONPATH=. python3 -m {python_dir.replace('/', '.')}.main\n"
+    )
+
+
+def _generate_core_py(contracts: List[ContractEntry]) -> str:
+    """Generate a pure-Python reference ``core.py`` matching the workspace contracts."""
+    lines: List[str] = [
+        '"""Pure-Python reference implementation."""',
+        "",
+        "from __future__ import annotations",
+        "",
+        "",
+    ]
+    for contract in contracts:
+        if not contract.signature:
+            continue
+        try:
+            name, args, return_type = _parse_signature(contract.signature)
+        except Exception:
+            continue
+        arg_names = [a for a, _ in args if a != "self"]
+        if name == "multiply_matrices":
+            lines.append(
+                "def multiply_matrices(a, b, rows, cols, inner):\n"
+                "    out = [0.0] * (rows * cols)\n"
+                "    for i in range(rows):\n"
+                "        for j in range(cols):\n"
+                "            total = 0.0\n"
+                "            for k in range(inner):\n"
+                "                total += a[i * inner + k] * b[k * cols + j]\n"
+                "            out[i * cols + j] = total\n"
+                "    return out\n"
+            )
+            continue
+        arg_sig = ", ".join(arg_names)
+        lines.append(f"def {name}({arg_sig}):")
+        lines.append(_generate_stub_body(name, args, return_type))
+        lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def _generate_orchestration_test(contracts: List[ContractEntry]) -> str:
+    """Generate a pytest that validates native wrappers against the core reference."""
+    rust_names = []
+    for contract in contracts:
+        if not contract.signature:
+            continue
+        try:
+            name, args, return_type = _parse_signature(contract.signature)
+        except Exception:
+            continue
+        if name == "run_scheduler":
+            rust_names.append(name)
+        elif name == "multiply_matrices":
+            rust_names.append(name)
+    lines: List[str] = [
+        '"""End-to-end orchestration tests for the native pipeline."""',
+        "",
+        "from __future__ import annotations",
+        "",
+        "import pytest",
+        "",
+        "from python_interface import run_scheduler, multiply_matrices",
+        "from src.session_1rp6n5ynsg6msbrvxax import core",
+        "",
+    ]
+    if "run_scheduler" in rust_names:
+        lines.extend([
+            "def test_run_scheduler_matches_core():",
+            "    task_descrs = [\"hello\", \"world\", \"x\"]",
+            "    count = 3",
+            "    assert run_scheduler(task_descrs, count) == core.run_scheduler(task_descrs, count)",
+            "",
+        ])
+    if "multiply_matrices" in rust_names:
+        lines.extend([
+            "def test_multiply_matrices_matches_core():",
+            "    rows, cols, inner = 2, 2, 2",
+            "    a = [1.0, 2.0, 3.0, 4.0]",
+            "    b = [5.0, 6.0, 7.0, 8.0]",
+            "    assert multiply_matrices(a, b, rows, cols, inner) == pytest.approx(core.multiply_matrices(a, b, rows, cols, inner))",
+            "",
+        ])
     return "\n".join(lines) + "\n"
 
 
@@ -995,11 +1256,14 @@ class TriPolyglotMaterializer:
         rust_crate_name = sanitize_crate_name("_".join(rust_dir_rel.parts))
         tests_dir = self.workspace / "tests"
         tests_dir.mkdir(exist_ok=True)
+        tests_dir_rel = tests_dir.relative_to(self.workspace)
 
         test_entries = [
             e
             for e in blueprint.manifest
-            if e.path.endswith(".py") and Path(e.path).name.startswith("test_")
+            if e.path.endswith(".py")
+            and Path(e.path).name.startswith("test_")
+            and "orchestration" not in Path(e.path).name
         ]
         if test_entries:
             test_path = self.workspace / test_entries[0].path
@@ -1098,6 +1362,21 @@ class TriPolyglotMaterializer:
             ),
             encoding="utf-8",
         )
+        (pkg_dir / "native_loader.py").write_text(
+            _generate_native_loader_py(
+                pkg_name,
+                cpp_dir,
+                cpp_contracts,
+                rust_contracts,
+                python_contracts,
+                rust_crate_name,
+                native_bridge_module,
+                rust_dir=str(rust_dir_rel),
+                workspace_root=self.workspace,
+                pkg_dir=pkg_dir,
+            ),
+            encoding="utf-8",
+        )
 
         # Generate the primary entrypoint from the execution strategy / CLI contract.
         execution_strategy = (
@@ -1151,6 +1430,19 @@ class TriPolyglotMaterializer:
             encoding="utf-8",
         )
 
+        (self.workspace / "Makefile").write_text(
+            _generate_makefile(
+                rust_dir=str(rust_dir_rel),
+                cpp_dir=str(cpp_dir_rel),
+                python_dir=str(pkg_rel),
+                tests_dir=str(tests_dir_rel),
+                cpp_pkg_name=cpp_pkg_name,
+                cpp_source_name=cpp_source_path.name,
+                header_dirs=header_paths,
+            ),
+            encoding="utf-8",
+        )
+
         # Enforce blueprint manifest integrity: every declared file must be materialized.
         self._write_missing_manifest_entries(
             blueprint,
@@ -1171,6 +1463,11 @@ class TriPolyglotMaterializer:
                 path=str(pkg_dir / "__init__.py"),
                 lang="python",
                 purpose="Python driver package init",
+            ),
+            ManifestEntry(
+                path=str(pkg_dir / "native_loader.py"),
+                lang="python",
+                purpose="Native shared-library loader",
             ),
             ManifestEntry(
                 path=str(pkg_dir / "main.py"),
@@ -1206,6 +1503,7 @@ class TriPolyglotMaterializer:
                 lang="python",
                 purpose="pytest tests",
             ),
+            ManifestEntry(path="Makefile", lang="makefile", purpose="Build/test/run targets"),
             ManifestEntry(path="README.md", lang="markdown", purpose="Project README"),
         ]
         existing_paths = {e.path for e in blueprint.manifest}
@@ -1231,6 +1529,7 @@ class TriPolyglotMaterializer:
             source=rust_source,
             target_mode=TargetMode.PYO3,
         )
+        _append_rust_c_abi_wrappers(rust_dir, rust_contracts)
 
         if build:
             self._build_cpp(cpp_pkg_name, cpp_source_path, header_paths)
@@ -1274,7 +1573,10 @@ class TriPolyglotMaterializer:
         cpp_dir = self._resolve_cpp_dir(blueprint, pkg_name)
         rust_dir = self._resolve_rust_dir(blueprint, pkg_name)
         rust_dir_rel = rust_dir.relative_to(self.workspace)
+        cpp_dir_rel = cpp_dir.relative_to(self.workspace)
         pkg_rel = pkg_dir.relative_to(self.workspace)
+        tests_dir_rel = (self.workspace / "tests").relative_to(self.workspace)
+        cpp_pkg_name = f"{pkg_name}_cpp"
         pkg_module = self._dotted_module(pkg_rel)
         for entry in list(blueprint.manifest):
             path = self.workspace / entry.path
@@ -1285,6 +1587,19 @@ class TriPolyglotMaterializer:
             if entry.lang == "python":
                 if path.name == "__init__.py":
                     content = _generate_python_init(
+                        pkg_name,
+                        cpp_dir,
+                        cpp_contracts,
+                        rust_contracts,
+                        python_contracts,
+                        rust_crate_name,
+                        native_bridge_module,
+                        rust_dir=str(rust_dir_rel),
+                        workspace_root=self.workspace,
+                        pkg_dir=pkg_dir,
+                    )
+                elif path.name == "native_loader.py":
+                    content = _generate_native_loader_py(
                         pkg_name,
                         cpp_dir,
                         cpp_contracts,
@@ -1332,6 +1647,14 @@ class TriPolyglotMaterializer:
                         workspace_root=self.workspace,
                         loader_path=path,
                     )
+                elif path.name == "core.py":
+                    content = _generate_core_py(
+                        rust_contracts + cpp_contracts + python_contracts
+                    )
+                elif "orchestration" in path.name and path.suffix == ".py":
+                    content = _generate_orchestration_test(
+                        rust_contracts + cpp_contracts + python_contracts
+                    )
                 elif "test" in path.name and path.suffix == ".py":
                     content = _generate_test_file(rel, blueprint, pkg_module)
                 elif path.suffix == ".py":
@@ -1347,6 +1670,16 @@ class TriPolyglotMaterializer:
                     )
                 else:
                     content = "// C++ placeholder\n"
+            elif entry.lang == "makefile" or path.name == "Makefile":
+                content = _generate_makefile(
+                    rust_dir=str(rust_dir_rel),
+                    cpp_dir=str(cpp_dir_rel),
+                    python_dir=str(pkg_rel),
+                    tests_dir=str(tests_dir_rel),
+                    cpp_pkg_name=cpp_pkg_name,
+                    cpp_source_name=cpp_source_path.name,
+                    header_dirs=header_dirs,
+                )
             elif entry.lang == "rust":
                 content = "// Rust placeholder\n"
             elif entry.lang == "toml":

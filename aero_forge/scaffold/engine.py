@@ -1194,6 +1194,8 @@ class RustGenerator:
             return f"({expr} as f64)"
         if from_type == "f64" and to_type == "i64":
             return f"({expr} as i64)"
+        if from_type in ("i64", "f64", "u64", "u32", "usize", "i32") and to_type in ("i64", "f64", "u64", "u32", "usize", "i32"):
+            return f"({expr} as {to_type})"
         if from_type == "bool" and to_type in ("i64", "f64"):
             return f"({expr} as {to_type})"
         if from_type == "i64" and to_type == "bool":
@@ -2644,7 +2646,7 @@ class RustGenerator:
             and len(loop_vars) >= 2
         ):
             body_lines.append(f"let {loop_vars[0]} = {loop_vars[0]} as i64;")
-        push = f"{tmp}.push({self._emit_expr(expr.elt, element_type)});"
+        push = f"{tmp}.push({self._strip_outer_parens(self._emit_expr(expr.elt, element_type))});"
         for cond in reversed(gen.ifs):
             cond_code = self._strip_outer_parens(self._emit_expr(cond, "bool"))
             push = f"if {cond_code} {{ {push} }}"
@@ -3315,7 +3317,7 @@ class RustGenerator:
             if isinstance(arg_node, ast.Subscript):
                 container_type = self._type_of(arg_node.value)
             arg_str = self._emit_expr(arg_node, container_type)
-            return self._coerce(f"(({arg_str}).len() as i64)", "i64", ctx)
+            return self._coerce(f"({arg_str}.len() as i64)", "i64", ctx)
 
         if base is None and name == "isinstance":
             if len(expr.args) != 2:
@@ -4296,6 +4298,14 @@ _SCALAR_TYPE_MAP = {
     "bool": "bool",
     "str": "String",
     "None": "()",
+    "i64": "i64",
+    "i32": "i32",
+    "u64": "u64",
+    "u32": "u32",
+    "usize": "usize",
+    "uint": "u64",
+    "uint64": "u64",
+    "uint32": "u32",
 }
 
 
