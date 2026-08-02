@@ -350,10 +350,14 @@ class TestProactivePolyglotBuilder:
         assert not (Path(payload["workspace"]) / "src").exists()
 
     def test_proactive_builder_blocks_on_goi_failure(self, tmp_path: Path) -> None:
-        """A non-nilpotent GoI payload must not write files to disk."""
+        """A non-nilpotent GoI payload with a 3-cycle cannot be auto-remediated."""
         from aero_forge.builder.builder import ProactivePolyglotBuilder
 
         payload = self._payload(tmp_path, goi_bad=True)
+        # A 3-cycle is not covered by the 2-cycle/single-edge fallback heuristic.
+        payload["goi_dim"] = 3
+        payload["goi_m"] = [0, 1, 0, 0, 0, 1, 1, 0, 0]
+        payload["goi_sigma"] = [1, 0, 0, 0, 1, 0, 0, 0, 1]
         builder = ProactivePolyglotBuilder()
         result = builder.build_blueprint_proactive(payload)
         assert result is False

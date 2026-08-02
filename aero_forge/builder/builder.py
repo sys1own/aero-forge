@@ -80,11 +80,13 @@ class ProactivePolyglotBuilder:
     """Build orchestrator that verifies HIN, SMT, and GoI before disk writes."""
 
     def __init__(self) -> None:
+        from aero_forge.builder.fallback_manager import FallbackManager
         from aero_forge.hin_engine import HINEngine
         from aero_forge.precision_shield import SMTASTEngine
 
         self.hin_engine = HINEngine()
         self.smt_engine = SMTASTEngine()
+        self.fallback_manager = FallbackManager()
 
     def _ingest_hin(self, payload: Dict[str, Any]) -> None:
         """Populate the HIN engine from the payload's nodes and relations."""
@@ -100,27 +102,27 @@ class ProactivePolyglotBuilder:
             node_id=node["id"],
             node_type=node["type"],
             language=node["lang"],
-            properties=node.get("props", {}),
+            properties=node.get("props") or node.get("properties") or {},
         )
 
     def _solve_smt_with_healing(self, payload: Dict[str, Any]) -> Dict[str, str]:
-        """Solve SMT constraints; attempt one in-memory healing pass on UNSAT."""
+        """Solve SMT constraints; attempt tiered fallback remediation on UNSAT."""
         holes = payload.get("holes", [])
         constraints = payload.get("constraints", [])
 
         try:
             return self.smt_engine.solve_ast_sketch_holes(holes, constraints)
         except ValueError as exc:
-            # One healing attempt: apply any patches implied by the UNSAT trace to
-            # the in-memory HIN graph JSON and re-check. If still unsatisfiable,
-            # re-raise so the pipeline returns False without writing files.
-            from aero_forge.apply_pipeline_healer import apply_pre_materialization_healing
-
-            graph_json = self._hin_graph_json()
-            healed_json = apply_pre_materialization_healing(str(exc), graph_json)
-            # Re-run SMT on the original constraints after healing the graph.
-            # (Healing does not change the type constraints, so this typically
-            # confirms the issue is structural rather than a transient failure.)
+            # Level 1/3 fallback: try to remediate the payload in memory and re-check.
+            trace = str(exc)
+            success, remediated = self.fallback_manager.remediate_smt_unsat(
+                payload, trace
+            )
+            if not success:
+                raise exc
+            # Update our working payload and re-run SMT with the remediated constraints.
+            payload.update(remediated)
+            constraints = payload.get("constraints", [])
             try:
                 return self.smt_engine.solve_ast_sketch_holes(holes, constraints)
             except ValueError:
@@ -153,6 +155,17 @@ class ProactivePolyglotBuilder:
 
         dimension = payload.get("goi_dim", 2)
         m_data = payload.get("goi_m", [0.0] * (dimension * dimension))
+        sigma_data = payload.get("goi_sigma", [0.0] * (dimension * dimension))
+        if verify_goi_proof_net(dimension, m_data, sigma_data):
+            return True
+
+        # Level 2 fallback: try to prune cyclic edges in the proof net and re-check.
+        success, remediated = self.fallback_manager.remediate_goi_non_nilpotent(
+            payload
+        )
+        if not success:
+            return False
+        payload.update(remediated)
         sigma_data = payload.get("goi_sigma", [0.0] * (dimension * dimension))
         return bool(verify_goi_proof_net(dimension, m_data, sigma_data))
 

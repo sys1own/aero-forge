@@ -511,11 +511,24 @@ def _append_rust_c_abi_wrappers(rust_dir: Path, rust_contracts: List[ContractEnt
         else:
             c_name = f"{name}_cabi"
         out_type = _C_ABI_SCALAR_MAP[ret_elt]
-        count_type = "i64"
-        for a, t in args:
-            if t.lower() in ("int", "i64", "i32", "u64", "u32", "usize"):
-                count_type = _C_ABI_SCALAR_MAP.get(t.lower(), "i64")
-                break
+        scalar_arg = next(
+            (
+                (a, t)
+                for a, t in args
+                if t.lower() in ("int", "i64", "i32", "u64", "u32", "usize")
+            ),
+            None,
+        )
+        count_type = (
+            _C_ABI_SCALAR_MAP.get(scalar_arg[1].lower(), "i64")
+            if scalar_arg
+            else "i64"
+        )
+
+        call_args = ["tasks_vec"]
+        if scalar_arg:
+            call_args.append(f"count as {count_type}")
+        call = ", ".join(call_args)
 
         wrappers.append(
             f"""#[no_mangle]
@@ -532,7 +545,7 @@ pub unsafe extern \"C\" fn {c_name}(tasks: *const *const std::os::raw::c_char, c
             CStr::from_ptr(ptr).to_string_lossy().into_owned()
         }})
         .collect();
-    let results = {rust_fn}(tasks_vec, count as {count_type});
+    let results = {rust_fn}({call});
     let out_slice = std::slice::from_raw_parts_mut(out, count);
     for (i, v) in results.iter().enumerate().take(count) {{
         out_slice[i] = *v;
