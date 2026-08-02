@@ -24,6 +24,7 @@ class RustEmitter(BaseEmitter):
         super().__init__(indent=indent)
         self.module_sources = {}
         self.module_artifacts = ArtifactBundle()
+        self._current_return_type: Optional[str] = None
 
     def emit(self, spec: EngineSpec) -> str:
         """Return the fully rendered ``src/lib.rs`` source for *spec*.
@@ -117,9 +118,19 @@ class RustEmitter(BaseEmitter):
             else:
                 param_strs.append(f"{p.name}: ()")
 
+        declared = self._map_type(node.type_hint)
+        inferred = self._infer_return_type_from_body(node.body) if node.body else None
+        if not self._is_void(declared):
+            return_type = declared
+        elif inferred:
+            return_type = inferred
+        else:
+            return_type = declared
+        self._current_return_type = return_type
+
         sig = f"fn {node.name}({', '.join(param_strs)})"
-        if node.type_hint:
-            sig += f" -> {self._map_type(node.type_hint)}"
+        if not self._is_void(return_type):
+            sig += f" -> {return_type}"
 
         self._write("")
         if self.is_pyo3:
@@ -130,8 +141,67 @@ class RustEmitter(BaseEmitter):
         if body:
             self._emit_children(body, indent_level + 1)
         else:
-            self._write(self._default_return_expr(node.type_hint), indent_level + 1)
+            self._write(self._default_return_expr(return_type), indent_level + 1)
         self._write("}", indent_level)
+
+    def _is_void(self, type_hint: Optional[str]) -> bool:
+        return (type_hint or "").strip() in ("", "void", "None", "()")
+
+    def _infer_return_type_from_body(
+        self, body: List[ASTNode]
+    ) -> Optional[str]:
+        """Infer a Rust return type from the body's ``return`` nodes."""
+        types: List[str] = []
+        for stmt in body:
+            if stmt.kind == "return":
+                if stmt.children:
+                    types.append(self._expr_type(stmt.children[0]))
+                elif stmt.value is not None:
+                    types.append(self._expr_type(ASTNode(kind="literal", value=stmt.value)))
+        # Drop unit/None values; they should not force a concrete return type.
+        concrete = [t for t in types if t not in ("", "void", "None", "()")]
+        if not concrete:
+            return None
+        if "f64" in concrete:
+            return "f64"
+        if "String" in concrete:
+            return "String"
+        if all(t == "bool" for t in concrete):
+            return "bool"
+        # Prefer the first concrete type, falling back to i64.
+        return concrete[0] if concrete else "i64"
+
+    def _expr_type(self, node: ASTNode) -> str:
+        """Best-effort Rust type for an expression node."""
+        if node.type_hint:
+            mapped = self._map_type(node.type_hint)
+            if not self._is_void(mapped):
+                return mapped
+        if node.kind == "literal":
+            value = node.value
+            if isinstance(value, bool):
+                return "bool"
+            if isinstance(value, int):
+                return "i64"
+            if isinstance(value, float):
+                return "f64"
+            if isinstance(value, str):
+                return "String"
+            if value is None:
+                return "()"
+        if node.kind == "binary_op":
+            left = self._expr_type(node.children[0]) if node.children else "i64"
+            right = self._expr_type(node.children[1]) if len(node.children) > 1 else "i64"
+            if "f64" in (left, right):
+                return "f64"
+            if "String" in (left, right):
+                return "String"
+            return left or "i64"
+        if node.kind == "call" and node.name:
+            # Heuristic: math helpers returning f64, len returning i64.
+            if node.name in ("len",):
+                return "i64"
+        return "i64"
 
     def _default_return_expr(self, type_hint: Optional[str]) -> str:
         """Return a value-initialized default expression for a function with no body."""
@@ -167,6 +237,10 @@ class RustEmitter(BaseEmitter):
             self._write(f"let {node.name} = {value_str};", indent_level)
 
     def _emit_return(self, node: ASTNode, indent_level: int) -> None:
+        if self._is_void(self._current_return_type):
+            # Void functions must not return a value.
+            self._write("return;", indent_level)
+            return
         value_str = (
             self._expr(node.children[0]) if node.children else self._literal(node.value)
         )

@@ -10,7 +10,7 @@ from __future__ import annotations
 import ast
 import difflib
 import re
-from typing import Optional, Set
+from typing import List, Optional, Set, Tuple
 
 from aero_forge.orchestrator.error_classifier import (
     extract_signature_mismatch_symbol,
@@ -76,6 +76,179 @@ def _closest_name(name: str, candidates: Set[str]) -> Optional[str]:
     return None
 
 
+def _extract_rust_type_mismatch(error_log: str) -> Optional[Tuple[str, str]]:
+    """Return (expected, found) type strings from an E0308 message, if any."""
+    for line in error_log.splitlines():
+        match = re.search(r"expected\s+`([^`]+)`,\s*found\s+`([^`]+)`", line)
+        if match:
+            return match.group(1), match.group(2)
+    return None
+
+
+def _is_unit_type(t: str) -> bool:
+    return t.strip() in ("", "()", "void", "None")
+
+
+def _infer_rust_type_from_expr(expr: str) -> str:
+    """Best-effort Rust type for a simple return expression string."""
+    expr = expr.strip()
+    if not expr:
+        return "()"
+    # Strip outer parentheses.
+    while len(expr) >= 2 and expr[0] == "(" and expr[-1] == ")":
+        expr = expr[1:-1].strip()
+    # Numeric literals with suffixes.
+    if re.fullmatch(r"-?\d+_i64|-?\d+_i32|-?\d+_u64|-?\d+_u32|-?\d+_usize", expr):
+        return expr.split("_")[-1]
+    if re.fullmatch(r"-?\d+", expr):
+        return "i64"
+    if re.fullmatch(r"-?\d+\.\d+(_f64|_f32)?", expr) or re.fullmatch(r"-?\d+(_f64|_f32)", expr):
+        return expr.split("_")[-1] if "_" in expr else "f64"
+    if expr in ("true", "false"):
+        return "bool"
+    if (expr.startswith('"') and expr.endswith('"')) or (
+        expr.startswith("'") and expr.endswith("'")
+    ):
+        return "String"
+    if " as usize" in expr or " as u64" in expr:
+        return "usize"
+    if " as i64" in expr:
+        return "i64"
+    if " as f64" in expr:
+        return "f64"
+    # Default to i64 for variable references / arithmetic in generated stubs.
+    return "i64"
+
+
+def _find_rust_function_spans(code: str) -> List[Tuple[int, int, int, int, str, Optional[str]]]:
+    """Return function header/body spans in *code*.
+
+    Each tuple is (header_start, header_end, body_start, body_end, name, ret_type).
+    ``body_end`` is the index just before the matching closing ``}``.
+    """
+    header_re = re.compile(
+        r"(?P<prefix>(?:\s*#\[.*?\]\n)*)"
+        r"(?P<indent>\s*)"
+        r"(?P<vis>pub\s+)?"
+        r"fn\s+(?P<name>\w+)\s*\((?P<args>[^)]*)\)\s*"
+        r"(?P<ret>(?:->\s*[^{;]+))?\s*\{",
+        re.MULTILINE,
+    )
+    results: List[Tuple[int, int, int, int, str, Optional[str]]] = []
+    for match in header_re.finditer(code):
+        open_brace = match.end() - 1
+        depth = 1
+        i = open_brace + 1
+        in_string = ""
+        escaped = False
+        while i < len(code) and depth > 0:
+            ch = code[i]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == in_string:
+                    in_string = ""
+            else:
+                if ch in ('"', "'"):
+                    in_string = ch
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+            i += 1
+        close_brace = i - 1
+        ret = match.group("ret")
+        if ret:
+            ret = ret.replace("->", "").strip()
+        results.append(
+            (match.start(), open_brace, open_brace + 1, close_brace, match.group("name"), ret)
+        )
+    return results
+
+
+def _repair_rust_return_types(error_log: str, code: str) -> Optional[str]:
+    """Patch Rust function signatures so they match the values returned by the body.
+
+    Targets E0308 mismatches such as ``expected `()`, found `i64``` where a
+    generated stub returns an integer but its signature declares the unit type.
+    """
+    if "fn " not in code:
+        return None
+
+    target_type: Optional[str] = None
+    mismatch = _extract_rust_type_mismatch(error_log)
+    if mismatch:
+        expected, found = mismatch
+        if _is_unit_type(expected) and not _is_unit_type(found):
+            target_type = found
+        elif not _is_unit_type(expected) and _is_unit_type(found):
+            target_type = expected
+
+    spans = _find_rust_function_spans(code)
+    if not spans:
+        return None
+
+    patches: List[Tuple[int, int, str]] = []
+    for header_start, header_end, body_start, body_end, name, ret in spans:
+        body = code[body_start:body_end]
+        # Find return statements with a value; bare ``return;`` is ignored.
+        return_values = [
+            m.group(1).strip()
+            for m in re.finditer(r"\breturn\s+([^;]+);", body)
+            if m.group(1).strip() not in ("", "()")
+        ]
+        bare_returns = bool(re.search(r"\breturn\s*;", body))
+        new_ret: Optional[str] = None
+        if return_values:
+            if target_type and not _is_unit_type(target_type):
+                new_ret = target_type
+            else:
+                inferred_types = [_infer_rust_type_from_expr(v) for v in return_values]
+                if "f64" in inferred_types:
+                    new_ret = "f64"
+                elif "String" in inferred_types:
+                    new_ret = "String"
+                elif all(t == "bool" for t in inferred_types):
+                    new_ret = "bool"
+                else:
+                    # Prefer a concrete non-unit type, falling back to i64.
+                    new_ret = next(
+                        (t for t in inferred_types if not _is_unit_type(t)), "i64"
+                    )
+        elif bare_returns and target_type and _is_unit_type(target_type):
+            new_ret = "()"
+
+        if new_ret is None:
+            continue
+
+        ret_str = (ret or "").strip()
+        if _is_unit_type(ret_str):
+            # Signature is currently omitted or ``-> ()``; add/replace the return type.
+            # ``header_end`` points at the existing ``{``, so the replacement text
+            # should stop just before the brace and let the original ``{`` remain.
+            header = code[header_start:header_end]
+            if ret_str == "":
+                # Insert `` -> T`` before the opening brace.
+                # Keep a trailing space so the preserved ``{`` is separated.
+                new_header = header[:-1].rstrip() + f" -> {new_ret} "
+            else:
+                # Replace ``-> ()`` with ``-> T``.
+                new_header = re.sub(r"->\s*\(\)", f"-> {new_ret}", header, count=1)
+            if new_header != header:
+                patches.append((header_start, header_end, new_header))
+
+    if not patches:
+        return None
+
+    # Apply patches from end to start to preserve indices.
+    result = code
+    for start, end, replacement in sorted(patches, reverse=True):
+        result = result[:start] + replacement + result[end:]
+    return result
+
+
 def try_auto_fix(error_log: str, code: str) -> Optional[str]:
     """Apply a small set of pattern-based fixes to *code*.
 
@@ -110,7 +283,13 @@ def try_auto_fix(error_log: str, code: str) -> Optional[str]:
         if patched != code:
             return patched
 
-    # 3. Python function signature / arity mismatch: make the target function accept
+    # 3. Rust E0308 return-type mismatch: align function signatures with return values.
+    if "error[E0308]" in error_log:
+        patched = _repair_rust_return_types(error_log, code)
+        if patched:
+            return patched
+
+    # 4. Python function signature / arity mismatch: make the target function accept
     # any additional positional or keyword arguments so callers do not fail.
     if is_signature_mismatch(error_log):
         symbol = extract_signature_mismatch_symbol(error_log)

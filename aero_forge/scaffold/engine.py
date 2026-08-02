@@ -1604,7 +1604,12 @@ class RustGenerator:
             return returns
 
         # If the function was explicitly annotated with a tuple type, trust it.
-        if self.annotated_return and self.return_type.startswith("("):
+        # ``()`` is the unit/None annotation and should not prevent inference.
+        if (
+            self.annotated_return
+            and self.return_type.startswith("(")
+            and self.return_type != "()"
+        ):
             return self.return_type
 
         sizes: set[int] = set()
@@ -1624,7 +1629,14 @@ class RustGenerator:
             # No non-None return statements; the function is effect-only.
             return self.return_type if self.annotated_return else "()"
         if sizes == {1}:
-            return self.return_type
+            # Infer the scalar return type from the returned expressions and
+            # reconcile it with any explicit annotation.  This prevents E0308
+            # mismatches where a void-annotated stub actually returns an integer.
+            inferred: Optional[str] = None
+            for rv in return_values:
+                typ = self._infer_expr_type(rv, self.type_env)
+                inferred = self._unify(inferred, typ)
+            return self._unify(self.return_type, inferred) or self.return_type
         if len(sizes) != 1:
             raise UnsupportedError(
                 "All return statements must return the same tuple size",
