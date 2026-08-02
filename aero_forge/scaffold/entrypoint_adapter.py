@@ -37,9 +37,9 @@ class EntrypointAdapterEngine:
 
         runtime = primary.get("runtime", "python3")
         if runtime != "python3":
-            raise NotImplementedError(
-                f"Runtime {runtime!r} not supported for auto-wrapper generation."
-            )
+            # Non-Python primary entrypoints (e.g. Rust native binaries) must be
+            # built by their own toolchain; no Python CLI wrapper is required.
+            return ""
 
         entrypoint_path = Path(primary.get("path", "main.py"))
         if entrypoint_path.is_absolute():
