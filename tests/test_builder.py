@@ -32,6 +32,13 @@ from aero_forge.scaffold.workspace import _cpp_stub_from_signature, _rust_stub_f
 from aero_forge.universal_builder import _extract_explicit_file_paths, _hybrid_fallback_blueprint
 
 
+def _valid_payload(tmp_path: Path) -> Path:
+    """Return a workspace path and valid blueprint for proactive builder tests."""
+    workspace = tmp_path / "proactive_ws"
+    workspace.mkdir(parents=True)
+    return workspace
+
+
 def _tmp_workspace(tmp_path: Path, name: str = "workspace") -> Path:
     ws = tmp_path / name
     ws.mkdir(parents=True, exist_ok=True)
@@ -270,3 +277,88 @@ class TestTriPolyglotBuilder:
         assert pytest_result.returncode == 0, (
             f"Generated tri-polyglot tests failed:\n{pytest_result.stdout}\n{pytest_result.stderr}"
         )
+
+
+class TestProactivePolyglotBuilder:
+    def _payload(self, tmp_path: Path, *, unsat: bool = False, goi_bad: bool = False):
+        workspace = tmp_path / ("proactive_unsat" if unsat else "proactive_ok")
+        workspace.mkdir(parents=True)
+
+        constraints = [
+            {"source_hole": "h1", "target_language": "rust"},
+            {"source_hole": "h2", "target_language": "python"},
+        ]
+        if unsat:
+            constraints.append({"source_hole": "h1", "target_language": "python"})
+
+        # Acyclic 3-node chain (nilpotent under sigma = 0.5 I)
+        goi_m = [0, 0, 0, 1, 0, 0, 0, 1, 0]
+        goi_sigma = [0.5, 0, 0, 0, 0.5, 0, 0, 0, 0.5]
+        if goi_bad:
+            # Cyclic 2x2 non-nilpotent
+            goi_m = [0, 1, 1, 0]
+            goi_sigma = [1, 0, 0, 1]
+
+        blueprint = {
+            "project": "proactive_test",
+            "architecture": "pure_python",
+            "toolchains": ["python"],
+            "manifest": [
+                {"path": "src/__init__.py", "lang": "python", "purpose": "package"},
+                {"path": "src/main.py", "lang": "python", "purpose": "entry"},
+            ],
+            "contracts": [
+                {"name": "main", "signature": "def main() -> bool", "purpose": "entry"}
+            ],
+        }
+
+        return {
+            "workspace": str(workspace),
+            "blueprint": blueprint,
+            "nodes": [
+                {"id": "rust_node", "type": "RustStruct", "lang": "rust"},
+                {"id": "py_node", "type": "PyClass", "lang": "python"},
+            ],
+            "relations": [
+                {"source": "rust_node", "target": "py_node", "relation": "ParentOf"}
+            ],
+            "holes": ["h1", "h2"],
+            "constraints": constraints,
+            "goi_dim": 3 if not goi_bad else 2,
+            "goi_m": goi_m,
+            "goi_sigma": goi_sigma,
+        }
+
+    def test_proactive_builder_passes_valid_payload(self, tmp_path: Path) -> None:
+        """A valid multi-language payload should pass all gates and write files."""
+        from aero_forge.builder.builder import ProactivePolyglotBuilder
+
+        payload = self._payload(tmp_path)
+        builder = ProactivePolyglotBuilder()
+        result = builder.build_blueprint_proactive(payload)
+        assert result is True
+        assert (Path(payload["workspace"]) / "src" / "main.py").is_file()
+
+    def test_proactive_builder_blocks_on_unsat_smt(self, tmp_path: Path) -> None:
+        """An SMT UNSAT payload must not write files to disk."""
+        from aero_forge.builder.builder import ProactivePolyglotBuilder
+
+        payload = self._payload(tmp_path, unsat=True)
+        builder = ProactivePolyglotBuilder()
+        result = builder.build_blueprint_proactive(payload)
+        assert result is False
+        assert not (Path(payload["workspace"]) / "src").exists()
+
+    def test_proactive_builder_blocks_on_goi_failure(self, tmp_path: Path) -> None:
+        """A non-nilpotent GoI payload with a 3-cycle cannot be auto-remediated."""
+        from aero_forge.builder.builder import ProactivePolyglotBuilder
+
+        payload = self._payload(tmp_path, goi_bad=True)
+        # A 3-cycle is not covered by the 2-cycle/single-edge fallback heuristic.
+        payload["goi_dim"] = 3
+        payload["goi_m"] = [0, 1, 0, 0, 0, 1, 1, 0, 0]
+        payload["goi_sigma"] = [1, 0, 0, 0, 1, 0, 0, 0, 1]
+        builder = ProactivePolyglotBuilder()
+        result = builder.build_blueprint_proactive(payload)
+        assert result is False
+        assert not (Path(payload["workspace"]) / "src").exists()

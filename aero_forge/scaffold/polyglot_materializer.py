@@ -1727,3 +1727,37 @@ class PolyglotMaterializer:
             )
 
         return blueprint.model_copy(update={"functions": functions})
+
+
+def _emit_verified_files(payload: Dict[str, Any]) -> "Blueprint":
+    """Materialize a verified blueprint to disk after all gates pass.
+
+    The *payload* must contain a ``workspace`` path and a ``blueprint`` dict
+    suitable for constructing a ``Blueprint``. Files are written without
+    triggering a native build. Tri-polyglot blueprints are routed to the
+    dedicated tri-polyglot materializer.
+    """
+    from aero_forge.blueprint import Blueprint
+
+    workspace = Path(payload.get("workspace", "."))
+    blueprint_dict = payload.get("blueprint", {})
+    blueprint = Blueprint(**blueprint_dict)
+
+    if blueprint.architecture == "tri_polyglot_rust_cpp_python" or (
+        {"rust", "cpp", "python"}.issubset(set(blueprint.toolchains))
+        and any(Path(e.path).name == "Cargo.toml" for e in blueprint.manifest)
+        and any(e.lang == "cpp" or str(e.path).endswith(".cpp") for e in blueprint.manifest)
+    ):
+        from aero_forge.scaffold.tri_polyglot_materializer import TriPolyglotMaterializer
+
+        return TriPolyglotMaterializer(workspace).materialize(
+            blueprint,
+            build=False,
+            force_overwrite=payload.get("force_overwrite", False),
+        )
+
+    return PolyglotMaterializer(workspace).materialize(
+        blueprint,
+        build=False,
+        force_overwrite=payload.get("force_overwrite", False),
+    )

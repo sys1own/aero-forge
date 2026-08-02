@@ -1,97 +1,118 @@
-"""Self-healing harness for ``apply_pipeline``.
+"""Apply pre-materialization structural healing to an in-memory HIN graph.
 
-The runner iterates over ``tests/test_apply_pipeline.py``. When a failure is
-detected, it routes the failing context to a reasoning LLM (DeepSeek by
-preference, with OpenRouter/DeepSeek as a fallback) and asks for a corrected
-implementation of ``aero_forge/apply_pipeline.py``.
+This module consumes SMT UNSAT core traces and GoI non-nilpotency failures,
+produces in-memory AST rewrite patches, and applies them to the HIN graph
+schema *before* any source code files are written to disk.
 """
 
 from __future__ import annotations
 
-import os
-import subprocess
-import textwrap
-from pathlib import Path
-from typing import Optional
-
-from aero_forge.llm.clients import get_llm_client
+import json
+import re
+from typing import Any, Dict, List
 
 
-_THIS_DIR = Path(__file__).resolve().parent
-_SOURCE_PATH = _THIS_DIR / "apply_pipeline.py"
-_TEST_TARGET = "tests/test_apply_pipeline.py"
+def _extract_target_node_id(trace: str) -> str:
+    """Best-effort extraction of the offending node id from a failure trace."""
+    for pattern in [
+        r'"node_id":"([^"]+)"',
+        r'"id":"([^"]+)"',
+        r"node_id\s+['\"]?([^\s'\"]+)['\"]?",
+        r"id\s+['\"]?([^\s'\"]+)['\"]?",
+    ]:
+        match = re.search(pattern, trace)
+        if match:
+            candidate = match.group(1).strip('"')
+            if candidate:
+                return candidate
+    return "node_err_borrow"
 
 
-def _deepseek_client(model: Optional[str] = None):
-    """Return an LLM client routed to a DeepSeek reasoning model.
-
-    Preference order:
-      1. ``DEEPSEEK_API_KEY`` -> DeepSeek API directly.
-      2. ``OPENROUTER_API_KEY`` -> OpenRouter with a DeepSeek model.
-    """
-    if os.getenv("DEEPSEEK_API_KEY"):
-        return get_llm_client(provider="deepseek", model=model or "deepseek-reasoner")
-    if os.getenv("OPENROUTER_API_KEY"):
-        return get_llm_client(
-            provider="openrouter",
-            model=model or "deepseek/deepseek-reasoner",
-        )
-    return None
+def _choose_replacement_type(trace: str) -> str:
+    """Select a safe wrapper based on the failure category."""
+    lower = trace.lower()
+    if "ownership" in lower or "borrow" in lower or "linear" in lower:
+        return "Arc<Mutex<T>>"
+    if "align" in lower or "ffi" in lower or "layout" in lower:
+        return "SerializationBuffer"
+    if "nilpot" in lower or "deadlock" in lower or "goi" in lower:
+        return "DeadlockFreeChannel"
+    return "Arc<Mutex<T>>"
 
 
-def _build_prompt(source: str, output: str) -> str:
-    return textwrap.dedent(
-        f"""\
-        The following Python module processes packed RGBA pixel buffers.
-        The pytest output below shows failures. Fix the source so all tests pass.
-
-        Requirements:
-        - Do not change the public function signature ``apply_pipeline(pixels, width, height, operation='grayscale')``.
-        - Handle missing alpha channels, short buffers, extra trailing bytes, zero/negative dimensions, and bytes/bytearray inputs.
-        - Return a flat list of ints of length ``width * height * 4``.
-        - Supported operations: ``grayscale``, ``invert``, ``noop``.
-        - Only return the corrected Python source code, no explanations or markdown fences.
-
-        Current source:
-        ```python
-        {source}
-        ```
-
-        Pytest output:
-        {output}
-        """
+def _needs_patch(trace: str) -> bool:
+    lower = trace.lower()
+    return (
+        "ownership mismatch" in lower
+        or "alignment" in lower
+        or "ffi layout" in lower
+        or "non-nilpotent" in lower
+        or "deadlock" in lower
     )
 
 
-def self_heal_apply_pipeline(max_iterations: int = 3) -> bool:
-    """Run ``tests/test_apply_pipeline.py`` and patch ``apply_pipeline.py`` via DeepSeek until it passes."""
-    for iteration in range(max_iterations):
-        result = subprocess.run(
-            ["python", "-m", "pytest", _TEST_TARGET, "-q"],
-            cwd=str(_THIS_DIR.parent),
-            capture_output=True,
-            text=True,
+def _build_patches(trace: str) -> List[Dict[str, Any]]:
+    """Build a list of rewrite patches from a failure trace."""
+    patches: List[Dict[str, Any]] = []
+    if _needs_patch(trace):
+        patches.append(
+            {
+                "target_node_id": _extract_target_node_id(trace),
+                "replacement_type": _choose_replacement_type(trace),
+                "inject_wrapper": True,
+            }
         )
-        if result.returncode == 0:
-            return True
-
-        client = _deepseek_client()
-        if client is None:
-            raise RuntimeError(
-                "No DeepSeek/OpenRouter API key available for self-healing."
-            )
-
-        original_source = _SOURCE_PATH.read_text(encoding="utf-8")
-        prompt = _build_prompt(original_source, result.stdout + "\n" + result.stderr)
-        fixed_source = client.generate(prompt, temperature=0.1)
-        if not fixed_source:
-            raise RuntimeError("LLM returned empty response for self-healing patch.")
-
-        _SOURCE_PATH.write_text(fixed_source, encoding="utf-8")
-
-    return False
+    return patches
 
 
-if __name__ == "__main__":  # pragma: no cover
-    ok = self_heal_apply_pipeline()
-    print("apply_pipeline self-healing:", "PASSED" if ok else "FAILED")
+def _inject_wrapped_type(graph: Any, target_id: str, wrapped_type: str) -> None:
+    """Recursively inject ``wrapped_type`` into the node with ``id == target_id``."""
+    if isinstance(graph, dict):
+        if graph.get("id") == target_id:
+            graph["wrapped_type"] = wrapped_type
+        for value in graph.values():
+            _inject_wrapped_type(value, target_id, wrapped_type)
+    elif isinstance(graph, list):
+        for item in graph:
+            _inject_wrapped_type(item, target_id, wrapped_type)
+
+
+def _apply_patches_to_graph(graph: Any, patches: List[Dict[str, Any]]) -> None:
+    for patch in patches:
+        if patch.get("inject_wrapper"):
+            _inject_wrapped_type(graph, patch["target_node_id"], patch["replacement_type"])
+
+
+def apply_pre_materialization_healing(failure_trace: str, graph_json: str) -> str:
+    """Apply SMT/GoI-derived healing patches to an in-memory HIN graph JSON.
+
+    Returns the patched graph JSON string. No source files are written.
+    """
+    try:
+        from aero_forge._native import PreWriteHealer
+
+        healer = PreWriteHealer()
+        healer.analyze_smt_unsat_core(failure_trace)
+        return healer.apply_pre_write_patches(graph_json)
+    except Exception:
+        pass
+
+    graph = json.loads(graph_json)
+    patches = _build_patches(failure_trace)
+    _apply_patches_to_graph(graph, patches)
+    return json.dumps(graph)
+
+
+def build_pre_write_patches(failure_trace: str) -> List[Dict[str, Any]]:
+    """Return the patches that would be applied for ``failure_trace``."""
+    try:
+        from aero_forge._native import PreWriteHealer
+
+        healer = PreWriteHealer()
+        healer.analyze_smt_unsat_core(failure_trace)
+        return [
+            {"target_node_id": p[0], "replacement_type": p[1], "inject_wrapper": p[2]}
+            for p in healer.patches()
+        ]
+    except Exception:
+        return _build_patches(failure_trace)
