@@ -438,5 +438,7 @@ fn aero_forge_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(hin_engine::evaluate_hin_energy, m)?)?;
     m.add_function(wrap_pyfunction!(deterministic_healer::repair_uast_expression, m)?)?;
     m.add_function(wrap_pyfunction!(goi_solver::enforce_repair_isolation_py, m)?)?;
+    m.add_class::<goi_solver::GoIProofNet>()?;
+    m.add_function(wrap_pyfunction!(goi_solver::verify_goi_proof_net, m)?)?;
     Ok(())
 }

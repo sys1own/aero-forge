@@ -80,3 +80,51 @@ def test_goi_matrix_dimension_mismatch() -> None:
     U = np.eye(4, dtype=np.float64)
     with pytest.raises(GoiSolverError):
         goi_execute_wave(M, U)
+
+
+def test_goi_proof_net_nilpotent() -> None:
+    """A terminating acyclic interaction should be nilpotent."""
+    GoIProofNet = pytest.importorskip("aero_forge_native").GoIProofNet
+
+    net = GoIProofNet(3)
+    M = np.eye(3, dtype=np.float64).flatten().tolist()
+    sigma = (np.eye(3, dtype=np.float64) * 0.5).flatten().tolist()
+    net.set_axiom_matrix(M)
+    net.set_cut_matrix(sigma)
+
+    ex = np.array(net.compute_execution_formula())
+    assert ex.shape == (3, 3)
+    assert net.verify_nilpotency(100)
+
+
+def test_goi_proof_net_cyclic_deadlock() -> None:
+    """A cyclic non-terminating interaction should fail nilpotency/execution."""
+    aero_forge_native = pytest.importorskip("aero_forge_native")
+    GoIProofNet = aero_forge_native.GoIProofNet
+
+    net = GoIProofNet(2)
+    # 0 <-> 1 cycle
+    M = np.array([[0, 1], [1, 0]], dtype=np.float64).flatten().tolist()
+    sigma = np.eye(2, dtype=np.float64).flatten().tolist()
+    net.set_axiom_matrix(M)
+    net.set_cut_matrix(sigma)
+
+    assert not net.verify_nilpotency(50)
+
+    # The native convenience wrapper should also report false/deadlock.
+    assert not aero_forge_native.verify_goi_proof_net(2, M, sigma, 50)
+
+
+def test_native_bridge_verify_goi_proof_net() -> None:
+    """The Python bridge exposes verify_goi_proof_net and falls back gracefully."""
+    from aero_forge.native_bridge import verify_goi_proof_net
+
+    # Terminating 3-node chain.
+    M = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float64).flatten().tolist()
+    sigma = np.eye(3, dtype=np.float64).flatten().tolist()
+    assert verify_goi_proof_net(3, M, sigma, max_iterations=100)
+
+    # Cyclic 2-node deadlock.
+    M = np.array([[0, 1], [1, 0]], dtype=np.float64).flatten().tolist()
+    sigma = np.eye(2, dtype=np.float64).flatten().tolist()
+    assert not verify_goi_proof_net(2, M, sigma, max_iterations=50)

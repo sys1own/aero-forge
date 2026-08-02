@@ -157,3 +157,102 @@ pub fn enforce_repair_isolation_py(
     serde_json::to_string(&result)
         .map_err(|e| PyValueError::new_err(format!("repair result serialization failed: {}", e)))
 }
+
+use nalgebra::DMatrix;
+use std::collections::HashMap;
+
+/// Girard Geometry-of-Interaction proof net for deadlock-free concurrency checking.
+#[pyclass(name = "GoIProofNet")]
+pub struct GoIProofNet {
+    pub dimension: usize,
+    pub axiom_matrix_m: DMatrix<f64>,
+    pub cut_matrix_sigma: DMatrix<f64>,
+    pub channel_map: HashMap<String, usize>,
+}
+
+#[pymethods]
+impl GoIProofNet {
+    #[new]
+    pub fn new(dimension: usize) -> Self {
+        Self {
+            dimension,
+            axiom_matrix_m: DMatrix::zeros(dimension, dimension),
+            cut_matrix_sigma: DMatrix::zeros(dimension, dimension),
+            channel_map: HashMap::new(),
+        }
+    }
+
+    /// Compute Girard's Execution Formula:
+    ///   EX(M, sigma) = (I - sigma^2) * M * (I - sigma * M)^(-1) * (I - sigma^2)
+    pub fn compute_execution_formula(&self) -> PyResult<Vec<Vec<f64>>> {
+        let identity = DMatrix::identity(self.dimension, self.dimension);
+        let sigma_m = &self.cut_matrix_sigma * &self.axiom_matrix_m;
+        let resolvent = &identity - &sigma_m;
+        let resolvent_inv = resolvent.try_inverse().ok_or_else(|| {
+            PyValueError::new_err(
+                "GoI Execution Error: Operator (1 - sigma*M) is singular. Deadlock detected.",
+            )
+        })?;
+
+        let sigma_sq = &self.cut_matrix_sigma * &self.cut_matrix_sigma;
+        let proj = &identity - &sigma_sq;
+        let ex = (&proj * &self.axiom_matrix_m) * resolvent_inv * &proj;
+        Ok((0..ex.nrows())
+            .map(|r| ex.row(r).iter().copied().collect())
+            .collect())
+    }
+
+    /// Verify that (sigma * M) is nilpotent up to max_iterations.
+    #[pyo3(signature = (max_iterations=1000))]
+    pub fn verify_nilpotency(&self, max_iterations: usize) -> bool {
+        let sigma_m = &self.cut_matrix_sigma * &self.axiom_matrix_m;
+        let mut current_power = sigma_m.clone();
+        for _ in 1..max_iterations {
+            if current_power.norm() < 1e-9 {
+                return true;
+            }
+            current_power = &current_power * &sigma_m;
+        }
+        false
+    }
+
+    /// Populate the axiom link matrix from a flat row-major list.
+    pub fn set_axiom_matrix(&mut self, data: Vec<f64>) -> PyResult<()> {
+        if data.len() != self.dimension * self.dimension {
+            return Err(PyValueError::new_err("axiom matrix data length mismatch"));
+        }
+        self.axiom_matrix_m = DMatrix::from_row_slice(self.dimension, self.dimension, &data);
+        Ok(())
+    }
+
+    /// Populate the cut link matrix from a flat row-major list.
+    pub fn set_cut_matrix(&mut self, data: Vec<f64>) -> PyResult<()> {
+        if data.len() != self.dimension * self.dimension {
+            return Err(PyValueError::new_err("cut matrix data length mismatch"));
+        }
+        self.cut_matrix_sigma = DMatrix::from_row_slice(self.dimension, self.dimension, &data);
+        Ok(())
+    }
+}
+
+/// Convenience Python entry point: build a proof net from flat matrices, verify
+/// nilpotency, and return false when the execution formula is singular (deadlock).
+#[pyfunction(signature = (dimension, m_data, sigma_data, max_iterations=1000))]
+pub fn verify_goi_proof_net(
+    dimension: usize,
+    m_data: Vec<f64>,
+    sigma_data: Vec<f64>,
+    max_iterations: usize,
+) -> PyResult<bool> {
+    let mut net = GoIProofNet::new(dimension);
+    net.set_axiom_matrix(m_data)?;
+    net.set_cut_matrix(sigma_data)?;
+
+    // Deadlock detection: a singular resolvent means no execution formula exists.
+    match net.compute_execution_formula() {
+        Err(_) => return Ok(false),
+        Ok(_) => {}
+    }
+
+    Ok(net.verify_nilpotency(max_iterations))
+}

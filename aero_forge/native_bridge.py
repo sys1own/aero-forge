@@ -597,3 +597,40 @@ def accelerate(
         wrapper.__aero_accelerator__ = accelerator
         return wrapper
     return decorator
+
+
+def verify_goi_proof_net(
+    dimension: int,
+    m_data: List[float],
+    sigma_data: List[float],
+    max_iterations: int = 1000,
+) -> bool:
+    """Verify a Geometry-of-Interaction proof net for deadlock-free concurrency.
+
+    Falls back to a NumPy implementation when the native PyO3 extension is not
+    importable. A cyclic, non-terminating interaction returns ``False``.
+    """
+    try:
+        from aero_forge_native import verify_goi_proof_net as _native_verify
+
+        return _native_verify(dimension, m_data, sigma_data, max_iterations)
+    except Exception:
+        pass
+
+    import numpy as np
+
+    M = np.asarray(m_data, dtype=np.float64).reshape(dimension, dimension)
+    sigma = np.asarray(sigma_data, dtype=np.float64).reshape(dimension, dimension)
+    I = np.eye(dimension, dtype=np.float64)
+    resolvent = I - sigma @ M
+    try:
+        np.linalg.inv(resolvent)
+    except np.linalg.LinAlgError:
+        return False
+    product = sigma @ M
+    power = product
+    for _ in range(1, max_iterations):
+        if np.linalg.norm(power) < 1e-9:
+            return True
+        power = power @ product
+    return False
