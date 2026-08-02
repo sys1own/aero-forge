@@ -23,6 +23,34 @@ Core value propositions:
 - **Interactive Co-Pilot & Action Cards** - The web Co-Pilot chat is workspace-aware (via `bundle_repo.py`), separates conversational advice from the executable build prompt using isolated ` ```build_prompt ` blocks, and renders `SUGGEST_BUILD_PROMPT` Action Cards with an editable prompt box and a one-click `[ Send to Builder & Run ]` trigger.
 - **Fall-forward safety** - Unsupported Python constructs gracefully fall back to CPython without panics.
 
+## Proactive Formal Synthesis Engine (Zero-Failure Architecture)
+
+Aero-Forge has evolved from a reactive build-and-repair engine into a **proactive, proof-theoretic synthesis system**. It no longer relies on post-facto compiler error logs; instead, it mathematically guarantees buildability and cross-language semantic consistency *before* any file is written or a native toolchain (`rustc`, `g++`, `pytest`) is invoked.
+
+### From Reactive Repair to Pre-Materialization Verification
+
+- Build failures are prevented rather than observed after emission.
+- Every multi-language boundary (Rust ↔ C++ ↔ Python) is verified for type, ownership, FFI layout, and concurrency safety before source files are materialized.
+- Native toolchains are only invoked once the design has been proven sound.
+
+### Core Verification Pipeline
+
+- **HIN AST Normalization** — Python, Rust, and C++ AST fragments are unified into a single `networkx.MultiDiGraph` **Heterogeneous Information Network** $G_{\text{HIN}} = (V, E, \mathcal{T}, \mathcal{R})$. Double-Pushout (DPO) graph rewrites inject `FFIBoundary` nodes around raw string FFI calls, and an affine ownership lattice (`1`, `&`, `&mut`, `!`, $\bot$) propagates constraints across `TransfersOwnershipTo` edges.
+- **Neuro-Symbolic SMT Solving (Z3)** — Unresolved typed holes ($\square_i$) and cross-language FFI constraints (`OffsetOf`, `AlignOf`, import visibility) are solved by `SMTASTEngine`. UNSAT cores are captured for in-memory healing rather than allowed to reach disk.
+- **GoI Proof Net Verification** — Girard's *Geometry of Interaction* solver computes $EX(M, \sigma) = (I - \sigma^2) M (I - \sigma M)^{-1} (I - \sigma^2)$ and verifies nilpotency $(\sigma M)^N = 0$. This proves the absence of dynamic deadlocks and dropped async futures across language boundaries.
+- **Pre-Materialization In-Memory Healing** — `FallbackManager` applies structural AST repairs in memory using SMT UNSAT cores and GoI path cuts. Only after all verification gates pass does `ProactivePolyglotBuilder` call the materialization step.
+
+### Pipeline Workflow
+
+```mermaid
+flowchart LR
+    A[Blueprint / Sketch AST] --> B[HIN Normalization]
+    B --> C[SMT Z3 Constraint Solving]
+    C --> D[GoI Proof Net Deadlock Check]
+    D --> E[Pre-Write AST Healing]
+    E --> F[Zero-Failure Emission & Build]
+```
+
 ## Architecture
 
 ### A. Holographic Interaction Net (HIN) Engine & MELL Linear Typing
