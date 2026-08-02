@@ -35,6 +35,7 @@ class CppEmitter(BaseEmitter):
         self._write("#include <vector>")
         self._write("#include <map>")
         self._write("#include <cmath>")
+        self._write("#include <tuple>")
         if self.c_abi:
             self._write("")
             self._write('#ifdef _WIN32')
@@ -57,6 +58,9 @@ class CppEmitter(BaseEmitter):
         """Reference to a function (internal name in C-ABI mode)."""
         if not name:
             return ""
+        # Fully-qualified C++ names (std::...) and method calls should not be prefixed.
+        if "::" in name:
+            return name
         # Method calls on vector/list objects should not be prefixed; map Python
         # ``append`` to the C++ vector equivalent ``push_back``.
         if "." in name:
@@ -314,6 +318,8 @@ class CppEmitter(BaseEmitter):
 
         cpp_ret = self._function_return_type(node)
         is_array_return = cpp_ret.startswith("std::vector<")
+        tuple_types = self._tuple_scalar_types(node.type_hint)
+        is_tuple_return = bool(tuple_types)
 
         c_params: List[str] = []
         call_args: List[str] = []
@@ -333,6 +339,9 @@ class CppEmitter(BaseEmitter):
 
         if is_array_return:
             c_params.append("size_t* out_len")
+        if is_tuple_return:
+            for i, t in enumerate(tuple_types):
+                c_params.append(f"{self._c_scalar_type(t)}* out_{i}")
 
         self._write(f"extern \"C\" AERO_EXPORT {self._c_return_type(node.type_hint)} {name}({', '.join(c_params)}) {{")
         for line in setup:
@@ -345,6 +354,11 @@ class CppEmitter(BaseEmitter):
             self._write(f"    {inner}* _out = new {inner}[_result.size()];", 1)
             self._write(f"    std::memcpy(_out, _result.data(), _result.size() * sizeof({inner}));", 1)
             self._write(f"    return _out;", 1)
+        elif is_tuple_return:
+            self._write(f"    auto _result = {internal}({', '.join(call_args)});", 1)
+            for i in range(len(tuple_types)):
+                self._write(f"    *out_{i} = std::get<{i}>(_result);", 1)
+            self._write("    return 0;", 1)
         else:
             self._write(f"    return {internal}({', '.join(call_args)});", 1)
 
@@ -372,6 +386,10 @@ class CppEmitter(BaseEmitter):
         if type_hint.startswith("list["):
             inner = type_hint[5:-1] if type_hint.endswith("]") else "auto"
             return f"std::vector<{self._map_type(inner)}>"
+        if type_hint.startswith("tuple[") and type_hint.endswith("]"):
+            inner = type_hint[6:-1]
+            parts = [self._map_type(p.strip()) for p in inner.split(",")]
+            return f"std::tuple<{', '.join(parts)}>"
         if type_hint.startswith("dict["):
             inner = type_hint[5:-1] if type_hint.endswith("]") else "std::string, auto"
             parts = inner.split(",", 1)
@@ -382,6 +400,21 @@ class CppEmitter(BaseEmitter):
 
     def _is_list_type(self, type_hint: str) -> bool:
         return type_hint.startswith("list[") or type_hint == "list"
+
+    def _is_scalar_tuple_return(self, type_hint: Optional[str]) -> bool:
+        if not type_hint or not type_hint.startswith("tuple[") or not type_hint.endswith("]"):
+            return False
+        inner = type_hint[6:-1]
+        for part in inner.split(","):
+            ct = self._c_scalar_type(part.strip())
+            if ct == "void*" or ct == "auto" or ct.startswith("std::"):
+                return False
+        return True
+
+    def _tuple_scalar_types(self, type_hint: Optional[str]) -> List[str]:
+        if not self._is_scalar_tuple_return(type_hint):
+            return []
+        return [p.strip() for p in type_hint[6:-1].split(",")]
 
     def _c_scalar_type(self, type_hint: Optional[str]) -> str:
         if not type_hint:
@@ -414,6 +447,8 @@ class CppEmitter(BaseEmitter):
             return "void"
         if self._is_list_type(type_hint):
             return f"{self._c_elem_type(type_hint)}*"
+        if self._is_scalar_tuple_return(type_hint):
+            return "int"
         return self._c_scalar_type(type_hint)
 
     def _vector_inner_type(self, vector_type: str) -> str:

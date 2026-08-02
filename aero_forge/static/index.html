@@ -381,12 +381,13 @@
     .log-line.error { color: var(--terminal-error); }
     .deck-control-group { display: flex; align-items: center; gap: 0.35rem; font-size: 0.75rem; color: var(--muted); }
     .deck-control-group select { background: var(--editor); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 0.25rem 0.4rem; font-size: 0.75rem; }
-    .advanced-engine-details { width: 100%; border: 1px solid var(--border); border-radius: 4px; padding: 0.4rem 0.6rem; margin-top: 0.25rem; background: var(--panel); }
+    .advanced-engine-details { width: 100%; border: 1px solid var(--border); border-radius: 4px; padding: 0.4rem 0.6rem; margin-top: 0.25rem; background: var(--panel); position: relative; z-index: 1050; }
     .advanced-engine-details summary { list-style: none; cursor: pointer; font-size: 0.75rem; color: var(--muted); display: flex; align-items: center; user-select: none; }
     .advanced-engine-details summary::-webkit-details-marker { display: none; }
     .advanced-engine-details summary::before { content: '▸'; margin-right: 0.4rem; color: var(--accent); transition: transform 0.15s; }
     .advanced-engine-details[open] summary::before { content: '▾'; }
     .advanced-engine-details .deck-control-group { margin-top: 0.5rem; }
+    .advanced-settings { overflow-y: auto; max-height: calc(100vh - 120px); position: relative; z-index: 1050; }
     .template-bar { padding: 0.5rem; border-bottom: 1px solid var(--border); display: flex; gap: 0.4rem; align-items: center; background: var(--panel); overflow: hidden; box-sizing: border-box; }
     .template-bar select { flex: 1; min-width: 0; background: var(--editor); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 0.35rem 0.4rem; font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .template-bar button { flex-shrink: 0; font-size: 0.75rem; padding: 0.35rem 0.6rem; }
@@ -672,33 +673,35 @@
                 </div>
                 <details id="advanced-engine-settings" class="advanced-engine-details">
                   <summary>Advanced Engine Settings</summary>
-                  <div class="deck-control-group">
-                    <label for="engine-backend">Engine Backend</label>
-                    <select id="engine-backend">
-                      <option value="hin_cpu">HIN-CPU Multi-Threaded (Wavefront solver)</option>
-                      <option value="hin_gpu">HIN-GPU / CUDA / Vulkan</option>
-                      <option value="hin_wasm">HIN-WASM (Web target)</option>
-                    </select>
-                  </div>
-                  <div class="deck-control-group">
-                    <label for="wavefront-parallelism">Wavefront Solver Parallelism</label>
-                    <input id="wavefront-parallelism" type="number" min="1" max="64" value="4" style="width: 100%; padding: 0.3rem 0.4rem; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 4px;">
-                  </div>
-                  <div class="deck-control-group">
-                    <label for="precision-shield-mode">Precision Shield Mode</label>
-                    <select id="precision-shield-mode">
-                      <option value="ieee">IEEE Float Precision</option>
-                      <option value="fast_math">Fast-Math</option>
-                      <option value="shield">Precision Shield checks</option>
-                    </select>
-                  </div>
-                  <div class="deck-control-group">
-                    <label for="hin-jit-opt-level">HIN JIT Optimization Level</label>
-                    <select id="hin-jit-opt-level">
-                      <option value="0">0 - Debug</option>
-                      <option value="1">1 - Balanced</option>
-                      <option value="2">2 - Max Graph Fusion &amp; SIMD</option>
-                    </select>
+                  <div class="advanced-settings">
+                    <div class="deck-control-group">
+                      <label for="engine-backend">Engine Backend</label>
+                      <select id="engine-backend">
+                        <option value="hin_cpu">HIN-CPU Multi-Threaded (Wavefront solver)</option>
+                        <option value="hin_gpu">HIN-GPU / CUDA / Vulkan</option>
+                        <option value="hin_wasm">HIN-WASM (Web target)</option>
+                      </select>
+                    </div>
+                    <div class="deck-control-group">
+                      <label for="wavefront-parallelism">Wavefront Solver Parallelism</label>
+                      <input id="wavefront-parallelism" type="number" min="1" max="64" value="4" style="width: 100%; padding: 0.3rem 0.4rem; background: var(--panel-2); color: var(--text); border: 1px solid var(--border); border-radius: 4px;">
+                    </div>
+                    <div class="deck-control-group">
+                      <label for="precision-shield-mode">Precision Shield Mode</label>
+                      <select id="precision-shield-mode">
+                        <option value="ieee">IEEE Float Precision</option>
+                        <option value="fast_math">Fast-Math</option>
+                        <option value="shield">Precision Shield checks</option>
+                      </select>
+                    </div>
+                    <div class="deck-control-group">
+                      <label for="hin-jit-opt-level">HIN JIT Optimization Level</label>
+                      <select id="hin-jit-opt-level">
+                        <option value="0">0 - Debug</option>
+                        <option value="1">1 - Balanced</option>
+                        <option value="2">2 - Max Graph Fusion &amp; SIMD</option>
+                      </select>
+                    </div>
                   </div>
                 </details>
                 <div class="status-bar">

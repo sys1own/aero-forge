@@ -247,6 +247,26 @@ def _is_c_abi_tuple_return(type_hint: str) -> bool:
     return _tuple_list_inner(type_hint) is not None
 
 
+def _tuple_scalar_types(type_hint: str) -> Optional[List[str]]:
+    """Return the scalar element types for ``tuple[T1, T2, ...]`` style returns.
+
+    Only tuples of C-ABI scalar types are supported; tuples containing lists,
+    nested tuples, or strings are rejected.
+    """
+    th = (type_hint or "").strip()
+    if not (th.startswith("tuple[") and th.endswith("]")):
+        return None
+    inner = th[6:-1].strip()
+    parts = [p.strip() for p in inner.split(",") if p.strip()]
+    if not parts or not all(_is_c_abi_scalar(p) for p in parts):
+        return None
+    return parts
+
+
+def _is_c_abi_scalar_tuple_return(type_hint: str) -> bool:
+    return _tuple_scalar_types(type_hint) is not None
+
+
 def _is_c_abi_contract(contract: ContractEntry) -> bool:
     """Return True when *contract* can be exposed through an extern "C" ABI."""
     if not contract.signature:
@@ -259,6 +279,7 @@ def _is_c_abi_contract(contract: ContractEntry) -> bool:
         _is_c_abi_list(return_type)
         or _is_c_abi_scalar(return_type)
         or _is_c_abi_tuple_return(return_type)
+        or _is_c_abi_scalar_tuple_return(return_type)
     ):
         return False
     return all(_is_c_abi_list(t) or _is_c_abi_scalar(t) for _, t in args)
@@ -392,7 +413,11 @@ def _generic_c_abi_contract_spec(
         name, args, return_type = _parse_signature(contract.signature)
     except Exception:
         return None
-    if not _is_c_abi_list(return_type) and not _is_c_abi_scalar(return_type):
+    if not (
+        _is_c_abi_list(return_type)
+        or _is_c_abi_scalar(return_type)
+        or _is_c_abi_scalar_tuple_return(return_type)
+    ):
         return None
     if not all(_is_c_abi_list(t) or _is_c_abi_scalar(t) for _, t in args):
         return None
@@ -575,6 +600,144 @@ def _generic_c_abi_contract_spec(
             body=body,
         )
         return EngineSpec(name=pkg_name, root=module(name=pkg_name, children=[func]))
+
+    # Case 1.5: scalar tuple return (e.g., tuple[float, float])
+    if _is_c_abi_scalar_tuple_return(return_type):
+        tuple_types = _tuple_scalar_types(return_type)
+        if (
+            len(tuple_types) == 2
+            and len(list_args) == 1
+            and is_float_list(list_args[0][1])
+        ):
+            list_name, _ = list_args[0]
+            count = binding(
+                "count", call(f"{list_name}.size", []), type_hint="size_t"
+            )
+            peak = binding("peak", literal(0.0), type_hint=tuple_types[0])
+            sum_sq = binding(
+                "sum_sq", literal(0.0), type_hint=tuple_types[1]
+            )
+            guard = ASTNode(
+                kind="if",
+                children=[
+                    call(f"{list_name}.empty", []),
+                    block(
+                        children=[
+                            return_node(
+                                call(
+                                    "std::make_tuple",
+                                    [literal(0.0), literal(0.0)],
+                                )
+                            )
+                        ]
+                    ),
+                ],
+            )
+            update_peak = ASTNode(
+                kind="if",
+                children=[
+                    binary_op(reference("x"), ">", reference("peak")),
+                    block(
+                        children=[
+                            binding(
+                                "peak", reference("x"), type_hint=tuple_types[0]
+                            )
+                        ]
+                    ),
+                ],
+            )
+            update_sum_sq = ASTNode(
+                kind="aug_assign",
+                name="sum_sq",
+                value="+",
+                children=[
+                    binary_op(reference("x"), "*", reference("x"))
+                ],
+            )
+            loop = ASTNode(
+                kind="for",
+                name="x",
+                children=[
+                    reference(list_name),
+                    block(children=[update_peak, update_sum_sq]),
+                ],
+            )
+            rms = binding(
+                "rms",
+                call(
+                    "std::sqrt",
+                    [binary_op(reference("sum_sq"), "/", reference("count"))],
+                ),
+                type_hint=tuple_types[1],
+            )
+            ret = return_node(
+                call(
+                    "std::make_tuple",
+                    [reference("peak"), reference("rms")],
+                )
+            )
+            func = function(
+                name,
+                params=[param(a, t) for a, t in args],
+                return_type=return_type,
+                body=[count, guard, peak, sum_sq, loop, rms, ret],
+            )
+            return EngineSpec(
+                name=pkg_name, root=module(name=pkg_name, children=[func])
+            )
+
+        # Generic scalar tuple: sum all inputs and return one total per output.
+        total = binding("total", scalar_literal(0), type_hint=tuple_types[0])
+        body: List[ASTNode] = [total]
+        for scalar_name, _ in scalar_args:
+            body.append(
+                ASTNode(
+                    kind="aug_assign",
+                    name="total",
+                    value="+",
+                    children=[reference(scalar_name)],
+                )
+            )
+        for l_name, _ in list_args:
+            loop = ASTNode(
+                kind="for",
+                name="x",
+                children=[
+                    reference(l_name),
+                    block(
+                        children=[
+                            ASTNode(
+                                kind="aug_assign",
+                                name="total",
+                                value="+",
+                                children=[reference("x")],
+                            )
+                        ]
+                    ),
+                ],
+            )
+            body.append(loop)
+        out_names = [
+            binding(f"out_{i}", reference("total"), type_hint=t)
+            for i, t in enumerate(tuple_types)
+        ]
+        body.extend(out_names)
+        ret = return_node(
+            call(
+                "std::make_tuple",
+                [reference(f"out_{i}") for i in range(len(tuple_types))],
+            )
+        )
+        body.append(ret)
+        func = function(
+            name,
+            params=[param(a, t) for a, t in args],
+            return_type=return_type,
+            body=body,
+        )
+        return EngineSpec(
+            name=pkg_name, root=module(name=pkg_name, children=[func])
+        )
 
     # Case 2: list return
     if _is_c_abi_list(return_type):
@@ -882,6 +1045,10 @@ def _c_function_decl(contract: ContractEntry) -> str:
             c_params.append(f"{emitter._c_scalar_type(t)} {a}")
     if emitter._is_list_type(return_type):
         c_params.append("size_t* out_len")
+    tuple_scalar_types = _tuple_scalar_types(return_type)
+    if tuple_scalar_types:
+        for i, t in enumerate(tuple_scalar_types):
+            c_params.append(f"{emitter._c_scalar_type(t)}* out_{i}")
     ret = emitter._c_return_type(return_type)
     return f'    AERO_EXPORT {ret} {name}({", ".join(c_params)});'
 
