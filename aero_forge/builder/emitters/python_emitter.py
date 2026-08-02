@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 from typing import List, Optional
 
 from aero_forge.builder.emitters.base import BaseEmitter
@@ -120,6 +121,13 @@ class PythonEmitter(BaseEmitter):
             v = self._map_type(parts[1].strip()) if len(parts) > 1 else "Any"
             return f"dict[{k}, {v}]"
         return type_map.get(type_hint, type_hint)
+
+    def emit(self, spec: EngineSpec) -> str:
+        """Render *spec* and normalize every generated class to have ``__init__``."""
+        source = super().emit(spec)
+        from aero_forge.scaffold.syntax_guard import normalize_python_module
+
+        return normalize_python_module(source)
 
     def _bool_literal(self, value: bool) -> str:
         return "True" if value else "False"

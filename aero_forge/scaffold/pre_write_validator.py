@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from aero_forge.orchestrator.router import classify_build_intent
 from aero_forge.scaffold.cargo_runner import cargo_build, maturin_build
+from aero_forge.scaffold.module_guard import ensure_package_structure
 from aero_forge.scaffold.workspace import OutOfTreeWorkspace
 
 
@@ -562,6 +563,110 @@ def _check_dynamic_reflection(tree: ast.AST) -> None:
             )
 
 
+def _check_class_initialization(tree: ast.AST) -> None:
+    """Reject classes that lack an accessible ``__init__`` method.
+
+    ``@dataclass`` and ``Enum``/``IntEnum`` classes are exempt because they
+    receive an auto-generated constructor.
+    """
+    from aero_forge.scaffold.syntax_guard import _is_auto_initialized_class
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        if _is_auto_initialized_class(node):
+            continue
+        has_init = any(
+            isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and stmt.name == "__init__"
+            for stmt in node.body
+        )
+        if not has_init:
+            raise ValidationError(
+                f"Class '{node.name}' is missing an __init__ method{_format_line(node)}. "
+                "Every generated class must declare an explicit constructor.",
+                output="",
+            )
+
+
+def validate_blueprint_class_contracts(
+    workspace_root: Path,
+    blueprint_path: Optional[Path] = None,
+) -> None:
+    """Verify classes and methods referenced by blueprint contracts exist in sources.
+
+    Contract names of the form ``ClassName.__init__`` or ``ClassName.method`` are
+    resolved against Python files declared in the blueprint manifest.  Missing
+    classes or methods raise ``ValidationError`` before any file is promoted.
+    """
+    bp_path = blueprint_path or workspace_root / "blueprint.aero"
+    if not bp_path.is_file():
+        return
+
+    from aero_forge.blueprint import parse_blueprint
+
+    try:
+        blueprint = parse_blueprint(bp_path)
+    except Exception:
+        return
+
+    contracts = getattr(blueprint, "contracts", []) or getattr(blueprint, "abi_contracts", [])
+    manifest = getattr(blueprint, "manifest", [])
+    py_files = [
+        workspace_root / entry.path
+        for entry in manifest
+        if str(getattr(entry, "path", "")).endswith(".py")
+    ]
+
+    for contract in contracts:
+        name = getattr(contract, "name", "") or getattr(contract, "export_symbol", "")
+        if "." not in name:
+            continue
+        class_name, member_name = name.split(".", 1)
+        found_class = False
+        found_member = False
+        for path in py_files:
+            if not path.is_file():
+                continue
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except (SyntaxError, OSError, UnicodeDecodeError):
+                continue
+            for class_node in ast.walk(tree):
+                if not isinstance(class_node, ast.ClassDef):
+                    continue
+                if class_node.name != class_name:
+                    continue
+                found_class = True
+                if member_name == "__init__":
+                    found_member = any(
+                        isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and stmt.name == "__init__"
+                        for stmt in class_node.body
+                    )
+                else:
+                    found_member = any(
+                        isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and stmt.name == member_name
+                        for stmt in class_node.body
+                    )
+                if found_member:
+                    break
+            if found_class and found_member:
+                break
+
+        if not found_class:
+            raise ValidationError(
+                f"Contract '{name}' references class '{class_name}' not found in generated sources",
+                output="",
+            )
+        if not found_member:
+            raise ValidationError(
+                f"Contract '{name}' references method '{member_name}' not found in class '{class_name}'",
+                output="",
+            )
+
+
 def _run_python_static_checks(source: str) -> None:
     """Parse *source* and enforce the generator-side static-analysis rules."""
     try:
@@ -573,6 +678,7 @@ def _run_python_static_checks(source: str) -> None:
     _check_raw_enum_state_machines(tree)
     _check_empty_matrix_returns(tree)
     _check_dynamic_reflection(tree)
+    _check_class_initialization(tree)
 
 
 class BuildOutputError(ValidationError):
@@ -730,11 +836,19 @@ class PreWriteValidator:
         # before any sandboxed command or filesystem promotion.
         # Enforce the workspace blueprint before any per-file checks.
         validate_blueprint_manifest(workspace)
+        validate_blueprint_class_contracts(workspace)
 
         if lang == "python":
+            ensure_package_structure(workspace)
+            from aero_forge.scaffold.syntax_guard import normalize_python_module
+
             for path in workspace.rglob("*.py"):
                 try:
-                    _run_python_static_checks(path.read_text(encoding="utf-8"))
+                    text = path.read_text(encoding="utf-8")
+                    normalized = normalize_python_module(text)
+                    if normalized != text:
+                        path.write_text(normalized, encoding="utf-8")
+                    _run_python_static_checks(normalized)
                 except ValidationError as exc:
                     exc.output = f"{path}: {exc}"
                     raise

@@ -61,6 +61,65 @@ def _python_stub(name: str) -> str:
     )
 
 
+def ensure_package_structure(workspace: Path) -> List[Path]:
+    """Ensure every generated Python sub-directory is a package with ``__init__.py``.
+
+    For each directory that contains ``.py`` files and does not already have an
+    ``__init__.py``, one is created (or updated) exporting ``__all__`` with the
+    public classes and functions found in that directory.
+    """
+    workspace = Path(workspace).resolve()
+    created: List[Path] = []
+    skip_dirs = {"__pycache__", ".git", ".pytest_cache", "venv", ".venv", "node_modules"}
+    skip_names = {"test", "tests"}
+
+    # Discover directories that contain Python source files.
+    package_dirs: set = set()
+    for py_file in workspace.rglob("*.py"):
+        if not py_file.is_file():
+            continue
+        if py_file.name == "__init__.py":
+            package_dirs.add(py_file.parent)
+            continue
+        if any(part in skip_dirs or part.lower() in skip_names for part in py_file.parts):
+            continue
+        package_dirs.add(py_file.parent)
+
+    for package_dir in sorted(package_dirs):
+        init_path = package_dir / "__init__.py"
+        public_names: List[str] = []
+        for py_file in sorted(package_dir.glob("*.py")):
+            if py_file.name == "__init__.py":
+                continue
+            try:
+                text = py_file.read_text(encoding="utf-8")
+                tree = ast.parse(text)
+            except (SyntaxError, OSError, UnicodeDecodeError):
+                continue
+            for node in tree.body:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    if not node.name.startswith("_"):
+                        public_names.append(node.name)
+
+        if not init_path.is_file():
+            all_list = ", ".join(repr(n) for n in public_names)
+            init_path.write_text(f"__all__ = [{all_list}]\n", encoding="utf-8")
+            created.append(init_path)
+            logger.info("Created package init %s", init_path)
+        else:
+            # If an __init__.py exists but has no __all__, append a generated one.
+            existing = init_path.read_text(encoding="utf-8")
+            if "__all__" not in existing:
+                all_list = ", ".join(repr(n) for n in public_names)
+                init_path.write_text(
+                    existing.rstrip("\n") + f"\n\n__all__ = [{all_list}]\n",
+                    encoding="utf-8",
+                )
+                created.append(init_path)
+
+    return created
+
+
 def reify_missing_modules(workspace: Path) -> List[Path]:
     """Scan *workspace* for declared modules whose files are absent and create stubs.
 
