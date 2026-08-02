@@ -381,13 +381,13 @@
     .log-line.error { color: var(--terminal-error); }
     .deck-control-group { display: flex; align-items: center; gap: 0.35rem; font-size: 0.75rem; color: var(--muted); }
     .deck-control-group select { background: var(--editor); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 0.25rem 0.4rem; font-size: 0.75rem; }
-    .advanced-engine-details { width: 100%; border: 1px solid var(--border); border-radius: 4px; padding: 0.4rem 0.6rem; margin-top: 0.25rem; background: var(--panel); position: relative; z-index: 1050; }
+    .advanced-engine-details { width: 100%; border: 1px solid var(--border); border-radius: 4px; padding: 0.4rem 0.6rem; margin-top: 0.25rem; background: var(--panel); position: relative; z-index: 1000; }
     .advanced-engine-details summary { list-style: none; cursor: pointer; font-size: 0.75rem; color: var(--muted); display: flex; align-items: center; user-select: none; }
     .advanced-engine-details summary::-webkit-details-marker { display: none; }
     .advanced-engine-details summary::before { content: '▸'; margin-right: 0.4rem; color: var(--accent); transition: transform 0.15s; }
     .advanced-engine-details[open] summary::before { content: '▾'; }
     .advanced-engine-details .deck-control-group { margin-top: 0.5rem; }
-    .advanced-settings { overflow-y: auto; max-height: calc(100vh - 120px); position: relative; z-index: 1050; }
+    .advanced-settings { overflow-y: auto; max-height: 90vh; position: fixed; right: 1rem; top: 5rem; width: min(320px, calc(100vw - 2rem)); background: var(--panel); border: 1px solid var(--border); border-radius: 4px; padding: 0.6rem; box-shadow: 0 8px 24px rgba(0,0,0,0.4); z-index: 1000; }
     .template-bar { padding: 0.5rem; border-bottom: 1px solid var(--border); display: flex; gap: 0.4rem; align-items: center; background: var(--panel); overflow: hidden; box-sizing: border-box; }
     .template-bar select { flex: 1; min-width: 0; background: var(--editor); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 0.35rem 0.4rem; font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .template-bar button { flex-shrink: 0; font-size: 0.75rem; padding: 0.35rem 0.6rem; }
