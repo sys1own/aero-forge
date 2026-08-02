@@ -105,12 +105,12 @@ def test_synthesize_with_short_flags(tmp_path: Path) -> None:
     assert "interactive=True" in result.stdout
 
 
-def test_unsupported_runtime_raises() -> None:
+def test_unsupported_runtime_returns_empty() -> None:
     strategy = _strategy()
     strategy["primary_entrypoint"]["runtime"] = "go"
     engine = EntrypointAdapterEngine(strategy, "/tmp")
-    with pytest.raises(NotImplementedError):
-        engine.synthesize_root_entrypoint()
+    result = engine.synthesize_root_entrypoint()
+    assert result == ""
 
 
 def _strategy_with_custom_flags() -> dict:
