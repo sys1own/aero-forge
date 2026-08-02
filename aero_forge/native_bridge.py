@@ -243,6 +243,33 @@ def _ctypes_loader_source(
             continue
         all_names.append(func.name)
 
+        # Special-case matrix multiplication: the C ABI writes to a caller-supplied
+        # output buffer and returns void, so we allocate the output and return a list.
+        if func.name == "multiply_matrices":
+            lines.extend([
+                "_LIB.multiply_matrices.argtypes = [",
+                "    ctypes.POINTER(ctypes.c_double),",
+                "    ctypes.POINTER(ctypes.c_double),",
+                "    ctypes.POINTER(ctypes.c_double),",
+                "    ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t,",
+                "]",
+                "_LIB.multiply_matrices.restype = None",
+                "",
+                "def multiply_matrices(a, b, rows, cols, inner):",
+                "    _a = (ctypes.c_double * len(a))(*a)",
+                "    _b = (ctypes.c_double * len(b))(*b)",
+                "    _out = (ctypes.c_double * (rows * cols))()",
+                "    _LIB.multiply_matrices(",
+                "        ctypes.cast(_a, ctypes.POINTER(ctypes.c_double)),",
+                "        ctypes.cast(_b, ctypes.POINTER(ctypes.c_double)),",
+                "        ctypes.cast(_out, ctypes.POINTER(ctypes.c_double)),",
+                "        rows, cols, inner,",
+                "    )",
+                "    return list(_out)",
+                "",
+            ])
+            continue
+
         arg_info: List[Tuple[str, str, str, str]] = []
         for arg in func.args.args:
             ann = _py_ann(arg.annotation)

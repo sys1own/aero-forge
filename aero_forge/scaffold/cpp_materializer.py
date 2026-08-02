@@ -275,6 +275,8 @@ def _is_c_abi_contract(contract: ContractEntry) -> bool:
         name, args, return_type = _parse_signature(contract.signature)
     except Exception:
         return False
+    if _is_special_cpp_contract(contract):
+        return True
     if not (
         _is_c_abi_list(return_type)
         or _is_c_abi_scalar(return_type)
@@ -781,6 +783,14 @@ def _contract_to_engine_spec(
     return _generic_c_abi_contract_spec(pkg_name, contract)
 
 
+def _list_element_type(type_hint: str) -> str:
+    """Return the inner element type of a ``list[T]`` hint, lower-cased."""
+    th = (type_hint or "").strip()
+    if th.startswith("list[") and th.endswith("]"):
+        return th[5:-1].strip().lower()
+    return ""
+
+
 def _is_special_cpp_contract(contract: ContractEntry) -> bool:
     """Return True for contracts that ship a hand-written C++ implementation."""
     if not contract.signature:
@@ -789,6 +799,14 @@ def _is_special_cpp_contract(contract: ContractEntry) -> bool:
         name, args, return_type = _parse_signature(contract.signature)
     except Exception:
         return False
+    if name == "multiply_matrices":
+        float_list_args = [
+            a for a, t in args if _is_c_abi_list(t) and _map_py_type(_list_element_type(t)) == "float"
+        ]
+        int_scalar_args = [
+            a for a, t in args if _is_c_abi_scalar(t) and _map_py_type(t) == "int"
+        ]
+        return len(float_list_args) >= 2 and len(int_scalar_args) >= 3
     if name == "compute_sdf_sphere":
         return (
             len(args) == 4
@@ -833,6 +851,19 @@ def _special_cpp_source(pkg_name: str, contract: ContractEntry) -> str:
         return """extern "C" AERO_EXPORT double compute_sdf_sphere(double x, double y, double z, double radius) {
     return std::sqrt(x * x + y * y + z * z) - radius;
 }"""
+    if name == "multiply_matrices" and _is_special_cpp_contract(contract):
+        return '''extern "C" AERO_EXPORT void multiply_matrices(const double* a, const double* b, double* out, size_t rows, size_t cols, size_t inner) {
+    if (!a || !b || !out) return;
+    for (size_t i = 0; i < rows; ++i) {
+        for (size_t j = 0; j < cols; ++j) {
+            double sum = 0.0;
+            for (size_t k = 0; k < inner; ++k) {
+                sum += a[i * inner + k] * b[k * cols + j];
+            }
+            out[i * cols + j] = sum;
+        }
+    }
+}'''
     if "march" in name and "ray" in name:
         list_args = [a for a, t in args if _is_c_abi_list(t)]
         scalar_args = [a for a, t in args if _is_c_abi_scalar(t)]
@@ -1010,6 +1041,8 @@ def _c_function_decl(contract: ContractEntry) -> str:
     from aero_forge.scaffold.polyglot_materializer import _parse_signature
 
     name, args, return_type = _parse_signature(contract.signature)
+    if name == "multiply_matrices" and _is_special_cpp_contract(contract):
+        return '    AERO_EXPORT void multiply_matrices(const double* a, const double* b, double* out, size_t rows, size_t cols, size_t inner);'
     if _is_special_cpp_contract(contract):
         list_args = [a for a, t in args if _is_c_abi_list(t)]
         return_list = _is_c_abi_list(return_type) or _is_c_abi_tuple_return(return_type)
