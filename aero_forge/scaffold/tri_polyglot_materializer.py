@@ -24,6 +24,7 @@ from aero_forge.blueprint import (
 from aero_forge.errors import BuildStageError
 from aero_forge.builder import language_router
 from aero_forge.native_bridge import _ctypes_loader_source
+from aero_forge.scaffold.cargo_manifest import sanitize_crate_name
 from aero_forge.scaffold.cargo_runner import cargo_build
 from aero_forge.scaffold.entrypoint_adapter import EntrypointAdapterEngine
 from aero_forge.scaffold.cpp_materializer import (
@@ -965,7 +966,6 @@ class TriPolyglotMaterializer:
         )
         project = blueprint.project or "tri_polyglot_project"
         pkg_name = _sanitize_module_name(project)
-        rust_crate_name = f"aero_forge_native_{pkg_name}"
 
         contracts = _normalize_tri_polyglot_contracts(blueprint)
         blueprint.contracts = contracts
@@ -991,6 +991,8 @@ class TriPolyglotMaterializer:
         cpp_dir.mkdir(parents=True, exist_ok=True)
         rust_dir = self._resolve_rust_dir(blueprint, pkg_name)
         rust_dir.mkdir(parents=True, exist_ok=True)
+        rust_dir_rel = rust_dir.relative_to(self.workspace)
+        rust_crate_name = sanitize_crate_name("_".join(rust_dir_rel.parts))
         tests_dir = self.workspace / "tests"
         tests_dir.mkdir(exist_ok=True)
 

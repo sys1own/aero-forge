@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from aero_forge.errors import UserError
+from aero_forge.scaffold.cargo_manifest import sanitize_crate_name
 
 TOOL_ROOT = Path(__file__).resolve().parents[1]
 
@@ -436,7 +437,6 @@ class BlueprintRegenerator:
         entry_path = _lookup(entry, "path") or "Cargo.toml"
         path = Path(entry_path)
         project = _lookup(blueprint, "project", "aero_forge_project")
-        architecture = _lookup(blueprint, "architecture", "pure_python")
 
         if path.name == "pyproject.toml":
             return f"""[build-system]
@@ -449,28 +449,43 @@ version = "0.1.0"
 description = "Aero-Forge generated project"
 """
         if path.name == "Cargo.toml":
-            if "rust_core" in entry_path:
+            manifest = _lookup(blueprint, "manifest") or []
+            manifest_paths = {_lookup(e, "path") for e in manifest}
+            crate_dir = path.parent
+            lib_path = str(crate_dir / "src" / "lib.rs").replace("/./", "/")
+            if lib_path in manifest_paths:
+                # Crate manifest: use the target directory as the package name.
+                crate_name = (
+                    sanitize_crate_name("_".join(crate_dir.parts))
+                    if crate_dir != Path(".")
+                    else sanitize_crate_name(project)
+                )
                 return f"""[package]
-name = "{project}_core"
+name = "{crate_name}"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "{project}_core"
+name = "{crate_name}"
 crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = {{ version = "0.20.3", features = ["extension-module", "abi3-py39"] }}
 """
-            return f"""[package]
-name = "{project}"
-version = "0.1.0"
-edition = "2021"
-
-[workspace]
-members = ["rust_core"]
-
-[dependencies]
+            # Workspace manifest: reference every crate directory discovered.
+            members: List[str] = []
+            for e in manifest:
+                e_path = _lookup(e, "path")
+                if not e_path or Path(e_path).name != "Cargo.toml":
+                    continue
+                e_dir = Path(e_path).parent
+                e_lib = str(e_dir / "src" / "lib.rs").replace("/./", "/")
+                if e_lib in manifest_paths and e_dir != Path("."):
+                    members.append(str(e_dir))
+            members_text = json.dumps(sorted(set(members)))
+            return f"""[workspace]
+members = {members_text}
+resolver = "2"
 """
         return f"# {project} manifest\n"
 

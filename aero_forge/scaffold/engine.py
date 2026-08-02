@@ -238,13 +238,20 @@ class Engine:
         write_cargo_config(crate_root)
 
         if workspace_root is not None:
-            self._emit_from_blueprint(crate_root, Path(workspace_root))
+            self._emit_from_blueprint(crate_root, Path(workspace_root), crate_name)
             write_cargo_config(Path(workspace_root))
 
         return crate_root
 
-    def _emit_from_blueprint(self, crate_root: Path, workspace_root: Path) -> None:
+    def _emit_from_blueprint(
+        self, crate_root: Path, workspace_root: Path, crate_name: str
+    ) -> None:
         """Copy generated crate files to the paths declared in ``workspace_root/blueprint.aero``.
+
+        The ``[package] name`` in each emitted ``Cargo.toml`` is rewritten to
+        match the target crate directory so workspace builds do not collide.
+        The ``[lib] name`` and Python module name are left unchanged so the
+        generated Python loader can still locate the shared library.
 
         Raises ``BlueprintValidationError`` if a declared Rust/TOML file cannot
         be emitted at the expected location.
@@ -286,19 +293,29 @@ class Engine:
             crate_dirs = [sorted(cargo_dirs, key=lambda p: str(p))[0]]
 
         # Copy the generated crate into every declared crate directory.
+        # Each crate gets a unique package.name so workspace builds do not collide.
+        base_cargo = (crate_root / "Cargo.toml").read_text(encoding="utf-8")
+        base_lib = (crate_root / "src" / "lib.rs").read_text(encoding="utf-8")
         for crate_dir in crate_dirs:
             dest_dir = workspace_root / crate_dir
             dest_dir.mkdir(parents=True, exist_ok=True)
-            (dest_dir / "Cargo.toml").write_text(
-                (crate_root / "Cargo.toml").read_text(encoding="utf-8"),
-                encoding="utf-8",
+
+            local_crate_name = (
+                _rust_identifier("_".join(crate_dir.parts))
+                if crate_dir != Path(".")
+                else crate_name
             )
+            package_replacement = f'[package]\nname = "{local_crate_name}"'
+            cargo = base_cargo.replace(
+                f'[package]\nname = "{crate_name}"',
+                package_replacement,
+                1,
+            )
+            (dest_dir / "Cargo.toml").write_text(cargo, encoding="utf-8")
+
             src_dir = dest_dir / "src"
             src_dir.mkdir(parents=True, exist_ok=True)
-            (src_dir / "lib.rs").write_text(
-                (crate_root / "src" / "lib.rs").read_text(encoding="utf-8"),
-                encoding="utf-8",
-            )
+            (src_dir / "lib.rs").write_text(base_lib, encoding="utf-8")
             write_cargo_config(dest_dir)
 
         # If a root Cargo.toml exists without a corresponding lib.rs, make it a
