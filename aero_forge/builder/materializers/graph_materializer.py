@@ -525,6 +525,7 @@ pub extern "C" fn {symbol}() -> i64 {{
 name = "{node_id}"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 [lib]
 name = "{node_id}"
@@ -589,6 +590,8 @@ print("rust out:", list(result))
 
         # Emit required build manifests even if the LLM omitted them.
         package_dirs = sorted({Path(p).parts[0] for p in source_files if "/" in p})
+        # Rust crates always get a build.rs so Cargo never hits E0601.
+        needs_build_rs = lang == "rust"
         if lang == "rust" and any(p.endswith("src/lib.rs") for p in source_files):
             for d in package_dirs:
                 cargo_path = f"{d}/Cargo.toml"
@@ -621,6 +624,33 @@ add_library({node_id} SHARED src/kernels.cpp)
 target_include_directories({node_id} PUBLIC include)
 target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
 """
+
+        # Rust crates always ship a valid build.rs so Cargo never hits E0601.
+        if needs_build_rs:
+            build_rs_content = """fn main() {
+    // Aero-Forge build script configuration.
+    println!("cargo:rerun-if-changed=build.rs");
+}
+"""
+            # Add build.rs next to every Cargo.toml we emitted.
+            cargo_tomls = [p for p in files if Path(p).name == "Cargo.toml"]
+            if not cargo_tomls and source_files:
+                cargo_tomls = [p for p in source_files if Path(p).name == "Cargo.toml"]
+            for cargo_path in cargo_tomls:
+                build_path = str(Path(cargo_path).parent / "build.rs")
+                if build_path == "." or build_path == "/":
+                    build_path = "build.rs"
+                if build_path not in files:
+                    files[build_path] = build_rs_content
+            # Ensure every Cargo.toml wires build.rs.
+            for path, content in list(files.items()):
+                if Path(path).name == "Cargo.toml":
+                    if "build = \"build.rs\"" not in content:
+                        files[path] = content.replace(
+                            "[package]\n",
+                            "[package]\nbuild = \"build.rs\"\n",
+                            1,
+                        )
 
         return [CodeArtifact(file_path=p, content=c, language=lang) for p, c in files.items()]
 

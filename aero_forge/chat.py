@@ -667,27 +667,28 @@ class ChatSession:
         """Build the workspace-aware copilot system prompt used by the web UI."""
         prompt = self.copilot_system_prompt
         status = get_blueprint_status(self.output_dir)
-        if status["llm_initialized"]:
+        auto_generated = status.get("auto_generated", False)
+        source_count = status.get("source_count", 0)
+        exists = status.get("exists", False)
+
+        if auto_generated or not exists or source_count == 0:
+            workspace_state = "draft"
             workspace_status = (
-                "Workspace has an initialized blueprint; focus on update/refactor planning that "
-                "integrates with the existing architecture."
-            )
-        elif status["exists"]:
-            workspace_status = (
-                "Workspace blueprint exists but is not LLM-initialized; treat the current "
-                "files as a preliminary snapshot and focus on drafting an initial build prompt."
-            )
-        elif status["source_count"]:
-            workspace_status = (
-                "Workspace has source files but no blueprint; treat the current files as a "
-                "preliminary snapshot and focus on drafting an initial build prompt."
+                "Workspace is empty/blank. The blueprint (if any) is a placeholder. "
+                "focus on understanding the user's intent and drafting an initial build prompt "
+                "from scratch; do NOT reference existing build pipelines, existing contracts, or attempt updates."
             )
         else:
+            workspace_state = "active"
             workspace_status = (
-                "Workspace is empty; focus on understanding the user's intent and "
-                "drafting an initial build prompt with target and contracts."
+                "Workspace is active with existing source files and an initialized blueprint. "
+                "Analyze the existing architecture, entrypoints, and contracts, then design "
+                "updates and expansions that integrate cleanly with the current code."
             )
-        prompt += f"\n\n[WORKSPACE STATUS]\n{workspace_status}"
+
+        prompt += (
+            f"\n\n[WORKSPACE STATE]\n{workspace_state}\n\n[WORKSPACE STATUS]\n{workspace_status}"
+        )
         if self.project_context:
             prompt += "\n\n" + self.project_context
         blueprint_tag = workspace_blueprint_tag(self.output_dir)

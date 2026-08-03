@@ -289,6 +289,11 @@ def try_auto_fix(error_log: str, code: str) -> Optional[str]:
         if patched:
             return patched
 
+    # 3a. Rust E0601: Cargo build script is missing a fn main entrypoint.
+    if "error[E0601]" in error_log and "build_script_build" in error_log:
+        if re.search(r"\bfn\s+main\s*\(", code) is None:
+            return 'fn main() {\n    println!("cargo:rerun-if-changed=build.rs");\n}\n'
+
     # 4. Python function signature / arity mismatch: make the target function accept
     # any additional positional or keyword arguments so callers do not fail.
     if is_signature_mismatch(error_log):

@@ -1291,6 +1291,7 @@ def ensure_workspace_blueprint(workspace_root: Path) -> Path:
             generation_method=GenerationMethod.static_heuristic,
             transferable=True,
             llm_initialized=True,
+            auto_generated=True,
             description=description,
         ),
         llm_context=LLMContext(

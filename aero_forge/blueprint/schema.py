@@ -74,6 +74,7 @@ class Metadata(BaseModel):
     generation_method: GenerationMethod = GenerationMethod.manual
     transferable: bool = False
     llm_initialized: bool = False
+    auto_generated: bool = False
     description: str = ""
 
 
