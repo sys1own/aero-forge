@@ -490,6 +490,13 @@ class RustEmitter(BaseEmitter):
         return sanitized
 
 
+BUILD_RS_TEMPLATE = """fn main() {
+    // Aero-Forge build script configuration.
+    println!("cargo:rerun-if-changed=build.rs");
+}
+"""
+
+
 class RustEmitterPlugin(PolyglotEmitterPlugin):
     """Polyglot plugin adapter for the Rust emitter."""
 
@@ -522,6 +529,10 @@ class RustEmitterPlugin(PolyglotEmitterPlugin):
             artifacts.append(
                 CodeArtifact(file_path=mod_path, content=mod_source, language="rust")
             )
+        # Always emit a valid build.rs so Cargo never sees an empty/placeholder script.
+        artifacts.append(
+            CodeArtifact(file_path="build.rs", content=BUILD_RS_TEMPLATE, language="rust")
+        )
         return artifacts
 
     def emit_build_manifest(
@@ -536,7 +547,8 @@ class RustEmitterPlugin(PolyglotEmitterPlugin):
             "[package]\n"
             f'name = "{crate}"\n'
             'version = "0.1.0"\n'
-            'edition = "2021"\n\n'
+            'edition = "2021"\n'
+            'build = "build.rs"\n\n'
             "[lib]\n"
             'name = "' + crate.replace("-", "_") + '"\n'
             'crate-type = ["cdylib", "rlib"]\n\n'

@@ -49,10 +49,14 @@ def get_blueprint_status(workspace: Path) -> Dict[str, Any]:
 
     metadata = bp.get("metadata") or {}
     llm_context = bp.get("llm_context") or {}
+    auto_generated = bool(metadata.get("auto_generated"))
     llm_initialized = bool(
-        llm_context.get("state") == "synthesized"
-        or metadata.get("generation_method") == "llm_synthesized"
-        or metadata.get("llm_initialized")
+        not auto_generated
+        and (
+            llm_context.get("state") == "synthesized"
+            or metadata.get("generation_method") == "llm_synthesized"
+            or metadata.get("llm_initialized")
+        )
     )
     status = metadata.get("status", "unknown")
     generation_method = metadata.get("generation_method")
@@ -89,6 +93,7 @@ def get_blueprint_status(workspace: Path) -> Dict[str, Any]:
         "exists": exists,
         "stale": stale,
         "llm_initialized": llm_initialized,
+        "auto_generated": auto_generated,
         "source_count": source_count,
         "status": status,
         "generation_method": generation_method,

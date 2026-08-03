@@ -1706,7 +1706,14 @@ class TriPolyglotMaterializer:
                     header_dirs=header_dirs,
                 )
             elif entry.lang == "rust":
-                content = "// Rust placeholder\n"
+                if path.name == "build.rs":
+                    content = (
+                        "fn main() {\n"
+                        '    println!("cargo:rerun-if-changed=build.rs");\n'
+                        "}\n"
+                    )
+                else:
+                    content = "// Rust placeholder\n"
             elif entry.lang == "toml":
                 content = "# TOML placeholder\n"
             elif entry.lang == "markdown":

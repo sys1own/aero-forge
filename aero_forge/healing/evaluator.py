@@ -58,6 +58,12 @@ class LogEvaluator:
             "rust_syntax",
             "Dangling delimiter; structural AST patch can remove or balance it.",
         ),
+        # Cargo build script E0601: build.rs is missing a fn main entrypoint.
+        (
+            r"error\[E0601\]",
+            "rust_build_script_missing_main",
+            "Build script (build.rs) has no fn main; can be rewritten with a valid main.",
+        ),
     ]
 
     # Semantic / macro / linker / type errors: not AST-overlay fixable.
