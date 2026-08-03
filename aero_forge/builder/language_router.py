@@ -19,6 +19,7 @@ class SystemToolchainRouter:
         "clang": "clang",
         "clang++": "clang++",
         "cargo": "cargo",
+        "cmake": "cmake",
         "go": "go",
         "nvcc": "nvcc",
         "zig": "zig",
@@ -75,6 +76,9 @@ class SystemToolchainRouter:
                 src,
                 *compiler_flags,
             ]
+        if toolchain == "cmake":
+            # CMake configure is the first step; the build step is handled in dispatch.
+            return [cls._exec_path("cmake") or "cmake", "-B", "build", "."]
         if toolchain == "cargo":
             return [cls._exec_path("cargo") or "cargo", "build", "--release", *compiler_flags]
         if toolchain == "maturin":
@@ -134,6 +138,15 @@ class SystemToolchainRouter:
                 text=True,
                 check=True,
             )
+            if toolchain == "cmake":
+                build_cmd = [cls._exec_path("cmake") or "cmake", "--build", "build"]
+                result = subprocess.run(
+                    build_cmd,
+                    cwd=str(workspace_dir),
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(
                 f"toolchain {toolchain!r} failed for {node_id}: {exc.stderr}"
