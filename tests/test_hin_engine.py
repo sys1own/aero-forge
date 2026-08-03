@@ -157,3 +157,69 @@ def test_ownership_no_violation_with_managed_intermediate():
 
     violations = engine.propagate_ownership_constraints()
     assert violations == []
+
+
+def test_hin_graph_layout_alignment_ok():
+    from aero_forge.hin_graph import FFILayout, HINGraph, HINNode, verify_layout_alignment
+
+    g = HINGraph()
+    rust = HINNode(
+        "rust_buffer",
+        "RustStruct",
+        "rust",
+        {"size": 8, "alignment": 8},
+        layout=FFILayout(size=8, alignment=8, c_type="int64_t", rust_type="i64"),
+    )
+    cpp = HINNode(
+        "cpp_buffer",
+        "CppClass",
+        "cpp",
+        {"size": 8, "alignment": 8},
+        layout=FFILayout(size=8, alignment=8, c_type="int64_t", rust_type="i64"),
+    )
+    g.add_node(rust)
+    g.add_node(cpp)
+    g.add_relation("rust_buffer", "cpp_buffer", "FFIBoundary")
+    ok, errors = verify_layout_alignment(g.graph)
+    assert ok
+    assert errors == []
+
+
+def test_hin_graph_layout_alignment_mismatch():
+    from aero_forge.hin_graph import FFILayout, HINGraph, HINNode, verify_layout_alignment
+
+    g = HINGraph()
+    rust = HINNode("rust_buffer", "RustStruct", "rust", layout=FFILayout(size=8, alignment=8))
+    cpp = HINNode("cpp_buffer", "CppClass", "cpp", layout=FFILayout(size=4, alignment=4))
+    g.add_node(rust)
+    g.add_node(cpp)
+    g.add_relation("rust_buffer", "cpp_buffer", "FFIBoundary")
+    ok, errors = verify_layout_alignment(g.graph)
+    assert not ok
+    assert any("rust_buffer" in e and "cpp_buffer" in e for e in errors)
+
+
+def test_native_verify_hin_boundary_layouts():
+    aero_forge_native = pytest.importorskip("aero_forge_native")
+    payload = {
+        "nodes": [
+            {"id": "rust_node", "layout": {"size": 8, "alignment": 8, "c_type": "int64_t", "rust_type": "i64"}},
+            {"id": "cpp_node", "layout": {"size": 8, "alignment": 8, "c_type": "int64_t", "rust_type": "i64"}},
+        ],
+        "edges": [
+            {"source": "rust_node", "target": "cpp_node", "relation": "FFIBoundary"},
+        ],
+    }
+    assert aero_forge_native.verify_hin_boundary_layouts(json.dumps(payload))
+
+    bad_payload = {
+        "nodes": [
+            {"id": "rust_node", "layout": {"size": 8, "alignment": 8, "c_type": "int64_t", "rust_type": "i64"}},
+            {"id": "cpp_node", "layout": {"size": 4, "alignment": 4, "c_type": "int32_t", "rust_type": "i32"}},
+        ],
+        "edges": [
+            {"source": "rust_node", "target": "cpp_node", "relation": "FFIBoundary"},
+        ],
+    }
+    with pytest.raises(ValueError):
+        aero_forge_native.verify_hin_boundary_layouts(json.dumps(bad_payload))

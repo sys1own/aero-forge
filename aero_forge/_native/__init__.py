@@ -7,6 +7,7 @@ try:
     from .aero_forge_native import (  # type: ignore[import-not-found]
         ASTRewritePatch,
         GoIProofNet,
+        GoIWavefrontSolverNative,
         GraphEngine,
         Hasher,
         HinEngine,
@@ -21,6 +22,7 @@ try:
         run_aeroc,
         unpack_aeroc,
         verify_goi_proof_net,
+        verify_hin_boundary_layouts,
     )
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
@@ -33,6 +35,7 @@ __all__ = [
     "GraphEngine",
     "HinEngine",
     "GoIProofNet",
+    "GoIWavefrontSolverNative",
     "verify_goi_proof_net",
     "ASTRewritePatch",
     "PreWriteHealer",
@@ -45,4 +48,5 @@ __all__ = [
     "evaluate_hin_energy",
     "repair_uast_expression",
     "enforce_repair_isolation_py",
+    "verify_hin_boundary_layouts",
 ]

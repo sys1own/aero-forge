@@ -4,10 +4,32 @@ from __future__ import annotations
 
 import ast
 import logging
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger("aero_forge.healing.hin_graph")
+
+
+# Affine ownership labels used by the HIN graph.
+OWNERSHIP_ONE = "1"
+OWNERSHIP_REF = "&"
+OWNERSHIP_REFMUT = "&mut"
+OWNERSHIP_BANG = "!"
+OWNERSHIP_BOT = "bot"
+
+
+@dataclass
+class FFILayout:
+    """Concrete memory layout descriptor used to validate cross-language edges."""
+
+    size: int
+    alignment: int
+    c_type: str = ""
+    rust_type: str = ""
+    python_ctype: str = ""
+    csharp_type: str = ""
+    go_type: str = ""
 
 
 def _find_python_files(workspace_root: Path) -> List[Path]:
@@ -169,3 +191,36 @@ def delta_m_influence(
                     stack.append(dependent)
         impacted[seed] = sorted(reachable)
     return impacted
+
+
+def verify_layout_alignment(adj: Dict[str, List[str]], layouts: Dict[str, FFILayout]) -> Tuple[bool, List[str]]:
+    """Verify size/alignment equality across FFI-boundary edges.
+
+    ``adj`` maps module names to the modules they depend on (FFI-boundary
+    edges are treated as all edges for workspace analysis).
+    """
+    errors: List[str] = []
+    for target, deps in adj.items():
+        t_layout = layouts.get(target)
+        for dep in deps:
+            s_layout = layouts.get(dep)
+            if not t_layout or not s_layout:
+                errors.append(f"Missing layout information on boundary edge {dep} -> {target}")
+                continue
+            if t_layout.size != s_layout.size or t_layout.alignment != s_layout.alignment:
+                errors.append(
+                    f"FFI layout mismatch on boundary edge {dep} -> {target}: "
+                    f"size={s_layout.size}/{t_layout.size}, "
+                    f"alignment={s_layout.alignment}/{t_layout.alignment}"
+                )
+    return (not errors, errors)
+
+
+def default_ownership(language: str) -> str:
+    """Return the default affine ownership label for a language domain."""
+    return {
+        "rust": OWNERSHIP_ONE,
+        "python": OWNERSHIP_BANG,
+        "cpp": OWNERSHIP_BOT,
+        "ffi": OWNERSHIP_REF,
+    }.get(language, OWNERSHIP_ONE)
