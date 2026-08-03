@@ -194,6 +194,17 @@ class ProactivePolyglotBuilder:
             return False
 
         # 5. Materialization gate: only pass here when every check succeeded.
+        architecture = payload.get("blueprint", {}).get("architecture", "")
+        if architecture == "graph_polyglot" or "hin_graph_spec" in payload:
+            from aero_forge.builder.materializers.graph_materializer import (
+                GraphPolyglotMaterializer,
+            )
+
+            workspace = Path(payload.get("workspace", "."))
+            graph_spec = payload.get("hin_graph_spec", payload.get("blueprint", {}))
+            GraphPolyglotMaterializer(workspace).materialize(graph_spec)
+            return True
+
         from aero_forge.scaffold.polyglot_materializer import _emit_verified_files
 
         _emit_verified_files(payload)

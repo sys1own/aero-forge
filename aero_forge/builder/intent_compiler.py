@@ -18,6 +18,12 @@ from aero_forge.blueprint import (
     ManifestEntry,
     write_blueprint,
 )
+from aero_forge.blueprint.schema import (
+    BoundaryEdgeSpec,
+    BoundaryContractType,
+    PolyglotGraphBlueprint,
+    PolyglotNodeSpec,
+)
 from aero_forge.config import Tier
 from aero_forge.llm.clients import get_llm_client
 
@@ -545,3 +551,163 @@ class IntentCompiler:
                 "lang": node.get("lang") or node.get("language") or "python",
             })
         return {"intent": "incremental_update", "actions": actions}
+
+    def compile_prompt_to_graph(
+        self,
+        prompt_text: str,
+        output_dir: Optional[str | Path] = None,
+        project_name: Optional[str] = None,
+    ) -> PolyglotGraphBlueprint:
+        """Compile *prompt_text* into a validated ``PolyglotGraphBlueprint``.
+
+        The LLM is still asked for a v2 blueprint; the result is then lowered into
+        the graph polyglot representation used by ``GraphPolyglotMaterializer``.
+        """
+        client = self._llm_client
+        if client is None:
+            client = get_llm_client(
+                self.provider,
+                model=self.model,
+                max_retries=self.max_retries,
+                api_key=self.api_key,
+                config_override=self.config_override,
+                raise_on_error=True,
+                tier=Tier.REASONING,
+            )
+
+        schema = BlueprintSchemaV2.model_json_schema()
+        validator = Draft7Validator(schema)
+
+        messages: List[Dict[str, str]] = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": prompt_text},
+        ]
+
+        last_error: Optional[Exception] = None
+        for attempt in range(self.max_schema_retries):
+            raw = client.generate(messages, temperature=0.2, max_tokens=4096)
+            if not raw:
+                last_error = IntentCompilerError("LLM returned an empty response")
+                messages.append({"role": "assistant", "content": ""})
+                messages.append(
+                    {"role": "user", "content": f"Attempt {attempt + 1} returned empty. Please return valid JSON."}
+                )
+                continue
+
+            try:
+                data = _normalize_v2_data(_extract_json(raw))
+                validator.validate(data)
+                v2 = BlueprintSchemaV2.model_validate(data)
+            except (JsonSchemaValidationError, Exception) as exc:
+                last_error = exc
+                logger.warning("Intent JSON schema validation failed (attempt %d): %s", attempt + 1, exc)
+                messages.append({"role": "assistant", "content": raw})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Schema validation failed: {exc}. "
+                            "Return corrected JSON only, with no markdown or explanatory text."
+                        ),
+                    }
+                )
+                continue
+
+            graph = self._v2_to_graph_blueprint(
+                v2,
+                prompt_text,
+                output_dir,
+                project_name,
+            )
+            return graph
+
+        raise IntentCompilerError(
+            f"Failed to compile intent after {self.max_schema_retries} schema validation attempts: {last_error}"
+        )
+
+    def _v2_to_graph_blueprint(
+        self,
+        v2: BlueprintSchemaV2,
+        prompt_text: str,
+        output_dir: Optional[str | Path],
+        project_name: Optional[str],
+    ) -> PolyglotGraphBlueprint:
+        """Lower a validated ``BlueprintSchemaV2`` into a ``PolyglotGraphBlueprint``."""
+        project = project_name or v2.metadata.get("project_name") or "aero_forge_project"
+
+        nodes: List[PolyglotNodeSpec] = []
+        node_ids: set = set()
+        for node in v2.module_graph:
+            node_id = Path(node.get("path", "module")).stem or "module"
+            if node_id in node_ids:
+                base = node_id
+                suffix = 2
+                while f"{base}_{suffix}" in node_ids:
+                    suffix += 1
+                node_id = f"{base}_{suffix}"
+            node_ids.add(node_id)
+            nodes.append(
+                PolyglotNodeSpec(
+                    node_id=node_id,
+                    lang=node.get("lang") or node.get("language") or "python",
+                    source_files=[node.get("path", "")],
+                    extra={"purpose": node.get("purpose", "")},
+                )
+            )
+
+        edges: List[BoundaryEdgeSpec] = []
+        for abi in v2.abi_contracts:
+            binding = str(abi.binding_framework or "c_abi")
+            try:
+                boundary_type = BoundaryContractType(binding)
+            except ValueError:
+                boundary_type = BoundaryContractType.C_ABI
+
+            inputs = abi.signature.get("inputs", []) if abi.signature else []
+            outputs = abi.signature.get("outputs", []) if abi.signature else []
+
+            source_lang = {
+                "pyo3": "rust",
+                "ctypes": "python",
+                "c_abi": "cpp",
+                "raw_c": "c",
+                "c": "c",
+                "cffi": "c",
+                "cxx": "cpp",
+            }.get(binding, "cpp")
+            target_lang = (abi.target_language or "rust").lower()
+
+            for lang in (source_lang, target_lang):
+                if lang not in node_ids:
+                    node_ids.add(lang)
+                    nodes.append(
+                        PolyglotNodeSpec(
+                            node_id=lang,
+                            lang=lang,
+                            extra={"role": "language_endpoint"},
+                        )
+                    )
+
+            edges.append(
+                BoundaryEdgeSpec(
+                    source=source_lang,
+                    target=target_lang,
+                    boundary_type=boundary_type,
+                    symbol=abi.export_symbol or abi.contract_id or "ffi_symbol",
+                    args=[inp.get("type", "int64") for inp in inputs],
+                    return_type=(outputs[0].get("type", "") if outputs else ""),
+                )
+            )
+
+        resolved_output_dir = str(Path(output_dir) / "dist") if output_dir else "./dist"
+
+        return PolyglotGraphBlueprint(
+            project=project,
+            nodes=nodes,
+            edges=edges,
+            output_dir=resolved_output_dir,
+            metadata={
+                "prompt": prompt_text,
+                **v2.metadata,
+            },
+        )

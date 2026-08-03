@@ -627,3 +627,89 @@ def write_v3_blueprint(blueprint: BlueprintV3, path: Path) -> None:
         path.write_text(
             yaml.safe_dump(data, sort_keys=False, default_flow_style=False), encoding="utf-8"
         )
+
+
+class BoundaryContractType(str, Enum):
+    """Cross-language boundary contracts used by the graph polyglot blueprint."""
+
+    C_ABI = "c_abi"
+    PYO3_MATURIN = "pyo3_maturin"
+    WASM_WASI = "wasm_wasi"
+    JNI = "jni"
+    CGO = "cgo"
+    PINVOKE = "pinvoke"
+    CUDA_HIP_C = "cuda_hip_c"
+
+
+class PolyglotNodeSpec(BaseModel):
+    """One language node in a graph-driven polyglot blueprint."""
+
+    node_id: str
+    lang: str
+    toolchain: str = ""
+    source_files: List[str] = Field(default_factory=list)
+    compiler_flags: List[str] = Field(default_factory=list)
+    exports: List[str] = Field(default_factory=list)
+    dependencies: List[str] = Field(default_factory=list)
+    extra: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _normalize_lang(self) -> "PolyglotNodeSpec":
+        self.lang = self.lang.lower().strip()
+        if not self.toolchain:
+            self.toolchain = self.lang
+        return self
+
+
+class BoundaryEdgeSpec(BaseModel):
+    """A directed FFI edge between two polyglot nodes."""
+
+    source: str
+    target: str
+    boundary_type: BoundaryContractType = BoundaryContractType.C_ABI
+    symbol: str
+    args: List[str] = Field(default_factory=list)
+    return_type: str = ""
+    is_zero_copy: bool = False
+
+
+class PolyglotGraphBlueprint(BaseModel):
+    """Graph-driven, HIN-style blueprint for the unified polyglot materializer."""
+
+    project: str = "aero_forge_project"
+    architecture: str = "graph_polyglot"
+    nodes: List[PolyglotNodeSpec] = Field(default_factory=list)
+    edges: List[BoundaryEdgeSpec] = Field(default_factory=list)
+    output_dir: str = "./dist"
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _enforce_dag(self) -> "PolyglotGraphBlueprint":
+        """Validate node references and detect cycles."""
+        node_ids = {n.node_id for n in self.nodes}
+        for edge in self.edges:
+            if edge.source not in node_ids:
+                raise ValueError(f"edge references unknown source node: {edge.source}")
+            if edge.target not in node_ids:
+                raise ValueError(f"edge references unknown target node: {edge.target}")
+
+        adj: Dict[str, List[str]] = {n.node_id: [] for n in self.nodes}
+        for edge in self.edges:
+            adj[edge.source].append(edge.target)
+
+        state: Dict[str, int] = {nid: 0 for nid in node_ids}
+
+        def visit(nid: str) -> None:
+            if state[nid] == 1:
+                raise ValueError("cycle detected in graph blueprint")
+            if state[nid] == 0:
+                state[nid] = 1
+                for v in adj[nid]:
+                    visit(v)
+                state[nid] = 2
+
+        for nid in node_ids:
+            if state[nid] == 0:
+                visit(nid)
+
+        return self
