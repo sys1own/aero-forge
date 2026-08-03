@@ -4,8 +4,15 @@ from __future__ import annotations
 
 from typing import Any, List, Optional
 
-from aero_forge.builder.emitters.base import BaseEmitter
-from aero_forge.builder.spec import ASTNode, EngineSpec
+from aero_forge.builder.emitters.base import (
+    BaseEmitter,
+    BoundaryContract,
+    CapabilityDescriptor,
+    CodeArtifact,
+    EmitterRegistry,
+    PolyglotEmitterPlugin,
+)
+from aero_forge.builder.spec import ASTNode, EngineSpec, function, module
 
 
 class CppEmitter(BaseEmitter):
@@ -483,3 +490,64 @@ class CppEmitter(BaseEmitter):
         if self.c_abi and isinstance(value, int) and not isinstance(value, bool):
             return f"{value}LL"
         return super()._literal(value)
+
+
+class CppEmitterPlugin(PolyglotEmitterPlugin):
+    """Polyglot plugin adapter for the C++ emitter."""
+
+    @property
+    def descriptor(self) -> CapabilityDescriptor:
+        return CapabilityDescriptor(
+            language_id="cpp",
+            supported_boundaries={BoundaryContract.C_ABI, BoundaryContract.CUDA_HIP_C},
+            toolchains=["g++", "clang++", "nvcc"],
+            file_extensions=[".cpp", ".hpp", ".h", ".cu"],
+            supports_zero_copy=True,
+            supports_async_ffi=False,
+        )
+
+    def emit_source_files(
+        self,
+        node_id: str,
+        node_spec: dict,
+        boundary_contracts: List[dict],
+    ) -> List[CodeArtifact]:
+        spec = _cpp_engine_spec_from_node_spec(node_id, node_spec)
+        source = CppEmitter(c_abi=True).emit(spec)
+        return [CodeArtifact(file_path=f"{node_id or 'module'}.cpp", content=source, language="cpp")]
+
+    def emit_build_manifest(
+        self,
+        node_id: str,
+        dependencies: List[str],
+        compiler_flags: List[str],
+    ) -> CodeArtifact:
+        flags = " ".join(compiler_flags)
+        content = (
+            "cmake_minimum_required(VERSION 3.16)\n"
+            f"project({node_id or 'cpp_project'})\n\n"
+            "set(CMAKE_CXX_STANDARD 17)\n"
+            "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n"
+            "add_library(${PROJECT_NAME}_cpp SHARED src/${PROJECT_NAME}.cpp)\n\n"
+            f"# Extra flags: {flags}\n"
+        )
+        return CodeArtifact(file_path="CMakeLists.txt", content=content, language="cmake")
+
+
+def _cpp_engine_spec_from_node_spec(node_id: str, node_spec: dict) -> EngineSpec:
+    """Best-effort conversion of a plugin node spec to an EngineSpec."""
+    spec = node_spec.get("spec")
+    if isinstance(spec, EngineSpec):
+        return spec
+    if "source" in node_spec:
+        name = node_spec.get("name") or node_id or "module"
+        return EngineSpec(name=name, root=module(children=[function(name, body=[])]))
+    if "root" in node_spec:
+        return EngineSpec(
+            name=node_spec.get("name", node_id or "module"),
+            root=node_spec["root"],
+        )
+    return EngineSpec(name=node_id or "module", root=module(children=[]))
+
+
+EmitterRegistry.get_instance().register(CppEmitterPlugin())

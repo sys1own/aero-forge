@@ -7,8 +7,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from aero_forge.builder.artifact_generator import Artifact, ArtifactBundle
-from aero_forge.builder.emitters.base import BaseEmitter
-from aero_forge.builder.spec import ASTNode, EngineSpec
+from aero_forge.builder.emitters.base import (
+    BaseEmitter,
+    BoundaryContract,
+    CapabilityDescriptor,
+    CodeArtifact,
+    EmitterRegistry,
+    PolyglotEmitterPlugin,
+)
+from aero_forge.builder.spec import ASTNode, EngineSpec, function, module
 
 
 class RustEmitter(BaseEmitter):
@@ -481,3 +488,78 @@ class RustEmitter(BaseEmitter):
         if not sanitized or sanitized[0].isdigit():
             sanitized = "aero_forge_native_" + sanitized
         return sanitized
+
+
+class RustEmitterPlugin(PolyglotEmitterPlugin):
+    """Polyglot plugin adapter for the Rust emitter."""
+
+    @property
+    def descriptor(self) -> CapabilityDescriptor:
+        return CapabilityDescriptor(
+            language_id="rust",
+            supported_boundaries={
+                BoundaryContract.C_ABI,
+                BoundaryContract.PYO3_MATURIN,
+                BoundaryContract.WASM_WASI,
+            },
+            toolchains=["rustc", "cargo", "maturin"],
+            file_extensions=[".rs"],
+            supports_zero_copy=True,
+            supports_async_ffi=False,
+        )
+
+    def emit_source_files(
+        self,
+        node_id: str,
+        node_spec: dict,
+        boundary_contracts: List[dict],
+    ) -> List[CodeArtifact]:
+        spec = _rust_engine_spec_from_node_spec(node_id, node_spec)
+        emitter = RustEmitter()
+        source = emitter.emit(spec)
+        artifacts = [CodeArtifact(file_path="src/lib.rs", content=source, language="rust")]
+        for mod_path, mod_source in emitter.module_sources.items():
+            artifacts.append(
+                CodeArtifact(file_path=mod_path, content=mod_source, language="rust")
+            )
+        return artifacts
+
+    def emit_build_manifest(
+        self,
+        node_id: str,
+        dependencies: List[str],
+        compiler_flags: List[str],
+    ) -> CodeArtifact:
+        crate = node_id or "rust_project"
+        deps = "\n".join(f'{d} = "0.1"' for d in dependencies)
+        content = (
+            "[package]\n"
+            f'name = "{crate}"\n'
+            'version = "0.1.0"\n'
+            'edition = "2021"\n\n'
+            "[lib]\n"
+            'name = "' + crate.replace("-", "_") + '"\n'
+            'crate-type = ["cdylib", "rlib"]\n\n'
+            "[dependencies]\n"
+            f"{deps}\n"
+        )
+        return CodeArtifact(file_path="Cargo.toml", content=content, language="toml")
+
+
+def _rust_engine_spec_from_node_spec(node_id: str, node_spec: dict) -> EngineSpec:
+    """Best-effort conversion of a plugin node spec to an EngineSpec."""
+    spec = node_spec.get("spec")
+    if isinstance(spec, EngineSpec):
+        return spec
+    if "source" in node_spec:
+        name = node_spec.get("name") or node_id or "module"
+        return EngineSpec(name=name, root=module(children=[function(name, body=[])]))
+    if "root" in node_spec:
+        return EngineSpec(
+            name=node_spec.get("name", node_id or "module"),
+            root=node_spec["root"],
+        )
+    return EngineSpec(name=node_id or "module", root=module(children=[]))
+
+
+EmitterRegistry.get_instance().register(RustEmitterPlugin())

@@ -5,8 +5,15 @@ from __future__ import annotations
 import ast
 from typing import List, Optional
 
-from aero_forge.builder.emitters.base import BaseEmitter
-from aero_forge.builder.spec import ASTNode, EngineSpec
+from aero_forge.builder.emitters.base import (
+    BaseEmitter,
+    BoundaryContract,
+    CapabilityDescriptor,
+    CodeArtifact,
+    EmitterRegistry,
+    PolyglotEmitterPlugin,
+)
+from aero_forge.builder.spec import ASTNode, EngineSpec, function, module
 
 
 class PythonEmitter(BaseEmitter):
@@ -145,3 +152,68 @@ class PythonEmitter(BaseEmitter):
             k, v = pair.children
             entries.append(f"{self._expr(k)}: {self._expr(v)}")
         return "{" + ", ".join(entries) + "}"
+
+
+class PythonEmitterPlugin(PolyglotEmitterPlugin):
+    """Polyglot plugin adapter for the Python emitter."""
+
+    @property
+    def descriptor(self) -> CapabilityDescriptor:
+        return CapabilityDescriptor(
+            language_id="python",
+            supported_boundaries={BoundaryContract.C_ABI, BoundaryContract.PYO3_MATURIN},
+            toolchains=["cpython", "maturin"],
+            file_extensions=[".py"],
+            supports_zero_copy=False,
+            supports_async_ffi=False,
+        )
+
+    def emit_source_files(
+        self,
+        node_id: str,
+        node_spec: dict,
+        boundary_contracts: List[dict],
+    ) -> List[CodeArtifact]:
+        spec = _engine_spec_from_node_spec(node_id, node_spec)
+        source = PythonEmitter().emit(spec)
+        file_path = f"{node_id or 'module'}.py"
+        return [CodeArtifact(file_path=file_path, content=source, language="python")]
+
+    def emit_build_manifest(
+        self,
+        node_id: str,
+        dependencies: List[str],
+        compiler_flags: List[str],
+    ) -> CodeArtifact:
+        deps = "\n".join(f'    "{d}",' for d in dependencies)
+        content = (
+            "[build-system]\n"
+            'requires = ["setuptools>=61.0", "wheel"]\n'
+            "build-backend = \"setuptools.build_meta\"\n\n"
+            "[project]\n"
+            f'name = "{node_id or "project"}"\n'
+            'version = "0.1.0"\n'
+            "[project.dependencies]\n"
+            f"{deps}\n"
+        )
+        return CodeArtifact(file_path="pyproject.toml", content=content, language="toml")
+
+
+def _engine_spec_from_node_spec(node_id: str, node_spec: dict) -> EngineSpec:
+    """Best-effort conversion of a plugin node spec to an EngineSpec."""
+    spec = node_spec.get("spec")
+    if isinstance(spec, EngineSpec):
+        return spec
+    if "source" in node_spec:
+        name = node_spec.get("name") or node_id or "module"
+        root = module(children=[function(name, body=[])])
+        return EngineSpec(name=name, root=root)
+    if "root" in node_spec:
+        return EngineSpec(
+            name=node_spec.get("name", node_id or "module"),
+            root=node_spec["root"],
+        )
+    return EngineSpec(name=node_id or "module", root=module(children=[]))
+
+
+EmitterRegistry.get_instance().register(PythonEmitterPlugin())
