@@ -56,6 +56,37 @@ The JSON must conform to BlueprintSchemaV2.0.0 with these top-level keys:
 """
 
 
+_GRAPH_SYSTEM_PROMPT = """YOU ARE THE AERO-FORGE INTENT COMPILER (SYSTEM LAYER 0).
+YOUR SOLE PURPOSE IS TO CONVERT UNSTRUCTURED USER DOMAIN PROMPTS INTO A VALID `PolyglotGraphBlueprint` JSON SPECIFICATION.
+
+STRICT OPERATIONAL RULES:
+1. OUTPUT ONLY VALID JSON. DO NOT INCLUDE PREFACES, FOOTERS, MARKDOWN EXPLANATIONS, OR CODE BLOCK TEXT OUTSIDE THE JSON OBJECT.
+2. `architecture` MUST be "graph_polyglot" unless the request is explicitly a single-language project.
+3. `nodes` MUST be a list of objects with: `node_id` (unique), `lang` (one of: python, rust, cpp, go, csharp, java), `toolchain` (one of: gcc, clang, clang++, cargo, go, nvcc, zig, dotnet, maturin, python, javac), `source_files` (list of relative paths, optional), `compiler_flags` (list, optional), `exports` (list, optional).
+4. `edges` MUST be a list of cross-language FFI boundary objects with: `source`, `target` (both matching `node_id`s), `boundary_type` (one of: C_ABI, PYO3_MATURIN, WASM_WASI, JNI, CGO, PINVOKE, CUDA_HIP_C), `symbol`, `args` (list of primitive type names: int32, int64, float32, float64, pointer), `return_type` (primitive type name or ""), `is_zero_copy` (boolean).
+5. Enforce a DAG: no cycles among `edges`. The `source` node must be an earlier stage than the `target` node.
+6. Enforce zero-copy memory layout compatibility: scalars pass by value; vectors/tensors pass as raw pointer + length + capacity triples (`data_ptr`, `length`, `capacity`).
+7. DO NOT generate placeholder stubs ("// TODO", "pass", "todo!()"). Every node and contract must be fully specified.
+8. FILE BOUNDARY CONSTRAINT: only list `source_files` explicitly required by the prompt.
+9. ARTIFACT HYGIENE: NEVER stage, commit, or list generated binary targets, virtual environments, distribution metadata, or package archives as deliverables.
+
+Example JSON shape:
+{
+  "project": "audio_synth",
+  "architecture": "graph_polyglot",
+  "nodes": [
+    {"node_id": "cpp_core", "lang": "cpp", "toolchain": "clang++", "source_files": ["cpp_core/synth.cpp"], "exports": ["synth_render"]},
+    {"node_id": "go_server", "lang": "go", "toolchain": "go", "source_files": ["go_server/main.go"], "exports": ["start_server"]}
+  ],
+  "edges": [
+    {"source": "cpp_core", "target": "go_server", "boundary_type": "CGO", "symbol": "synth_render", "args": ["pointer", "int64"], "return_type": "int64", "is_zero_copy": true}
+  ],
+  "output_dir": "./dist",
+  "metadata": {}
+}
+"""
+
+
 def _strip_markdown_fences(text: str) -> str:
     """Remove optional JSON/YAML code fences from an LLM response."""
     text = text.strip()
@@ -560,8 +591,9 @@ class IntentCompiler:
     ) -> PolyglotGraphBlueprint:
         """Compile *prompt_text* into a validated ``PolyglotGraphBlueprint``.
 
-        The LLM is still asked for a v2 blueprint; the result is then lowered into
-        the graph polyglot representation used by ``GraphPolyglotMaterializer``.
+        The LLM is asked directly for a `graph_polyglot` JSON blueprint. If the
+        model returns a legacy v2 blueprint, it is lowered into the graph
+        representation used by ``GraphPolyglotMaterializer``.
         """
         client = self._llm_client
         if client is None:
@@ -575,11 +607,8 @@ class IntentCompiler:
                 tier=Tier.REASONING,
             )
 
-        schema = BlueprintSchemaV2.model_json_schema()
-        validator = Draft7Validator(schema)
-
         messages: List[Dict[str, str]] = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": _GRAPH_SYSTEM_PROMPT},
             {"role": "user", "content": prompt_text},
         ]
 
@@ -595,12 +624,36 @@ class IntentCompiler:
                 continue
 
             try:
-                data = _normalize_v2_data(_extract_json(raw))
-                validator.validate(data)
-                v2 = BlueprintSchemaV2.model_validate(data)
-            except (JsonSchemaValidationError, Exception) as exc:
+                data = _extract_json(raw)
+            except Exception as exc:
                 last_error = exc
-                logger.warning("Intent JSON schema validation failed (attempt %d): %s", attempt + 1, exc)
+                logger.warning("Intent JSON extraction failed (attempt %d): %s", attempt + 1, exc)
+                messages.append({"role": "assistant", "content": raw})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Could not extract JSON: {exc}. "
+                            "Return corrected JSON only, with no markdown or explanatory text."
+                        ),
+                    }
+                )
+                continue
+
+            # Primary path: a native `graph_polyglot` blueprint.
+            try:
+                graph = PolyglotGraphBlueprint.model_validate(data)
+                return graph
+            except Exception as graph_exc:
+                logger.debug("Graph blueprint validation failed (attempt %d): %s", attempt + 1, graph_exc)
+
+            # Fallback path: legacy v2 blueprint lowered to graph.
+            try:
+                normalized = _normalize_v2_data(data)
+                v2 = BlueprintSchemaV2.model_validate(normalized)
+            except Exception as exc:
+                last_error = exc
+                logger.warning("Intent schema validation failed (attempt %d): %s", attempt + 1, exc)
                 messages.append({"role": "assistant", "content": raw})
                 messages.append(
                     {
@@ -613,13 +666,12 @@ class IntentCompiler:
                 )
                 continue
 
-            graph = self._v2_to_graph_blueprint(
+            return self._v2_to_graph_blueprint(
                 v2,
                 prompt_text,
                 output_dir,
                 project_name,
             )
-            return graph
 
         raise IntentCompilerError(
             f"Failed to compile intent after {self.max_schema_retries} schema validation attempts: {last_error}"
