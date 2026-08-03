@@ -5,11 +5,12 @@
 //! evaluates whether the spectral radius of ``U (M + ΔM)`` stays strictly
 //! below the unit boundary, and computes the support set of the perturbation.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use ndarray::{Array1, Array2};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyArithmeticError, PyValueError};
 use pyo3::prelude::*;
+use nalgebra::DMatrix;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -158,9 +159,6 @@ pub fn enforce_repair_isolation_py(
         .map_err(|e| PyValueError::new_err(format!("repair result serialization failed: {}", e)))
 }
 
-use nalgebra::DMatrix;
-use std::collections::HashMap;
-
 /// Girard Geometry-of-Interaction proof net for deadlock-free concurrency checking.
 #[pyclass(name = "GoIProofNet")]
 pub struct GoIProofNet {
@@ -255,4 +253,145 @@ pub fn verify_goi_proof_net(
     }
 
     Ok(net.verify_nilpotency(max_iterations))
+}
+
+/// Wavefront scheduler based on the GoI operator (I - U * M).
+///
+/// Given an adjacency matrix M and a routing matrix U, the operator
+/// K = I - U * M is inverted to compute the execution wave operator.
+/// A singular K (determinant near zero) indicates a cyclic dependency
+/// in the HIN graph.
+#[pyclass(name = "GoIWavefrontSolverNative")]
+pub struct GoIWavefrontSolverNative {
+    labels: Vec<String>,
+    dimension: usize,
+    m: DMatrix<f64>,
+    u: DMatrix<f64>,
+}
+
+#[pymethods]
+impl GoIWavefrontSolverNative {
+    #[new]
+    fn new(labels: Vec<String>, m_data: Vec<Vec<f64>>, u_data: Vec<Vec<f64>>) -> PyResult<Self> {
+        let n = labels.len();
+        if n == 0 {
+            return Err(PyValueError::new_err("labels must be non-empty"));
+        }
+        let m = matrix_to_dmatrix(&m_data, n)?;
+        let u = matrix_to_dmatrix(&u_data, n)?;
+        Ok(Self { labels, dimension: n, m, u })
+    }
+
+    /// Compute K = I - U * M and return its determinant.
+    fn operator_determinant(&self) -> f64 {
+        let identity = DMatrix::<f64>::identity(self.dimension, self.dimension);
+        let k = identity - &self.u * &self.m;
+        k.determinant()
+    }
+
+    /// Return the execution wave operator EX(M, U) = (I - U * M)^-1 * U.
+    fn ex_operator(&self) -> PyResult<Vec<Vec<f64>>> {
+        let identity = DMatrix::<f64>::identity(self.dimension, self.dimension);
+        let k = identity - &self.u * &self.m;
+        let det = k.determinant();
+        if det.abs() < 1e-12 {
+            return Err(PyArithmeticError::new_err(
+                "Cyclic dependency in G_HIN: (I - U*M) matrix operator is singular."
+            ));
+        }
+        let k_inv = k.try_inverse().ok_or_else(|| {
+            PyArithmeticError::new_err(
+                "Cyclic dependency in G_HIN: (I - U*M) matrix operator is singular."
+            )
+        })?;
+        let ex = k_inv * &self.u;
+        let mut rows = Vec::with_capacity(self.dimension);
+        for i in 0..self.dimension {
+            let mut row = Vec::with_capacity(self.dimension);
+            for j in 0..self.dimension {
+                row.push(ex[(i, j)]);
+            }
+            rows.push(row);
+        }
+        Ok(rows)
+    }
+
+    /// Extract parallel wavefront stages using in-degree reduction on M.
+    fn wavefront_stages(&self) -> PyResult<Vec<Vec<String>>> {
+        let identity = DMatrix::<f64>::identity(self.dimension, self.dimension);
+        let k = identity - &self.u * &self.m;
+        let det = k.determinant();
+        if det.abs() < 1e-12 {
+            return Err(PyArithmeticError::new_err(
+                "Cyclic dependency in G_HIN: (I - U*M) matrix operator is singular."
+            ));
+        }
+
+        // Use M as the dependency matrix: M[i][j] != 0 means source j must
+        // complete before target i can run (edge j -> i).
+        let mut in_degree = vec![0usize; self.dimension];
+        let mut outgoing: Vec<Vec<usize>> = vec![Vec::new(); self.dimension];
+        for i in 0..self.dimension {
+            for j in 0..self.dimension {
+                if self.m[(i, j)].abs() > 1e-12 {
+                    in_degree[i] += 1;
+                    outgoing[j].push(i);
+                }
+            }
+        }
+
+        let mut remaining = in_degree.clone();
+        let mut seen = vec![false; self.dimension];
+        let mut stages: Vec<Vec<String>> = Vec::new();
+
+        loop {
+            let mut stage = Vec::new();
+            for i in 0..self.dimension {
+                if !seen[i] && remaining[i] == 0 {
+                    stage.push(self.labels[i].clone());
+                    seen[i] = true;
+                }
+            }
+            if stage.is_empty() {
+                if seen.iter().all(|&x| x) {
+                    break;
+                }
+                return Err(PyArithmeticError::new_err(
+                    "Cyclic dependency in G_HIN: no wavefront stage could be extracted."
+                ));
+            }
+
+            // Decrement in-degrees of neighbours for the nodes advanced this stage.
+            for i in 0..self.dimension {
+                if seen[i] {
+                    for &j in &outgoing[i] {
+                        if !seen[j] {
+                            remaining[j] = remaining[j].saturating_sub(1);
+                        }
+                    }
+                }
+            }
+
+            stage.sort();
+            stages.push(stage);
+        }
+
+        Ok(stages)
+    }
+}
+
+fn matrix_to_dmatrix(data: &Vec<Vec<f64>>, n: usize) -> PyResult<DMatrix<f64>> {
+    let mut flat = Vec::with_capacity(n * n);
+    for row in data.iter().take(n) {
+        if row.len() != n {
+            return Err(PyValueError::new_err("matrix must be square"));
+        }
+        for &v in row.iter().take(n) {
+            flat.push(v);
+        }
+    }
+    if flat.len() != n * n {
+        return Err(PyValueError::new_err("matrix size mismatch"));
+    }
+    Ok(DMatrix::from_row_slice(n, n, &flat))
 }

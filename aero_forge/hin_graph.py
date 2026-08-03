@@ -7,9 +7,22 @@ model cross-language ASTs and perform DPO rewrites and ownership propagation.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import networkx as nx
+
+
+@dataclass
+class FFILayout:
+    """Concrete memory layout descriptor used to validate cross-language edges."""
+
+    size: int
+    alignment: int
+    c_type: str = ""
+    rust_type: str = ""
+    python_ctype: str = ""
+    csharp_type: str = ""
+    go_type: str = ""
 
 
 # Node types T(V) supported by the HIN graph.
@@ -33,6 +46,7 @@ EDGE_RELATIONS = {
     "BorrowsFrom",
     "ImportsSymbol",
     "BindsTo",
+    "FFIBoundary",
 }
 
 
@@ -53,6 +67,7 @@ class HINNode:
     language: str
     properties: Dict[str, Any] = field(default_factory=dict)
     ownership_level: Optional[str] = None
+    layout: Optional[FFILayout] = None
 
     def __post_init__(self):
         if self.ownership_level is None:
@@ -72,13 +87,16 @@ class HINNode:
         return self.properties.get("ownership", "1")
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d = {
             "node_id": self.node_id,
             "node_type": self.node_type,
             "language": self.language,
             "properties": self.properties,
             "ownership": self.ownership_level,
         }
+        if self.layout is not None:
+            d["layout"] = self.layout.__dict__
+        return d
 
 
 class HINGraph:
@@ -94,6 +112,7 @@ class HINGraph:
             language=node.language,
             ownership=node.ownership_level,
             properties=node.properties,
+            layout=node.layout,
             obj=node,
         )
 
@@ -111,3 +130,31 @@ class HINGraph:
 
     def edge_count(self) -> int:
         return self.graph.number_of_edges()
+
+
+def verify_layout_alignment(graph: nx.MultiDiGraph) -> Tuple[bool, List[str]]:
+    """Check that every FFI-boundary edge connects nodes with matching layout.
+
+    Returns ``(ok, errors)`` where ``ok`` is True when all boundary edges have
+    identical ``size`` and ``alignment`` on both sides.
+    """
+    errors: List[str] = []
+    for u, v, data in graph.edges(data=True):
+        relation = data.get("relation", "")
+        if relation not in {"FFIBoundary", "BindsTo"}:
+            continue
+        u_layout = graph.nodes[u].get("layout")
+        v_layout = graph.nodes[v].get("layout")
+        if not u_layout or not v_layout:
+            errors.append(f"Missing layout information on boundary edge {u} -> {v}")
+            continue
+        u_size = u_layout.get("size") if isinstance(u_layout, dict) else u_layout.size
+        u_align = u_layout.get("alignment") if isinstance(u_layout, dict) else u_layout.alignment
+        v_size = v_layout.get("size") if isinstance(v_layout, dict) else v_layout.size
+        v_align = v_layout.get("alignment") if isinstance(v_layout, dict) else v_layout.alignment
+        if u_size != v_size or u_align != v_align:
+            errors.append(
+                f"FFI layout mismatch on boundary edge {u} -> {v}: "
+                f"size={u_size}/{v_size}, alignment={u_align}/{v_align}"
+            )
+    return (not errors, errors)

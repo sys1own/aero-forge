@@ -859,6 +859,32 @@ impl Default for MellSymbol {
     }
 }
 
+/// Affine ownership labels for cross-language memory safety.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Ownership {
+    /// Uniquely owned value (e.g. Rust owned data).
+    #[default]
+    One,
+    /// Shared immutable borrow.
+    Ref,
+    /// Mutable borrow.
+    RefMut,
+    /// Replicable / shared ownership (e.g. Python refcounted, Rust Arc).
+    Bang,
+    /// Uninitialized / invalid / moved-out.
+    Bot,
+}
+
+/// Concrete memory layout descriptor for an FFI boundary field/type.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct FFILayout {
+    pub size: usize,
+    pub alignment: usize,
+    pub c_type: String,
+    pub rust_type: String,
+}
+
 /// Single HIN port with an optional connection and a MELL type annotation.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
@@ -888,6 +914,8 @@ pub struct HinNode {
     pub principal: Option<usize>,
     pub aux: SmallVec<[usize; 4]>,
     pub energy: EnergyState,
+    pub ownership: Ownership,
+    pub layout: Option<FFILayout>,
 }
 
 /// Parse-able port representation used by the energy evaluator.
@@ -910,6 +938,10 @@ struct NodeInput {
     kind: String,
     #[serde(default)]
     ports: Vec<PortInput>,
+    #[serde(default)]
+    ownership: Ownership,
+    #[serde(default)]
+    layout: Option<FFILayout>,
 }
 
 #[derive(Deserialize)]
@@ -954,6 +986,8 @@ pub fn evaluate_hin_energy(arena_json: &str) -> PyResult<String> {
                 dangling: 0,
                 total: 0.0,
             },
+            ownership: node_input.ownership,
+            layout: node_input.layout,
         };
         for (port_idx_in_node, port_input) in node_input.ports.into_iter().enumerate() {
             let port_idx = ports.len();
@@ -1051,4 +1085,70 @@ pub fn evaluate_hin_energy(arena_json: &str) -> PyResult<String> {
 
     serde_json::to_string(&energy)
         .map_err(|e| PyValueError::new_err(format!("energy serialization failed: {}", e)))
+}
+
+/// Layout descriptor attached to a HIN node for FFI boundary checking.
+#[derive(Deserialize)]
+struct LayoutNodeInput {
+    id: String,
+    #[serde(default)]
+    layout: Option<FFILayout>,
+}
+
+/// Edge descriptor for FFI boundary layout verification.
+#[derive(Deserialize)]
+struct LayoutEdgeInput {
+    source: String,
+    target: String,
+    #[serde(default)]
+    relation: String,
+}
+
+#[derive(Deserialize)]
+struct LayoutInput {
+    nodes: Vec<LayoutNodeInput>,
+    edges: Vec<LayoutEdgeInput>,
+}
+
+/// Verify that all FFI-boundary edges connect nodes with matching memory layout.
+///
+/// Returns ``true`` when every ``FFIBoundary`` or ``BindsTo`` edge connects a
+/// source and target whose ``size`` and ``alignment`` fields are identical.
+/// Raises ``PyValueError`` if a boundary edge links mismatched layouts.
+#[pyfunction]
+pub fn verify_hin_boundary_layouts(layout_json: &str) -> PyResult<bool> {
+    let input: LayoutInput = serde_json::from_str(layout_json)
+        .map_err(|e| PyValueError::new_err(format!("invalid layout JSON: {}", e)))?;
+
+    let layouts: HashMap<String, Option<FFILayout>> = input
+        .nodes
+        .into_iter()
+        .map(|n| (n.id, n.layout))
+        .collect();
+
+    for edge in input.edges {
+        if edge.relation != "FFIBoundary" && edge.relation != "BindsTo" {
+            continue;
+        }
+        let src = layouts.get(&edge.source).cloned().flatten();
+        let tgt = layouts.get(&edge.target).cloned().flatten();
+        match (src.as_ref(), tgt.as_ref()) {
+            (Some(s), Some(t)) => {
+                if s.size != t.size || s.alignment != t.alignment {
+                    return Err(PyValueError::new_err(format!(
+                        "FFI layout mismatch on boundary edge {} -> {}: {:?} vs {:?}",
+                        edge.source, edge.target, s, t
+                    )));
+                }
+            }
+            (None, Some(_)) | (Some(_), None) | (None, None) => {
+                return Err(PyValueError::new_err(format!(
+                    "Missing layout information on boundary edge {} -> {}",
+                    edge.source, edge.target
+                )));
+            }
+        }
+    }
+
+    Ok(true)
 }

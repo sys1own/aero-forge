@@ -93,6 +93,124 @@ Aero-Forge accelerates *both* the artifacts it produces and the engine itself.
 
 Tier 3 is fully backward-compatible; tiers 1 and 2 activate automatically when the Rust extension and optional JAX/NumPy dependencies are available.
 
+## Graph-Driven Polyglot Materializer
+
+Aero-Forge also supports a `graph_polyglot` architecture that models the whole build as a Heterogeneous Information Network (HIN). The `GraphPolyglotMaterializer` consumes a graph of language nodes and cross-language edges, schedules parallel build wavefronts with the GoI solver, synthesizes FFI bridge contracts, and writes all source files and toolchain manifests atomically.
+
+### Architecture
+
+The graph blueprint is a HIN:
+
+```text
+G_HIN = (V, E, T, R)
+```
+
+- $V$: language nodes (`rust_core`, `cpp_engine`, `py_client`, ...).
+- $E$: directed FFI-boundary edges between nodes.
+- $\mathcal{T}$: node target runtime / language tag.
+- $\mathcal{R}$: edge boundary contract type (`c_abi`, `pyo3_maturin`, `cgo`, `pinvoke`, `jni`, ...).
+
+`PolyglotGraphBlueprint` in `aero_forge/blueprint/schema.py` validates this graph: every edge endpoint must exist and the graph must be acyclic before materialization begins.
+
+### GoI Wavefront Scheduling
+
+Given a dependency matrix $M$ where $M_{ij} = 1$ when node $i$ depends on node $j$ (edge $j \to i$), and a routing matrix $U$, the execution wave operator is:
+
+$$EX(M, U) = (I - U \cdot M)^{-1} \cdot U$$
+
+If $\det(I - U \cdot M) = 0$, the operator is singular and the graph contains a cycle. `GoIWavefrontSolver` raises a cyclic-dependency exception before any file is written to disk, so circular builds are caught during pre-materialization verification.
+
+### Supported Runtimes and FFI Boundaries
+
+| Runtime | Boundaries | Toolchains |
+|---------|------------|------------|
+| **Python** | C-ABI (`ctypes`), PyO3/Maturin | `python3`, `maturin` |
+| **Rust** | C-ABI (`extern "C"`), PyO3/Maturin | `rustc`, `cargo`, `maturin` |
+| **C/C++** | C-ABI shared libraries, CUDA-HIP-C | `gcc`, `clang`, `clang++`, `nvcc` |
+| **Go** | CGO `//export` c-shared | `go` |
+| **C#** | .NET NativeAOT `[UnmanagedCallersOnly]`, `[LibraryImport]` | `dotnet` |
+| **Java** | JNI native method signatures | `javac`, `gcc`, `clang++` |
+
+### `blueprint.aero` Example
+
+```yaml
+metadata:
+  project_name: graph_demo
+  schema_version: "3.0.0"
+  architecture: graph_polyglot
+
+nodes:
+  - node_id: rust_core
+    lang: rust
+    toolchain: cargo
+  - node_id: cpp_engine
+    lang: cpp
+    toolchain: clang++
+  - node_id: py_client
+    lang: python
+    toolchain: python
+
+edges:
+  - source: rust_core
+    target: cpp_engine
+    boundary_type: c_abi
+    symbol: rust_compute
+    args: [int64, int64]
+    return_type: int64
+  - source: cpp_engine
+    target: py_client
+    boundary_type: c_abi
+    symbol: cpp_compute
+    args: [int64, int64]
+    return_type: int64
+```
+
+The `GraphPolyglotMaterializer` turns this into three ordered wavefront stages (`rust_core`, then `cpp_engine`, then `py_client`), synthesizes the C-ABI headers and `ctypes` loaders for each edge, and emits `Cargo.toml`, `CMakeLists.txt`, and `pyproject.toml` manifests.
+
+### Extending the Engine with Custom Plugins
+
+New language targets implement `PolyglotEmitterPlugin` and register with `EmitterRegistry`:
+
+```python
+from aero_forge.builder.emitters.base import (
+    BoundaryContract,
+    CapabilityDescriptor,
+    CodeArtifact,
+    EmitterRegistry,
+    PolyglotEmitterPlugin,
+)
+
+class ZigEmitterPlugin(PolyglotEmitterPlugin):
+    @property
+    def descriptor(self) -> CapabilityDescriptor:
+        return CapabilityDescriptor(
+            language_id="zig",
+            supported_boundaries={BoundaryContract.C_ABI},
+            toolchains=["zig"],
+            file_extensions=[".zig"],
+            supports_zero_copy=False,
+            supports_async_ffi=False,
+        )
+
+    def emit_source_files(self, node_id, node_spec, boundary_contracts):
+        return [
+            CodeArtifact(
+                file_path=f"{node_id}.zig",
+                content="// generated",
+                language="zig",
+            )
+        ]
+
+    def emit_build_manifest(self, node_id, dependencies, compiler_flags):
+        return CodeArtifact(
+            file_path="build.zig",
+            content="// build manifest",
+            language="zig",
+        )
+
+EmitterRegistry.get_instance().register(ZigEmitterPlugin())
+```
+
 ## Core Supported Build Targets
 
 Aero-Forge natively supports eight primary build targets, each with deterministic materialization and native toolchain invocation:

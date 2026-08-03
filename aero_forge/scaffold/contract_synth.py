@@ -14,9 +14,59 @@ the contract name and signature.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from aero_forge.blueprint import ContractEntry
+
+
+FFI_TYPE_LAYOUTS: Dict[str, Dict[str, Any]] = {
+    "int32": {
+        "c_type": "int32_t",
+        "rust_type": "i32",
+        "python_ctype": "c_int32",
+        "csharp_type": "int",
+        "go_type": "C.int32_t",
+        "size": 4,
+        "alignment": 4,
+    },
+    "int64": {
+        "c_type": "int64_t",
+        "rust_type": "i64",
+        "python_ctype": "c_int64",
+        "csharp_type": "long",
+        "go_type": "C.int64_t",
+        "size": 8,
+        "alignment": 8,
+    },
+    "float32": {
+        "c_type": "float",
+        "rust_type": "f32",
+        "python_ctype": "c_float",
+        "csharp_type": "float",
+        "go_type": "C.float",
+        "size": 4,
+        "alignment": 4,
+    },
+    "float64": {
+        "c_type": "double",
+        "rust_type": "f64",
+        "python_ctype": "c_double",
+        "csharp_type": "double",
+        "go_type": "C.double",
+        "size": 8,
+        "alignment": 8,
+    },
+    "pointer": {
+        "c_type": "void*",
+        "rust_type": "*mut c_void",
+        "python_ctype": "c_void_p",
+        "csharp_type": "IntPtr",
+        "go_type": "unsafe.Pointer",
+        "size": 8,
+        "alignment": 8,
+    },
+}
 
 
 # Simplified type maps used for canonical stub generation.  They are
@@ -252,3 +302,198 @@ class ContractSynthesizer:
             "symbol": name,
             "rust_stub": rust_stub,
         }
+
+
+@dataclass
+class FFIBoundaryEdge:
+    """A directed edge between two language nodes requiring an FFI bridge."""
+
+    edge_id: str
+    source_node: str
+    source_lang: str
+    target_node: str
+    target_lang: str
+    boundary_type: str
+    symbol_name: str
+    argument_types: List[str] = field(default_factory=list)
+    return_type: str = "void"
+    is_zero_copy: bool = False
+
+
+@dataclass
+class GeneratedFFIBridge:
+    """Output of synthesizing one FFI boundary edge."""
+
+    edge_id: str
+    boundary_type: str
+    header: str
+    source: str
+    python_loader: str
+    csharp_stub: str
+    build_manifest: Dict[str, Any] = field(default_factory=dict)
+
+
+class DynamicContractSynthesizer:
+    """Synthesize dynamic FFI bridge contracts across arbitrary polyglot edges."""
+
+    def synthesize_boundary(self, edge: FFIBoundaryEdge) -> GeneratedFFIBridge:
+        """Dispatch to the generator matching the edge boundary type."""
+        boundary = edge.boundary_type.replace("-", "_").lower()
+        if boundary in ("c_abi", "cabi", "c"):
+            return self._synth_c_abi_boundary(edge)
+        if boundary in ("pyo3", "pyo3_maturin", "python_rust"):
+            return self._synth_pyo3_boundary(edge)
+        if boundary in ("cgo", "go_c", "go"):
+            return self._synth_cgo_boundary(edge)
+        if boundary in ("pinvoke", "csharp", "cs"):
+            return self._synth_pinvoke_boundary(edge)
+        raise ValueError(f"unsupported boundary type: {edge.boundary_type}")
+
+    def _synth_c_abi_boundary(self, edge: FFIBoundaryEdge) -> GeneratedFFIBridge:
+        args = list(zip(edge.argument_types, [f"arg{i}" for i in range(len(edge.argument_types))]))
+        c_args = ", ".join(
+            f"{FFI_TYPE_LAYOUTS.get(t, {}).get('c_type', 'void*')} {name}"
+            for t, name in args
+        )
+        c_ret = FFI_TYPE_LAYOUTS.get(edge.return_type, {}).get("c_type", "void")
+        header_guard = f"AERO_{edge.symbol_name.upper()}_H"
+        header = (
+            f"#ifndef {header_guard}\n"
+            f"#define {header_guard}\n\n"
+            "#include <stdint.h>\n\n"
+            f'#ifdef __cplusplus\nextern "C" {{\n#endif\n\n'
+            f"{c_ret} {edge.symbol_name}({c_args});\n\n"
+            f'#ifdef __cplusplus\n}}\n#endif\n\n'
+            f"#endif /* {header_guard} */\n"
+        )
+
+        rust_args = ", ".join(
+            f"{name}: {FFI_TYPE_LAYOUTS.get(t, {}).get('rust_type', '*mut c_void')}"
+            for t, name in args
+        )
+        rust_ret = FFI_TYPE_LAYOUTS.get(edge.return_type, {}).get("rust_type", "()")
+        source = (
+            "use std::os::raw::c_void;\n\n"
+            f"#[no_mangle]\n"
+            f"pub extern \"C\" fn {edge.symbol_name}({rust_args}) -> {rust_ret} {{\n"
+            "    // TODO: wire to implementation\n"
+            f"    {'0' if rust_ret not in ('()', 'void') else ''}\n"
+            "}\n"
+        )
+
+        py_args = ", ".join(
+            FFI_TYPE_LAYOUTS.get(t, {}).get("python_ctype", "c_void_p")
+            for t, _ in args
+        )
+        python_loader = (
+            "import ctypes\n\n"
+            f"lib = ctypes.CDLL('./lib{edge.symbol_name}.so')\n"
+            f"lib.{edge.symbol_name}.argtypes = [{py_args}]\n"
+            f"lib.{edge.symbol_name}.restype = {FFI_TYPE_LAYOUTS.get(edge.return_type, {}).get('python_ctype', 'None')}\n"
+        )
+
+        return GeneratedFFIBridge(
+            edge_id=edge.edge_id,
+            boundary_type="c_abi",
+            header=header,
+            source=source,
+            python_loader=python_loader,
+            csharp_stub="",
+            build_manifest={"cbindgen": True, "crate_type": "cdylib"},
+        )
+
+    def _synth_pyo3_boundary(self, edge: FFIBoundaryEdge) -> GeneratedFFIBridge:
+        rust_args = ", ".join(
+            f"arg{i}: {FFI_TYPE_LAYOUTS.get(t, {}).get('rust_type', 'PyObject')}"
+            for i, t in enumerate(edge.argument_types)
+        )
+        rust_ret = FFI_TYPE_LAYOUTS.get(edge.return_type, {}).get("rust_type", "PyObject")
+        source = (
+            "use pyo3::prelude::*;\n\n"
+            f"#[pyfunction]\n"
+            f"fn {edge.symbol_name}({rust_args}) -> {rust_ret} {{\n"
+            "    // TODO: wire to implementation\n"
+            f"    {'Default::default()' if rust_ret not in ('()', 'void') else ''}\n"
+            "}\n"
+        )
+        header = f"// PyO3 bridge for {edge.symbol_name}\n"
+        python_loader = (
+            f"from {edge.symbol_name} import {edge.symbol_name}\n"
+        )
+        csharp_stub = ""
+        return GeneratedFFIBridge(
+            edge_id=edge.edge_id,
+            boundary_type="pyo3_maturin",
+            header=header,
+            source=source,
+            python_loader=python_loader,
+            csharp_stub=csharp_stub,
+            build_manifest={"maturin": True, "crate_type": "cdylib"},
+        )
+
+    def _synth_cgo_boundary(self, edge: FFIBoundaryEdge) -> GeneratedFFIBridge:
+        go_args = ", ".join(
+            f"arg{i} {FFI_TYPE_LAYOUTS.get(t, {}).get('go_type', 'C.int')}"
+            for i, t in enumerate(edge.argument_types)
+        )
+        go_ret = FFI_TYPE_LAYOUTS.get(edge.return_type, {}).get("go_type", "")
+        ret_sig = f" {go_ret}" if go_ret else ""
+        header = f"// CGO header for {edge.symbol_name}\n"
+        source = (
+            "package main\n\n"
+            '/*\n#include <stdint.h>\n*/\n'
+            'import "C"\n\n'
+            f"//export {edge.symbol_name}\n"
+            f"func {edge.symbol_name}({go_args}){ret_sig} {{\n"
+            "    // TODO: wire to implementation\n"
+            "}\n\n"
+            "func main() {}\n"
+        )
+        python_loader = (
+            "import ctypes\n\n"
+            f"lib = ctypes.CDLL('./{edge.symbol_name}.so')\n"
+        )
+        csharp_stub = ""
+        return GeneratedFFIBridge(
+            edge_id=edge.edge_id,
+            boundary_type="cgo",
+            header=header,
+            source=source,
+            python_loader=python_loader,
+            csharp_stub=csharp_stub,
+            build_manifest={"buildmode": "c-shared"},
+        )
+
+    def _synth_pinvoke_boundary(self, edge: FFIBoundaryEdge) -> GeneratedFFIBridge:
+        cs_args = ", ".join(
+            f"{FFI_TYPE_LAYOUTS.get(t, {}).get('csharp_type', 'IntPtr')} arg{i}"
+            for i, t in enumerate(edge.argument_types)
+        )
+        cs_ret = FFI_TYPE_LAYOUTS.get(edge.return_type, {}).get("csharp_type", "void")
+        csharp_stub = (
+            "using System;\n"
+            "using System.Runtime.InteropServices;\n\n"
+            "public static partial class AeroNative\n{\n"
+            f'    [LibraryImport("{edge.symbol_name}", EntryPoint = "{edge.symbol_name}")]\n'
+            f"    public static partial {cs_ret} {edge.symbol_name}({cs_args});\n"
+            "}\n"
+        )
+        header = f"// C# P/Invoke bridge for {edge.symbol_name}\n"
+        source = (
+            "#include <stdint.h>\n\n"
+            f"__declspec(dllexport) {FFI_TYPE_LAYOUTS.get(edge.return_type, {}).get('c_type', 'void')} "
+            f"{edge.symbol_name}(\n"
+        )
+        for i, t in enumerate(edge.argument_types):
+            source += f"    {FFI_TYPE_LAYOUTS.get(t, {}).get('c_type', 'void*')} arg{i}{',' if i < len(edge.argument_types) - 1 else ''}\n"
+        source += ") {\n    // TODO: wire to implementation\n}\n"
+        python_loader = ""
+        return GeneratedFFIBridge(
+            edge_id=edge.edge_id,
+            boundary_type="pinvoke",
+            header=header,
+            source=source,
+            python_loader=python_loader,
+            csharp_stub=csharp_stub,
+            build_manifest={"aot": True, "allow_unsafe_blocks": True},
+        )

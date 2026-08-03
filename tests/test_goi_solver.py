@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from aero_forge.scheduler.goi_solver import (
+    GoIWavefrontSolver,
     GoiSolverError,
     adjacency_to_matrix,
     goi_compute_gradients,
@@ -128,3 +129,27 @@ def test_native_bridge_verify_goi_proof_net() -> None:
     M = np.array([[0, 1], [1, 0]], dtype=np.float64).flatten().tolist()
     sigma = np.eye(2, dtype=np.float64).flatten().tolist()
     assert not verify_goi_proof_net(2, M, sigma, max_iterations=50)
+
+
+def test_goi_wavefront_solver_dag_stages() -> None:
+    """A 3-node chain produces ordered parallel wavefront stages."""
+    labels = ["a", "b", "c"]
+    M = np.array([
+        [0, 0, 0],
+        [1, 0, 0],
+        [0, 1, 0],
+    ], dtype=np.float64)
+    U = np.eye(3, dtype=np.float64) * 0.5
+    solver = GoIWavefrontSolver(labels, M, U)
+    stages = solver.wavefront_stages()
+    assert stages == [["a"], ["b"], ["c"]]
+
+
+def test_goi_wavefront_solver_cyclic_raises() -> None:
+    """A cyclic graph (A -> B -> A) makes the GoI operator singular."""
+    labels = ["a", "b"]
+    M = np.array([[0, 1], [1, 0]], dtype=np.float64)
+    U = np.eye(2, dtype=np.float64) * 0.5
+    solver = GoIWavefrontSolver(labels, M, U)
+    with pytest.raises(GoiSolverError):
+        solver.wavefront_stages()

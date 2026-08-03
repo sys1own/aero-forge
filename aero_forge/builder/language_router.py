@@ -5,9 +5,143 @@ from __future__ import annotations
 import ast
 import os
 import shutil
+import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+
+class SystemToolchainRouter:
+    """Invoke native host toolchains for graph materializer build stages."""
+
+    TOOLCHAIN_EXEC_MAP: Dict[str, str] = {
+        "gcc": "gcc",
+        "clang": "clang",
+        "clang++": "clang++",
+        "cargo": "cargo",
+        "go": "go",
+        "nvcc": "nvcc",
+        "zig": "zig",
+        "dotnet": "dotnet",
+        "maturin": "maturin",
+    }
+
+    @classmethod
+    def _exec_path(cls, toolchain: str) -> Optional[str]:
+        name = cls.TOOLCHAIN_EXEC_MAP.get(toolchain, toolchain)
+        return shutil.which(name)
+
+    @classmethod
+    def _build_command(
+        cls,
+        toolchain: str,
+        node_id: str,
+        source_files: List[str],
+        compiler_flags: List[str],
+        workspace_dir: Path,
+    ) -> List[str]:
+        if toolchain in ("gcc", "clang", "c"):
+            out = workspace_dir / f"lib{node_id}.so"
+            return [
+                cls._exec_path(toolchain) or toolchain,
+                "-shared",
+                "-fPIC",
+                "-o",
+                str(out),
+                *source_files,
+                *compiler_flags,
+            ]
+        if toolchain in ("clang++", "g++"):
+            out = workspace_dir / f"lib{node_id}.so"
+            return [
+                cls._exec_path(toolchain) or toolchain,
+                "-shared",
+                "-fPIC",
+                "-std=c++20",
+                "-o",
+                str(out),
+                *source_files,
+                *compiler_flags,
+            ]
+        if toolchain == "go":
+            out = workspace_dir / f"{node_id}.so"
+            src = source_files[0] if source_files else f"{node_id}.go"
+            return [
+                cls._exec_path("go") or "go",
+                "build",
+                "-buildmode=c-shared",
+                "-o",
+                str(out),
+                src,
+                *compiler_flags,
+            ]
+        if toolchain == "cargo":
+            return [cls._exec_path("cargo") or "cargo", "build", "--release", *compiler_flags]
+        if toolchain == "maturin":
+            return [cls._exec_path("maturin") or "maturin", "build", "--release", *compiler_flags]
+        if toolchain == "dotnet":
+            return [cls._exec_path("dotnet") or "dotnet", "build", *compiler_flags]
+        if toolchain == "nvcc":
+            out = workspace_dir / f"{node_id}.so"
+            return [
+                cls._exec_path("nvcc") or "nvcc",
+                "-shared",
+                "-o",
+                str(out),
+                *source_files,
+                *compiler_flags,
+            ]
+        if toolchain == "zig":
+            out = workspace_dir / f"lib{node_id}.so"
+            return [
+                cls._exec_path("zig") or "zig",
+                "cc",
+                "-shared",
+                "-o",
+                str(out),
+                *source_files,
+                *compiler_flags,
+            ]
+        raise ValueError(f"unsupported toolchain: {toolchain}")
+
+    @classmethod
+    def dispatch_node_build(
+        cls,
+        node_id: str,
+        node_spec: Dict[str, Any],
+        workspace_dir: Path,
+    ) -> subprocess.CompletedProcess[str]:
+        """Run the appropriate host toolchain for *node_spec*.
+
+        Raises:
+            RuntimeError: when the toolchain is unavailable or the build fails.
+        """
+        toolchain = (node_spec.get("toolchain") or node_spec.get("lang") or "").lower()
+        if not cls._exec_path(toolchain):
+            raise RuntimeError(f"toolchain {toolchain!r} not found on PATH")
+
+        source_files = list(node_spec.get("source_files", []))
+        compiler_flags = list(node_spec.get("compiler_flags", []))
+        cmd = cls._build_command(
+            toolchain, node_id, source_files, compiler_flags, Path(workspace_dir)
+        )
+
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=str(workspace_dir),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(
+                f"toolchain {toolchain!r} failed for {node_id}: {exc.stderr}"
+            ) from exc
+
+        return result
+
+
 
 
 def _accel_log(level: str, message: str) -> None:

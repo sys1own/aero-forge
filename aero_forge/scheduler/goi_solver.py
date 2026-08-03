@@ -136,6 +136,98 @@ def adjacency_to_matrix(
     return M, nodes
 
 
+def _native_wavefront_solver() -> Any:
+    """Return the native GoI wavefront solver class if the extension is compiled."""
+    try:
+        from aero_forge._native import GoIWavefrontSolverNative
+
+        return GoIWavefrontSolverNative
+    except Exception:
+        return None
+
+
+class GoIWavefrontSolver:
+    """Python wrapper for the native GoI wavefront scheduler.
+
+    Falls back to a pure Python implementation when the compiled extension is
+    unavailable.
+    """
+
+    def __init__(self, labels: List[str], M: Any, U: Any) -> None:
+        self.labels = labels
+        self._native_cls = _native_wavefront_solver()
+        if self._native_cls is not None:
+            self._native = self._native_cls(labels, M, U)
+        else:
+            self._native = None
+            self.M = _as_array(M).astype(np.float64)
+            self.U = _as_array(U).astype(np.float64)
+            if self.M.shape != (len(labels), len(labels)) or self.U.shape != self.M.shape:
+                raise GoiSolverError("M and U must be square matrices matching labels length")
+
+    def ex_operator(self) -> Any:
+        """Compute EX(M, U) = (I - U * M)^-1 * U."""
+        try:
+            if self._native is not None:
+                return self._native.ex_operator()
+        except ArithmeticError as exc:
+            raise GoiSolverError(str(exc)) from exc
+
+        I = np.eye(len(self.labels), dtype=np.float64)
+        k = I - self.U @ self.M
+        det = np.linalg.det(k)
+        if abs(det) < 1e-12:
+            raise GoiSolverError(
+                "Cyclic dependency in G_HIN: (I - U*M) matrix operator is singular."
+            )
+        k_inv = np.linalg.inv(k)
+        return k_inv @ self.U
+
+    def wavefront_stages(self) -> List[List[str]]:
+        """Return parallel execution stages by in-degree reduction on M.
+
+        Raises:
+            GoiSolverError: if the graph is cyclic (K is singular).
+        """
+        try:
+            if self._native is not None:
+                return self._native.wavefront_stages()
+        except ArithmeticError as exc:
+            raise GoiSolverError(str(exc)) from exc
+
+        n = len(self.labels)
+        in_degree = [0] * n
+        outgoing: List[List[int]] = [[] for _ in range(n)]
+        for i in range(n):
+            for j in range(n):
+                if abs(self.M[i, j]) > 1e-12:
+                    # M[i][j] == source j -> target i
+                    in_degree[i] += 1
+                    outgoing[j].append(i)
+
+        remaining = in_degree.copy()
+        seen = [False] * n
+        stages: List[List[str]] = []
+        while True:
+            stage = [self.labels[i] for i in range(n) if not seen[i] and remaining[i] == 0]
+            if not stage:
+                if all(seen):
+                    break
+                raise GoiSolverError(
+                    "Cyclic dependency in G_HIN: no wavefront stage could be extracted."
+                )
+            for name in stage:
+                seen[self.labels.index(name)] = True
+            for i in range(n):
+                if seen[i]:
+                    for j in outgoing[i]:
+                        if not seen[j]:
+                            remaining[j] = max(0, remaining[j] - 1)
+            stage.sort()
+            stages.append(stage)
+        return stages
+
+
 def precedence_scores(
     adj_list: Dict[str, List[str]],
     node_order: Optional[List[str]] = None,
