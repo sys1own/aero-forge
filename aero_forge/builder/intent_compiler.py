@@ -61,21 +61,25 @@ YOUR SOLE PURPOSE IS TO CONVERT UNSTRUCTURED USER DOMAIN PROMPTS INTO A VALID `P
 
 STRICT OPERATIONAL RULES:
 1. OUTPUT ONLY VALID JSON. DO NOT INCLUDE PREFACES, FOOTERS, MARKDOWN EXPLANATIONS, OR CODE BLOCK TEXT OUTSIDE THE JSON OBJECT.
-2. `architecture` MUST be "graph_polyglot" unless the request is explicitly a single-language project.
-3. `nodes` MUST be a list of objects with: `node_id` (unique), `lang` (one of: python, rust, cpp, go, csharp, java), `toolchain` (one of: gcc, clang, clang++, cargo, go, nvcc, zig, dotnet, maturin, python, javac), `source_files` (list of relative paths, optional), `compiler_flags` (list, optional), `exports` (list, optional).
+2. `architecture` MUST be "graph_polyglot" unless the request is explicitly a single-language project. Never fall back to legacy target strings like "tri_polyglot_rust_cpp_python" or generic stub names like "sliding_window_dtw" / "orchestrate".
+3. `nodes` MUST be a list of objects with: `node_id` (unique), `lang` (one of: python, rust, cpp, go, csharp, java), `toolchain` (one of: gcc, clang, clang++, cargo, go, nvcc, zig, dotnet, maturin, python, javac, cmake), `source_files` (list of relative paths, optional), `compiler_flags` (list, optional), `exports` (list, optional).
 4. `edges` MUST be a list of cross-language FFI boundary objects with: `source`, `target` (both matching `node_id`s), `boundary_type` (one of: C_ABI, PYO3_MATURIN, WASM_WASI, JNI, CGO, PINVOKE, CUDA_HIP_C), `symbol`, `args` (list of primitive type names: int32, int64, float32, float64, pointer), `return_type` (primitive type name or ""), `is_zero_copy` (boolean).
-5. Enforce a DAG: no cycles among `edges`. The `source` node must be an earlier stage than the `target` node.
-6. Enforce zero-copy memory layout compatibility: scalars pass by value; vectors/tensors pass as raw pointer + length + capacity triples (`data_ptr`, `length`, `capacity`).
-7. DO NOT generate placeholder stubs ("// TODO", "pass", "todo!()"). Every node and contract must be fully specified.
-8. FILE BOUNDARY CONSTRAINT: only list `source_files` explicitly required by the prompt.
-9. ARTIFACT HYGIENE: NEVER stage, commit, or list generated binary targets, virtual environments, distribution metadata, or package archives as deliverables.
+5. `primary_entrypoint` MUST be the user's requested entrypoint path (e.g. "python_interface/main.py") instead of any default like "run_shell.py".
+6. `build_script` MUST be the user's requested root build script path (e.g. "build.sh") when specified.
+7. Enforce a DAG: no cycles among `edges`. The `source` node must be an earlier stage than the `target` node.
+8. Enforce zero-copy memory layout compatibility: scalars pass by value; vectors/tensors pass as raw pointer + length + capacity triples (`data_ptr`, `length`, `capacity`).
+9. DO NOT generate placeholder stubs ("// TODO", "pass", "todo!()"). Every node and contract must be fully specified.
+10. FILE BOUNDARY CONSTRAINT: only list `source_files` explicitly required by the prompt. Include custom build files such as `build.sh` and `cpp_engine/CMakeLists.txt` exactly as requested.
+11. ARTIFACT HYGIENE: NEVER stage, commit, or list generated binary targets, virtual environments, distribution metadata, or package archives as deliverables.
 
 Example JSON shape:
 {
   "project": "audio_synth",
   "architecture": "graph_polyglot",
+  "primary_entrypoint": "python_interface/main.py",
+  "build_script": "build.sh",
   "nodes": [
-    {"node_id": "cpp_core", "lang": "cpp", "toolchain": "clang++", "source_files": ["cpp_core/synth.cpp"], "exports": ["synth_render"]},
+    {"node_id": "cpp_core", "lang": "cpp", "toolchain": "cmake", "source_files": ["cpp_engine/src/synth.cpp", "cpp_engine/CMakeLists.txt"], "exports": ["synth_render"]},
     {"node_id": "go_server", "lang": "go", "toolchain": "go", "source_files": ["go_server/main.go"], "exports": ["start_server"]}
   ],
   "edges": [
@@ -753,11 +757,19 @@ class IntentCompiler:
 
         resolved_output_dir = str(Path(output_dir) / "dist") if output_dir else "./dist"
 
+        primary_entrypoint = ""
+        if v2.execution_strategy:
+            primary_entrypoint = v2.execution_strategy.primary_entrypoint.get("path", "")
+
+        build_script = v2.execution_strategy.run_spec.get("command", "") if v2.execution_strategy else ""
+
         return PolyglotGraphBlueprint(
             project=project,
             nodes=nodes,
             edges=edges,
             output_dir=resolved_output_dir,
+            primary_entrypoint=primary_entrypoint or "run_shell.py",
+            build_script=build_script or None,
             metadata={
                 "prompt": prompt_text,
                 **v2.metadata,

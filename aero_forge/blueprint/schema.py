@@ -709,6 +709,8 @@ class PolyglotGraphBlueprint(BaseModel):
     nodes: List[PolyglotNodeSpec] = Field(default_factory=list)
     edges: List[BoundaryEdgeSpec] = Field(default_factory=list)
     output_dir: str = "./dist"
+    primary_entrypoint: str = "run_shell.py"
+    build_script: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")

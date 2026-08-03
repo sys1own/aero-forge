@@ -25,15 +25,23 @@ You will receive:
   `target`.
 
 OUTPUT RULES
-1. Return ONLY source code inside well-labeled Markdown fences. Use the form:
-   ```<lang>
-   // source
+1. Return ONLY source code inside well-labeled Markdown fences. Each fence
+   MUST be labeled with the target file path using the form:
+   ```<lang>:<relative/path>
+   ...
    ```
-2. Do NOT include explanations, TODOs, or placeholder stubs. The generated
-   code must compile with the stated toolchain on the first pass.
-3. Include the build manifest (Cargo.toml, CMakeLists.txt, pyproject.toml,
-   go.mod, .csproj, build.gradle, etc.) as a separate fenced block labeled with
-   the manifest language (e.g. `toml`, `xml`, `go.mod`).
+   Example:
+   ```cpp:cpp_engine/src/kernels.cpp
+   // ...
+   ```
+2. Do NOT include explanations, TODOs, or placeholder stubs (no "// TODO",
+   no `pass`, no `todo!()`). The generated code must compile with the stated
+   toolchain on the first pass and must implement a real baseline for every
+   requested symbol.
+3. Generate every file listed in `node.source_files`, including headers and
+   the build manifest (Cargo.toml, CMakeLists.txt, pyproject.toml, go.mod,
+   .csproj, build.gradle, etc.). Manifest fences use their language label
+   (e.g. `toml`, `xml`) and the exact manifest path (e.g. `Cargo.toml`).
 
 LANGUAGE-SPECIFIC FFI IDIOMS
 - C_ABI:
