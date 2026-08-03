@@ -390,25 +390,32 @@ def get_default_template() -> PromptTemplate:
 # Blueprint planning prompt material
 # ---------------------------------------------------------------------------
 
-BLUEPRINT_PLAN_INSTRUCTIONS = """You are a systems architect. Given the user prompt and constraints, produce a valid YAML blueprint.aero with exactly these top-level keys:
-project, architecture, toolchains, manifest, contracts, output_dir, prompt, constraints, llm.
+BLUEPRINT_PLAN_INSTRUCTIONS = """You are a systems architect for Aero-Forge. Given the user prompt and constraints, produce a valid YAML blueprint.aero that follows the `graph_polyglot` schema.
 
-- architecture must be one of: pure_python, pure_rust, hybrid_rust_python, hybrid_cpp_python, hybrid_cpp_rust, tri_polyglot_rust_cpp_python.
-- If the prompt mentions Python and Rust together (PyO3, Maturin, FFI, native core), architecture MUST be hybrid_rust_python and toolchains MUST be [python, cargo].
-- If the prompt mentions Python and C++ together (pybind11, CMake, g++, clang++, C extensions, extern "C"), architecture MUST be hybrid_cpp_python and toolchains MUST be [python, cpp, g++, clang].
-- If the prompt mentions Rust and C++ together (cargo build.rs, C-ABI, no Python runtime), architecture MUST be hybrid_cpp_rust and toolchains MUST be [rust, cpp, cargo, g++, clang].
-- If the prompt mentions Python + Rust + C++ together, tri-polyglot, or a Python CLI orchestrating Rust PyO3 and C++ C-ABI, architecture MUST be tri_polyglot_rust_cpp_python and toolchains MUST be [python, rust, cpp, cargo, g++, clang].
-- If the prompt is purely Rust/cargo, use pure_rust with toolchains [rust, cargo].
-- If the prompt is purely Python, use pure_python with toolchains [python].
-- manifest is a list of objects with keys: path, lang, purpose. Use relative paths.
-- contracts is a list of objects with keys: name, signature, language, python_name, purpose.
-- Every contract signature MUST be a valid Python function definition using Python type annotations (e.g. `def compute(data: list[float]) -> list[float]`, `def scale_matrix(m: list[list[float]], k: float) -> list[list[float]]`, `def dot(a: list[float], b: list[float]) -> float`). Do NOT use C/C++ pointer or array syntax such as `const float*`, `float*`, `void`, or `int len`.
-- Quote all signature strings with double quotes so colons in Python type annotations do not break YAML parsing.
-- output_dir should be "dist".
-- llm should be an object with provider and model keys, or null.
-- If the user prompt explicitly lists file paths or module names (e.g. "aero_orchestrator/cli.py", "run_shell.py", "tests/test_cli.py"), you MUST include those EXACT paths in the manifest and derive the project/package name from them. Do not substitute template defaults like "aero_polyglot_runner", "run_demo.py", or "tests/test_polyglot.py" unless the user asks for them.
+Required top-level keys: project, architecture, nodes, edges, output_dir, prompt, constraints, llm.
 
-Keep the blueprint minimal and accurate."""
+- `architecture` must be `"graph_polyglot"` for any multi-language or cross-FFI build.
+- `nodes` is a list of objects with keys:
+    - `node_id`: unique string identifier.
+    - `lang`: one of `python`, `rust`, `cpp`, `go`, `csharp`, `java`.
+    - `toolchain`: one of `gcc`, `clang`, `clang++`, `cargo`, `go`, `nvcc`, `zig`, `dotnet`, `maturin`, `python`, `javac`.
+    - `source_files`: list of relative file paths for this node (optional).
+    - `compiler_flags`: list of extra flags (optional).
+    - `exports`: list of public symbols this node exposes (optional).
+- `edges` is a list of cross-language FFI boundary objects with keys:
+    - `source`, `target`: must match existing `node_id`s.
+    - `boundary_type`: one of `C_ABI`, `PYO3_MATURIN`, `WASM_WASI`, `JNI`, `CGO`, `PINVOKE`, `CUDA_HIP_C`.
+    - `symbol`: exported function / method name.
+    - `args`: list of argument type names (e.g. `int64`, `float64`, `pointer`).
+    - `return_type`: single return type name or empty string for `void`.
+    - `is_zero_copy`: boolean (default false).
+- Enforce a DAG: every edge goes from an earlier node to a later node; no cycles.
+- Enforce zero-copy memory layout compatibility: scalars by value; vectors/tensors as raw pointer + length + capacity (`data_ptr`, `length`, `capacity`).
+- `output_dir` should be "dist".
+- `llm` should be an object with `provider` and `model` keys, or null.
+- If the user prompt explicitly lists file paths or module names (e.g. "aero_orchestrator/cli.py", "run_shell.py", "tests/test_cli.py"), you MUST include those EXACT paths in the relevant node's `source_files`.
+
+Return ONLY the YAML blueprint.aero. No markdown fences, no explanation."""
 
 # ---------------------------------------------------------------------------
 # Co-pilot / chat system prompt
@@ -416,41 +423,36 @@ Keep the blueprint minimal and accurate."""
 
 from aero_forge.copilot.prompts import COPILOT_SYSTEM_PROMPT as AERO_FORGE_COPILOT_SYSTEM_PROMPT
 
-POLYGLOT_BLUEPRINT_EXAMPLE = """Example polyglot blueprint.aero for a Python-Rust batch processor:
+POLYGLOT_BLUEPRINT_EXAMPLE = """Example graph_polyglot blueprint.aero for a Python-Rust batch processor:
 
 project: batch_processor
-architecture: hybrid_rust_python
-toolchains:
-  - python
-  - cargo
-manifest:
-  - path: Cargo.toml
-    lang: toml
-    purpose: Rust workspace manifest
-  - path: rust_core/Cargo.toml
-    lang: toml
-    purpose: PyO3 crate manifest
-  - path: rust_core/src/lib.rs
+architecture: graph_polyglot
+nodes:
+  - node_id: rust_core
     lang: rust
-    purpose: Rust native core exposing compute_batch
-  - path: python_engine/pyproject.toml
-    lang: toml
-    purpose: Python package and Maturin configuration
-  - path: python_engine/src/batch_engine/__init__.py
+    toolchain: cargo
+    source_files:
+      - rust_core/Cargo.toml
+      - rust_core/src/lib.rs
+    exports:
+      - compute_batch
+  - node_id: python_engine
     lang: python
-    purpose: Python driver package exports
-  - path: python_engine/src/batch_engine/core.py
-    lang: python
-    purpose: Python wrapper importing rust_core
-  - path: python_engine/tests/test_core.py
-    lang: python
-    purpose: pytest tests
-contracts:
-  - name: compute_batch
-    signature: "def compute_batch(data: list[float]) -> list[float]"
-    language: python/rust
-    python_name: batch_engine.core.compute_batch
-    purpose: Native/PyO3 exported core function
+    toolchain: python
+    source_files:
+      - python_engine/pyproject.toml
+      - python_engine/src/batch_engine/__init__.py
+      - python_engine/src/batch_engine/core.py
+      - python_engine/tests/test_core.py
+    exports: []
+edges:
+  - source: rust_core
+    target: python_engine
+    boundary_type: PYO3_MATURIN
+    symbol: compute_batch
+    args: [pointer]
+    return_type: pointer
+    is_zero_copy: true
 output_dir: dist
 prompt: Build a Python-Rust batch processor
 constraints: none

@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger("aero_forge.blueprint.schema")
 
@@ -671,6 +671,34 @@ class BoundaryEdgeSpec(BaseModel):
     args: List[str] = Field(default_factory=list)
     return_type: str = ""
     is_zero_copy: bool = False
+
+    @field_validator("boundary_type", mode="before")
+    @classmethod
+    def _normalize_boundary_type(cls, value: Any) -> str:
+        if value is None:
+            return "c_abi"
+        text = str(value).lower().strip().replace("-", "_")
+        synonyms = {
+            "c": "c_abi",
+            "c_abi": "c_abi",
+            "capi": "c_abi",
+            "pyo3": "pyo3_maturin",
+            "maturin": "pyo3_maturin",
+            "wasm": "wasm_wasi",
+            "wasi": "wasm_wasi",
+            "cgo": "cgo",
+            "go": "cgo",
+            "pinvoke": "pinvoke",
+            "p/invoke": "pinvoke",
+            "csharp": "pinvoke",
+            "dotnet": "pinvoke",
+            "jni": "jni",
+            "java": "jni",
+            "cuda": "cuda_hip_c",
+            "hip": "cuda_hip_c",
+            "cuda_hip": "cuda_hip_c",
+        }
+        return synonyms.get(text, text)
 
 
 class PolyglotGraphBlueprint(BaseModel):
