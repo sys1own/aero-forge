@@ -142,6 +142,46 @@ def test_synthesize_upgrades_draft_to_finalized(tmp_path: Path, monkeypatch: Any
     BlueprintV3Validator(finalized.model_dump(mode="json"), workspace=workspace).check_exportable()
 
 
+def test_synthesize_treats_auto_generated_draft_as_raw(tmp_path: Path, monkeypatch: Any) -> None:
+    """An auto-generated starter blueprint is recognized as a draft and synthesized."""
+    from aero_forge.blueprint.schema import ContextState, Metadata
+
+    draft = BlueprintV3(
+        metadata=Metadata(
+            schema_version="3.0.0",
+            project_name="draft_project",
+            status="draft",
+            generation_method="static_heuristic",
+            transferable=False,
+            llm_initialized=False,
+            auto_generated=True,
+        ),
+        llm_context={
+            "state": ContextState.raw,
+            "repository_summary": "Auto-generated minimal blueprint for empty workspace.",
+        },
+    )
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("print('Hello')\n", encoding="utf-8")
+    write_v3_blueprint(draft, workspace / "blueprint.aero")
+
+    import aero_forge.llm.clients as clients
+
+    monkeypatch.setattr(
+        clients, "get_llm_client", lambda provider, model=None: _FakeLLMClient(project_name="draft_project")
+    )
+
+    synthesizer = LLMBlueprintSynthesizer(provider="fake")
+    synthesizer._client = lambda: _FakeLLMClient(project_name="draft_project")
+    finalized = synthesizer.synthesize(workspace, draft=draft)
+
+    assert finalized.metadata.status == "finalized"
+    assert finalized.metadata.llm_initialized is True
+    assert finalized.metadata.auto_generated is False
+    assert finalized.llm_context.state == ContextState.synthesized
+
+
 def test_synthesize_fills_missing_verification_node_id(tmp_path: Path, monkeypatch: Any) -> None:
     """LLM synthesis that omits verification node_id should still produce a valid BlueprintV3."""
     workspace = tmp_path / "project"

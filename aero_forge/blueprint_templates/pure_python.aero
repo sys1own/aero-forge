@@ -1,7 +1,23 @@
+metadata:
+  schema_version: "3.0.0"
+  project_name: pure_python_project
+  status: draft
+  generation_method: static_heuristic
+  transferable: true
+  llm_initialized: false
+  auto_generated: true
+  description: Auto-generated draft blueprint for pure_python project.
+llm_context:
+  state: raw
+  repository_summary: ""
+  dependency_graph: {}
+  exported_api_signatures: {}
+  polyglot_boundaries: []
+  compute_hotspots: []
 project: pure_python_project
 architecture: pure_python
 toolchains:
-  - python
+  - name: python
 manifest:
   - path: pyproject.toml
     lang: toml
