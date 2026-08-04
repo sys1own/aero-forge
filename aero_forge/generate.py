@@ -8,7 +8,7 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from aero_forge.blueprint import (
     Blueprint,
@@ -488,6 +488,12 @@ def write_generated_project(
     if tests and not tests.endswith("\n"):
         tests += "\n"
 
+    # Auto-correct common generator mistakes such as ``return []`` in
+    # matrix/array functions before validation sees them.
+    from aero_forge.scaffold.pre_write_validator import rewrite_empty_matrix_returns
+
+    implementation = rewrite_empty_matrix_returns(implementation)
+
     src_dir = output_dir / "src"
     tests_dir = output_dir / "tests"
     src_dir.mkdir(parents=True, exist_ok=True)
@@ -661,6 +667,89 @@ def _review_code(
     return implementation
 
 
+def _flatten_nested_functions(source: str) -> str:
+    """Lift nested function definitions to module level so HIN/Rust can emit them.
+
+    Only safe when the nested function does not close over outer local variables.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+
+    builtins = {*dir(__builtins__)} if isinstance(__builtins__, dict) else {*dir(__builtins__)}
+    new_top_level: List[ast.FunctionDef] = []
+
+    def _assigned_names(body: List[ast.stmt]) -> Set[str]:
+        names: Set[str] = set()
+        for stmt in body:
+            for child in ast.walk(stmt):
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Store):
+                    names.add(child.id)
+        return names
+
+    for top_node in list(tree.body):
+        if not isinstance(top_node, ast.FunctionDef):
+            continue
+        outer_locals = {arg.arg for arg in top_node.args.args}
+        outer_locals.update(a.arg for a in getattr(top_node.args, "posonlyargs", []))
+        outer_locals.update(a.arg for a in getattr(top_node.args, "kwonlyargs", []))
+        outer_locals.add(top_node.name)
+        outer_locals.update(_assigned_names(top_node.body))
+
+        body = list(top_node.body)
+        for idx in range(len(body) - 1, -1, -1):
+            stmt = body[idx]
+            if not isinstance(stmt, ast.FunctionDef):
+                continue
+            nested = stmt
+            nested_locals = {arg.arg for arg in nested.args.args}
+            nested_locals.update(_assigned_names(nested.body))
+            free_vars: Set[str] = set()
+            for child in ast.walk(nested):
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
+                    if child.id in builtins or child.id in nested_locals:
+                        continue
+                    if child.id in outer_locals:
+                        free_vars.add(child.id)
+            if free_vars:
+                continue
+
+            old_name = nested.name
+            new_name = f"{top_node.name}_{old_name}"
+            for child in ast.walk(nested):
+                if isinstance(child, ast.Name) and child.id == old_name:
+                    child.id = new_name
+            nested.name = new_name
+            ast.fix_missing_locations(nested)
+            new_top_level.append(nested)
+
+            body[idx] = ast.Pass()
+            for child_stmt in body:
+                for child in ast.walk(child_stmt):
+                    if isinstance(child, ast.Name) and child.id == old_name:
+                        child.id = new_name
+            top_node.body = body
+
+    if new_top_level:
+        tree.body = new_top_level + tree.body
+        ast.fix_missing_locations(tree)
+        return ast.unparse(tree)
+    return source
+
+
+def _normalize_numeric_literals(source: str) -> str:
+    """Fix malformed numeric literals produced by some LLMs.
+
+    Some model outputs include underscores adjacent to the decimal point
+    (``1_.0`` or ``1._0``) which are invalid Python.  Remove the underscore
+    while leaving valid digit-grouping underscores like ``1_000.0`` intact.
+    """
+    source = re.sub(r"(\d+)_\.(\d+)", r"\1.\2", source)
+    source = re.sub(r"(\d+)\._(\d+)", r"\1.\2", source)
+    return source
+
+
 def sanitize_generated_code(source: str) -> str:
     """Remove unsupported constructs that commonly appear in LLM output.
 
@@ -668,6 +757,7 @@ def sanitize_generated_code(source: str) -> str:
     statements because the Aero-Forge transpiler does not support them,
     while preserving as much of the generated numeric function as possible.
     """
+    source = _normalize_numeric_literals(source)
     try:
         tree = ast.parse(source)
     except SyntaxError:
@@ -681,7 +771,7 @@ def sanitize_generated_code(source: str) -> str:
             return ast.Pass()
 
     sanitized = ast.unparse(Sanitizer().visit(tree))
-    return sanitized
+    return _flatten_nested_functions(sanitized)
 
 
 def _has_float_literal(node: ast.AST) -> bool:
@@ -692,6 +782,13 @@ def _has_float_literal(node: ast.AST) -> bool:
 def _is_literal_expression(node: ast.AST) -> bool:
     """Return True for simple literal containers used as expected values."""
     return isinstance(node, (ast.Constant, ast.List, ast.Tuple, ast.Set, ast.Dict))
+
+
+def _is_nested_list_literal(node: ast.expr) -> bool:
+    """Return True when ``node`` is a list literal containing other lists."""
+    return isinstance(node, ast.List) and any(
+        isinstance(elt, ast.List) for elt in node.elts
+    )
 
 
 def _is_pytest_approx(node: ast.AST) -> bool:
@@ -705,20 +802,59 @@ def _is_pytest_approx(node: ast.AST) -> bool:
     )
 
 
+def _is_pytest_approx_call(node: ast.expr) -> Optional[ast.expr]:
+    """Return the inner argument if ``node`` is ``pytest.approx(...)`` or ``pytest.approx(value, rel=...)``."""
+    if not isinstance(node, ast.Call):
+        return None
+    func = node.func
+    if (
+        isinstance(func, ast.Attribute)
+        and isinstance(func.value, ast.Name)
+        and func.value.id == "pytest"
+        and func.attr == "approx"
+    ):
+        if node.args:
+            return node.args[0]
+    return None
+
+
 def _normalize_float_assertions(tests: str) -> str:
-    """Rewrite exact equality assertions on floats to use ``pytest.approx``.
+    """Rewrite equality assertions on floats to use ``pytest.approx`` safely.
 
     Floating-point arithmetic in compiled Rust can produce tiny differences
-    (e.g. ``1.7000000000000002`` instead of ``1.7``). Wrapping the expected
-    literal in ``pytest.approx`` makes generated tests robust.
+    (e.g. ``1.7000000000000002`` instead of ``1.7``). For scalar/flat values we
+    wrap the expected literal in ``pytest.approx``. For nested matrices we
+    emit a row-level helper so ``pytest.approx`` is not applied to nested
+    containers (which raises a TypeError).
     """
     try:
         tree = ast.parse(tests)
     except SyntaxError:
         return tests
 
+    def _collect_nested_matrix_vars(tree: ast.AST) -> Set[str]:
+        """Return names assigned to a nested list literal anywhere in *tree*."""
+        names: Set[str] = set()
+        for stmt in ast.walk(tree):
+            if isinstance(stmt, ast.Assign):
+                for target in stmt.targets:
+                    if isinstance(target, ast.Name) and _is_nested_list_literal(stmt.value):
+                        names.add(target.id)
+        return names
+
+    needs_nested_helper = False
+
     class ApproxTransformer(ast.NodeTransformer):
+        def __init__(self, nested_vars: Set[str]) -> None:
+            self.nested_vars = nested_vars
+
+        def _is_nested_expected(self, expr: ast.expr) -> bool:
+            return _is_nested_list_literal(expr) or (
+                isinstance(expr, ast.Name) and expr.id in self.nested_vars
+            )
+
         def visit_Assert(self, node: ast.Assert) -> ast.AST:
+            nonlocal needs_nested_helper
             test = node.test
             if (
                 not isinstance(test, ast.Compare)
@@ -728,8 +864,35 @@ def _normalize_float_assertions(tests: str) -> str:
                 return node
             left = test.left
             right = test.comparators[0]
-            if _is_pytest_approx(left) or _is_pytest_approx(right):
+
+            # Case 1: the LLM already wrapped the expected value in
+            # ``pytest.approx``.  Replace with a row-wise approx helper when
+            # the expectation is a nested matrix.
+            approx_inner = _is_pytest_approx_call(left)
+            if approx_inner is not None:
+                expected, actual = approx_inner, right
+                if self._is_nested_expected(expected):
+                    needs_nested_helper = True
+                    new_test = ast.Call(
+                        func=ast.Name(id="_aero_approx_nested", ctx=ast.Load()),
+                        args=[actual, expected],
+                        keywords=[],
+                    )
+                    return ast.Assert(test=new_test, msg=node.msg)
                 return node
+            approx_inner = _is_pytest_approx_call(right)
+            if approx_inner is not None:
+                expected, actual = approx_inner, left
+                if self._is_nested_expected(expected):
+                    needs_nested_helper = True
+                    new_test = ast.Call(
+                        func=ast.Name(id="_aero_approx_nested", ctx=ast.Load()),
+                        args=[actual, expected],
+                        keywords=[],
+                    )
+                    return ast.Assert(test=new_test, msg=node.msg)
+                return node
+
             left_has_float = _has_float_literal(left)
             right_has_float = _has_float_literal(right)
             if not left_has_float and not right_has_float:
@@ -740,6 +903,14 @@ def _normalize_float_assertions(tests: str) -> str:
                 expected, actual = left, right
             else:
                 return node
+            if self._is_nested_expected(expected):
+                needs_nested_helper = True
+                new_test = ast.Call(
+                    func=ast.Name(id="_aero_approx_nested", ctx=ast.Load()),
+                    args=[actual, expected],
+                    keywords=[],
+                )
+                return ast.Assert(test=new_test, msg=node.msg)
             approx_call = ast.Call(
                 func=ast.Attribute(
                     value=ast.Name(id="pytest", ctx=ast.Load()),
@@ -758,10 +929,27 @@ def _normalize_float_assertions(tests: str) -> str:
             new_test.col_offset = getattr(test, "col_offset", None)
             return ast.Assert(test=new_test, msg=node.msg)
 
-    tree = ApproxTransformer().visit(tree)
+    nested_vars = _collect_nested_matrix_vars(tree)
+    tree = ApproxTransformer(nested_vars).visit(tree)
     ast.fix_missing_locations(tree)
     result = ast.unparse(tree)
-    if "import pytest" not in result:
+    helper = (
+        "def _aero_approx_nested(actual, expected):\n"
+        "    assert len(actual) == len(expected)\n"
+        "    for a_row, e_row in zip(actual, expected):\n"
+        "        assert len(a_row) == len(e_row)\n"
+        "        for a, e in zip(a_row, e_row):\n"
+        "            assert a == pytest.approx(e)\n"
+        "    return True\n"
+    )
+    if needs_nested_helper:
+        prefix = ""
+        if "import pytest" not in result:
+            prefix += "import pytest\n"
+        if "def _aero_approx_nested" not in result:
+            prefix += helper + "\n"
+        result = prefix + result
+    elif "import pytest" not in result:
         result = "import pytest\n" + result
     return result
 
@@ -835,6 +1023,7 @@ def generate_project(
         tests = generate_smoke_tests(implementation, module_name=module_name)
     else:
         tests = _rewrite_generated_imports(tests, module_name)
+    tests = _normalize_numeric_literals(tests)
     tests = _normalize_float_assertions(tests)
     source_path, test_path, blueprint = write_generated_project(
         output_dir,
