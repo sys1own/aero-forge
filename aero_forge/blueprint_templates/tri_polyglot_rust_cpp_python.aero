@@ -1,10 +1,26 @@
+metadata:
+  schema_version: "3.0.0"
+  project_name: <project>
+  status: draft
+  generation_method: static_heuristic
+  transferable: true
+  llm_initialized: false
+  auto_generated: true
+  description: Auto-generated draft blueprint for tri_polyglot_rust_cpp_python project.
+llm_context:
+  state: raw
+  repository_summary: ""
+  dependency_graph: {}
+  exported_api_signatures: {}
+  polyglot_boundaries: []
+  compute_hotspots: []
 project: <project>
 architecture: tri_polyglot_rust_cpp_python
 toolchains:
-  - python
-  - rust
-  - cpp
-  - cargo
+  - name: python
+  - name: rust
+  - name: cpp
+  - name: cargo
 manifest:
   - path: Cargo.toml
     lang: toml

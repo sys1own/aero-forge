@@ -1183,9 +1183,9 @@ def ensure_workspace_blueprint(workspace_root: Path) -> Path:
 
     For workspaces that already contain source code, a Blueprint v3.0.0 is
     inferred from the discovered artifacts. For truly empty workspaces, a
-    minimal blueprint is synthesized from the closest standard template
-    (``pure_python.aero`` by default) and marked as LLM-initialized so the UI
-    does not warn about a missing blueprint.
+    minimal draft blueprint is synthesized from the closest standard template
+    (``pure_python.aero`` by default) and marked as auto-generated so the
+    synthesizer knows it still needs LLM synthesis.
     """
     workspace_root = Path(workspace_root).resolve()
     blueprint_path = workspace_root / "blueprint.aero"
@@ -1287,15 +1287,15 @@ def ensure_workspace_blueprint(workspace_root: Path) -> Path:
         metadata=Metadata(
             schema_version="3.0.0",
             project_name=project_name,
-            status=BlueprintStatus.finalized,
+            status=BlueprintStatus.draft,
             generation_method=GenerationMethod.static_heuristic,
             transferable=True,
-            llm_initialized=True,
+            llm_initialized=False,
             auto_generated=True,
             description=description,
         ),
         llm_context=LLMContext(
-            state=ContextState.synthesized,
+            state=ContextState.raw,
             repository_summary=description,
             dependency_graph={},
             compute_hotspots=[],

@@ -1,8 +1,24 @@
+metadata:
+  schema_version: "3.0.0"
+  project_name: pure_rust_project
+  status: draft
+  generation_method: static_heuristic
+  transferable: true
+  llm_initialized: false
+  auto_generated: true
+  description: Auto-generated draft blueprint for pure_rust project.
+llm_context:
+  state: raw
+  repository_summary: ""
+  dependency_graph: {}
+  exported_api_signatures: {}
+  polyglot_boundaries: []
+  compute_hotspots: []
 project: pure_rust_project
 architecture: pure_rust
 toolchains:
-  - rust
-  - cargo
+  - name: rust
+  - name: cargo
 manifest:
   - path: Cargo.toml
     lang: toml

@@ -282,6 +282,18 @@ class LLMBlueprintSynthesizer:
         when *output_path* is provided.
         """
         workspace = Path(workspace).resolve()
+
+        # Auto-generated / draft blueprints are placeholders, not finalized work.
+        # Make sure the LLM prompt sees them as raw so it actually synthesizes.
+        if draft and (
+            draft.metadata.auto_generated
+            or draft.metadata.status == BlueprintStatus.draft
+            or not draft.metadata.llm_initialized
+        ):
+            draft.metadata.llm_initialized = False
+            draft.metadata.status = BlueprintStatus.draft
+            draft.llm_context.state = ContextState.raw
+
         context = self._gather_context(workspace, draft, spec)
         prompt = self._load_prompt().render(**context)
 
@@ -384,6 +396,7 @@ class LLMBlueprintSynthesizer:
         metadata["generation_method"] = "llm_synthesized"
         metadata["transferable"] = True
         metadata["llm_initialized"] = True
+        metadata["auto_generated"] = False
 
         # Mark the blueprint as LLM-context enriched.
         llm_context = data.setdefault("llm_context", {})
