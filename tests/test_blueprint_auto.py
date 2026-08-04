@@ -54,6 +54,11 @@ def test_ensure_workspace_blueprint_detects_rust_workspace() -> None:
         path = ensure_workspace_blueprint(root)
         bp = BlueprintV3.load(path)
         assert bp.metadata.project_name
+        assert bp.metadata.status.value == "draft"
+        assert bp.metadata.auto_generated is True
+        assert bp.metadata.llm_initialized is False
+        assert bp.metadata.transferable is False
+        assert bp.llm_context.state.value == "raw"
         assert bp.build_pipeline
         assert bp.build_pipeline[0].type.value == "cargo_cdylib"
         assert any("src/lib.rs" in sf for sf in bp.build_pipeline[0].source_files)
@@ -68,6 +73,10 @@ def test_ensure_workspace_blueprint_detects_python_rust_hybrid() -> None:
         path = ensure_workspace_blueprint(root)
         bp = BlueprintV3.load(path)
         assert bp.metadata.project_name
+        assert bp.metadata.status.value == "draft"
+        assert bp.metadata.auto_generated is True
+        assert bp.metadata.llm_initialized is False
+        assert bp.llm_context.state.value == "raw"
         assert any(t.name.lower() == "rust" for t in bp.toolchains)
         assert any(t.name.lower() in {"python", "cpython"} for t in bp.toolchains)
 

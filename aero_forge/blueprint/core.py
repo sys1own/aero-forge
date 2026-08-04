@@ -1210,11 +1210,14 @@ def ensure_workspace_blueprint(workspace_root: Path) -> Path:
     # instead of overwriting with an empty template.
     if _workspace_has_sources(workspace_root):
         blueprint = generate_draft_v3_blueprint(workspace_root)
-        blueprint.metadata.status = BlueprintStatus.finalized
-        blueprint.metadata.llm_initialized = True
-        blueprint.metadata.transferable = True
+        # Source-derived blueprints are still heuristic sketches; they are not
+        # LLM-initialized and must not be treated as finalized.
+        blueprint.metadata.status = BlueprintStatus.draft
+        blueprint.metadata.auto_generated = True
+        blueprint.metadata.llm_initialized = False
+        blueprint.metadata.transferable = False
         blueprint.metadata.generation_method = GenerationMethod.static_heuristic
-        blueprint.llm_context.state = ContextState.synthesized
+        blueprint.llm_context.state = ContextState.raw
         write_v3_blueprint(blueprint, blueprint_path)
         logger.info("Auto-generated source-derived blueprint: %s", blueprint_path)
         return blueprint_path
@@ -1289,7 +1292,7 @@ def ensure_workspace_blueprint(workspace_root: Path) -> Path:
             project_name=project_name,
             status=BlueprintStatus.draft,
             generation_method=GenerationMethod.static_heuristic,
-            transferable=True,
+            transferable=False,
             llm_initialized=False,
             auto_generated=True,
             description=description,

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger("aero_forge.builder")
 
 from aero_forge.builder.artifact_generator import ArtifactBundle, ArtifactGenerator
 from aero_forge.builder.emitters import get_emitter
@@ -169,6 +172,23 @@ class ProactivePolyglotBuilder:
         sigma_data = payload.get("goi_sigma", [0.0] * (dimension * dimension))
         return bool(verify_goi_proof_net(dimension, m_data, sigma_data))
 
+    @staticmethod
+    def _requires_synthesis(payload: Dict[str, Any]) -> bool:
+        """Return True when the payload's blueprint is a draft that needs LLM synthesis."""
+        blueprint = payload.get("blueprint") or {}
+        if not isinstance(blueprint, dict):
+            return False
+        metadata = blueprint.get("metadata") or {}
+        status = str(metadata.get("status", "")).lower()
+        auto_generated = bool(metadata.get("auto_generated"))
+        llm_initialized = bool(metadata.get("llm_initialized"))
+        llm_context = blueprint.get("llm_context") or {}
+        if isinstance(llm_context, dict):
+            state = str(llm_context.get("state", "")).lower()
+        else:
+            state = ""
+        return status == "draft" or state == "raw" or (auto_generated and not llm_initialized)
+
     def build_blueprint_proactive(self, payload: Dict[str, Any]) -> bool:
         """Run the full proactive verification pipeline and emit files if valid.
 
@@ -182,6 +202,13 @@ class ProactivePolyglotBuilder:
         Returns ``True`` when all verification phases pass and files were
         written, ``False`` otherwise.
         """
+        if self._requires_synthesis(payload):
+            logger.warning(
+                "ProactivePolyglotBuilder: blueprint is a draft/auto-generated sketch; "
+                "run LLM synthesis before materialization."
+            )
+            return False
+
         self._ingest_hin(payload)
         self.hin_engine.apply_dpo_rewrite_ffi_strings()
 
