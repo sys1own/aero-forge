@@ -214,6 +214,8 @@ def generate_draft_v3_blueprint(workspace: Path) -> BlueprintV3:
             status=BlueprintStatus.draft,
             generation_method=GenerationMethod.static_heuristic,
             transferable=False,
+            llm_initialized=False,
+            auto_generated=True,
             description=f"Auto-generated draft blueprint for {architecture} project",
         ),
         llm_context=LLMContext(

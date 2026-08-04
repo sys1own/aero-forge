@@ -104,7 +104,13 @@ from aero_forge.blueprint import (
     load_blueprint,
     write_v3_blueprint,
 )
-from aero_forge.blueprint.schema import ArtifactType, BuildArtifact, ContextState, GenerationMethod
+from aero_forge.blueprint.schema import (
+    ArtifactType,
+    BlueprintStatus,
+    BuildArtifact,
+    ContextState,
+    GenerationMethod,
+)
 from aero_forge.blueprint.validator import InvalidBlueprintError
 from aero_forge.scaffold.pre_write_validator import BlueprintValidationError
 from aero_forge.scaffold.aeroc_export import export_scaffold_zip
@@ -1329,11 +1335,13 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     raise ValueError("Workspace or blueprint path not available for fallback")
                 fallback = generate_draft_v3_blueprint(workspace)
                 fallback.metadata.schema_version = "3.0.0"
-                fallback.metadata.status = "finalized"
+                # The fallback is a heuristic draft, not a finalized synthesis.
+                fallback.metadata.status = BlueprintStatus.draft
                 fallback.metadata.generation_method = GenerationMethod.static_heuristic
-                fallback.metadata.transferable = True
+                fallback.metadata.transferable = False
                 fallback.metadata.llm_initialized = False
-                fallback.llm_context.state = ContextState.synthesized
+                fallback.metadata.auto_generated = True
+                fallback.llm_context.state = ContextState.raw
                 if not fallback.build_pipeline:
                     fallback.build_pipeline.append(
                         BuildArtifact(
@@ -1347,13 +1355,13 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 write_v3_blueprint(fallback, draft_path)
                 BlueprintV3Validator(
                     fallback.model_dump(mode="json"), workspace=workspace
-                ).check_exportable()
+                ).validate()
 
                 return _send_json(
                     self,
                     200,
                     {
-                        "status": "finalized",
+                        "status": "draft",
                         "session_id": session_id,
                         "path": str(draft_path),
                         "transferable": fallback.metadata.transferable,

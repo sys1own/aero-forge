@@ -362,3 +362,21 @@ class TestProactivePolyglotBuilder:
         result = builder.build_blueprint_proactive(payload)
         assert result is False
         assert not (Path(payload["workspace"]) / "src").exists()
+
+    def test_proactive_builder_rejects_draft_blueprint(self, tmp_path: Path) -> None:
+        """A draft/auto-generated blueprint must be synthesized before materialization."""
+        from aero_forge.builder.builder import ProactivePolyglotBuilder
+
+        payload = self._payload(tmp_path)
+        payload["blueprint"]["metadata"] = {
+            "schema_version": "3.0.0",
+            "status": "draft",
+            "auto_generated": True,
+            "llm_initialized": False,
+        }
+        payload["blueprint"]["llm_context"] = {"state": "raw"}
+
+        builder = ProactivePolyglotBuilder()
+        result = builder.build_blueprint_proactive(payload)
+        assert result is False
+        assert not (Path(payload["workspace"]) / "src").exists()

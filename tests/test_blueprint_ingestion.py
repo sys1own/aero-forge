@@ -8,8 +8,10 @@ from pathlib import Path
 import pytest
 
 from aero_forge.blueprint.blueprint_parser import is_blueprint_ready, load_blueprint
+from aero_forge.blueprint.schema import BlueprintV3
 from aero_forge.builder.aeroc_compiler import compile_directory_to_aeroc
 from aero_forge.errors import UserError
+from aero_forge.ingestion.zip_parser import generate_draft_v3_blueprint
 from aero_forge.scaffold.workspace import BlueprintRegenerator
 
 
@@ -183,3 +185,19 @@ class TestSafeMaterialization:
         result = regenerator.run()
         assert result["status"] == "success"
         assert (workspace / ".aero_backup").is_dir()
+
+
+def test_generate_draft_v3_blueprint_marks_auto_generated_draft(tmp_path: Path) -> None:
+    """A ZIP-upload-derived v3 blueprint must be a non-finalized auto-generated draft."""
+    workspace = tmp_path / "upload"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("print('hello')\n", encoding="utf-8")
+
+    bp = generate_draft_v3_blueprint(workspace)
+
+    assert isinstance(bp, BlueprintV3)
+    assert bp.metadata.status.value == "draft"
+    assert bp.metadata.auto_generated is True
+    assert bp.metadata.llm_initialized is False
+    assert bp.metadata.transferable is False
+    assert bp.llm_context.state.value == "raw"
