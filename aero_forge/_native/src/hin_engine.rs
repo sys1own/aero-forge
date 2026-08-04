@@ -42,13 +42,15 @@ impl MellType {
 }
 
 /// Payload carried by a ``Value`` node.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum NodeValue {
     Null,
     Bool(bool),
     Number(f64),
     String(String),
+    Dict(Vec<(NodeValue, NodeValue)>),
+    Set(Vec<NodeValue>),
 }
 
 impl NodeValue {
@@ -58,8 +60,27 @@ impl NodeValue {
             NodeValue::Bool(b) => *b,
             NodeValue::Number(n) => *n != 0.0,
             NodeValue::String(s) => !s.is_empty(),
+            NodeValue::Dict(pairs) => !pairs.is_empty(),
+            NodeValue::Set(elements) => !elements.is_empty(),
         }
     }
+}
+
+/// Linear collection kind used by HIN collection agents.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectionKind {
+    Dict,
+    Set,
+}
+
+/// Operation performed by a HIN collection agent.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CollectionOp {
+    Construct,
+    Destruct,
+    Switch,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -72,6 +93,10 @@ pub enum NodeKind {
     Value,
     Switch,
     CausalProjection,
+    Collection {
+        kind: CollectionKind,
+        op: CollectionOp,
+    },
 }
 
 struct Port {
@@ -155,6 +180,7 @@ impl HinEngine {
             NodeKind::Value => "V",
             NodeKind::Switch => "σ",
             NodeKind::CausalProjection => "P",
+            NodeKind::Collection { .. } => "coll",
         });
         let idx = self.nodes.len();
         let principal = self.add_port(idx, "p", true, MellType::any());
@@ -313,6 +339,10 @@ impl HinEngine {
             "binding" | "assignment" | "let" | "variable_declaration" => self.build_binding(node),
             "reference" | "identifier" | "name" | "var" => self.build_reference(node),
             "literal" | "constant" | "number" | "string" | "value" => self.build_literal(node),
+            "dict" => self.build_dict(node),
+            "set" => self.build_set(node),
+            "dict_lookup" => self.build_dict_lookup(node),
+            "set_member" => self.build_set_member(node),
             "if" | "if_statement" | "conditional" | "if_else" => self.build_if(node),
             "call" | "application" | "apply" | "call_expression" | "user_function_call" => {
                 self.build_call(node)
@@ -551,6 +581,164 @@ impl HinEngine {
         }
     }
 
+    fn build_dict(&mut self, node: &Value) -> Result<Option<usize>, String> {
+        let pairs = node
+            .get("pairs")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]);
+        let coll = self.add_node(
+            NodeKind::Collection {
+                kind: CollectionKind::Dict,
+                op: CollectionOp::Construct,
+            },
+            pairs.len() * 2,
+            None,
+        );
+        for (i, pair) in pairs.iter().enumerate() {
+            let key_port = if let Some(p) = self.build(pair.get("key").unwrap_or(&Value::Null))? {
+                p
+            } else {
+                let v = self.add_node(NodeKind::Value, 0, Some(NodeValue::Null));
+                self.node_principal(v)
+            };
+            let val_port =
+                if let Some(p) = self.build(pair.get("value").unwrap_or(&Value::Null))? {
+                    p
+                } else {
+                    let v = self.add_node(NodeKind::Value, 0, Some(NodeValue::Null));
+                    self.node_principal(v)
+                };
+            self.connect(key_port, self.node_aux(coll, i * 2));
+            self.connect(val_port, self.node_aux(coll, i * 2 + 1));
+        }
+        Ok(Some(self.node_principal(coll)))
+    }
+
+    fn build_set(&mut self, node: &Value) -> Result<Option<usize>, String> {
+        let elements = node
+            .get("elements")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]);
+        let coll = self.add_node(
+            NodeKind::Collection {
+                kind: CollectionKind::Set,
+                op: CollectionOp::Construct,
+            },
+            elements.len(),
+            None,
+        );
+        for (i, elem) in elements.iter().enumerate() {
+            let elem_port = if let Some(p) = self.build(elem)? {
+                p
+            } else {
+                let v = self.add_node(NodeKind::Value, 0, Some(NodeValue::Null));
+                self.node_principal(v)
+            };
+            self.connect(elem_port, self.node_aux(coll, i));
+        }
+        Ok(Some(self.node_principal(coll)))
+    }
+
+    fn build_dict_lookup(&mut self, node: &Value) -> Result<Option<usize>, String> {
+        let dtor = self.add_node(
+            NodeKind::Collection {
+                kind: CollectionKind::Dict,
+                op: CollectionOp::Destruct,
+            },
+            2,
+            None,
+        );
+        let dtor_p = self.node_principal(dtor);
+        let dtor_a1 = self.node_aux(dtor, 0);
+        let dtor_a2 = self.node_aux(dtor, 1);
+
+        let coll_port = if let Some(p) = self.build(node.get("collection").unwrap_or(&Value::Null))? {
+            p
+        } else {
+            let v = self.add_node(NodeKind::Value, 0, Some(NodeValue::Null));
+            self.node_principal(v)
+        };
+        self.connect(coll_port, dtor_p);
+
+        let key_port = if let Some(p) = self.build(node.get("key").unwrap_or(&Value::Null))? {
+            p
+        } else {
+            let v = self.add_node(NodeKind::Value, 0, Some(NodeValue::Null));
+            self.node_principal(v)
+        };
+        self.connect(key_port, dtor_a1);
+
+        Ok(Some(dtor_a2))
+    }
+
+    fn build_set_member(&mut self, node: &Value) -> Result<Option<usize>, String> {
+        let dtor = self.add_node(
+            NodeKind::Collection {
+                kind: CollectionKind::Set,
+                op: CollectionOp::Destruct,
+            },
+            2,
+            None,
+        );
+        let dtor_p = self.node_principal(dtor);
+        let dtor_a1 = self.node_aux(dtor, 0);
+        let dtor_a2 = self.node_aux(dtor, 1);
+
+        let coll_port = if let Some(p) = self.build(node.get("collection").unwrap_or(&Value::Null))? {
+            p
+        } else {
+            let v = self.add_node(NodeKind::Value, 0, Some(NodeValue::Null));
+            self.node_principal(v)
+        };
+        self.connect(coll_port, dtor_p);
+
+        let elem_port = if let Some(p) = self.build(node.get("element").unwrap_or(&Value::Null))? {
+            p
+        } else if let Some(p) = self.build(node.get("value").unwrap_or(&Value::Null))? {
+            p
+        } else {
+            let v = self.add_node(NodeKind::Value, 0, Some(NodeValue::Null));
+            self.node_principal(v)
+        };
+        self.connect(elem_port, dtor_a1);
+
+        Ok(Some(dtor_a2))
+    }
+
+    fn value_at_port(&self, port: usize) -> Option<&NodeValue> {
+        let target = self.ports[port].target?;
+        let owner = self.ports[target].owner;
+        self.nodes[owner].value.as_ref()
+    }
+
+    fn node_value_eq(a: &NodeValue, b: &NodeValue) -> bool {
+        match (a, b) {
+            (NodeValue::Null, NodeValue::Null) => true,
+            (NodeValue::Bool(x), NodeValue::Bool(y)) => x == y,
+            (NodeValue::Number(x), NodeValue::Number(y)) => x == y,
+            (NodeValue::String(x), NodeValue::String(y)) => x == y,
+            (NodeValue::Dict(x), NodeValue::Dict(y)) => {
+                if x.len() != y.len() {
+                    return false;
+                }
+                x.iter().all(|(xk, xv)| {
+                    y.iter()
+                        .any(|(yk, yv)| Self::node_value_eq(xk, yk) && Self::node_value_eq(xv, yv))
+                })
+            }
+            (NodeValue::Set(x), NodeValue::Set(y)) => {
+                if x.len() != y.len() {
+                    return false;
+                }
+                x.iter()
+                    .all(|xv| y.iter().any(|yv| Self::node_value_eq(xv, yv)))
+            }
+            _ => false,
+        }
+    }
+
     /// Run active-pair reductions until the net is stable or ``max_steps`` is hit.
     pub fn reduce_to_completion(&mut self, max_steps: usize) -> usize {
         let mut steps = 0usize;
@@ -587,6 +775,32 @@ impl HinEngine {
     }
 
     fn has_rule(&self, a: usize, b: usize) -> bool {
+        // Collection agents are active only when a data constructor meets a
+        // consumer (destructor or switch). Two constructors or two consumers
+        // are inert, so duplicated collections can be shared linearly.
+        if let (
+            NodeKind::Collection {
+                kind: kind_a,
+                op: op_a,
+            },
+            NodeKind::Collection {
+                kind: kind_b,
+                op: op_b,
+            },
+        ) = (&self.nodes[a].kind, &self.nodes[b].kind)
+        {
+            if kind_a != kind_b {
+                return false;
+            }
+            return matches!(
+                (op_a, op_b),
+                (CollectionOp::Construct, CollectionOp::Destruct)
+                    | (CollectionOp::Destruct, CollectionOp::Construct)
+                    | (CollectionOp::Construct, CollectionOp::Switch)
+                    | (CollectionOp::Switch, CollectionOp::Construct)
+            );
+        }
+
         let kinds = (&self.nodes[a].kind, &self.nodes[b].kind);
         matches!(
             kinds,
@@ -614,6 +828,46 @@ impl HinEngine {
             (NodeKind::Value, NodeKind::Switch) => self.rule_switch(b, a),
             (NodeKind::CausalProjection, NodeKind::Value) => self.rule_project(a, b),
             (NodeKind::Value, NodeKind::CausalProjection) => self.rule_project(b, a),
+            (
+                NodeKind::Collection {
+                    op: CollectionOp::Construct,
+                    kind,
+                },
+                NodeKind::Collection {
+                    op: CollectionOp::Destruct,
+                    ..
+                },
+            ) => self.rule_collection_lookup(b, a, kind),
+            (
+                NodeKind::Collection {
+                    op: CollectionOp::Destruct,
+                    ..
+                },
+                NodeKind::Collection {
+                    op: CollectionOp::Construct,
+                    kind,
+                },
+            ) => self.rule_collection_lookup(a, b, kind),
+            (
+                NodeKind::Collection {
+                    op: CollectionOp::Construct,
+                    kind,
+                },
+                NodeKind::Collection {
+                    op: CollectionOp::Switch,
+                    ..
+                },
+            ) => self.rule_collection_switch(b, a, kind),
+            (
+                NodeKind::Collection {
+                    op: CollectionOp::Switch,
+                    ..
+                },
+                NodeKind::Collection {
+                    op: CollectionOp::Construct,
+                    kind,
+                },
+            ) => self.rule_collection_switch(a, b, kind),
             _ => self.rule_annihilate(a, b),
         }
     }
@@ -711,6 +965,119 @@ impl HinEngine {
         let proj_a1 = self.node_aux(proj, 0);
         self._link(Some(self.node_principal(emitted)), self.ports[proj_a1].target);
         self.retire(proj, coord);
+    }
+
+    fn rule_collection_lookup(
+        &mut self,
+        destruct: usize,
+        construct: usize,
+        kind: CollectionKind,
+    ) {
+        let key_port = self.node_aux(destruct, 0);
+        let result_port = self.node_aux(destruct, 1);
+        let key = self.value_at_port(key_port).cloned();
+
+        let aux: Vec<usize> = self.nodes[construct].aux.clone();
+        let mut found: Option<usize> = None;
+        match kind {
+            CollectionKind::Dict => {
+                for pair in aux.chunks_exact(2) {
+                    if pair.len() < 2 {
+                        break;
+                    }
+                    let candidate = self.value_at_port(pair[0]);
+                    if let (Some(k), Some(c)) = (&key, candidate) {
+                        if Self::node_value_eq(k, c) {
+                            found = Some(pair[1]);
+                            break;
+                        }
+                    }
+                }
+            }
+            CollectionKind::Set => {
+                for &elem in &aux {
+                    let candidate = self.value_at_port(elem);
+                    if let (Some(k), Some(c)) = (&key, candidate) {
+                        if Self::node_value_eq(k, c) {
+                            found = Some(elem);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        match kind {
+            CollectionKind::Dict => {
+                if let Some(value_aux) = found {
+                    self._link(self.ports[result_port].target, self.ports[value_aux].target);
+                } else {
+                    let v = self.add_node(NodeKind::Value, 0, Some(NodeValue::Null));
+                    self._link(self.ports[result_port].target, Some(self.node_principal(v)));
+                }
+            }
+            CollectionKind::Set => {
+                let result = found.is_some();
+                let v = self.add_node(NodeKind::Value, 0, Some(NodeValue::Bool(result)));
+                self._link(self.ports[result_port].target, Some(self.node_principal(v)));
+            }
+        }
+        self.retire(destruct, construct);
+    }
+
+    fn rule_collection_switch(
+        &mut self,
+        switch: usize,
+        construct: usize,
+        kind: CollectionKind,
+    ) {
+        let then_port = self.node_aux(switch, 0);
+        let else_port = self.node_aux(switch, 1);
+        let key_port = self.node_aux(switch, 2);
+        let output_port = self.node_aux(switch, 3);
+        let key = self.value_at_port(key_port).cloned();
+
+        let aux: Vec<usize> = self.nodes[construct].aux.clone();
+        let mut found = false;
+        match kind {
+            CollectionKind::Dict => {
+                for pair in aux.chunks_exact(2) {
+                    if pair.len() < 2 {
+                        break;
+                    }
+                    let candidate = self.value_at_port(pair[0]);
+                    if let (Some(k), Some(c)) = (&key, candidate) {
+                        if Self::node_value_eq(k, c) {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            CollectionKind::Set => {
+                for &elem in &aux {
+                    let candidate = self.value_at_port(elem);
+                    if let (Some(k), Some(c)) = (&key, candidate) {
+                        if Self::node_value_eq(k, c) {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        let (selected, discarded) = if found {
+            (then_port, else_port)
+        } else {
+            (else_port, then_port)
+        };
+        self._link(self.ports[selected].target, self.ports[output_port].target);
+
+        let eraser = self.add_node(NodeKind::Eraser, 0, None);
+        let ep = self.node_principal(eraser);
+        self._link(Some(ep), self.ports[discarded].target);
+        self.retire(switch, construct);
     }
 
     fn clone_node(&mut self, node: usize) -> usize {
@@ -1151,4 +1518,201 @@ pub fn verify_hin_boundary_layouts(layout_json: &str) -> PyResult<bool> {
     }
 
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn value_number(engine: &mut HinEngine, n: f64) -> usize {
+        let node = engine.add_node(NodeKind::Value, 0, Some(NodeValue::Number(n)));
+        engine.node_principal(node)
+    }
+
+    fn value_string(engine: &mut HinEngine, s: &str) -> usize {
+        let node = engine.add_node(NodeKind::Value, 0, Some(NodeValue::String(s.to_string())));
+        engine.node_principal(node)
+    }
+
+    fn make_dict(engine: &mut HinEngine, pairs: &[(usize, usize)]) -> usize {
+        let coll = engine.add_node(
+            NodeKind::Collection {
+                kind: CollectionKind::Dict,
+                op: CollectionOp::Construct,
+            },
+            pairs.len() * 2,
+            None,
+        );
+        for (i, (k, v)) in pairs.iter().enumerate() {
+            engine.connect(*k, engine.node_aux(coll, i * 2));
+            engine.connect(*v, engine.node_aux(coll, i * 2 + 1));
+        }
+        coll
+    }
+
+    fn make_set(engine: &mut HinEngine, elements: &[usize]) -> usize {
+        let coll = engine.add_node(
+            NodeKind::Collection {
+                kind: CollectionKind::Set,
+                op: CollectionOp::Construct,
+            },
+            elements.len(),
+            None,
+        );
+        for (i, e) in elements.iter().enumerate() {
+            engine.connect(*e, engine.node_aux(coll, i));
+        }
+        coll
+    }
+
+    fn make_box(engine: &mut HinEngine) -> usize {
+        engine.add_node(NodeKind::Constructor, 2, None)
+    }
+
+    #[test]
+    fn reduce_dict_lookup_found() {
+        let mut engine = HinEngine::new();
+        let key = value_string(&mut engine, "x");
+        let val = value_number(&mut engine, 42.0);
+        let dict = make_dict(&mut engine, &[(key, val)]);
+
+        let dtor = engine.add_node(
+            NodeKind::Collection {
+                kind: CollectionKind::Dict,
+                op: CollectionOp::Destruct,
+            },
+            2,
+            None,
+        );
+        let box_node = make_box(&mut engine);
+
+        let lookup_key = value_string(&mut engine, "x");
+        engine.connect(lookup_key, engine.node_aux(dtor, 0));
+        engine.connect(engine.node_principal(box_node), engine.node_aux(dtor, 1));
+        engine.connect(engine.node_principal(dict), engine.node_principal(dtor));
+
+        let steps = engine.reduce_to_completion(1000);
+        assert!(steps > 0);
+        let graph = engine.to_json().unwrap();
+        assert!(graph.contains("42"));
+    }
+
+    #[test]
+    fn reduce_dict_lookup_missing() {
+        let mut engine = HinEngine::new();
+        let key = value_string(&mut engine, "x");
+        let val = value_number(&mut engine, 42.0);
+        let dict = make_dict(&mut engine, &[(key, val)]);
+
+        let dtor = engine.add_node(
+            NodeKind::Collection {
+                kind: CollectionKind::Dict,
+                op: CollectionOp::Destruct,
+            },
+            2,
+            None,
+        );
+        let box_node = make_box(&mut engine);
+
+        let lookup_key = value_string(&mut engine, "y");
+        engine.connect(lookup_key, engine.node_aux(dtor, 0));
+        engine.connect(engine.node_principal(box_node), engine.node_aux(dtor, 1));
+        engine.connect(engine.node_principal(dict), engine.node_principal(dtor));
+
+        let steps = engine.reduce_to_completion(1000);
+        assert!(steps > 0);
+        let graph = engine.to_json().unwrap();
+        // The result should be null when the key is missing.
+        assert!(graph.contains("null"));
+    }
+
+    #[test]
+    fn reduce_set_membership_true() {
+        let mut engine = HinEngine::new();
+        let a = value_number(&mut engine, 1.0);
+        let b = value_number(&mut engine, 2.0);
+        let c = value_number(&mut engine, 3.0);
+        let set = make_set(&mut engine, &[a, b, c]);
+
+        let dtor = engine.add_node(
+            NodeKind::Collection {
+                kind: CollectionKind::Set,
+                op: CollectionOp::Destruct,
+            },
+            2,
+            None,
+        );
+        let box_node = make_box(&mut engine);
+
+        let elem = value_number(&mut engine, 2.0);
+        engine.connect(elem, engine.node_aux(dtor, 0));
+        engine.connect(engine.node_principal(box_node), engine.node_aux(dtor, 1));
+        engine.connect(engine.node_principal(set), engine.node_principal(dtor));
+
+        let steps = engine.reduce_to_completion(1000);
+        assert!(steps > 0);
+        let graph = engine.to_json().unwrap();
+        assert!(graph.contains("true"));
+    }
+
+    #[test]
+    fn reduce_set_membership_false() {
+        let mut engine = HinEngine::new();
+        let a = value_number(&mut engine, 1.0);
+        let b = value_number(&mut engine, 2.0);
+        let set = make_set(&mut engine, &[a, b]);
+
+        let dtor = engine.add_node(
+            NodeKind::Collection {
+                kind: CollectionKind::Set,
+                op: CollectionOp::Destruct,
+            },
+            2,
+            None,
+        );
+        let box_node = make_box(&mut engine);
+
+        let elem = value_number(&mut engine, 9.0);
+        engine.connect(elem, engine.node_aux(dtor, 0));
+        engine.connect(engine.node_principal(box_node), engine.node_aux(dtor, 1));
+        engine.connect(engine.node_principal(set), engine.node_principal(dtor));
+
+        let steps = engine.reduce_to_completion(1000);
+        assert!(steps > 0);
+        let graph = engine.to_json().unwrap();
+        assert!(graph.contains("false"));
+    }
+
+    #[test]
+    fn duplicate_dict_and_lookup_both_copies() {
+        let mut engine = HinEngine::new();
+        let key = value_string(&mut engine, "x");
+        let val = value_number(&mut engine, 42.0);
+        let dict = make_dict(&mut engine, &[(key, val)]);
+
+        let dup = engine.add_node(NodeKind::Duplicator, 2, None);
+        engine.connect(engine.node_principal(dict), engine.node_principal(dup));
+
+        for i in 0..2 {
+            let dtor = engine.add_node(
+                NodeKind::Collection {
+                    kind: CollectionKind::Dict,
+                    op: CollectionOp::Destruct,
+                },
+                2,
+                None,
+            );
+            let box_node = make_box(&mut engine);
+            let lookup_key = value_string(&mut engine, "x");
+            engine.connect(lookup_key, engine.node_aux(dtor, 0));
+            engine.connect(engine.node_principal(box_node), engine.node_aux(dtor, 1));
+            engine.connect(engine.node_aux(dup, i), engine.node_principal(dtor));
+        }
+
+        let steps = engine.reduce_to_completion(1000);
+        assert!(steps > 0);
+        let graph = engine.to_json().unwrap();
+        // Two lookups both find 42.
+        assert_eq!(graph.matches("42").count(), 2);
+    }
 }

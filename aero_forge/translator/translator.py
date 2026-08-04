@@ -5,11 +5,12 @@ Walks a normalized UAST and builds a homomorphic interaction-net graph.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from aero_forge.hin_vm import (
+    CollectionNode,
     ConstructorNode,
     DestructorNode,
     DuplicatorNode,
@@ -93,6 +94,8 @@ class UASTToHINTranslator:
         net = HINNetwork()
         self.scope_stack = []
         self._ref_remaining = []
+        self._type_map = self._infer_types(uast)
+        self._annotate_uast(uast, self._type_map)
         self._push_scope(uast)
         result = self._build_container(uast, net)
         if result is not None and result.target is None:
@@ -115,6 +118,14 @@ class UASTToHINTranslator:
             return self._build_reference(node, net)
         if kind in _LITERAL_KINDS:
             return self._build_literal(node, net)
+        if kind == "dict":
+            return self._build_dict(node, net)
+        if kind == "set":
+            return self._build_set(node, net)
+        if kind == "dict_lookup":
+            return self._build_dict_lookup(node, net)
+        if kind == "set_member":
+            return self._build_set_member(node, net)
         if kind in _IF_KINDS:
             return self._build_if(node, net)
         if kind in _CALL_KINDS:
@@ -202,6 +213,77 @@ class UASTToHINTranslator:
         vnode = ValueNode(net.fresh_id("V"), value)
         net.register_node(vnode)
         return vnode.p
+
+    def _build_dict(self, node: dict, net: HINNetwork) -> Optional[Port]:
+        pairs = node.get("pairs") or []
+        coll = CollectionNode(
+            net.fresh_id("dict"), "dict", "construct", len(pairs) * 2
+        )
+        net.register_node(coll)
+        for i, pair in enumerate(pairs):
+            key = self._traverse_and_build(pair.get("key", {}), net)
+            val = self._traverse_and_build(pair.get("value", {}), net)
+            if key is None:
+                key = ValueNode(net.fresh_id("V"), None).p
+                net.register_node(key.owner)
+            if val is None:
+                val = ValueNode(net.fresh_id("V"), None).p
+                net.register_node(val.owner)
+            net._link(key, coll.aux[2 * i])
+            net._link(val, coll.aux[2 * i + 1])
+        return coll.p
+
+    def _build_set(self, node: dict, net: HINNetwork) -> Optional[Port]:
+        elements = node.get("elements") or []
+        coll = CollectionNode(
+            net.fresh_id("set"), "set", "construct", len(elements)
+        )
+        net.register_node(coll)
+        for i, elem in enumerate(elements):
+            port = self._traverse_and_build(elem, net)
+            if port is None:
+                port = ValueNode(net.fresh_id("V"), None).p
+                net.register_node(port.owner)
+            net._link(port, coll.aux[i])
+        return coll.p
+
+    def _build_dict_lookup(self, node: dict, net: HINNetwork) -> Optional[Port]:
+        dtor = CollectionNode(net.fresh_id("lookup"), "dict", "destruct", 2)
+        net.register_node(dtor)
+
+        coll = self._traverse_and_build(node.get("collection", {}), net)
+        if coll is None:
+            coll = ValueNode(net.fresh_id("V"), None).p
+            net.register_node(coll.owner)
+        net._link(coll, dtor.p)
+
+        key = self._traverse_and_build(node.get("key", {}), net)
+        if key is None:
+            key = ValueNode(net.fresh_id("V"), None).p
+            net.register_node(key.owner)
+        net._link(key, dtor.aux[0])
+
+        return dtor.aux[1]
+
+    def _build_set_member(self, node: dict, net: HINNetwork) -> Optional[Port]:
+        dtor = CollectionNode(net.fresh_id("member"), "set", "destruct", 2)
+        net.register_node(dtor)
+
+        coll = self._traverse_and_build(node.get("collection", {}), net)
+        if coll is None:
+            coll = ValueNode(net.fresh_id("V"), None).p
+            net.register_node(coll.owner)
+        net._link(coll, dtor.p)
+
+        elem = self._traverse_and_build(
+            node.get("element") or node.get("value", {}), net
+        )
+        if elem is None:
+            elem = ValueNode(net.fresh_id("V"), None).p
+            net.register_node(elem.owner)
+        net._link(elem, dtor.aux[0])
+
+        return dtor.aux[1]
 
     def _build_if(self, node: dict, net: HINNetwork) -> Port:
         switch = SwitchNode(net.fresh_id("switch"))
@@ -318,6 +400,55 @@ class UASTToHINTranslator:
         if isinstance(value, list):
             return value
         return [value]
+
+    def _infer_types(self, uast: dict) -> Dict[str, str]:
+        holes, constraints = self._extract_holes(uast)
+        if not holes:
+            return {}
+        try:
+            from aero_forge.precision_shield.smt_solver import SMTASTEngine
+
+            engine = SMTASTEngine()
+            return engine.solve_ast_sketch_holes(holes, constraints)
+        except Exception:
+            return {}
+
+    def _extract_holes(
+        self, node, holes: Optional[List[str]] = None, constraints: Optional[List[Dict[str, Any]]] = None
+    ) -> Tuple[List[str], List[Dict[str, Any]]]:
+        if holes is None:
+            holes = []
+        if constraints is None:
+            constraints = []
+        if isinstance(node, dict):
+            if node.get("type") == "hole":
+                name = node.get("name")
+                if name and name not in holes:
+                    holes.append(name)
+                    target_language = node.get("target_language")
+                    if target_language:
+                        constraints.append(
+                            {"source_hole": name, "target_language": target_language}
+                        )
+                    constraints.extend(node.get("constraints", []))
+            else:
+                for value in node.values():
+                    self._extract_holes(value, holes, constraints)
+        elif isinstance(node, list):
+            for item in node:
+                self._extract_holes(item, holes, constraints)
+        return holes, constraints
+
+    def _annotate_uast(self, node, type_map: Dict[str, str]) -> None:
+        if not isinstance(node, dict):
+            return
+        if node.get("type") == "hole":
+            name = node.get("name")
+            if name in type_map:
+                node["inferred_type"] = type_map[name]
+        for value in node.values():
+            if isinstance(value, (dict, list)):
+                self._annotate_uast(value, type_map)
 
     # The following helpers are kept for parity but are not used by the
     # accelerate CLI path.
