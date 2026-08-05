@@ -355,13 +355,7 @@ class SMTASTEngine:
                     z3.Or(left_t == self.I64, right_t == self.I64),
                     result_t == self.I64,
                 )
-                mixed_float = z3.And(
-                    _is_scalar_numeric(left_t),
-                    _is_scalar_numeric(right_t),
-                    z3.Or(left_t == self.F64, right_t == self.F64),
-                    result_t == self.F64,
-                )
-                scalar_case = z3.Or(both_i64, both_usize, both_f64, mixed_int, mixed_float)
+                scalar_case = z3.Or(both_i64, both_usize, both_f64, mixed_int)
 
                 if _may_be_vector(expr.left) or _may_be_vector(expr.right):
                     vec_case = z3.Or(

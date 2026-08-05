@@ -279,48 +279,65 @@ def goi_nilpotency_check(M: Any, max_power: Optional[int] = None) -> bool:
 
 
 def _loop_dependency_matrix(func: ast.FunctionDef) -> Tuple[np.ndarray, List[str]]:
-    """Build a dependency matrix for loop-carried variable dependencies."""
+    """Build a per-statement loop-carried dependency matrix.
+
+    An edge ``src -> tgt`` means that a write to ``tgt`` in the loop body reads
+    ``src``.  Self-loops are removed because a variable depending on its own
+    previous value cannot deadlock.  Cross-statement false dependencies (e.g.
+    ``count = count + 1`` creating an edge to ``total``) are avoided by only
+    wiring loads to stores that appear in the same statement.
+    """
     edges: set = set()
     all_names: set = set()
-    for node in ast.walk(func):
-        if not isinstance(node, (ast.For, ast.While)):
-            continue
-        iter_or_test_loads: set = set()
-        if isinstance(node, ast.For):
-            for child in ast.walk(node.iter):
-                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
-                    iter_or_test_loads.add(child.id)
-        elif isinstance(node, ast.While):
-            for child in ast.walk(node.test):
-                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
-                    iter_or_test_loads.add(child.id)
 
-        body_loads: set = set()
-        body_stores: set = set()
-        for stmt in node.body + node.orelse:
-            for child in ast.walk(stmt):
-                if isinstance(child, ast.Name):
-                    if isinstance(child.ctx, ast.Load):
-                        body_loads.add(child.id)
-                    elif isinstance(child.ctx, ast.Store):
-                        body_stores.add(child.id)
+    def _names(node: ast.AST, ctx_type: type) -> set:
+        return {
+            child.id
+            for child in ast.walk(node)
+            if isinstance(child, ast.Name) and isinstance(child.ctx, ctx_type)
+        }
 
-        all_names.update(iter_or_test_loads | body_loads | body_stores)
+    def _process(stmts: List[ast.stmt]) -> None:
+        for stmt in stmts:
+            if isinstance(stmt, (ast.For, ast.While)):
+                if isinstance(stmt, ast.For):
+                    iter_loads = _names(stmt.iter, ast.Load)
+                    all_names.update(iter_loads)
+                    for target in ast.walk(stmt.target):
+                        if isinstance(target, ast.Name) and isinstance(
+                            target.ctx, ast.Store
+                        ):
+                            all_names.add(target.id)
+                            for src in iter_loads:
+                                if src != target.id:
+                                    edges.add((src, target.id))
+                _process(stmt.body)
+                _process(stmt.orelse)
+            elif isinstance(stmt, ast.If):
+                _process(stmt.body)
+                _process(stmt.orelse)
+            elif isinstance(stmt, ast.With):
+                # Context expressions provide loads; ``as`` targets are stores.
+                for item in stmt.items:
+                    loads = _names(item.context_expr, ast.Load)
+                    if item.optional_vars:
+                        stores = _names(item.optional_vars, ast.Store)
+                        all_names.update(loads | stores)
+                        for s in stores:
+                            for l in loads:
+                                if l != s:
+                                    edges.add((l, s))
+                _process(stmt.body)
+            else:
+                loads = _names(stmt, ast.Load)
+                stores = _names(stmt, ast.Store)
+                all_names.update(loads | stores)
+                for s in stores:
+                    for l in loads:
+                        if l != s:
+                            edges.add((l, s))
 
-        # Body assignments depend on values read in the loop body.
-        for s in body_stores:
-            for l in body_loads:
-                if l != s:
-                    edges.add((l, s))
-
-        # ``for`` loop variables depend on the iterable, not on body loads.
-        if isinstance(node, ast.For):
-            for target in ast.walk(node.target):
-                if isinstance(target, ast.Name) and isinstance(target.ctx, ast.Store):
-                    all_names.add(target.id)
-                    for l in iter_or_test_loads:
-                        if l != target.id:
-                            edges.add((l, target.id))
+    _process(func.body)
     if not all_names:
         return np.zeros((0, 0), dtype=np.float64), []
     nodes = sorted(all_names)
