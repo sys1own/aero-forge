@@ -70,9 +70,10 @@ def build_blueprint_plan_prompt(
 ) -> str:
     """Return the planning prompt for generating a ``blueprint.aero``.
 
-    The prompt explicitly instructs the model to emit a polyglot
-    ``hybrid_rust_python`` blueprint whenever the user intent involves both
-    Python and Rust/PyO3/Maturin/FFI, and includes a concrete few-shot example.
+    The prompt instructs the model to emit a universal ``graph_polyglot``
+    blueprint. The model may propose any language/toolchain (Go, C#, Java, Zig,
+    Mojo, etc.) because missing ``PolyglotEmitterPlugin`` modules are synthesized
+    and validated on demand.
     """
     import re
 

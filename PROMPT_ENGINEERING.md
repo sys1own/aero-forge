@@ -65,9 +65,10 @@ The script writes `prompt_engineering_report.json` with per-case metrics.
 
 - Added **DeepSeek v4 / DeepSeek API** provider (`deepseek`) in
   `aero_forge/llm/clients.py`.
-- Added **ten prompt templates** in `aero_forge/prompts.py` and a
-  `--prompt-template` CLI option, including `v9_transpiler_friendly` and
-  `v10_correctness_focused`.
+- Added **eleven prompt templates** in `aero_forge/prompts/__init__.py` and a
+  `--prompt-template` CLI option, including `v9_transpiler_friendly`,
+  `v10_correctness_focused`, and `v11_universal_architect` for the Universal
+  Build System.
 - Added **smoke-test generation** as a fallback when the LLM does not produce
   tests.
 - Added **deterministic router-level sanitization** that strips unsupported `raise` and
@@ -93,7 +94,8 @@ Newer prompts support structured explanation output:
    "optimized" code.
 3. Use `v9_transpiler_friendly` when the transpiler rejects advanced Python idioms.
 4. Use `v10_correctness_focused` when the generated code compiles but fails tests.
-5. Avoid `v1_minimal` for production use; it does not supply the transpiler
+5. Use `v11_universal_architect` when the request may involve non-standard toolchains or multi-language FFI boundaries; this prompt is optimized for the Universal Plugin Synthesis pipeline and SMT/GoI-backed safety.
+6. Avoid `v1_minimal` for production use; it does not supply the transpiler
    constraints that prevent invalid Rust output.
-6. Consider regenerating or post-editing LLM-generated tests when using
+7. Consider regenerating or post-editing LLM-generated tests when using
    `v3_algorithm`, as the terse style can introduce test-side logic errors.

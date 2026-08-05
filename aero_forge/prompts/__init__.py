@@ -30,7 +30,7 @@ class PromptTemplate:
                 f"- Max memory: {max_memory}",
                 f"- Max time per operation: {max_time}",
                 f"- Target speedup: {target_speedup}x",
-                "- Language: Python → Rust",
+                "- Language: Python → native (Rust, C++, Go, C#, Java, Zig, or any toolchain the blueprint requests; the engine synthesizes missing emitters on demand)",
                 "",
                 "Generate a Python function that meets these requirements. "
                 "Return ONLY the Python code – no explanations.",
@@ -353,6 +353,37 @@ STATIC ANALYSIS RULES (the pre-write validator will reject code that violates th
     "Emphasizes algorithmic correctness and transpiler-friendly explicit loops.",
 )
 
+UNIVERSAL_ARCHITECT = PromptTemplate(
+    "v11_universal_architect",
+    """You are Aero-Forge, a universal polyglot architect. Generate Python code that expresses the user's intent as a clean, well-typed numeric/algorithmic kernel. You are not limited to a fixed language stack: feel free to propose any toolchain (Go, C#, Java, Zig, Mojo, D, Nim, etc.) because Aero-Forge synthesizes the required `PolyglotEmitterPlugin` and FFI bridge contracts on demand.
+
+RULES:
+1. Return ONLY a single Python function with explicit type hints and a short docstring.
+2. Choose the most efficient well-known algorithm for the request; prefer iterative over recursion.
+3. Use idiomatic Python that maps cleanly to any native backend (Rust, C++, Go, C#, Java, Zig, etc.).
+4. Use explicit `for i in range(n):` loops, index-based list access, and simple variable assignments.
+5. You may use `list`, `dict`, and `set` when the algorithm genuinely needs them; the SMT/GoI core will infer native types and prove deadlock-freedom.
+6. You may use `enumerate()`, `zip()`, and simple tuple unpacking when they improve clarity.
+7. Do NOT use `hasattr`, `getattr`, `setattr`, `eval()`, `exec()`, `raise`, `assert`, `with`, `async`/`await`, `match`/`case`, or walrus operators. Use `isinstance()` for type checks and `try...except AttributeError:` for safe attribute access.
+8. Do NOT use list comprehensions; use explicit `for` loops and `append()`.
+9. All return statements must return the same number of values and the same type.
+10. The implementation file is named after the primary function or prompt domain (e.g. `sieve.py`); tests may import with `from generated import function_name` and the build pipeline rewrites `generated` to the saved module name.
+11. If the user asks for a specific language or toolchain, add a comment `# @accelerate(target='<lang>')` or `# @target: <toolchain>` above the function.
+For the Mandelbrot escape-time algorithm, use real and imaginary parts separately. If `cr*cr + ci*ci >= 4` return 0 immediately. Start with `zr = 0.0` and `zi = 0.0`. For `i` from `0` to `max_iter - 1`, compute `new_zr = zr*zr - zi*zi + cr` and `new_zi = 2*zr*zi + ci`. If `new_zr*new_zr + new_zi*new_zi > 4` return `i + 1` (the number of iterations performed). Otherwise set `zr = new_zr` and `zi = new_zi`. Return `max_iter` if it never escapes. Test guidance: `(0.0, 0.0, 100) -> 100`, `(-0.9, 0.0, 100) -> 100`, `(-1.5, 0.0, 100) -> 100`, `(0.25, 0.5, 100) -> 100`, `(-1.3, 0.0, 100) -> 100`; escape cases: `(2.0, 0.0, 100) -> 0`, `(1.0, 0.0, 100) -> 3`. Avoid ambiguous boundary points in tests.
+Do not define any helper functions, nested functions, classes, or lambdas. Implement the entire algorithm in a single top-level function. Do not reuse a variable name for values of different types (e.g., `temp` as both a scalar and a list). For sorting tasks such as Timsort, the simplest valid implementation is to copy the input and call `sorted(arr)`, `.sort()`, or a small inline merge/insertion sort; avoid large run-stack based Timsort with helper functions.
+Do not use Python `complex` numbers or `complex()` calls; represent complex values as separate real and imaginary arrays when needed. For FFT-like code, use `import math` and call `math.cos`, `math.sin`, and `math.pi` explicitly (do not use `from math import ...`).
+You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple unpacking simple and avoid slice assignments.
+If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b` before accessing `a[0]` or `b[0]`; do not return a plain `[]`. Instead return a zero matrix with the correct outer dimensions (`[[0.0] * cols for _ in range(rows)]` for float matrices). Do not alias `result[i]` to a temporary list; set `result[i][j] = total` directly after the inner loop.
+
+STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
+- Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
+- Do NOT use dynamic reflection builtins (`hasattr`, `getattr`, `setattr`, `eval()`, `exec()`). Use `isinstance()` for type checks or `try...except AttributeError:` for safe attribute access.
+- State machine enums must inherit from `IntEnum` only (e.g. `from enum import IntEnum`) or be a plain `@dataclass`; no raw `Enum`, `Flag`, or multi-base class hierarchies.
+- Do NOT return `[]` from matrix/array functions or tensor-processing routines. On empty input, initialize and return a zero-filled target structure with the correct outer dimensions (e.g. `[[0.0] * cols for _ in range(rows)]` for float matrices), never a plain empty list.
+""",
+    "Universal polyglot architect: any toolchain, SMT/GoI-backed safety.",
+)
+
 
 TEMPLATES: Dict[str, PromptTemplate] = {
     t.name: t
@@ -367,6 +398,7 @@ TEMPLATES: Dict[str, PromptTemplate] = {
         ITERATIVE,
         TRANSPILER_FRIENDLY,
         CORRECTNESS_FOCUSED,
+        UNIVERSAL_ARCHITECT,
     ]
 }
 
@@ -390,15 +422,17 @@ def get_default_template() -> PromptTemplate:
 # Blueprint planning prompt material
 # ---------------------------------------------------------------------------
 
-BLUEPRINT_PLAN_INSTRUCTIONS = """You are a systems architect for Aero-Forge. Given the user prompt and constraints, produce a valid YAML blueprint.aero that follows the `graph_polyglot` schema.
+BLUEPRINT_PLAN_INSTRUCTIONS = """You are a systems architect for Aero-Forge, the Universal Build System. Given the user prompt and constraints, produce a valid YAML blueprint.aero that follows the `graph_polyglot` schema.
+
+Aero-Forge is no longer limited to a fixed set of languages or plugins. You may propose any toolchain or runtime (Go, C#, Java, Zig, Mojo, D, Nim, Fortran, etc.) when it solves the user's problem. If an emitter plugin for that language is not already built into the engine, Aero-Forge will synthesize a `PolyglotEmitterPlugin` on demand and validate it against the requested FFI boundary contract before invoking the native toolchain.
 
 Required top-level keys: project, architecture, nodes, edges, output_dir, prompt, constraints, llm.
 
 - `architecture` must be `"graph_polyglot"` for any multi-language or cross-FFI build.
 - `nodes` is a list of objects with keys:
     - `node_id`: unique string identifier.
-    - `lang`: one of `python`, `rust`, `cpp`, `go`, `csharp`, `java`.
-    - `toolchain`: one of `gcc`, `clang`, `clang++`, `cargo`, `go`, `nvcc`, `zig`, `dotnet`, `maturin`, `python`, `javac`.
+    - `lang`: any programming language identifier (`python`, `rust`, `cpp`, `go`, `csharp`, `java`, `zig`, `mojo`, `d`, `nim`, `fortran`, etc.).
+    - `toolchain`: any build tool (`gcc`, `clang`, `clang++`, `cargo`, `go`, `nvcc`, `zig`, `dotnet`, `maturin`, `python`, `javac`, `dmd`, `nimble`, `make`, etc.).
     - `source_files`: list of relative file paths for this node (optional).
     - `compiler_flags`: list of extra flags (optional).
     - `exports`: list of public symbols this node exposes (optional).
