@@ -25,6 +25,10 @@ class SystemToolchainRouter:
         "zig": "zig",
         "dotnet": "dotnet",
         "maturin": "maturin",
+        "python": "python3",
+        "py": "python3",
+        "cpython": "python3",
+        "javac": "javac",
     }
 
     @classmethod
@@ -97,8 +101,31 @@ class SystemToolchainRouter:
             ]
         if toolchain == "zig":
             out = workspace_dir / f"lib{node_id}.so"
+            zig = cls._exec_path("zig") or "zig"
+            # Native Zig source vs C/C++ source compiled with zig cc.
+            if any(str(f).endswith(".zig") for f in source_files):
+                # Native `zig build-lib` uses -O <Mode>, not -O3, and -mcpu, not -march.
+                zig_flags: List[str] = []
+                for flag in compiler_flags:
+                    if flag in ("-O3", "-O2", "-O1", "-Os", "-Oz"):
+                        continue
+                    if flag == "-march=native":
+                        zig_flags.append("-mcpu=native")
+                    else:
+                        zig_flags.append(flag)
+                return [
+                    zig,
+                    "build-lib",
+                    "-dynamic",
+                    "-O",
+                    "ReleaseFast",
+                    "-fPIC",
+                    f"-femit-bin={out}",
+                    *source_files,
+                    *zig_flags,
+                ]
             return [
-                cls._exec_path("zig") or "zig",
+                zig,
                 "cc",
                 "-shared",
                 "-o",
@@ -106,6 +133,12 @@ class SystemToolchainRouter:
                 *source_files,
                 *compiler_flags,
             ]
+        if toolchain in ("python", "py", "cpython"):
+            py = cls._exec_path("python3") or cls._exec_path("python") or "python3"
+            target = source_files[0] if source_files else ""
+            if not target:
+                return [py, "--version"]
+            return [py, "-m", "py_compile", target]
         raise ValueError(f"unsupported toolchain: {toolchain}")
 
     @classmethod

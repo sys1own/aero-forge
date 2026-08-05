@@ -40,6 +40,7 @@ from aero_forge.builder.emitters.base import (
 )
 from aero_forge.builder.language_router import SystemToolchainRouter
 from aero_forge.llm.clients import get_llm_client
+from aero_forge.orchestrator.prompt_builder import EMITTER_PLUGIN_SYNTHESIS_SYSTEM_PROMPT
 from aero_forge.prompts.builder_emitter import (
     BUILDER_EMITTER_SYSTEM_PROMPT,
     format_builder_emitter_user_prompt,
@@ -137,9 +138,12 @@ class GraphPolyglotMaterializer:
         contracts: List[Dict[str, Any]] = []
         for edge in edges:
             if edge.get("source") == node_id or edge.get("target") == node_id:
+                raw_boundary = edge.get("boundary_type", "c_abi")
+                boundary = str(raw_boundary).lower().replace("-", "_")
                 contracts.append(
                     {
-                        "boundary_type": edge.get("boundary_type", "c_abi"),
+                        "boundary_type": boundary,
+                        "boundary": boundary,
                         "symbol": edge.get("symbol", ""),
                         "args": edge.get("args", []),
                         "return_type": edge.get("return_type", ""),
@@ -360,24 +364,60 @@ class GraphPolyglotMaterializer:
     ) -> List[CodeArtifact]:
         """Emit source/manifest artifacts for a node.
 
-        If an LLM client is available, use the Builder Code Emission Agent so
-        exact user-requested files and symbols are produced. Otherwise fall
-        back to the registered language plugin.
+        If an LLM client is available, the registry can JIT-synthesize a
+        ``PolyglotEmitterPlugin`` for unknown languages. When a plugin is
+        already registered, or after successful synthesis, the node is emitted
+        through the plugin's ``emit_source_files`` / ``emit_build_manifest`` hooks.
         """
-        if self._llm_client is not None or (
-            self._llm_provider or self._llm_model or self._llm_api_key
-        ):
-            return self._emit_with_llm(node_id, node_spec, contracts)
-
+        self._configure_registry_jit()
         lang = node_spec.get("lang", "").lower()
-        plugin = self.registry.get_plugin(lang)
-        source_artifacts = plugin.emit_source_files(node_id, node_spec, contracts)
-        manifest = plugin.emit_build_manifest(
+        boundary = self._boundary_contract_for_contracts(contracts)
+        plugin = self.registry.get_plugin(lang, synthesize=True, boundary_type=boundary)
+        source_artifacts = list(plugin.emit_source_files(node_id, node_spec, contracts))
+        manifest_artifacts = plugin.emit_build_manifest(
             node_id,
             node_spec.get("dependencies", []),
             node_spec.get("compiler_flags", []),
         )
-        return list(source_artifacts) + [manifest]
+        if isinstance(manifest_artifacts, CodeArtifact):
+            manifest_artifacts = [manifest_artifacts]
+        else:
+            manifest_artifacts = list(manifest_artifacts)
+
+        # Keep the node's source_files in sync with the emitted artifacts so the
+        # toolchain router compiles the files that the plugin actually wrote.
+        # Strip a leading `node_id/` package directory so paths are relative to
+        # the node's working directory.
+        prefix = f"{node_id}/"
+        node_spec["source_files"] = [
+            a.file_path[len(prefix):] if a.file_path.startswith(prefix) else a.file_path
+            for a in source_artifacts
+            if not a.is_header
+        ]
+        return source_artifacts + manifest_artifacts
+
+    def _configure_registry_jit(self) -> None:
+        """Pass the configured LLM client/prompt to the plugin registry."""
+        if self.registry._synthesis_prompt is None:
+            self.registry.configure_jit_synthesis(
+                llm_client=self._llm_client,
+                provider=self._llm_provider,
+                model=self._llm_model,
+                api_key=self._llm_api_key,
+                prompt=EMITTER_PLUGIN_SYNTHESIS_SYSTEM_PROMPT,
+            )
+
+    def _boundary_contract_for_contracts(
+        self, contracts: List[Dict[str, Any]]
+    ) -> Optional[BoundaryContract]:
+        """Map the first node's boundary contract string to a BoundaryContract enum."""
+        if not contracts:
+            return None
+        raw = contracts[0].get("boundary_type", "")
+        try:
+            return BoundaryContract(raw)
+        except ValueError:
+            return None
 
     # ------------------------------------------------------------------
     # Deterministic baseline emission (guard fallback)
@@ -712,35 +752,6 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                     return False
         return True
 
-    def _emit_node_artifacts(
-        self, node_id: str, node_spec: Dict[str, Any], contracts: List[Dict[str, Any]]
-    ) -> List[CodeArtifact]:
-        """Emit source/manifest artifacts for a node.
-
-        If an LLM client is available, use the Builder Code Emission Agent so
-        exact user-requested files and symbols are produced. The pre-
-        materialization guard then checks the emitted artifacts; if they are
-        missing requested symbols or files, deterministic baseline emission is
-        triggered instead of falling back to legacy stubs.
-        """
-        if self._llm_client is not None or (
-            self._llm_provider or self._llm_model or self._llm_api_key
-        ):
-            artifacts = self._emit_with_llm(node_id, node_spec, contracts)
-            if self._node_artifacts_pass_guard(artifacts, node_id, node_spec, contracts):
-                return artifacts
-            return self._emit_baseline_for_node(node_id, node_spec, contracts)
-
-        lang = node_spec.get("lang", "").lower()
-        plugin = self.registry.get_plugin(lang)
-        source_artifacts = plugin.emit_source_files(node_id, node_spec, contracts)
-        manifest = plugin.emit_build_manifest(
-            node_id,
-            node_spec.get("dependencies", []),
-            node_spec.get("compiler_flags", []),
-        )
-        return list(source_artifacts) + [manifest]
-
     def _synthesize_ffi_bridges(
         self, edges: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
@@ -851,6 +862,12 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                     lines.append(f"(cd {package_dir} && dotnet build -c Release)")
                 elif toolchain == "nvcc":
                     lines.append(f"(cd {package_dir} && nvcc -shared -o {node_id}.so *.cu)")
+                elif toolchain == "zig":
+                    src = source_files[0] if source_files else f"src/{node_id}.zig"
+                    lines.append(
+                        f"(cd {package_dir} && zig build-lib -dynamic -O ReleaseFast -fPIC "
+                        f"-femit-bin=lib{node_id}.so {src})"
+                    )
         if primary_entrypoint:
             if primary_entrypoint.endswith(".py"):
                 lines.append(f"python3 {primary_entrypoint}")
@@ -988,11 +1005,13 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                 lang = node_spec.get("lang", "").lower()
                 node_dir = self.workspace_root / node_id
                 contracts = self._boundary_contracts_for_node(node_id, edges)
+                # Capture the user's requested package paths before the plugin mutates
+                # source_files with the files it actually emitted.
+                original_source_files = list(node_spec.get("source_files") or [])
                 artifacts = self._emit_node_artifacts(node_id, node_spec, contracts)
-                # Determine which package directories the user explicitly requested.
                 requested_dirs = {
                     Path(sf).parts[0]
-                    for sf in node_spec.get("source_files", [])
+                    for sf in original_source_files
                     if isinstance(sf, str) and ("/" in sf or os.sep in sf)
                 }
                 for artifact in artifacts:
