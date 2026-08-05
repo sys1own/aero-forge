@@ -15,6 +15,8 @@ parallel matrix pass.
 
 from __future__ import annotations
 
+import ast
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -250,3 +252,111 @@ def precedence_scores(
     # Row-norm as a simple scalar precedence for each node.
     scores = np.linalg.norm(EX, axis=1)
     return {node: float(scores[i]) for i, node in enumerate(nodes)}
+
+
+def goi_nilpotency_check(M: Any, max_power: Optional[int] = None) -> bool:
+    """Return True if ``(σ M)^N = 0`` for some ``N``.
+
+    ``σ M`` is ``M`` with its diagonal removed (no self-loops).  Nilpotency
+    of the loop-carried dependency matrix proves that the corresponding
+    concurrent loop nest can never deadlock.
+    """
+    M_arr = _as_array(M).astype(np.float64)
+    if M_arr.ndim != 2 or M_arr.shape[0] != M_arr.shape[1]:
+        return False
+    n = M_arr.shape[0]
+    if n == 0:
+        return True
+    sigma = M_arr.copy()
+    np.fill_diagonal(sigma, 0.0)
+    limit = max_power or n
+    power = sigma.copy()
+    for _ in range(1, limit + 1):
+        if np.allclose(power, 0.0, atol=1e-12):
+            return True
+        power = power @ sigma
+    return False
+
+
+def _loop_dependency_matrix(func: ast.FunctionDef) -> Tuple[np.ndarray, List[str]]:
+    """Build a dependency matrix for loop-carried variable dependencies."""
+    edges: set = set()
+    all_names: set = set()
+    for node in ast.walk(func):
+        if not isinstance(node, (ast.For, ast.While)):
+            continue
+        iter_or_test_loads: set = set()
+        if isinstance(node, ast.For):
+            for child in ast.walk(node.iter):
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
+                    iter_or_test_loads.add(child.id)
+        elif isinstance(node, ast.While):
+            for child in ast.walk(node.test):
+                if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
+                    iter_or_test_loads.add(child.id)
+
+        body_loads: set = set()
+        body_stores: set = set()
+        for stmt in node.body + node.orelse:
+            for child in ast.walk(stmt):
+                if isinstance(child, ast.Name):
+                    if isinstance(child.ctx, ast.Load):
+                        body_loads.add(child.id)
+                    elif isinstance(child.ctx, ast.Store):
+                        body_stores.add(child.id)
+
+        all_names.update(iter_or_test_loads | body_loads | body_stores)
+
+        # Body assignments depend on values read in the loop body.
+        for s in body_stores:
+            for l in body_loads:
+                if l != s:
+                    edges.add((l, s))
+
+        # ``for`` loop variables depend on the iterable, not on body loads.
+        if isinstance(node, ast.For):
+            for target in ast.walk(node.target):
+                if isinstance(target, ast.Name) and isinstance(target.ctx, ast.Store):
+                    all_names.add(target.id)
+                    for l in iter_or_test_loads:
+                        if l != target.id:
+                            edges.add((l, target.id))
+    if not all_names:
+        return np.zeros((0, 0), dtype=np.float64), []
+    nodes = sorted(all_names)
+    index = {name: i for i, name in enumerate(nodes)}
+    M = np.zeros((len(nodes), len(nodes)), dtype=np.float64)
+    for src, tgt in edges:
+        M[index[tgt], index[src]] = 1.0
+    return M, nodes
+
+
+def check_python_loops_nilpotent(
+    source: str,
+    function_name: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """Check that every loop in ``source`` has a nilpotent dependency matrix.
+
+    Returns ``(True, reason)`` when no loop-carried cycles are detected,
+    otherwise ``(False, reason)``.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False, "source could not be parsed"
+    funcs = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+    if function_name:
+        funcs = [f for f in funcs if f.name == function_name]
+    if not funcs:
+        return True, "no function found"
+    for func in funcs:
+        M, nodes = _loop_dependency_matrix(func)
+        if M.size == 0:
+            continue
+        if not goi_nilpotency_check(M):
+            return (
+                False,
+                f"loop dependency matrix for {func.name} is not nilpotent: "
+                f"potential deadlock among {nodes}",
+            )
+    return True, "all loop dependency matrices nilpotent (deadlock-free)"

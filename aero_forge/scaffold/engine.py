@@ -73,6 +73,7 @@ class Engine:
         function_names: List[str],
         source: str,
         target_mode: str = TargetMode.PYO3,
+        smt_inferred_types: Optional[Dict[str, Dict[str, str]]] = None,
     ) -> Path:
         """Create a temporary crate, write Cargo.toml and src/lib.rs, and return its path.
 
@@ -160,6 +161,7 @@ class Engine:
                     class_names,
                     local_function_nodes=local_function_nodes,
                     target_mode=target_mode,
+                    smt_inferred_types=(smt_inferred_types or {}).get(name),
                 )
                 block = generator.emit()
                 function_blocks.append(block)
@@ -418,6 +420,7 @@ class RustGenerator:
         class_names: Optional[Set[str]] = None,
         local_function_nodes: Optional[Dict[str, ast.FunctionDef]] = None,
         target_mode: str = TargetMode.PYO3,
+        smt_inferred_types: Optional[Dict[str, str]] = None,
     ):
         self.func = func
         self.target_mode = target_mode
@@ -431,6 +434,7 @@ class RustGenerator:
         self.return_type = traits.get("return_type", self.function_type)
         self.class_names = class_names or set()
         self.local_function_nodes = local_function_nodes or {}
+        self.smt_inferred_types = smt_inferred_types or {}
 
         arg_names = [a.arg for a in func.args.args]
         arg_types = self._annotated_arg_types(func, arg_names)
@@ -499,6 +503,11 @@ class RustGenerator:
                 types[name] = self.arg_types[i]
             else:
                 types[name] = None
+
+        # Seed the local inference with SMT-resolved types before propagation.
+        for name, typ in self.smt_inferred_types.items():
+            if typ and typ != "unknown":
+                types[name] = self._unify(types.get(name), typ)
 
         for stmt in self.func.body:
             self._infer_annotated_local(stmt, types)
@@ -3901,6 +3910,7 @@ class ClassGenerator:
         traits: Dict[str, Any],
         class_names: Optional[Set[str]] = None,
         local_function_nodes: Optional[Dict[str, ast.FunctionDef]] = None,
+        smt_inferred_types: Optional[Dict[str, str]] = None,
     ):
         self.class_node = class_node
         self.module_name = module_name
@@ -3909,6 +3919,7 @@ class ClassGenerator:
         self.class_name = _rust_identifier(class_node.name)
         self.class_names = (class_names or set()) | {class_node.name}
         self.local_function_nodes = local_function_nodes or {}
+        self.smt_inferred_types = smt_inferred_types or {}
         self._check_slots()
         self.methods: Dict[str, ast.FunctionDef] = {
             node.name: node
@@ -3982,6 +3993,7 @@ class ClassGenerator:
             local_function_nodes=self.local_function_nodes,
             is_new=True,
             init_arg_types=init_arg_types,
+            smt_inferred_types=self.smt_inferred_types,
         )
         blocks = [init_gen.emit()]
         self._used_traits.update(init_gen.shield_traits())
@@ -3998,6 +4010,7 @@ class ClassGenerator:
                 class_names=self.class_names,
                 local_function_nodes=self.local_function_nodes,
                 init_arg_types=init_arg_types,
+                smt_inferred_types=self.smt_inferred_types,
             )
             blocks.append(gen.emit())
             self._used_traits.update(gen.shield_traits())
@@ -4059,6 +4072,7 @@ class ClassMethodGenerator(RustGenerator):
         local_function_nodes: Optional[Dict[str, ast.FunctionDef]] = None,
         is_new: bool = False,
         init_arg_types: Optional[List[str]] = None,
+        smt_inferred_types: Optional[Dict[str, str]] = None,
     ):
         self.class_name = class_name
         self.fields = fields
@@ -4078,6 +4092,7 @@ class ClassMethodGenerator(RustGenerator):
             traits,
             class_names=class_names,
             local_function_nodes=local_function_nodes,
+            smt_inferred_types=smt_inferred_types,
         )
         # Methods always have `self`/`cls` as the first parameter unless they are
         # static methods.

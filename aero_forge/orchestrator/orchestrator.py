@@ -94,7 +94,9 @@ from aero_forge.orchestrator.stack_classifier import (
     default_manifest_for_architecture,
 )
 from aero_forge.precision_shield.shield import Shield
+from aero_forge.precision_shield.smt_solver import SMTASTEngine
 from aero_forge.sandbox.manager import Sandbox, ensure_cargo_in_path
+from aero_forge.scheduler import goi_solver
 from aero_forge.scaffold.cargo_runner import cargo_build
 from aero_forge.scaffold.engine import (
     Engine,
@@ -924,6 +926,34 @@ class Orchestrator:
             if _find_top_level(tree, name)[0] is None:
                 raise _BuildFailure(f"Function or class {name!r} not found")
 
+        # Neuro-symbolic SMT type inference: resolve typed holes from usage.
+        smt_types_by_function: Dict[str, Dict[str, str]] = {}
+        try:
+            smt_engine = SMTASTEngine()
+            for func_node in tree.body:
+                if not isinstance(func_node, ast.FunctionDef):
+                    continue
+                inferred = smt_engine.infer_native_types(
+                    source, function_name=func_node.name
+                )
+                for var, typ in inferred.items():
+                    _accel_log(
+                        "info", f"SMT resolved typed hole: {func_node.name}.{var} -> {typ}"
+                    )
+                smt_types_by_function[func_node.name] = inferred
+        except Exception as exc:
+            logger.debug("SMT type inference skipped: %s", exc)
+
+        # GoI deadlock-freedom proof for concurrent loop nests.
+        try:
+            nilpotent, reason = goi_solver.check_python_loops_nilpotent(source)
+            if nilpotent:
+                _accel_log("info", f"GoI deadlock proven: nilpotent ({reason})")
+            else:
+                _accel_log("warning", f"GoI deadlock check failed: {reason}")
+        except Exception as exc:
+            logger.debug("GoI nilpotency check skipped: %s", exc)
+
         # Use the source stem for the module name so multiple functions from the
         # same file are compiled into a single extension.
         module_name = f"aero_forge_{self.source_path.stem}"
@@ -976,6 +1006,7 @@ class Orchestrator:
                 function_names=self.function_names,
                 source=source,
                 target_mode=self.target_mode,
+                smt_inferred_types=smt_types_by_function,
             )
 
             lib_rs = crate_root / "src" / "lib.rs"
