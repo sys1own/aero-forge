@@ -7,13 +7,9 @@ import copy
 import json
 from typing import Any, Dict, List, Tuple
 
+from aero_forge.errors import HeuristicWarning
 
-class HeuristicWarning(Exception):
-    """Raised when a function cannot be healed into a Tier-1/Tier-2 pathway.
-
-    The caller must choose between manual refactoring or an explicit
-    CPython fallback (e.g. ``precision_shield_mode='permissive'``).
-    """
+__all__ = ["FallbackManager", "HeuristicWarning"]
 
 
 class _CollectionAstRepairer(ast.NodeTransformer):
