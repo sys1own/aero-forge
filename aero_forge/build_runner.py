@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import logging
 import os
 import shutil
@@ -14,6 +15,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import click
+import numpy as np
+
+from aero_forge.scheduler.goi_solver import GoIWavefrontSolver, GoiSolverError
 
 from aero_forge.blueprint import Blueprint, FunctionSpec, discover_functions
 from aero_forge.cache.build_cache import BuildCache
@@ -53,6 +57,18 @@ def _function_uast_node(
 
 
 logger = logging.getLogger("aero_forge.build")
+
+
+def _accel_log(level: str, message: str) -> None:
+    """Append a structured line to the per-session accelerator log if set."""
+    log_path = os.environ.get("AERO_FORGE_ACCEL_LOG")
+    if not log_path:
+        return
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"level": level, "message": message}, default=str) + "\n")
+    except Exception:
+        pass
 
 
 class BuildResult:
@@ -116,24 +132,61 @@ class BuildTaskDAG:
             "deps": list(deps or []),
         }
 
+    def _dependency_matrix(self) -> tuple[np.ndarray, List[str]]:
+        """Build adjacency matrix M (target depends on dep) and ordered labels."""
+        labels = sorted(self._tasks.keys())
+        index = {name: i for i, name in enumerate(labels)}
+        n = len(labels)
+        M = np.zeros((n, n), dtype=np.float64)
+        for name, task in self._tasks.items():
+            i = index[name]
+            for dep in task["deps"]:
+                j = index.get(dep)
+                if j is not None:
+                    M[i, j] = 1.0
+        return M, labels
+
     def run(self) -> Dict[str, Any]:
-        """Execute tasks in dependency order and return their results."""
-        order = self._topological_order()
+        """Execute tasks in GoI-derived topological wavefronts with join barriers."""
+        if not self._tasks:
+            return {}
+        M, labels = self._dependency_matrix()
+        n = len(labels)
+        U = np.eye(n, dtype=np.float64)
         results: Dict[str, Any] = {}
 
-        if self.max_workers == 1 or len(order) == 1:
-            for name in order:
-                results[name] = self._run_task(name)
-        else:
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=self.max_workers
-            ) as executor:
-                futures = {
-                    executor.submit(self._run_task, name): name for name in order
-                }
-                for future in concurrent.futures.as_completed(futures):
-                    name = futures[future]
-                    results[name] = future.result()
+        try:
+            solver = GoIWavefrontSolver(labels, M, U)
+            waves = solver.wavefront_stages()
+        except GoiSolverError as exc:
+            raise RuntimeError(f"Build task graph scheduling failed: {exc}")
+
+        _accel_log("info", f"goi_wave_state: waves={waves}")
+        for wave_idx, wave in enumerate(waves):
+            wave = [name for name in wave if name in self._tasks]
+            if not wave:
+                continue
+            _accel_log(
+                "info",
+                f"goi_wave_state: wave={wave_idx} total_waves={len(waves)} tasks={wave} status=running",
+            )
+            if self.max_workers == 1 or len(wave) == 1:
+                for name in wave:
+                    results[name] = self._run_task(name)
+            else:
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=self.max_workers
+                ) as executor:
+                    futures = {
+                        executor.submit(self._run_task, name): name for name in wave
+                    }
+                    for future in concurrent.futures.as_completed(futures):
+                        name = futures[future]
+                        results[name] = future.result()
+            _accel_log(
+                "info",
+                f"goi_wave_state: wave={wave_idx} total_waves={len(waves)} tasks={wave} status=completed",
+            )
 
         return results
 

@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Set
 HIN_COMPUTE = "HIN_COMPUTE"
 GENERAL_PURPOSE = "GENERAL_PURPOSE"
 
-_SCALAR_TYPES = {"int", "float", "bool", "complex", "str", "bytes", "None"}
+_SCALAR_TYPES = {"int", "float", "bool", "complex", "str", "bytes", "None", "Any"}
 
 _ALLOWED_BUILTINS = {
     "abs",
@@ -34,6 +34,7 @@ _ALLOWED_BUILTINS = {
     "reversed",
     "all",
     "any",
+    "set",
     "complex",
     # Exception constructors are only meaningful inside raise statements; the
     # transpiler emits them as panics.
@@ -50,7 +51,7 @@ _ALLOWED_MATH_MODULES = {"math", "numpy", "np"}
 _TYPE_MODULES = {"typing", "collections.abc"}
 
 # Map typing aliases to lowercase container names used by the HIN pipeline.
-_TYPING_ALIASES = {"List": "list", "Tuple": "tuple", "Dict": "dict"}
+_TYPING_ALIASES = {"List": "list", "Tuple": "tuple", "Dict": "dict", "Set": "set"}
 
 _IO_BUILTINS = {
     "open",
@@ -90,7 +91,7 @@ _IO_METHODS = {
     "upper",
 }
 
-_LIST_MUTATORS = {"append", "extend", "pop"}
+_LIST_MUTATORS = {"append", "extend", "pop", "add"}
 _COLLECTION_ACCESSORS = {"get", "items", "keys", "values"}
 
 
@@ -205,6 +206,11 @@ def _is_homogeneous_numeric_list(node: ast.List) -> bool:
         elif isinstance(elt, (ast.Name, ast.Subscript, ast.BinOp, ast.UnaryOp, ast.Call)):
             # Variable/expression elements are assumed homogeneous for the target type.
             pass
+        elif isinstance(elt, ast.List):
+            if not _is_homogeneous_numeric_list(elt):
+                return False
+        elif isinstance(elt, (ast.ListComp, ast.Tuple)):
+            pass
         else:
             return False
     return len(constant_types) <= 1
@@ -245,7 +251,7 @@ class _FunctionClassifier(ast.NodeVisitor):
             base = name.split("[", 1)[0]
             if base in _TYPING_ALIASES:
                 base = _TYPING_ALIASES[base]
-            if base not in _SCALAR_TYPES and base not in {"list", "tuple", "dict"}:
+            if base not in _SCALAR_TYPES and base not in {"list", "tuple", "dict", "set"}:
                 self._reject(
                     f"Function '{self.function.name}' parameter '{arg.arg}' uses non-primitive type '{name}'"
                 )
@@ -275,7 +281,7 @@ class _FunctionClassifier(ast.NodeVisitor):
         base = name.split("[", 1)[0].strip()
         if base in _SCALAR_TYPES:
             return True
-        if base not in ("list", "tuple", "dict"):
+        if base not in ("list", "tuple", "dict", "set"):
             return False
         if "[" not in name or not name.endswith("]"):
             return False
@@ -293,7 +299,7 @@ class _FunctionClassifier(ast.NodeVisitor):
         if name is None:
             return
         base = name.split("[", 1)[0]
-        if base not in ("list", "tuple", "dict"):
+        if base not in ("list", "tuple", "dict", "set"):
             return
         if "[" not in name or not name.endswith("]"):
             self._reject(
@@ -370,7 +376,8 @@ class _FunctionClassifier(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Set(self, node: ast.Set) -> None:
-        self._reject(f"Function '{self.function.name}' uses set literal")
+        # HIN-backed Rust generation supports HashSet construction and
+        # membership tests, so set literals are allowed.
         self.generic_visit(node)
 
     def visit_Starred(self, node: ast.Starred) -> None:

@@ -243,6 +243,27 @@ class SwitchNode(Node):
         self.a_3 = self._add_aux("a_3", branch_type)
 
 
+class CollectionNode(Node):
+    """Collection constructor/destructor/switch agent."""
+
+    symbol = "coll"
+
+    def __init__(
+        self,
+        node_id: str,
+        kind: str,
+        op: str,
+        arity: int,
+        port_type: Optional[MELLType] = None,
+    ):
+        super().__init__(node_id)
+        self.kind = kind
+        self.op = op
+        self._set_principal(port_type or MELLType.any_())
+        for i in range(arity):
+            self._add_aux(f"a_{i + 1}", port_type or MELLType.any_())
+
+
 class CausalProjectionNode(Node):
     """Stub projection node; kept for interface compatibility."""
 
@@ -289,6 +310,7 @@ __all__ = [
     "EraserNode",
     "ValueNode",
     "SwitchNode",
+    "CollectionNode",
     "CausalProjectionNode",
     "HINNetwork",
 ]

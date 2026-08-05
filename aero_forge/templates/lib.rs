@@ -1,8 +1,8 @@
+#![allow(unused_imports)]
 use pyo3::prelude::*;
-#[allow(unused_imports)]
 use pyo3::types::PyType;
-#[allow(unused_imports)]
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 {shield_imports}
 
 {functions}

@@ -67,6 +67,49 @@ def test_conditional_reduction_parity():
     assert len(net.nodes) == len(result["graph"])
 
 
+def test_dict_and_set_uast_lowering():
+    source = "d = {\"x\": 1}\ns = {1, 2}\n"
+    uast = python_source_to_uast(source)
+    children = uast.get("children", [])
+    values = [c.get("value", {}) for c in children if c.get("type") == "binding"]
+    assert any(v.get("type") == "dict" for v in values)
+    assert any(v.get("type") == "set" for v in values)
+
+
+def test_dict_lookup_and_set_member_uast_lowering():
+    source = "d = {\"x\": 1}\nresult = d[\"x\"]\ns = {1, 2}\nflag = 1 in s\n"
+    uast = python_source_to_uast(source)
+    children = uast.get("children", [])
+    values = [c.get("value", {}) for c in children if c.get("type") == "binding"]
+    assert any(v.get("type") == "dict_lookup" for v in values)
+    assert any(v.get("type") == "set_member" for v in values)
+
+
+def test_dict_and_set_hin_reduction():
+    source = 'd = {"x": 1}\nresult = d["x"]\ns = {1, 2}\nflag = 1 in s\n'
+    uast = python_source_to_uast(source)
+    result = HIN.reduce_uast(uast)
+    assert result["native"]
+    assert result["steps"] > 0
+    assert isinstance(result["graph"], list)
+
+
+def test_smt_type_inference_for_typed_holes():
+    from aero_forge.translator.translator import UASTToHINTranslator
+
+    uast = {
+        "type": "module",
+        "children": [
+            {"type": "hole", "name": "h1", "target_language": "rust"},
+            {"type": "hole", "name": "h2"},
+        ],
+    }
+    translator = UASTToHINTranslator()
+    type_map = translator._infer_types(uast)
+    assert "h1" in type_map
+    assert "h2" in type_map
+
+
 def test_hin_engine_class_api():
     HinEngine = pytest.importorskip("aero_forge_native").HinEngine
     source = "def f(x):\n    return x\nf(42)"

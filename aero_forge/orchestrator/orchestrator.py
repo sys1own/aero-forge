@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ast
 import importlib.machinery
+import json
 import logging
 import os
 import re
@@ -103,6 +104,7 @@ from aero_forge.scaffold.engine import (
     ensure_sys_path,
     find_project_root,
 )
+from aero_forge.hin_engine import reduce_uast
 from aero_forge.translator import (
     UASTToHINTranslator,
     python_source_to_uast,
@@ -110,6 +112,18 @@ from aero_forge.translator import (
 )
 
 logger = logging.getLogger("aero_forge.orchestrator")
+
+
+def _accel_log(level: str, message: str) -> None:
+    """Append a structured line to the per-session accelerator log if set."""
+    log_path = os.environ.get("AERO_FORGE_ACCEL_LOG")
+    if not log_path:
+        return
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"level": level, "message": message}, default=str) + "\n")
+    except Exception:
+        pass
 
 
 def _is_main_guard(stmt: ast.stmt) -> bool:
@@ -848,6 +862,11 @@ class Orchestrator:
 
     def _compile_to_native(self, source: str, sandbox_root: Path) -> Path:
         """Transpile ``source`` to Rust, build it, and return the compiled .so path."""
+        target_label = self.target or "native"
+        _accel_log(
+            "info",
+            f"rust_hin: compiling {self.function_names} via target={target_label} mode={self.target_mode}",
+        )
         # Isolate ``if __name__ == '__main__':`` blocks from function definitions
         # and the transpiler so entry-point code cannot wrap DSL functions.
         source = _strip_main_guard(source)
@@ -872,6 +891,23 @@ class Orchestrator:
 
         try:
             uast = python_source_to_uast(source)
+
+            def _hin_progress(event: str, payload: Dict[str, Any]) -> None:
+                _accel_log("info", f"hin_stream: event={event} payload={payload}")
+
+            try:
+                hin_result = reduce_uast(uast, progress_callback=_hin_progress)
+                _accel_log(
+                    "info",
+                    f"hin_stream: reduction complete steps={hin_result['steps']} "
+                    f"nodes={len(hin_result['graph'])} native={hin_result['native']}",
+                )
+            except Exception as exc:
+                _accel_log(
+                    "warning",
+                    f"hin_stream: reduction skipped ({type(exc).__name__}: {exc})",
+                )
+
             graph = UASTToHINTranslator().translate(uast)
 
             shield_config: Dict[str, Any] = {}

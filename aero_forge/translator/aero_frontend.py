@@ -207,6 +207,12 @@ def _lower_expr(expr: Optional[ast.expr]) -> Optional[dict]:
             "function": {"type": "reference", "name": f"__unary_{op_name}__"},
             "argument": _lower_expr(expr.operand),
         }
+    if isinstance(expr, ast.Compare) and len(expr.ops) == 1 and isinstance(expr.ops[0], ast.In):
+        return {
+            "type": "set_member",
+            "collection": _lower_expr(expr.comparators[0]),
+            "element": _lower_expr(expr.left),
+        }
     if isinstance(expr, ast.Compare) and len(expr.ops) == 1:
         return {
             "type": "call",
@@ -242,17 +248,25 @@ def _lower_expr(expr: Optional[ast.expr]) -> Optional[dict]:
             # object fields and safe stdlib attributes do not fail lowering.
             return {"type": "reference", "name": f"{expr.value.id}.{expr.attr}"}
         return _lower_expr(expr.value)
+    if isinstance(expr, ast.Subscript):
+        return {
+            "type": "dict_lookup",
+            "collection": _lower_expr(expr.value),
+            "key": _lower_expr(expr.slice),
+        }
     if isinstance(expr, ast.Dict):
         return {
-            "type": "literal",
-            "value": {
-                "type": "dict",
-                "pairs": [
-                    {"key": _lower_expr(k), "value": _lower_expr(v)}
-                    for k, v in zip(expr.keys, expr.values)
-                    if k is not None
-                ],
-            },
+            "type": "dict",
+            "pairs": [
+                {"key": _lower_expr(k), "value": _lower_expr(v)}
+                for k, v in zip(expr.keys, expr.values)
+                if k is not None
+            ],
+        }
+    if isinstance(expr, ast.Set):
+        return {
+            "type": "set",
+            "elements": [_lower_expr(e) for e in expr.elts],
         }
     return None
 
