@@ -458,11 +458,11 @@ def fix(
     "--precision-shield-mode",
     "precision_shield_mode",
     type=click.Choice(
-        ["ieee", "fast_math", "shield"],
+        ["ieee", "fast_math", "shield", "permissive"],
         case_sensitive=False,
     ),
     default=None,
-    help="Precision mode: ieee, fast_math, or shield.",
+    help="Precision mode: ieee, fast_math, shield, or permissive (allows CPython fallback after heuristic warning).",
 )
 @click.option(
     "--hin-jit-opt-level",
@@ -912,11 +912,11 @@ def build(
     "--precision-shield-mode",
     "precision_shield_mode",
     type=click.Choice(
-        ["ieee", "fast_math", "shield"],
+        ["ieee", "fast_math", "shield", "permissive"],
         case_sensitive=False,
     ),
     default=None,
-    help="Precision mode: ieee, fast_math, or shield.",
+    help="Precision mode: ieee, fast_math, shield, or permissive (allows CPython fallback after heuristic warning).",
 )
 @click.option(
     "--hin-jit-opt-level",

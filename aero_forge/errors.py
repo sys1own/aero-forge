@@ -173,3 +173,11 @@ class SemanticRegressionError(Exception):
         super().__init__(message)
         self.delta = delta
         self.report = report
+
+
+class HeuristicWarning(UserError):
+    """Raised when a function cannot be healed into a Tier-1/Tier-2 pathway.
+
+    The caller must choose between manual refactoring or an explicit
+    CPython fallback (e.g. ``precision_shield_mode='permissive'``).
+    """

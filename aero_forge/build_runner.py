@@ -804,6 +804,7 @@ class BuildRunner:
             target=self.target if self.target != "native" else None,
             target_mode=self.target_mode,
             config_override=self.config_override,
+            precision_shield_mode=self.precision_shield_mode,
         )
         result = orchestrator.run()
         success = result.get("success", False)

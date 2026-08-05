@@ -12,7 +12,13 @@ from aero_forge.orchestrator.orchestrator import Orchestrator
     not shutil.which("cargo") or not shutil.which("rustc"),
     reason="Rust toolchain not installed",
 )
-def _run_case(tmp_path: Path, name: str, source: str, test_code: str) -> dict:
+def _run_case(
+    tmp_path: Path,
+    name: str,
+    source: str,
+    test_code: str,
+    precision_shield_mode: str | None = None,
+) -> dict:
     src = tmp_path / f"{name}.py"
     src.write_text(source)
     test = tmp_path / f"test_{name}.py"
@@ -23,6 +29,7 @@ def _run_case(tmp_path: Path, name: str, source: str, test_code: str) -> dict:
         test_path=test,
         max_iterations=2,
         use_llm=False,
+        precision_shield_mode=precision_shield_mode,
     )
     result = orchestrator.run()
     assert result["success"], result.get("error", "")
@@ -301,6 +308,7 @@ def test_nested_function_routes_to_general(tmp_path: Path) -> None:
         test_path=test,
         max_iterations=1,
         use_llm=False,
+        precision_shield_mode="permissive",
     )
     result = orchestrator.run()
     assert result["success"]
@@ -481,6 +489,7 @@ def test_safe_stdlib_imports_and_calls(tmp_path: Path) -> None:
         "safe_stdlib_calls",
         source,
         "def test_safe_stdlib_calls():\n    assert safe_stdlib_calls(5) == 10\n",
+        precision_shield_mode="permissive",
     )
 
 

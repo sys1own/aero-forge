@@ -392,7 +392,12 @@ def test_build_runner_routes_io_to_general_purpose_bypass(tmp_path):
     )
 
     bp = parse_blueprint(blueprint_path)
-    runner = BuildRunner(bp, max_workers=1, cache_enabled=False)
+    runner = BuildRunner(
+        bp,
+        max_workers=1,
+        cache_enabled=False,
+        precision_shield_mode="permissive",
+    )
     result = runner.build()
 
     assert result["success"] is True
