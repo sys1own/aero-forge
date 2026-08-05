@@ -74,15 +74,6 @@ pub enum CollectionKind {
     Set,
 }
 
-/// Operation performed by a HIN collection agent.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum CollectionOp {
-    Construct,
-    Destruct,
-    Switch,
-}
-
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
@@ -93,9 +84,13 @@ pub enum NodeKind {
     Value,
     Switch,
     CausalProjection,
-    Collection {
+    /// Dict constructor: pairs of key/value ports bound to MELL edges.
+    DictConstructor,
+    /// Set constructor: element ports bound to MELL edges.
+    SetConstructor,
+    /// Key/membership lookup for a dict or set (`kind` selects the collection).
+    KeyLookup {
         kind: CollectionKind,
-        op: CollectionOp,
     },
 }
 
@@ -180,7 +175,9 @@ impl HinEngine {
             NodeKind::Value => "V",
             NodeKind::Switch => "σ",
             NodeKind::CausalProjection => "P",
-            NodeKind::Collection { .. } => "coll",
+            NodeKind::DictConstructor => "dict",
+            NodeKind::SetConstructor => "set",
+            NodeKind::KeyLookup { .. } => "lookup",
         });
         let idx = self.nodes.len();
         let principal = self.add_port(idx, "p", true, MellType::any());
@@ -587,14 +584,7 @@ impl HinEngine {
             .and_then(|v| v.as_array())
             .map(|a| a.as_slice())
             .unwrap_or(&[]);
-        let coll = self.add_node(
-            NodeKind::Collection {
-                kind: CollectionKind::Dict,
-                op: CollectionOp::Construct,
-            },
-            pairs.len() * 2,
-            None,
-        );
+        let coll = self.add_node(NodeKind::DictConstructor, pairs.len() * 2, None);
         for (i, pair) in pairs.iter().enumerate() {
             let key_port = if let Some(p) = self.build(pair.get("key").unwrap_or(&Value::Null))? {
                 p
@@ -621,14 +611,7 @@ impl HinEngine {
             .and_then(|v| v.as_array())
             .map(|a| a.as_slice())
             .unwrap_or(&[]);
-        let coll = self.add_node(
-            NodeKind::Collection {
-                kind: CollectionKind::Set,
-                op: CollectionOp::Construct,
-            },
-            elements.len(),
-            None,
-        );
+        let coll = self.add_node(NodeKind::SetConstructor, elements.len(), None);
         for (i, elem) in elements.iter().enumerate() {
             let elem_port = if let Some(p) = self.build(elem)? {
                 p
@@ -643,9 +626,8 @@ impl HinEngine {
 
     fn build_dict_lookup(&mut self, node: &Value) -> Result<Option<usize>, String> {
         let dtor = self.add_node(
-            NodeKind::Collection {
+            NodeKind::KeyLookup {
                 kind: CollectionKind::Dict,
-                op: CollectionOp::Destruct,
             },
             2,
             None,
@@ -675,9 +657,8 @@ impl HinEngine {
 
     fn build_set_member(&mut self, node: &Value) -> Result<Option<usize>, String> {
         let dtor = self.add_node(
-            NodeKind::Collection {
+            NodeKind::KeyLookup {
                 kind: CollectionKind::Set,
-                op: CollectionOp::Destruct,
             },
             2,
             None,
@@ -775,33 +756,36 @@ impl HinEngine {
     }
 
     fn has_rule(&self, a: usize, b: usize) -> bool {
+        let (kind_a, kind_b) = (&self.nodes[a].kind, &self.nodes[b].kind);
+
         // Collection agents are active only when a data constructor meets a
-        // consumer (destructor or switch). Two constructors or two consumers
-        // are inert, so duplicated collections can be shared linearly.
-        if let (
-            NodeKind::Collection {
-                kind: kind_a,
-                op: op_a,
-            },
-            NodeKind::Collection {
-                kind: kind_b,
-                op: op_b,
-            },
-        ) = (&self.nodes[a].kind, &self.nodes[b].kind)
-        {
-            if kind_a != kind_b {
-                return false;
+        // compatible consumer (KeyLookup / Collection switch).  Two constructors,
+        // two lookups, or mismatched collection kinds are inert so that shared
+        // collections reduce linearly without spurious annihilation.
+        let is_collection_ctor =
+            matches!(kind_a, NodeKind::DictConstructor | NodeKind::SetConstructor)
+                || matches!(kind_b, NodeKind::DictConstructor | NodeKind::SetConstructor);
+        if is_collection_ctor {
+            match (kind_a, kind_b) {
+                (NodeKind::DictConstructor, NodeKind::KeyLookup { kind: CollectionKind::Dict })
+                | (NodeKind::KeyLookup { kind: CollectionKind::Dict }, NodeKind::DictConstructor) => {
+                    return true;
+                }
+                (NodeKind::SetConstructor, NodeKind::KeyLookup { kind: CollectionKind::Set })
+                | (NodeKind::KeyLookup { kind: CollectionKind::Set }, NodeKind::SetConstructor) => {
+                    return true;
+                }
+                (_, NodeKind::Eraser) | (NodeKind::Eraser, _) => return true,
+                (_, NodeKind::Duplicator) | (NodeKind::Duplicator, _) => return true,
+                // All other collection pairs are inert.
+                (NodeKind::DictConstructor, _) | (_, NodeKind::DictConstructor) => return false,
+                (NodeKind::SetConstructor, _) | (_, NodeKind::SetConstructor) => return false,
+                (NodeKind::KeyLookup { .. }, _) | (_, NodeKind::KeyLookup { .. }) => return false,
+                _ => {}
             }
-            return matches!(
-                (op_a, op_b),
-                (CollectionOp::Construct, CollectionOp::Destruct)
-                    | (CollectionOp::Destruct, CollectionOp::Construct)
-                    | (CollectionOp::Construct, CollectionOp::Switch)
-                    | (CollectionOp::Switch, CollectionOp::Construct)
-            );
         }
 
-        let kinds = (&self.nodes[a].kind, &self.nodes[b].kind);
+        let kinds = (kind_a, kind_b);
         matches!(
             kinds,
             (_, NodeKind::Eraser)
@@ -829,45 +813,29 @@ impl HinEngine {
             (NodeKind::CausalProjection, NodeKind::Value) => self.rule_project(a, b),
             (NodeKind::Value, NodeKind::CausalProjection) => self.rule_project(b, a),
             (
-                NodeKind::Collection {
-                    op: CollectionOp::Construct,
-                    kind,
+                NodeKind::DictConstructor,
+                NodeKind::KeyLookup {
+                    kind: CollectionKind::Dict,
                 },
-                NodeKind::Collection {
-                    op: CollectionOp::Destruct,
-                    ..
-                },
-            ) => self.rule_collection_lookup(b, a, kind),
+            ) => self.rule_collection_lookup(b, a, CollectionKind::Dict),
             (
-                NodeKind::Collection {
-                    op: CollectionOp::Destruct,
-                    ..
+                NodeKind::KeyLookup {
+                    kind: CollectionKind::Dict,
                 },
-                NodeKind::Collection {
-                    op: CollectionOp::Construct,
-                    kind,
-                },
-            ) => self.rule_collection_lookup(a, b, kind),
+                NodeKind::DictConstructor,
+            ) => self.rule_collection_lookup(a, b, CollectionKind::Dict),
             (
-                NodeKind::Collection {
-                    op: CollectionOp::Construct,
-                    kind,
+                NodeKind::SetConstructor,
+                NodeKind::KeyLookup {
+                    kind: CollectionKind::Set,
                 },
-                NodeKind::Collection {
-                    op: CollectionOp::Switch,
-                    ..
-                },
-            ) => self.rule_collection_switch(b, a, kind),
+            ) => self.rule_collection_lookup(b, a, CollectionKind::Set),
             (
-                NodeKind::Collection {
-                    op: CollectionOp::Switch,
-                    ..
+                NodeKind::KeyLookup {
+                    kind: CollectionKind::Set,
                 },
-                NodeKind::Collection {
-                    op: CollectionOp::Construct,
-                    kind,
-                },
-            ) => self.rule_collection_switch(a, b, kind),
+                NodeKind::SetConstructor,
+            ) => self.rule_collection_lookup(a, b, CollectionKind::Set),
             _ => self.rule_annihilate(a, b),
         }
     }
@@ -1023,61 +991,6 @@ impl HinEngine {
             }
         }
         self.retire(destruct, construct);
-    }
-
-    fn rule_collection_switch(
-        &mut self,
-        switch: usize,
-        construct: usize,
-        kind: CollectionKind,
-    ) {
-        let then_port = self.node_aux(switch, 0);
-        let else_port = self.node_aux(switch, 1);
-        let key_port = self.node_aux(switch, 2);
-        let output_port = self.node_aux(switch, 3);
-        let key = self.value_at_port(key_port).cloned();
-
-        let aux: Vec<usize> = self.nodes[construct].aux.clone();
-        let mut found = false;
-        match kind {
-            CollectionKind::Dict => {
-                for pair in aux.chunks_exact(2) {
-                    if pair.len() < 2 {
-                        break;
-                    }
-                    let candidate = self.value_at_port(pair[0]);
-                    if let (Some(k), Some(c)) = (&key, candidate) {
-                        if Self::node_value_eq(k, c) {
-                            found = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            CollectionKind::Set => {
-                for &elem in &aux {
-                    let candidate = self.value_at_port(elem);
-                    if let (Some(k), Some(c)) = (&key, candidate) {
-                        if Self::node_value_eq(k, c) {
-                            found = true;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        let (selected, discarded) = if found {
-            (then_port, else_port)
-        } else {
-            (else_port, then_port)
-        };
-        self._link(self.ports[selected].target, self.ports[output_port].target);
-
-        let eraser = self.add_node(NodeKind::Eraser, 0, None);
-        let ep = self.node_principal(eraser);
-        self._link(Some(ep), self.ports[discarded].target);
-        self.retire(switch, construct);
     }
 
     fn clone_node(&mut self, node: usize) -> usize {
@@ -1535,14 +1448,7 @@ mod tests {
     }
 
     fn make_dict(engine: &mut HinEngine, pairs: &[(usize, usize)]) -> usize {
-        let coll = engine.add_node(
-            NodeKind::Collection {
-                kind: CollectionKind::Dict,
-                op: CollectionOp::Construct,
-            },
-            pairs.len() * 2,
-            None,
-        );
+        let coll = engine.add_node(NodeKind::DictConstructor, pairs.len() * 2, None);
         for (i, (k, v)) in pairs.iter().enumerate() {
             engine.connect(*k, engine.node_aux(coll, i * 2));
             engine.connect(*v, engine.node_aux(coll, i * 2 + 1));
@@ -1551,14 +1457,7 @@ mod tests {
     }
 
     fn make_set(engine: &mut HinEngine, elements: &[usize]) -> usize {
-        let coll = engine.add_node(
-            NodeKind::Collection {
-                kind: CollectionKind::Set,
-                op: CollectionOp::Construct,
-            },
-            elements.len(),
-            None,
-        );
+        let coll = engine.add_node(NodeKind::SetConstructor, elements.len(), None);
         for (i, e) in elements.iter().enumerate() {
             engine.connect(*e, engine.node_aux(coll, i));
         }
@@ -1577,9 +1476,8 @@ mod tests {
         let dict = make_dict(&mut engine, &[(key, val)]);
 
         let dtor = engine.add_node(
-            NodeKind::Collection {
+            NodeKind::KeyLookup {
                 kind: CollectionKind::Dict,
-                op: CollectionOp::Destruct,
             },
             2,
             None,
@@ -1605,9 +1503,8 @@ mod tests {
         let dict = make_dict(&mut engine, &[(key, val)]);
 
         let dtor = engine.add_node(
-            NodeKind::Collection {
+            NodeKind::KeyLookup {
                 kind: CollectionKind::Dict,
-                op: CollectionOp::Destruct,
             },
             2,
             None,
@@ -1635,9 +1532,8 @@ mod tests {
         let set = make_set(&mut engine, &[a, b, c]);
 
         let dtor = engine.add_node(
-            NodeKind::Collection {
+            NodeKind::KeyLookup {
                 kind: CollectionKind::Set,
-                op: CollectionOp::Destruct,
             },
             2,
             None,
@@ -1663,9 +1559,8 @@ mod tests {
         let set = make_set(&mut engine, &[a, b]);
 
         let dtor = engine.add_node(
-            NodeKind::Collection {
+            NodeKind::KeyLookup {
                 kind: CollectionKind::Set,
-                op: CollectionOp::Destruct,
             },
             2,
             None,
@@ -1695,9 +1590,8 @@ mod tests {
 
         for i in 0..2 {
             let dtor = engine.add_node(
-                NodeKind::Collection {
+                NodeKind::KeyLookup {
                     kind: CollectionKind::Dict,
-                    op: CollectionOp::Destruct,
                 },
                 2,
                 None,
