@@ -40,7 +40,9 @@ from aero_forge.builder.emitters.base import (
 )
 from aero_forge.builder.language_router import SystemToolchainRouter
 from aero_forge.llm.clients import get_llm_client
-from aero_forge.orchestrator.prompt_builder import EMITTER_PLUGIN_SYNTHESIS_SYSTEM_PROMPT
+from aero_forge.orchestrator.prompt_builder import (
+    EMITTER_PLUGIN_SYNTHESIS_SYSTEM_PROMPT,
+)
 from aero_forge.prompts.builder_emitter import (
     BUILDER_EMITTER_SYSTEM_PROMPT,
     format_builder_emitter_user_prompt,
@@ -166,7 +168,9 @@ class GraphPolyglotMaterializer:
                 f.write(artifact.content)
             os.replace(tmp_path, str(target))
             if artifact.file_path.endswith(".sh") or artifact.file_path == "build.sh":
-                target.chmod(target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                target.chmod(
+                    target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+                )
         except Exception:
             try:
                 os.unlink(tmp_path)
@@ -175,7 +179,9 @@ class GraphPolyglotMaterializer:
             raise
         return target
 
-    def _guard_requested_symbols(self, nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]) -> None:
+    def _guard_requested_symbols(
+        self, nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]
+    ) -> None:
         """Fail fast if an edge references a symbol that no source node exports."""
         exports_by_node: Dict[str, set] = {}
         for node in nodes:
@@ -207,8 +213,12 @@ class GraphPolyglotMaterializer:
                 continue
             for path in source_files:
                 if not isinstance(path, str) or not path:
-                    raise MaterializationError(f"Guard: node {node_id!r} has an invalid source_file entry")
-                if path.endswith(('.so', '.dll', '.dylib', '.pyd', '.whl', '.zip', '.tar', '.tar.gz')):
+                    raise MaterializationError(
+                        f"Guard: node {node_id!r} has an invalid source_file entry"
+                    )
+                if path.endswith(
+                    (".so", ".dll", ".dylib", ".pyd", ".whl", ".zip", ".tar", ".tar.gz")
+                ):
                     raise MaterializationError(
                         f"Guard: node {node_id!r} requests binary artifact {path!r}; only source files are allowed"
                     )
@@ -225,7 +235,9 @@ class GraphPolyglotMaterializer:
             content = match.group(3)
             if not content:
                 continue
-            artifacts.append(CodeArtifact(file_path=file_path, content=content, language=lang))
+            artifacts.append(
+                CodeArtifact(file_path=file_path, content=content, language=lang)
+            )
         return artifacts
 
     def _assign_artifact_paths(
@@ -281,7 +293,10 @@ class GraphPolyglotMaterializer:
                     return path
                 if ext == ".xml" and artifact.language in ("xml", "text"):
                     return path
-                if ext in (".cpp", ".cc", ".cxx") and artifact.language in ("cpp", "c++"):
+                if ext in (".cpp", ".cc", ".cxx") and artifact.language in (
+                    "cpp",
+                    "c++",
+                ):
                     return path
                 if ext in (".c",) and artifact.language == "c":
                     return path
@@ -307,9 +322,13 @@ class GraphPolyglotMaterializer:
             if not target_path:
                 # Fallback to a default file based on language.
                 if artifact.language in ("toml",):
-                    target_path = manifest_names.get(node_spec.get("lang", "").lower(), "manifest.toml")
+                    target_path = manifest_names.get(
+                        node_spec.get("lang", "").lower(), "manifest.toml"
+                    )
                 elif artifact.language in ("xml",):
-                    target_path = manifest_names.get(node_spec.get("lang", "").lower(), f"{node_id}.xml")
+                    target_path = manifest_names.get(
+                        node_spec.get("lang", "").lower(), f"{node_id}.xml"
+                    )
                 elif artifact.language in ("cpp", "c++"):
                     target_path = f"src/{node_id}.cpp"
                 elif artifact.language == "c":
@@ -341,7 +360,9 @@ class GraphPolyglotMaterializer:
             assigned.append(artifact)
         return assigned
 
-    def _emit_with_llm(self, node_id: str, node_spec: Dict[str, Any], contracts: List[Dict[str, Any]]) -> List[CodeArtifact]:
+    def _emit_with_llm(
+        self, node_id: str, node_spec: Dict[str, Any], contracts: List[Dict[str, Any]]
+    ) -> List[CodeArtifact]:
         """Ask the Builder Code Emission Agent to emit source and manifest files."""
         client = self._get_llm_client()
         user_prompt = format_builder_emitter_user_prompt(node_spec, contracts)
@@ -351,7 +372,9 @@ class GraphPolyglotMaterializer:
         ]
         raw = client.generate(messages, temperature=0.2, max_tokens=4096)
         if not raw:
-            raise MaterializationError(f"LLM returned empty emission for node {node_id!r}")
+            raise MaterializationError(
+                f"LLM returned empty emission for node {node_id!r}"
+            )
         artifacts = self._extract_code_artifacts(raw)
         if not artifacts:
             raise MaterializationError(
@@ -390,7 +413,11 @@ class GraphPolyglotMaterializer:
         # the node's working directory.
         prefix = f"{node_id}/"
         node_spec["source_files"] = [
-            a.file_path[len(prefix):] if a.file_path.startswith(prefix) else a.file_path
+            (
+                a.file_path[len(prefix) :]
+                if a.file_path.startswith(prefix)
+                else a.file_path
+            )
             for a in source_artifacts
             if not a.is_header
         ]
@@ -473,7 +500,9 @@ class GraphPolyglotMaterializer:
                 if len(args) >= 3 and args[0] == "pointer" and args[2] == "pointer":
                     sig = "void execute_task(const double* in, size_t n, double* out)"
                 else:
-                    c_args = [f"{self._cpp_arg_type(a)} arg_{i}" for i, a in enumerate(args)]
+                    c_args = [
+                        f"{self._cpp_arg_type(a)} arg_{i}" for i, a in enumerate(args)
+                    ]
                     ret = "void" if not return_type else self._cpp_arg_type(return_type)
                     sig = f"{ret} {symbol}({', '.join(c_args)})"
                 body = f"""#include "kernels.h"
@@ -580,7 +609,7 @@ rayon = "1.10"
         elif lang == "python":
             for path in source_files:
                 if path.endswith("main.py"):
-                    files[path] = '''import ctypes
+                    files[path] = """import ctypes
 import os
 import shutil
 import sys
@@ -621,7 +650,7 @@ else:
 data = bytes(range(8))
 result = rust_core.run_pipeline(data)
 print("rust out:", list(result))
-'''
+"""
 
         # Emit any requested files that did not get a baseline.
         for path in source_files:
@@ -685,14 +714,17 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             # Ensure every Cargo.toml wires build.rs.
             for path, content in list(files.items()):
                 if Path(path).name == "Cargo.toml":
-                    if "build = \"build.rs\"" not in content:
+                    if 'build = "build.rs"' not in content:
                         files[path] = content.replace(
                             "[package]\n",
-                            "[package]\nbuild = \"build.rs\"\n",
+                            '[package]\nbuild = "build.rs"\n',
                             1,
                         )
 
-        return [CodeArtifact(file_path=p, content=c, language=lang) for p, c in files.items()]
+        return [
+            CodeArtifact(file_path=p, content=c, language=lang)
+            for p, c in files.items()
+        ]
 
     def _node_artifacts_pass_guard(
         self,
@@ -729,7 +761,9 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             boundary = contract.get("boundary_type", "")
             # C++ guard
             if lang == "cpp":
-                cpp_files = [p for p in source_files if p.endswith((".cpp", ".cc", ".h", ".hpp"))]
+                cpp_files = [
+                    p for p in source_files if p.endswith((".cpp", ".cc", ".h", ".hpp"))
+                ]
                 if not cpp_files:
                     return False
                 for path in cpp_files:
@@ -738,11 +772,13 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                         return False
                     if "sliding_window_dtw" in content:
                         return False
-                    if "extern \"C\"" not in content:
+                    if 'extern "C"' not in content:
                         return False
             # Rust guard
             if lang == "rust" and boundary == "pyo3_maturin":
-                lib_rs = next((p for p in source_files if p.endswith("src/lib.rs")), None)
+                lib_rs = next(
+                    (p for p in source_files if p.endswith("src/lib.rs")), None
+                )
                 if not lib_rs:
                     return False
                 content = by_path.get(lib_rs, "")
@@ -826,7 +862,9 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             )
         return bridges
 
-    def _generate_build_script(self, hin_graph_spec: Dict[str, Any], stages: List[List[str]]) -> Optional[CodeArtifact]:
+    def _generate_build_script(
+        self, hin_graph_spec: Dict[str, Any], stages: List[List[str]]
+    ) -> Optional[CodeArtifact]:
         """Generate a root ``build.sh`` that builds each stage in order."""
         build_script_path = hin_graph_spec.get("build_script") or "build.sh"
         if not build_script_path:
@@ -834,6 +872,18 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
 
         node_map = {n["node_id"]: n for n in hin_graph_spec.get("nodes", [])}
         primary_entrypoint = hin_graph_spec.get("primary_entrypoint", "run_shell.py")
+
+        # The primary entrypoint may have been emitted under a node directory
+        # (e.g. python_cli/cli.py). Resolve it to an existing workspace-relative
+        # path so the build script can run it.
+        if primary_entrypoint:
+            entry_path = self.workspace_root / primary_entrypoint
+            if not entry_path.is_file():
+                for node_id, _ in node_map.items():
+                    candidate = self.workspace_root / node_id / primary_entrypoint
+                    if candidate.is_file():
+                        primary_entrypoint = f"{node_id}/{primary_entrypoint}"
+                        break
 
         lines: List[str] = ["#!/usr/bin/env bash", "set -euo pipefail", ""]
         for stage in stages:
@@ -843,25 +893,42 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                 source_files = node.get("source_files") or []
                 # Use the directory prefix requested by the user (e.g. cpp_engine/)
                 # instead of the node_id so build paths match emitted files.
-                if source_files and isinstance(source_files[0], str) and "/" in source_files[0]:
-                    package_dir = source_files[0].split("/")[0]
+                if (
+                    source_files
+                    and isinstance(source_files[0], str)
+                    and "/" in source_files[0]
+                ):
+                    first_dir = source_files[0].split("/")[0]
+                    # Conventional source subdirectories live inside the node directory.
+                    if first_dir in ("src", "include", "lib", "tests"):
+                        package_dir = node_id
+                    else:
+                        package_dir = first_dir
                 else:
                     package_dir = node_id
                 if toolchain == "cmake":
                     # Assume CMakeLists.txt lives inside the package directory.
-                    lines.append(f"(cd {package_dir} && cmake -B build && cmake --build build)")
+                    lines.append(
+                        f"(cd {package_dir} && cmake -B build && cmake --build build)"
+                    )
                 elif toolchain == "cargo":
                     lines.append(f"(cd {package_dir} && cargo build --release)")
                 elif toolchain == "maturin":
                     lines.append(f"(cd {package_dir} && maturin build --release)")
                 elif toolchain in ("gcc", "clang", "g++", "clang++"):
-                    lines.append(f"# {node_id}: build via {toolchain} (see CMakeLists/Cargo)")
+                    lines.append(
+                        f"# {node_id}: build via {toolchain} (see CMakeLists/Cargo)"
+                    )
                 elif toolchain == "go":
-                    lines.append(f"(cd {package_dir} && go build -buildmode=c-shared -o {node_id}.so .)")
+                    lines.append(
+                        f"(cd {package_dir} && go build -buildmode=c-shared -o {node_id}.so .)"
+                    )
                 elif toolchain == "dotnet":
                     lines.append(f"(cd {package_dir} && dotnet build -c Release)")
                 elif toolchain == "nvcc":
-                    lines.append(f"(cd {package_dir} && nvcc -shared -o {node_id}.so *.cu)")
+                    lines.append(
+                        f"(cd {package_dir} && nvcc -shared -o {node_id}.so *.cu)"
+                    )
                 elif toolchain == "zig":
                     src = source_files[0] if source_files else f"src/{node_id}.zig"
                     lines.append(
@@ -905,7 +972,10 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
 
         abi_contracts: List[ABIContractV3] = []
         for edge in hin_graph_spec.get("edges", []):
-            inputs = [ABIArgument(name=f"arg_{i}", type=t) for i, t in enumerate(edge.get("args", []))]
+            inputs = [
+                ABIArgument(name=f"arg_{i}", type=t)
+                for i, t in enumerate(edge.get("args", []))
+            ]
             outputs = []
             if edge.get("return_type"):
                 outputs.append(ABIArgument(name="return", type=edge.get("return_type")))

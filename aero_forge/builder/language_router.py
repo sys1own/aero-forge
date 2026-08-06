@@ -84,9 +84,19 @@ class SystemToolchainRouter:
             # CMake configure is the first step; the build step is handled in dispatch.
             return [cls._exec_path("cmake") or "cmake", "-B", "build", "."]
         if toolchain == "cargo":
-            return [cls._exec_path("cargo") or "cargo", "build", "--release", *compiler_flags]
+            return [
+                cls._exec_path("cargo") or "cargo",
+                "build",
+                "--release",
+                *compiler_flags,
+            ]
         if toolchain == "maturin":
-            return [cls._exec_path("maturin") or "maturin", "build", "--release", *compiler_flags]
+            return [
+                cls._exec_path("maturin") or "maturin",
+                "build",
+                "--release",
+                *compiler_flags,
+            ]
         if toolchain == "dotnet":
             return [cls._exec_path("dotnet") or "dotnet", "build", *compiler_flags]
         if toolchain == "nvcc":
@@ -154,6 +164,7 @@ class SystemToolchainRouter:
             RuntimeError: when the toolchain is unavailable or the build fails.
         """
         toolchain = (node_spec.get("toolchain") or node_spec.get("lang") or "").lower()
+        _accel_log("info", f"Dispatching {toolchain} build for node {node_id}")
         if not cls._exec_path(toolchain):
             raise RuntimeError(f"toolchain {toolchain!r} not found on PATH")
 
@@ -181,13 +192,15 @@ class SystemToolchainRouter:
                     check=True,
                 )
         except subprocess.CalledProcessError as exc:
+            _accel_log("error", f"{toolchain} build failed for {node_id}: {exc.stderr}")
             raise RuntimeError(
                 f"toolchain {toolchain!r} failed for {node_id}: {exc.stderr}"
             ) from exc
 
+        _accel_log(
+            "success", f"{toolchain} build succeeded for {node_id}: {' '.join(cmd)}"
+        )
         return result
-
-
 
 
 def _accel_log(level: str, message: str) -> None:
@@ -201,6 +214,7 @@ def _accel_log(level: str, message: str) -> None:
             f.write(f"{timestamp} [{level}] {message}\n")
     except Exception:
         pass
+
 
 SUPPORTED_LANGUAGES = frozenset({"rust", "python", "cpp"})
 DEFAULT_LANGUAGE = "rust"
@@ -325,15 +339,26 @@ def is_cpp_friendly(source: str) -> bool:
             pass
 
     if has_io or has_numpy or has_unsupported_list:
-        _accel_log("info", "PASSTHROUGH: lightweight or I/O-heavy function; not C++ friendly")
+        _accel_log(
+            "info", "PASSTHROUGH: lightweight or I/O-heavy function; not C++ friendly"
+        )
         return False
 
     verdict = has_loop or numeric_ops >= 2 or recursive_calls >= 1
     if verdict:
-        detail = "Heavy numerical matrix loop bound to C++ dynamic shared library" if has_loop else "numeric workload"
-        _accel_log("info", f"ACCELERATED: {detail} (loops={has_loop}, numeric_ops={numeric_ops}, recursive_calls={recursive_calls})")
+        detail = (
+            "Heavy numerical matrix loop bound to C++ dynamic shared library"
+            if has_loop
+            else "numeric workload"
+        )
+        _accel_log(
+            "info",
+            f"ACCELERATED: {detail} (loops={has_loop}, numeric_ops={numeric_ops}, recursive_calls={recursive_calls})",
+        )
     else:
-        _accel_log("info", "PASSTHROUGH: insufficient numeric workload for C++ acceleration")
+        _accel_log(
+            "info", "PASSTHROUGH: insufficient numeric workload for C++ acceleration"
+        )
     return verdict
 
 
@@ -352,13 +377,18 @@ def select_native_backend(source: str, hint: Optional[str] = None) -> str:
     _accel_log("info", f"Selecting native backend (hint={hint})")
     hint = (hint or "rust_hin").lower()
     if hint in ("cpp", "c_abi"):
-        _accel_log("success", "ACCELERATED: C++ selected for extern \"C\" dynamic shared library")
+        _accel_log(
+            "success", 'ACCELERATED: C++ selected for extern "C" dynamic shared library'
+        )
         return "cpp"
     if hint in ("rust", "rust_hin", "pyo3"):
         _accel_log("success", "Target compilation language: Rust (cdylib / PyO3)")
         return "rust_hin"
     if is_cpp_friendly(source) and _cpp_compiler_available():
-        _accel_log("success", "ACCELERATED: C++ auto-selected for extern \"C\" dynamic shared library")
+        _accel_log(
+            "success",
+            'ACCELERATED: C++ auto-selected for extern "C" dynamic shared library',
+        )
         return "cpp"
     _accel_log("success", "Target compilation language: Rust (auto-selected)")
     return "rust_hin"
@@ -371,14 +401,20 @@ def should_accelerate_with_native(source: str, *, min_numeric_ops: int = 3) -> b
     generated contract should be backed by a compiled native extension or left as
     pure Python.
     """
-    _accel_log("info", f"Evaluating native acceleration gate (min_numeric_ops={min_numeric_ops})")
+    _accel_log(
+        "info",
+        f"Evaluating native acceleration gate (min_numeric_ops={min_numeric_ops})",
+    )
     try:
         tree = ast.parse(source)
     except SyntaxError:
         _accel_log("error", "Native acceleration gate failed: source parse error")
         return False
 
-    has_loop = any(isinstance(n, (ast.For, ast.While, ast.ListComp, ast.GeneratorExp)) for n in ast.walk(tree))
+    has_loop = any(
+        isinstance(n, (ast.For, ast.While, ast.ListComp, ast.GeneratorExp))
+        for n in ast.walk(tree)
+    )
     numeric_ops = sum(
         1
         for n in ast.walk(tree)
@@ -400,8 +436,18 @@ def should_accelerate_with_native(source: str, *, min_numeric_ops: int = 3) -> b
     )
     verdict = has_loop or numeric_ops >= min_numeric_ops
     if verdict:
-        detail = "Heavy numerical matrix loop bound to C++ dynamic shared library" if has_loop else "heavy compute"
-        _accel_log("success", f"ACCELERATED: {detail} (loops={has_loop}, numeric_ops={numeric_ops})")
+        detail = (
+            "Heavy numerical matrix loop bound to C++ dynamic shared library"
+            if has_loop
+            else "heavy compute"
+        )
+        _accel_log(
+            "success",
+            f"ACCELERATED: {detail} (loops={has_loop}, numeric_ops={numeric_ops})",
+        )
     else:
-        _accel_log("info", f"PASSTHROUGH: light workload (loops={has_loop}, numeric_ops={numeric_ops})")
+        _accel_log(
+            "info",
+            f"PASSTHROUGH: light workload (loops={has_loop}, numeric_ops={numeric_ops})",
+        )
     return verdict

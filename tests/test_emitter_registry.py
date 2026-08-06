@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import concurrent.futures
+import ctypes
+import shutil
+import subprocess
+import tempfile
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -91,10 +96,90 @@ def test_registry_concurrent_registration_is_safe() -> None:
     def register_and_lookup() -> list:
         barrier.wait()
         registry.register(_FakePlugin(threading.current_thread().name))
-        return [registry.get_plugin(threading.current_thread().name).descriptor.language_id]
+        return [
+            registry.get_plugin(threading.current_thread().name).descriptor.language_id
+        ]
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
         futures = [executor.submit(register_and_lookup) for _ in range(10)]
         results = [f.result() for f in concurrent.futures.as_completed(futures)]
 
     assert len(results) == 10
+
+
+def test_fallback_emitter_plugin_emits_compilable_zig() -> None:
+    """The deterministic fallback emitter produces a Zig kernel that builds."""
+    from aero_forge.builder.emitters.base import _FallbackEmitterPlugin
+
+    if not shutil.which("zig"):
+        pytest.skip("zig not installed")
+
+    plugin = _FallbackEmitterPlugin("zig", BoundaryContract.C_ABI)
+    contract = {
+        "boundary_type": "c_abi",
+        "boundary": "c_abi",
+        "symbol": "fast_math_kernel",
+        "args": ["int64"],
+        "return_type": "int64",
+        "is_zero_copy": False,
+    }
+    node_spec = {
+        "lang": "zig",
+        "toolchain": "zig",
+        "source_files": ["src/fast_math_kernel.zig"],
+        "compiler_flags": ["-O3"],
+        "exports": ["fast_math_kernel"],
+    }
+    artifacts = plugin.emit_source_files("zig_kernel", node_spec, [contract])
+    assert any(a.file_path.endswith("fast_math_kernel.zig") for a in artifacts)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        node_dir = Path(tmp) / "zig_kernel"
+        for a in artifacts:
+            target = node_dir / a.file_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(a.content, encoding="utf-8")
+        out = node_dir / "libzig_kernel.so"
+        subprocess.run(
+            [
+                "zig",
+                "build-lib",
+                "-dynamic",
+                "-O",
+                "ReleaseFast",
+                "-fPIC",
+                f"-femit-bin={out}",
+                "src/fast_math_kernel.zig",
+            ],
+            cwd=str(node_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert out.is_file()
+        lib = ctypes.CDLL(str(out))
+        lib.fast_math_kernel.argtypes = [ctypes.c_int64]
+        lib.fast_math_kernel.restype = ctypes.c_int64
+        assert lib.fast_math_kernel(21) == 42
+
+
+def test_synthesize_plugin_falls_back_on_empty_llm_response() -> None:
+    """If the LLM returns empty/malformed output, the registry uses the fallback emitter."""
+    from aero_forge.builder.emitters.base import _FallbackEmitterPlugin
+
+    class _EmptyClient:
+        def generate(self, *args, **kwargs):
+            return ""
+
+    registry = EmitterRegistry.get_instance()
+    registry._plugins.pop("mojo", None)
+    registry.configure_jit_synthesis(
+        llm_client=_EmptyClient(),
+        prompt="You are an emitter synthesis agent.",
+    )
+    plugin = registry.get_plugin(
+        "mojo", synthesize=True, boundary_type=BoundaryContract.C_ABI
+    )
+    assert plugin.descriptor.language_id == "mojo"
+    # The fallback is the deterministic conservative emitter.
+    assert isinstance(plugin, _FallbackEmitterPlugin)

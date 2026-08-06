@@ -60,13 +60,17 @@ class PythonEmitter(BaseEmitter):
             for field in node.children:
                 if field.kind != "field":
                     continue
-                type_str = f": {self._map_type(field.type_hint)}" if field.type_hint else ""
+                type_str = (
+                    f": {self._map_type(field.type_hint)}" if field.type_hint else ""
+                )
                 self._write(f"{field.name}{type_str}", indent_level + 1)
         else:
             self._write("pass", indent_level + 1)
 
     def _emit_binding(self, node: ASTNode, indent_level: int) -> None:
-        value_str = self._expr(node.children[0]) if node.children else self._literal(node.value)
+        value_str = (
+            self._expr(node.children[0]) if node.children else self._literal(node.value)
+        )
         if node.type_hint:
             self._write(
                 f"{node.name}: {self._map_type(node.type_hint)} = {value_str}",
@@ -76,7 +80,9 @@ class PythonEmitter(BaseEmitter):
             self._write(f"{node.name} = {value_str}", indent_level)
 
     def _emit_return(self, node: ASTNode, indent_level: int) -> None:
-        value_str = self._expr(node.children[0]) if node.children else self._literal(node.value)
+        value_str = (
+            self._expr(node.children[0]) if node.children else self._literal(node.value)
+        )
         self._write(f"return {value_str}", indent_level)
 
     def _emit_import(self, node: ASTNode, indent_level: int) -> None:
@@ -161,7 +167,10 @@ class PythonEmitterPlugin(PolyglotEmitterPlugin):
     def descriptor(self) -> CapabilityDescriptor:
         return CapabilityDescriptor(
             language_id="python",
-            supported_boundaries={BoundaryContract.C_ABI, BoundaryContract.PYO3_MATURIN},
+            supported_boundaries={
+                BoundaryContract.C_ABI,
+                BoundaryContract.PYO3_MATURIN,
+            },
             toolchains=["cpython", "maturin"],
             file_extensions=[".py"],
             supports_zero_copy=False,
@@ -174,9 +183,20 @@ class PythonEmitterPlugin(PolyglotEmitterPlugin):
         node_spec: dict,
         boundary_contracts: List[dict],
     ) -> List[CodeArtifact]:
-        spec = _engine_spec_from_node_spec(node_id, node_spec)
-        source = PythonEmitter().emit(spec)
-        file_path = f"{node_id or 'module'}.py"
+        source_files = node_spec.get("source_files") or [f"{node_id or 'module'}.py"]
+        file_path = str(source_files[0])
+        # Ensure the file is scoped under the node directory so the root build
+        # script and node-level py_compile both resolve it correctly. The
+        # GraphPolyglotMaterializer strips a leading node_id/ prefix when it
+        # writes the artifact, leaving a workspace-relative entrypoint.
+        if not file_path.startswith(f"{node_id}/"):
+            file_path = f"{node_id}/{file_path}"
+
+        if _has_c_abi_consumer_contract(node_id, boundary_contracts):
+            source = _ctypes_loader_source(node_id, boundary_contracts)
+        else:
+            spec = _engine_spec_from_node_spec(node_id, node_spec)
+            source = PythonEmitter().emit(spec)
         return [CodeArtifact(file_path=file_path, content=source, language="python")]
 
     def emit_build_manifest(
@@ -189,14 +209,76 @@ class PythonEmitterPlugin(PolyglotEmitterPlugin):
         content = (
             "[build-system]\n"
             'requires = ["setuptools>=61.0", "wheel"]\n'
-            "build-backend = \"setuptools.build_meta\"\n\n"
+            'build-backend = "setuptools.build_meta"\n\n'
             "[project]\n"
             f'name = "{node_id or "project"}"\n'
             'version = "0.1.0"\n'
             "[project.dependencies]\n"
             f"{deps}\n"
         )
-        return CodeArtifact(file_path="pyproject.toml", content=content, language="toml")
+        return CodeArtifact(
+            file_path="pyproject.toml", content=content, language="toml"
+        )
+
+
+def _has_c_abi_consumer_contract(node_id: str, boundary_contracts: List[dict]) -> bool:
+    """Return True when *node_id* is the Python consumer side of a C-ABI edge."""
+    for contract in boundary_contracts:
+        if (
+            contract.get("boundary_type") == "c_abi"
+            and contract.get("target") == node_id
+        ):
+            return True
+    return False
+
+
+def _ctypes_loader_source(node_id: str, boundary_contracts: List[dict]) -> str:
+    """Generate a Python CLI that loads the source node's C-ABI shared library."""
+    contract = next(
+        (
+            c
+            for c in boundary_contracts
+            if c.get("boundary_type") == "c_abi" and c.get("target") == node_id
+        ),
+        {},
+    )
+    source_node = contract.get("source", "native_kernel")
+    symbol = contract.get("symbol", "fast_math_kernel")
+    args = contract.get("args", ["int64"])
+    return_type = contract.get("return_type", "int64") or "int64"
+
+    ctype_for = {
+        "int32": "ctypes.c_int32",
+        "int64": "ctypes.c_int64",
+        "float32": "ctypes.c_float",
+        "float64": "ctypes.c_double",
+        "pointer": "ctypes.POINTER(ctypes.c_double)",
+    }
+    argtypes = ", ".join(ctype_for.get(a, "ctypes.c_int64") for a in args)
+    restype = ctype_for.get(return_type, "ctypes.c_int64")
+
+    return f'''"""Auto-generated Python CLI for the C-ABI bridge."""
+import ctypes
+import os
+from pathlib import Path
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if _SCRIPT_DIR.name == "{node_id}":
+    _WORKSPACE = _SCRIPT_DIR.parent
+else:
+    _WORKSPACE = _SCRIPT_DIR
+
+_LIB_PATH = _WORKSPACE / "{source_node}" / "lib{source_node}.so"
+_LIB = ctypes.CDLL(str(_LIB_PATH))
+
+{symbol} = _LIB.{symbol}
+{symbol}.argtypes = [{argtypes}]
+{symbol}.restype = {restype}
+
+if __name__ == "__main__":
+    result = {symbol}(42)
+    print(f"{symbol}(42) = {{result}}")
+'''
 
 
 def _engine_spec_from_node_spec(node_id: str, node_spec: dict) -> EngineSpec:
