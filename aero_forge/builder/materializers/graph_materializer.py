@@ -39,6 +39,7 @@ from aero_forge.builder.emitters.base import (
     PolyglotEmitterPlugin,
 )
 from aero_forge.builder.language_router import SystemToolchainRouter
+from aero_forge.config import resolve_llm_provider
 from aero_forge.llm.clients import get_llm_client
 from aero_forge.orchestrator.prompt_builder import (
     EMITTER_PLUGIN_SYNTHESIS_SYSTEM_PROMPT,
@@ -96,8 +97,9 @@ class GraphPolyglotMaterializer:
     def _get_llm_client(self) -> Any:
         """Return a lazily constructed LLM client."""
         if self._llm_client is None:
+            provider = resolve_llm_provider(self._llm_provider) or "deepseek"
             self._llm_client = get_llm_client(
-                provider=self._llm_provider or "deepseek",
+                provider=provider,
                 model=self._llm_model or "deepseek-chat",
                 api_key=self._llm_api_key,
                 raise_on_error=True,
@@ -489,9 +491,10 @@ class GraphPolyglotMaterializer:
     def _configure_registry_jit(self) -> None:
         """Pass the configured LLM client/prompt to the plugin registry."""
         if self.registry._synthesis_prompt is None:
+            provider = resolve_llm_provider(self._llm_provider)
             self.registry.configure_jit_synthesis(
                 llm_client=self._llm_client,
-                provider=self._llm_provider,
+                provider=provider,
                 model=self._llm_model,
                 api_key=self._llm_api_key,
                 prompt=EMITTER_PLUGIN_SYNTHESIS_SYSTEM_PROMPT,

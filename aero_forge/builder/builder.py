@@ -224,8 +224,9 @@ class ProactivePolyglotBuilder:
         from aero_forge.builder.materializers.graph_materializer import (
             GraphPolyglotMaterializer,
         )
+        from aero_forge.config import resolve_llm_provider
 
-        provider = llm_provider or "deepseek"
+        provider = resolve_llm_provider(llm_provider) or "deepseek"
         model = llm_model or "deepseek-chat"
 
         compiler = IntentCompiler(

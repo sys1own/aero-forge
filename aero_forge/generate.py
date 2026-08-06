@@ -17,7 +17,7 @@ from aero_forge.blueprint import (
     generate_blueprint,
 )
 from aero_forge.build_runner import BuildRunner
-from aero_forge.config import ConfigOverride, Tier
+from aero_forge.config import ConfigOverride, Tier, resolve_llm_provider
 from aero_forge.errors import UserError
 from aero_forge.builder.builder import ProactivePolyglotBuilder
 from aero_forge.builder.intent_compiler import IntentCompiler
@@ -427,6 +427,7 @@ def generate_from_prompt(
     config_override: Optional[ConfigOverride] = None,
 ) -> str:
     """Call the configured LLM and return the raw generated text."""
+    llm_provider = resolve_llm_provider(llm_provider)
     client = get_llm_client(
         llm_provider,
         model=model,
