@@ -19,6 +19,7 @@ from aero_forge.blueprint import (
 from aero_forge.build_runner import BuildRunner
 from aero_forge.config import ConfigOverride, Tier
 from aero_forge.errors import UserError
+from aero_forge.builder.builder import ProactivePolyglotBuilder
 from aero_forge.builder.intent_compiler import IntentCompiler
 from aero_forge.healing.healer import DeterministicHealer
 from aero_forge.llm.clients import get_llm_client
@@ -46,6 +47,43 @@ CODE_FENCE_RE = re.compile(
 
 class GenerationError(Exception):
     """Raised when prompt-driven code generation fails."""
+
+
+def _is_universal_project_prompt(prompt: str) -> bool:
+    """Return True when the prompt asks for a non-Python language bridge."""
+    lower = prompt.lower()
+    non_python_languages = [
+        "zig",
+        "mojo",
+        "golang",
+        "c#",
+        "csharp",
+        "java",
+        "kotlin",
+        "swift",
+        "d language",
+        "nim",
+        "fortran",
+    ]
+    has_non_python = any(lang in lower for lang in non_python_languages)
+    # "go" is ambiguous (e.g. "go ahead"), so only treat it as a language when
+    # paired with project/FFI markers.
+    if not has_non_python and " go " in lower:
+        has_non_python = True
+    project_markers = [
+        "c-abi",
+        "c abi",
+        "bridge",
+        "link",
+        "kernel",
+        "emitter",
+        "toolchain",
+        "shared library",
+        "ctypes",
+        "zero-copy",
+        "jit-synthes",
+    ]
+    return has_non_python and any(m in lower for m in project_markers)
 
 
 DEFAULT_SYSTEM_PROMPT = get_default_template().system_prompt
@@ -1082,6 +1120,21 @@ def generate_and_build(
             hin_jit_opt_level = int(hin_jit_opt_level)
         except (TypeError, ValueError):
             hin_jit_opt_level = None
+
+    if (build_kwargs is not None or optimize) and _is_universal_project_prompt(prompt):
+        # Project-level prompts that name a non-Python language and an FFI
+        # bridge should be routed through the graph materializer, which can
+        # JIT-synthesize the required emitter plugin and validate boundaries.
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return ProactivePolyglotBuilder().synthesize_and_build(
+            prompt,
+            output_dir,
+            llm_provider=llm_provider,
+            llm_model=model,
+            prompt_template=prompt_template,
+            max_retries=max_retries,
+        )
+
     if variants > 1:
         from aero_forge.variants import generate_variants, select_best_variant
 
@@ -1151,6 +1204,20 @@ def generate_and_build(
             },
             "iterations": [],
         }
+    except GenerationError as exc:
+        # When the single-function generator returns an empty/malformed response,
+        # the prompt is likely a project-level polyglot request.  Route it through
+        # the proactive graph builder, which JIT-synthesizes missing emitter plugins.
+        if "empty" in str(exc).lower() or "malformed" in str(exc).lower():
+            return ProactivePolyglotBuilder().synthesize_and_build(
+                prompt,
+                output_dir,
+                llm_provider=llm_provider,
+                llm_model=model,
+                prompt_template=prompt_template,
+                max_retries=max_retries,
+            )
+        raise
 
     result: Dict[str, Any] = {
         "source_path": str(source_path),

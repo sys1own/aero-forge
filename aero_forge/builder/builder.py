@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -189,6 +190,122 @@ class ProactivePolyglotBuilder:
         else:
             state = ""
         return status == "draft" or state == "raw" or (auto_generated and not llm_initialized)
+
+    @staticmethod
+    def _v11_universal_guidance() -> str:
+        """Return the v11_universal_architect planning guidance as a string."""
+        from aero_forge.prompts import get_template
+
+        template = get_template("v11_universal_architect")
+        return (
+            "Use the following universal polyglot architect guidance when "
+            "designing the blueprint:\n" + template.system_prompt
+        )
+
+    def synthesize_and_build(
+        self,
+        prompt: str,
+        output_dir: Path,
+        *,
+        llm_provider: Optional[str] = None,
+        llm_model: Optional[str] = None,
+        llm_api_key: Optional[str] = None,
+        prompt_template: Optional[str] = None,
+        max_retries: int = 3,
+    ) -> Dict[str, Any]:
+        """Compile a natural-language prompt to a graph blueprint and build it.
+
+        This is the proactive path for project-level prompts that the single-function
+        code generator cannot satisfy (e.g. multi-language C-ABI bridges).  It uses the
+        graph materializer, which JIT-synthesizes any missing emitter plugins and
+        validates boundary contracts before writing source files.
+        """
+        from aero_forge.builder.intent_compiler import IntentCompiler
+        from aero_forge.builder.materializers.graph_materializer import (
+            GraphPolyglotMaterializer,
+        )
+
+        provider = llm_provider or "deepseek"
+        model = llm_model or "deepseek-chat"
+
+        compiler = IntentCompiler(
+            provider=provider,
+            model=model,
+            api_key=llm_api_key,
+            max_retries=max_retries,
+        )
+
+        last_error: Optional[Exception] = None
+        graph = None
+        for attempt, extra in enumerate(
+            [
+                "",
+                (
+                    self._v11_universal_guidance()
+                    if prompt_template == "v11_universal_architect"
+                    else ""
+                ),
+            ]
+        ):
+            if attempt > 0:
+                logger.warning(
+                    "Retrying graph intent synthesis with v11 universal architect guidance"
+                )
+            try:
+                text = prompt if not extra else f"{prompt}\n\n{extra}"
+                graph = compiler.compile_prompt_to_graph(
+                    text, output_dir=output_dir
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt == 0:
+                    continue
+
+        if graph is None:
+            raise RuntimeError(
+                f"ProactivePolyglotBuilder could not compile prompt to graph: {last_error}"
+            ) from last_error
+
+        materializer = GraphPolyglotMaterializer(
+            output_dir,
+            llm_provider=provider,
+            llm_model=model,
+            llm_api_key=llm_api_key,
+        )
+        result = materializer.materialize(
+            graph.model_dump(mode="json"), build=True
+        )
+
+        build_script = output_dir / (graph.build_script or "build.sh")
+        build_success = False
+        build_output = ""
+        if build_script.is_file():
+            proc = subprocess.run(
+                ["bash", str(build_script)],
+                cwd=str(output_dir),
+                capture_output=True,
+                text=True,
+            )
+            build_success = proc.returncode == 0
+            build_output = proc.stdout + proc.stderr
+
+        return {
+            "success": build_success,
+            "source_path": str(output_dir / graph.primary_entrypoint),
+            "test_path": "",
+            "blueprint_path": str(result["blueprint_path"]),
+            "implementation": "",
+            "tests": "",
+            "explanation": "",
+            "build": {
+                "success": build_success,
+                "passed": 1 if build_success else 0,
+                "total": 1,
+                "output": build_output,
+                "error": "" if build_success else build_output,
+            },
+        }
 
     def build_blueprint_proactive(self, payload: Dict[str, Any]) -> bool:
         """Run the full proactive verification pipeline and emit files if valid.

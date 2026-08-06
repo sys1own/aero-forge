@@ -647,6 +647,7 @@ class IntentCompiler:
             # Primary path: a native `graph_polyglot` blueprint.
             try:
                 graph = PolyglotGraphBlueprint.model_validate(data)
+                graph.metadata["prompt"] = prompt_text
                 return graph
             except Exception as graph_exc:
                 logger.debug("Graph blueprint validation failed (attempt %d): %s", attempt + 1, graph_exc)
