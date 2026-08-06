@@ -470,7 +470,6 @@ def get_llm_client(
     if not provider or provider.lower() in {"none", "null", ""}:
         return None
 
-    provider = provider.lower()
     tier_obj = Tier(tier) if tier else Tier.FAST
 
     if file_config is None:

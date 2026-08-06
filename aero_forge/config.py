@@ -117,7 +117,7 @@ class ConfigOverride:
 
 
 DEFAULTS: Dict[str, Any] = {
-    "LLM_PROVIDER": "none",
+    "LLM_PROVIDER": None,
     "MODEL": None,
     "API_KEY": None,
     "MAX_RETRIES": 3,
@@ -126,6 +126,66 @@ DEFAULTS: Dict[str, Any] = {
     "COMPILER_FLAGS": [],
     "TARGET": None,
 }
+
+# Environment variable names that identify which provider an API key belongs to.
+_PROVIDER_KEY_ENVS: Dict[str, List[str]] = {
+    "deepseek": ["DEEPSEEK_API_KEY", "AERO_FORGE_API_KEY"],
+    "openai": ["OPENAI_API_KEY", "AERO_FORGE_API_KEY"],
+    "openrouter": ["OPENROUTER_API_KEY", "AERO_FORGE_API_KEY"],
+    "gemini": ["GEMINI_API_KEY", "AERO_FORGE_API_KEY"],
+}
+
+
+def _resolve_api_key(provider: Optional[str]) -> Optional[str]:
+    """Return the best available API key for *provider* from the environment."""
+    if provider and provider.lower() not in ("none", "null", ""):
+        for name in _PROVIDER_KEY_ENVS.get(provider.lower(), []):
+            value = os.getenv(name)
+            if value:
+                return value
+    # If no provider is pinned, prefer a provider-specific key over the generic
+    # fallback so the engine infers the right endpoint.
+    for names in _PROVIDER_KEY_ENVS.values():
+        for name in names:
+            if name == "AERO_FORGE_API_KEY":
+                continue
+            value = os.getenv(name)
+            if value:
+                return value
+    return os.getenv("AERO_FORGE_API_KEY")
+
+
+def resolve_llm_provider(explicit: Optional[str] = None) -> Optional[str]:
+    """Resolve the LLM provider using the configured precedence.
+
+    Precedence:
+        1. *explicit* provider argument / CLI flag.
+        2. ``AERO_FORGE_LLM_PROVIDER`` environment variable.
+        3. Provider-specific API key environment variable (``DEEPSEEK_API_KEY``,
+           ``OPENAI_API_KEY``, etc.).
+        4. ``AERO_FORGE_API_KEY`` generic fallback (defaults to deepseek).
+
+    An explicit value of ``none``/``null``/empty disables provider inference.
+    """
+    if explicit is not None:
+        lowered = str(explicit).lower().strip()
+        if lowered in ("", "none", "null"):
+            return None
+        return lowered
+    env_provider = os.getenv("AERO_FORGE_LLM_PROVIDER")
+    if env_provider:
+        return env_provider.lower().strip()
+    for provider, names in _PROVIDER_KEY_ENVS.items():
+        for name in names:
+            if name == "AERO_FORGE_API_KEY":
+                # Generic key is a last resort; do not prefer it over a
+                # provider-specific key.
+                continue
+            if os.getenv(name):
+                return provider
+    if os.getenv("AERO_FORGE_API_KEY"):
+        return "deepseek"
+    return None
 
 
 class Tier(str, Enum):
@@ -304,10 +364,17 @@ def resolve_settings(
         if key in file_config:
             settings[key] = file_config[key]
 
-    # Environment overrides
-    env_provider = os.getenv("AERO_FORGE_LLM_PROVIDER")
-    if env_provider:
-        settings["LLM_PROVIDER"] = env_provider
+    # Environment overrides: provider is resolved from explicit flags, environment,
+    # and available API keys; API key is resolved from the matching env var.
+    provider_from_file = settings.get("LLM_PROVIDER")
+    resolved_provider = resolve_llm_provider(
+        os.getenv("AERO_FORGE_LLM_PROVIDER") or provider_from_file
+    )
+    settings["LLM_PROVIDER"] = resolved_provider or "none"
+
+    if settings.get("API_KEY") is None:
+        settings["API_KEY"] = _resolve_api_key(settings.get("LLM_PROVIDER"))
+
     env_model = os.getenv("AERO_FORGE_MODEL")
     if env_model:
         settings["MODEL"] = env_model
@@ -325,6 +392,7 @@ def resolve_settings(
     env_use_llm = _env_bool("AERO_FORGE_USE_LLM")
     if env_use_llm is False:
         settings["LLM_PROVIDER"] = "none"
+        settings["API_KEY"] = None
 
     # Request-scoped override (explicit or thread-local)
     active = override or current_override()

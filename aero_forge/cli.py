@@ -29,6 +29,7 @@ from .blueprint import (
 )
 from .build_runner import BuildRunner
 from .build_summary import format_build_summary
+from .config import resolve_llm_provider
 from .error_explainer import explain_error
 from .errors import UserError
 from .examples import create_example, list_examples, run_example
@@ -54,8 +55,9 @@ def _resolve_llm_provider(
 ) -> str | None:
     if no_llm:
         return "none"
-    if not llm_provider:
-        llm_provider = os.getenv("AERO_FORGE_LLM_PROVIDER")
+    llm_provider = resolve_llm_provider(
+        llm_provider or os.getenv("AERO_FORGE_LLM_PROVIDER")
+    )
     if llm_fix:
         click.echo(
             "--llm-fix is deprecated; the build loop is deterministic and no longer "
@@ -65,8 +67,8 @@ def _resolve_llm_provider(
         )
     if not llm_provider:
         click.echo(
-            "No LLM provider configured (set AERO_FORGE_LLM_PROVIDER or use --llm-provider); "
-            "running in router-only mode.",
+            "No LLM provider configured (set AERO_FORGE_LLM_PROVIDER, --llm-provider, "
+            "or a provider API key such as DEEPSEEK_API_KEY); running in router-only mode.",
             err=True,
         )
         return "none"
@@ -980,10 +982,11 @@ def generate(
     if no_llm:
         llm_provider = "none"
     elif not llm_provider:
-        llm_provider = os.getenv("AERO_FORGE_LLM_PROVIDER")
+        llm_provider = resolve_llm_provider(os.getenv("AERO_FORGE_LLM_PROVIDER"))
     if not llm_provider and not no_llm:
         click.echo(
-            "Error: --llm-provider or AERO_FORGE_LLM_PROVIDER is required for generation.",
+            "Error: --llm-provider, AERO_FORGE_LLM_PROVIDER, or a provider API key "
+            "(e.g. DEEPSEEK_API_KEY) is required for generation.",
             err=True,
         )
         sys.exit(1)
