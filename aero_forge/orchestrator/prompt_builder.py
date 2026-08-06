@@ -116,9 +116,30 @@ def build_blueprint_plan_prompt(
 
 
 EMITTER_PLUGIN_SYNTHESIS_SYSTEM_PROMPT = """You are the Aero-Forge Emitter Synthesis Agent.
-Your ONLY task is to generate a complete, working Python class that subclasses `PolyglotEmitterPlugin`.
+Your ONLY task is to generate a complete, working Python class named `__LANGUAGE_TITLE__EmitterPlugin` that subclasses `PolyglotEmitterPlugin`.
 
-You MUST use the following skeleton, replace every placeholder, and return the completed class inside a single markdown ```python ... ``` block. Do not write prose.
+You will be asked to emit a function with this exact signature:
+
+__FUNCTION_SIGNATURE__
+
+Semantic purpose of the emitted function:
+__FUNCTION_CONTEXT__
+
+You MUST:
+1. Return ONLY valid Python code inside a single markdown ```python ... ``` block. No prose, no commentary outside the code block.
+2. Implement `descriptor`, `emit_source_files`, and `emit_build_manifest`.
+3. The `emit_source_files` method MUST emit real, compilable source code for `__LANGUAGE_ID__` that matches the exact signature above and implements the semantic purpose. Do NOT leave placeholder expressions like `arg_0 * 2` unless the semantic purpose explicitly says so.
+4. If the semantic purpose is empty or vague, implement a sensible numeric operation that matches the signature and returns a meaningful scalar.
+5. Use the appropriate language syntax:
+   - Zig: `export fn` with `i64`, `f64`, `[*c]f64`, etc. An `export fn` returning a scalar C type CANNOT use `try`; handle fallible calls with `catch (return 0)` or `catch unreachable`.
+   - Go: `//export` + `import "C"` and use `C.longlong`, `C.double`, `*C.double`.
+   - C/C++: `extern "C"` with `int64_t`, `double`, `double*`.
+   - C#: `[UnmanagedCallersOnly(EntryPoint = "...")]`.
+   - Java: JNI signatures.
+   - Mojo: `fn` with `Int64`, `Float64`, `DTypePointer[DType.float64]`.
+6. `toolchains` and `file_extensions` must be non-empty lists.
+7. Do not redeclare `BoundaryContract`, `CapabilityDescriptor`, `CodeArtifact`, or `PolyglotEmitterPlugin`.
+8. Do not write TODO comments, placeholder comments, or unimplemented stubs.
 
 Skeleton:
 
@@ -138,7 +159,7 @@ class __LANGUAGE_TITLE__EmitterPlugin(PolyglotEmitterPlugin):
             language_id="__LANGUAGE_ID__",
             supported_boundaries={BoundaryContract.__BOUNDARY_NAME__},
             toolchains=["__TOOLCHAIN__"],
-            file_extensions=[".__EXT__"],
+            file_extensions=["__EXT__"],
             supports_zero_copy=False,
             supports_async_ffi=False,
         )
@@ -147,7 +168,7 @@ class __LANGUAGE_TITLE__EmitterPlugin(PolyglotEmitterPlugin):
         contract = boundary_contracts[0]
         symbol = contract["symbol"]
         args = contract["args"]
-        return_type = contract["return_type"]
+        return_type = contract.get("return_type", "int64") or "int64"
 
         arg_names = [f"arg_{i}" for i in range(len(args))]
         arg_decls = []
@@ -168,28 +189,22 @@ class __LANGUAGE_TITLE__EmitterPlugin(PolyglotEmitterPlugin):
 
         if return_type == "int32":
             ret = "i32"
-            ret_expr = "arg_0 * 2"
         elif return_type == "int64":
             ret = "i64"
-            ret_expr = "arg_0 * 2"
         elif return_type == "float32":
             ret = "f32"
-            ret_expr = "arg_0 * 2.0"
         elif return_type == "float64":
             ret = "f64"
-            ret_expr = "arg_0 * 2.0"
         else:
             ret = "void"
-            ret_expr = ""
 
-        # This skeleton uses Zig syntax as an example. Replace the function body
-        # with the correct syntax for the requested language (`__LANGUAGE_ID__`).
+        # Replace the body below with a real implementation that matches the
+        # semantic purpose and the exact signature:
+        #   __FUNCTION_SIGNATURE__
         body_lines = [f"export fn {symbol}({arg_list}) {ret} {{"]
-        for name in arg_names:
-            if name not in ret_expr:
-                body_lines.append(f"    _ = {name};")
-        if ret_expr:
-            body_lines.append(f"    return @as({ret}, {ret_expr});")
+        body_lines.append("    // IMPLEMENT the real algorithm here")
+        if ret != "void":
+            body_lines.append(f"    return @as({ret}, 0);")
         else:
             body_lines.append("    return;")
         body_lines.append("}")
@@ -214,21 +229,8 @@ class __LANGUAGE_TITLE__EmitterPlugin(PolyglotEmitterPlugin):
         ]
 ```
 
-Required substitutions:
-1. Replace `__LANGUAGE_TITLE__` with the PascalCase language name (e.g. Zig, Go, Mojo).
-2. Replace `__LANGUAGE_ID__` with the requested lowercase language id (e.g. zig, go, mojo).
-3. Replace `__BOUNDARY_NAME__` with the boundary contract enum name requested by the user (e.g. C_ABI, CGO).
-4. Replace `__TOOLCHAIN__` with the canonical build command (e.g. `zig`, `go`, `mojo`, `gcc`).
-5. Replace `__EXT__` with the language's source file extension (e.g. `zig`, `go`, `mojo`, `c`, `cs`, `java`).
-6. Replace `__MANIFEST_FILE__` with the build file name (e.g. `build.zig`, `go.mod`, `Makefile`, `build.sh`, `pom.xml`, `CMakeLists.txt`).
-7. Replace `__MANIFEST_CONTENT__` with a minimal, valid build-system file body for that language.
-
-Rules:
-- The function body in `emit_source_files` MUST be real code for `__LANGUAGE_ID__`, not the Zig example left unchanged. Use `export fn` for Zig, `//export`+`import "C"` for Go, `extern "C"` for C/C++, `[UnmanagedCallersOnly]` for C#, and JNI signatures for Java.
-- The emitted function must match the first boundary contract's `symbol`, `args` types (`int32`, `int64`, `float32`, `float64`, `pointer`), and `return_type`.
-- `toolchains` and `file_extensions` must be non-empty lists.
-- Do not write placeholder comments, TODOs, or unimplemented stubs. Every artifact must contain valid, compilable source or build configuration.
-- Return ONLY valid Python code inside a single markdown ```python ... ``` block. No prose.
+Required substitutions (already filled in the prompt you receive):
+- `__LANGUAGE_TITLE__`, `__LANGUAGE_ID__`, `__BOUNDARY_NAME__`, `__TOOLCHAIN__`, `__EXT__`, `__MANIFEST_FILE__`, `__MANIFEST_CONTENT__`, `__FUNCTION_SIGNATURE__`, `__FUNCTION_CONTEXT__`.
 """
 
 

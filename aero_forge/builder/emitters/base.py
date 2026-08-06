@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import builtins
 import importlib
+import ast
 import json
 import logging
 import os
@@ -100,6 +101,67 @@ def _pascal_case(language_id: str) -> str:
 def _python_string_literal(value: str) -> str:
     """Return *value* as a valid double-quoted Python string literal."""
     return json.dumps(value)
+
+
+def _function_signature_for_prompt(
+    language_id: str,
+    symbol: str,
+    args: List[str],
+    return_type: str,
+) -> str:
+    """Return a concrete native function signature for the prompt placeholder."""
+    lang = language_id.lower()
+    arg_names = [f"arg_{i}" for i in range(len(args))]
+    arg_decls = [
+        f"{name}: {_type_map_for_boundary(lang, kind)}"
+        for name, kind in zip(arg_names, args)
+    ]
+    rt = (return_type or "").strip().lower()
+    if rt in ("", "void"):
+        ret = ""
+    else:
+        ret = _type_map_for_boundary(lang, rt)
+    if lang == "zig":
+        return f"export fn {symbol}({', '.join(arg_decls)}) {ret}".strip()
+    if lang == "go":
+        proto = f"func {symbol}({', '.join(arg_decls)}) {ret}".strip()
+        return f"//export {symbol}\nimport \"C\"\n{proto}"
+    if lang in ("c", "cpp", "c++"):
+        c_arg_decls = [
+            f"{_type_map_for_boundary('c', kind)} {name}"
+            for name, kind in zip(arg_names, args)
+        ]
+        return f"{ret or 'void'} {symbol}({', '.join(c_arg_decls)})"
+    if lang == "csharp":
+        cs_arg_decls = [
+            f"{_type_map_for_boundary('csharp', kind)} {name}"
+            for name, kind in zip(arg_names, args)
+        ]
+        return (
+            f'[UnmanagedCallersOnly(EntryPoint = "{symbol}")]\n'
+            f"public static {ret or 'void'} {symbol}"
+            f"({', '.join(cs_arg_decls)})"
+        )
+    if lang == "mojo":
+        return f"fn {symbol}({', '.join(arg_decls)}) -> {ret or 'None'}"
+    return f"{ret or 'void'} {symbol}({', '.join(arg_decls)})"
+
+
+def _function_context_from_node(node_spec: Optional[Dict[str, Any]]) -> str:
+    """Extract a human-readable function purpose from the node spec."""
+    if not node_spec:
+        return ""
+    for key in ("description", "purpose", "_synthesis_context"):
+        value = node_spec.get(key)
+        if value:
+            return str(value)
+    exports = node_spec.get("exports") or []
+    if exports:
+        return (
+            f"Implement the exported function(s) {exports} "
+            f"for the {node_spec.get('lang', 'target')} target."
+        )
+    return ""
 
 
 def _type_map_for_boundary(
@@ -667,6 +729,8 @@ class EmitterRegistry:
         language_id: str,
         synthesize: bool = True,
         boundary_type: Optional[BoundaryContract] = None,
+        node_spec: Optional[Dict[str, Any]] = None,
+        contracts: Optional[List[Dict[str, Any]]] = None,
     ) -> PolyglotEmitterPlugin:
         """Return a registered plugin, synthesizing one on demand if allowed."""
         key = language_id.lower().strip()
@@ -674,7 +738,12 @@ class EmitterRegistry:
             if key in self._plugins:
                 return self._plugins[key]
             if synthesize and self._can_synthesize():
-                plugin = self._synthesize_plugin(key, boundary_type=boundary_type)
+                plugin = self._synthesize_plugin(
+                    key,
+                    boundary_type=boundary_type,
+                    node_spec=node_spec,
+                    contracts=contracts,
+                )
                 self._plugins[key] = plugin
                 return plugin
             raise EmitterError(
@@ -711,6 +780,8 @@ class EmitterRegistry:
         self,
         language_id: str,
         boundary_type: Optional[BoundaryContract] = None,
+        node_spec: Optional[Dict[str, Any]] = None,
+        contracts: Optional[List[Dict[str, Any]]] = None,
     ) -> PolyglotEmitterPlugin:
         """Ask the LLM to generate a temporary emitter plugin for *language_id*.
 
@@ -722,9 +793,15 @@ class EmitterRegistry:
             raise EmitterError("JIT synthesis prompt is not configured")
 
         client = self._get_llm_client()
-        user_prompt = self._build_synthesis_user_prompt(language_id, boundary_type)
+        user_prompt = self._build_synthesis_user_prompt(
+            language_id, boundary_type, node_spec, contracts
+        )
         system_prompt = self._prepare_system_prompt(
-            self._synthesis_prompt, language_id, boundary_type
+            self._synthesis_prompt,
+            language_id,
+            boundary_type,
+            node_spec,
+            contracts,
         )
         messages = [
             {"role": "system", "content": system_prompt},
@@ -801,12 +878,23 @@ class EmitterRegistry:
         prompt_template: str,
         language_id: str,
         boundary_type: Optional[BoundaryContract] = None,
+        node_spec: Optional[Dict[str, Any]] = None,
+        contracts: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Fill language-specific placeholders in the emitter synthesis prompt."""
         boundary = boundary_type or BoundaryContract.C_ABI
         boundary_name = boundary.name
         title = _pascal_case(language_id)
         node_id = f"{language_id}_kernel"
+
+        first_contract = (contracts or [{}])[0]
+        symbol = first_contract.get("symbol", "fast_math_kernel")
+        args = list(first_contract.get("args", ["int64"]))
+        return_type = first_contract.get("return_type", "int64") or "int64"
+        signature = _function_signature_for_prompt(
+            language_id, symbol, args, return_type
+        )
+        context = _function_context_from_node(node_spec)
 
         toolchain = {
             "zig": "zig",
@@ -840,12 +928,16 @@ class EmitterRegistry:
             .replace("__EXT__", ext)
             .replace("__MANIFEST_FILE__", manifest_file)
             .replace("__MANIFEST_CONTENT__", manifest_repr)
+            .replace("__FUNCTION_SIGNATURE__", signature)
+            .replace("__FUNCTION_CONTEXT__", context)
         )
 
     def _build_synthesis_user_prompt(
         self,
         language_id: str,
         boundary_type: Optional[BoundaryContract] = None,
+        node_spec: Optional[Dict[str, Any]] = None,
+        contracts: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         boundary = boundary_type.value if boundary_type else "c_abi"
         boundary_name = boundary_type.name if boundary_type else "C_ABI"
@@ -867,9 +959,21 @@ class EmitterRegistry:
             "csharp": "cs",
             "fortran": "f90",
         }.get(language_id.lower(), language_id.lower())
+
+        first_contract = (contracts or [{}])[0]
+        symbol = first_contract.get("symbol", "fast_math_kernel")
+        args = list(first_contract.get("args", ["int64"]))
+        return_type = first_contract.get("return_type", "int64") or "int64"
+        signature = _function_signature_for_prompt(
+            language_id, symbol, args, return_type
+        )
+        context = _function_context_from_node(node_spec)
+
         return (
             f"Complete the skeleton for a `{_pascal_case(language_id)}EmitterPlugin` "
             f"for language '{language_id}' (toolchain '{toolchain}', source extension '.{ext}').\n\n"
+            f"The plugin must generate source code for this exact function signature:\n{signature}\n\n"
+            f"Semantic purpose:\n{context}\n\n"
             f"The plugin must support the boundary contract `{boundary_name}` (value '{boundary}').\n"
             "Implement `descriptor`, `emit_source_files`, and `emit_build_manifest`.\n"
             "Use only the base classes imported from `aero_forge.builder.emitters.base`. "
@@ -888,11 +992,37 @@ class EmitterRegistry:
 
     @staticmethod
     def _extract_python_code(raw: str) -> str:
-        """Extract Python source from a fenced code block, or return the raw text."""
-        fenced = re.findall(r"```(?:python)?\s*\n(.*?)\n```", raw, re.DOTALL)
+        """Extract Python source from a fenced code block or conversational text."""
+        if not raw:
+            return ""
+        # Prefer explicitly-tagged python fences, then any fence.
+        fenced = re.findall(
+            r"```(?:python|py)?\s*\n(.*?)\n```",
+            raw,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if not fenced:
+            fenced = re.findall(r"```\s*\n(.*?)\n```", raw, re.DOTALL)
         if fenced:
             return fenced[-1].strip()
-        return raw.strip()
+
+        # No fences: attempt to locate a parseable Python snippet.
+        raw = raw.strip()
+        lines = raw.splitlines()
+        start = 0
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith(("import ", "from ", "class ", "def ")):
+                start = i
+                break
+        for end in range(len(lines), start, -1):
+            snippet = "\n".join(lines[start:end])
+            try:
+                ast.parse(snippet)
+                return snippet.strip()
+            except SyntaxError:
+                continue
+        return raw
 
     @staticmethod
     def _strip_redefined_helpers(code: str) -> str:
