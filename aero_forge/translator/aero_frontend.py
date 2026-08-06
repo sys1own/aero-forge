@@ -1,8 +1,10 @@
 """Normalize a subset of Python source into a simple UAST module.
 
-The UAST dialect is intentionally small: module, function_declaration,
-binding, reference, literal, if, and call. It is enough to drive the
-translator and the precision shield for numeric functions.
+The UAST dialect includes: module, function_declaration, binding, reference,
+literal, if, call, dict/set constructors, dict key lookup, and set membership.
+These constructs are lowered directly into the Rust HIN agents
+``DictConstructor``, ``SetConstructor``, and ``KeyLookup``; they no longer
+trigger a CPython fallback.
 """
 
 from __future__ import annotations

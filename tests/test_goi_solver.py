@@ -7,8 +7,10 @@ from aero_forge.scheduler.goi_solver import (
     GoIWavefrontSolver,
     GoiSolverError,
     adjacency_to_matrix,
+    check_python_loops_nilpotent,
     goi_compute_gradients,
     goi_execute_wave,
+    goi_nilpotency_check,
     precedence_scores,
 )
 
@@ -153,3 +155,45 @@ def test_goi_wavefront_solver_cyclic_raises() -> None:
     solver = GoIWavefrontSolver(labels, M, U)
     with pytest.raises(GoiSolverError):
         solver.wavefront_stages()
+
+
+def test_goi_nilpotency_acyclic_matrix():
+    """An acyclic dependency matrix is nilpotent."""
+    M = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=np.float64)
+    assert goi_nilpotency_check(M) is True
+
+
+def test_goi_nilpotency_cyclic_matrix():
+    """A 2-cycle dependency matrix is not nilpotent."""
+    M = np.array([[0, 1], [1, 0]], dtype=np.float64)
+    assert goi_nilpotency_check(M) is False
+
+
+def test_goi_python_loop_nilpotent():
+    """A pure Python reduction loop has a nilpotent dependency matrix."""
+    source = (
+        "def process(items):\n"
+        "    s = 0.0\n"
+        "    for x in items:\n"
+        "        s = s + x\n"
+        "    return s\n"
+    )
+    ok, reason = check_python_loops_nilpotent(source)
+    assert ok is True
+    assert "nilpotent" in reason.lower()
+
+
+def test_goi_python_loop_cycle_detected():
+    """A loop with a variable cycle is not nilpotent."""
+    source = (
+        "def cycle(n):\n"
+        "    a = 0\n"
+        "    b = 0\n"
+        "    for _ in range(n):\n"
+        "        a = b + 1\n"
+        "        b = a + 1\n"
+        "    return a\n"
+    )
+    ok, reason = check_python_loops_nilpotent(source)
+    assert ok is False
+    assert "not nilpotent" in reason.lower()

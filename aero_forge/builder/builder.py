@@ -83,13 +83,14 @@ class ProactivePolyglotBuilder:
     """Build orchestrator that verifies HIN, SMT, and GoI before disk writes."""
 
     def __init__(self) -> None:
-        from aero_forge.builder.fallback_manager import FallbackManager
+        from aero_forge.builder.fallback_manager import FallbackManager, HeuristicWarning
         from aero_forge.hin_engine import HINEngine
         from aero_forge.precision_shield import SMTASTEngine
 
         self.hin_engine = HINEngine()
         self.smt_engine = SMTASTEngine()
         self.fallback_manager = FallbackManager()
+        self.HeuristicWarning = HeuristicWarning
 
     def _ingest_hin(self, payload: Dict[str, Any]) -> None:
         """Populate the HIN engine from the payload's nodes and relations."""

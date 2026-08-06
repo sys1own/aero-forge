@@ -100,6 +100,7 @@ def test_orchestrator_routes_non_numeric_function_to_standard_runtime(tmp_path):
         test_path=test,
         max_iterations=1,
         use_llm=False,
+        precision_shield_mode="permissive",
     )
     result = orchestrator.run()
     assert result["success"] is True

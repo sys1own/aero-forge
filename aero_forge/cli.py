@@ -458,11 +458,11 @@ def fix(
     "--precision-shield-mode",
     "precision_shield_mode",
     type=click.Choice(
-        ["ieee", "fast_math", "shield"],
+        ["ieee", "fast_math", "shield", "permissive"],
         case_sensitive=False,
     ),
     default=None,
-    help="Precision mode: ieee, fast_math, or shield.",
+    help="Precision mode: ieee, fast_math, shield, or permissive (allows CPython fallback after heuristic warning).",
 )
 @click.option(
     "--hin-jit-opt-level",
@@ -485,6 +485,7 @@ def fix(
             "v8_iterative",
             "v9_transpiler_friendly",
             "v10_correctness_focused",
+            "v11_universal_architect",
         ],
         case_sensitive=False,
     ),
@@ -853,6 +854,7 @@ def build(
             "v8_iterative",
             "v9_transpiler_friendly",
             "v10_correctness_focused",
+            "v11_universal_architect",
         ],
         case_sensitive=False,
     ),
@@ -912,11 +914,11 @@ def build(
     "--precision-shield-mode",
     "precision_shield_mode",
     type=click.Choice(
-        ["ieee", "fast_math", "shield"],
+        ["ieee", "fast_math", "shield", "permissive"],
         case_sensitive=False,
     ),
     default=None,
-    help="Precision mode: ieee, fast_math, or shield.",
+    help="Precision mode: ieee, fast_math, shield, or permissive (allows CPython fallback after heuristic warning).",
 )
 @click.option(
     "--hin-jit-opt-level",
@@ -1302,6 +1304,7 @@ def init_blueprint(path: str, verbose: bool) -> None:
             "v8_iterative",
             "v9_transpiler_friendly",
             "v10_correctness_focused",
+            "v11_universal_architect",
         ],
         case_sensitive=False,
     ),

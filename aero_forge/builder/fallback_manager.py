@@ -2,8 +2,60 @@
 
 from __future__ import annotations
 
+import ast
 import copy
+import json
 from typing import Any, Dict, List, Tuple
+
+from aero_forge.errors import HeuristicWarning
+
+__all__ = ["FallbackManager", "HeuristicWarning"]
+
+
+class _CollectionAstRepairer(ast.NodeTransformer):
+    """Rewrite common Python collection idioms into HIN-compatible forms.
+
+    Transformations performed:
+
+    * ``dict_obj.get(key)`` -> ``dict_obj[key]`` (maps to ``dict_lookup`` UAST node).
+    * ``dict_obj.get(key, default)`` -> ``dict_obj[key]`` with a diagnostic note;
+      the HIN ``dict_lookup`` agent returns ``Null`` for missing keys, which callers
+      can treat as a sentinel value.
+    * ``dict(k=v, ...)`` -> ``{"k": v, ...}`` (maps to the ``dict`` UAST constructor).
+    * ``dict()`` -> ``{}``.
+    """
+
+    def __init__(self) -> None:
+        self.diagnostics: List[str] = []
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        if isinstance(node.func, ast.Attribute) and node.func.attr == "get":
+            base = node.func.value
+            args = node.args
+            if len(args) == 1:
+                return ast.Subscript(value=base, slice=self._slice(args[0]), ctx=ast.Load())
+            if len(args) == 2:
+                self.diagnostics.append(
+                    "dict.get(key, default) default argument dropped; "
+                    "HIN dict_lookup returns Null for missing keys."
+                )
+                return ast.Subscript(value=base, slice=self._slice(args[0]), ctx=ast.Load())
+        if isinstance(node.func, ast.Name) and node.func.id == "dict":
+            if not node.args and not node.keywords:
+                return ast.Dict(keys=[], values=[])
+            if node.keywords and not node.args:
+                keys = [ast.Constant(k.arg) for k in node.keywords]
+                values = [k.value for k in node.keywords]
+                return ast.Dict(keys=keys, values=values)
+        return node
+
+    @staticmethod
+    def _slice(expr: ast.expr) -> ast.expr:
+        # Python 3.9+ uses ast.Index internally; unwrap if necessary.
+        if isinstance(expr, ast.Index):  # type: ignore[attr-defined]
+            return expr.value  # type: ignore[attr-defined]
+        return expr
 
 
 class FallbackManager:
@@ -21,12 +73,83 @@ class FallbackManager:
     3. Interactive Blueprint Clarification: SMT UNSAT on fundamental business
        logic or import visibility is not auto-repairable; materialization is
        aborted and a precise diagnostic report is emitted.
+
+    In addition, the manager performs *proactive* AST healing for unsupported
+    Python idioms such as ``dict.get()`` so that Tier-1 ``rust_hin`` routing is
+    preferred over a CPython fallback.
     """
 
     def __init__(self) -> None:
         self.patches: List[Dict[str, Any]] = []
         self.diagnostics: List[str] = []
         self.last_level: int | None = None
+
+    def remediate_collection_ast(
+        self, source_text: str
+    ) -> Tuple[bool, str, List[str]]:
+        """Repair collection idioms in Python source and return the healed text.
+
+        Returns ``(changed, new_source, diagnostics)``.
+        """
+        try:
+            tree = ast.parse(source_text)
+        except SyntaxError:
+            return False, source_text, ["Source text is not valid Python; AST healing skipped."]
+
+        repairer = _CollectionAstRepairer()
+        new_tree = ast.fix_missing_locations(repairer.visit(tree))
+        new_source = ast.unparse(new_tree)
+        changed = new_source != source_text
+        if changed:
+            self.patches.append(
+                {
+                    "target_node_id": "python_ast",
+                    "replacement_type": "hin_collection_subscript",
+                    "purpose": "dict.get() -> dict[key] for HIN KeyLookup",
+                }
+            )
+        self.diagnostics.extend(repairer.diagnostics)
+        return changed, new_source, repairer.diagnostics
+
+    def remediate_uast_expressions(
+        self, uast: Dict[str, Any]
+    ) -> Tuple[bool, Dict[str, Any], List[str]]:
+        """Apply e-graph equality saturation to UAST expression nodes.
+
+        This wraps the native ``repair_uast_expression`` proof engine so that
+        arithmetic and algebraic sub-expressions are minimized before lowering
+        to the HIN arena.  Unsupported expression fragments are left unchanged.
+        """
+        try:
+            from aero_forge._native import repair_uast_expression
+        except Exception as exc:
+            return False, uast, [f"Native repair engine unavailable: {exc}"]
+
+        def _repair(node: Any) -> Any:
+            if isinstance(node, list):
+                return [_repair(item) for item in node]
+            if not isinstance(node, dict):
+                return node
+            node_type = node.get("type", "")
+            if node_type in {"literal", "reference", "call", "binop", "unaryop"}:
+                try:
+                    rewritten = repair_uast_expression(json.dumps(node))
+                    return json.loads(rewritten)
+                except Exception:
+                    pass
+            return {k: _repair(v) for k, v in node.items()}
+
+        new_uast = _repair(copy.deepcopy(uast))
+        changed = new_uast != uast
+        if changed:
+            self.patches.append(
+                {
+                    "target_node_id": "uast",
+                    "replacement_type": "egraph_minimized_expression",
+                    "purpose": "equality saturation rewrite",
+                }
+            )
+        return changed, new_uast, []
 
     def remediate_smt_unsat(
         self,

@@ -35,6 +35,7 @@ _ALLOWED_BUILTINS = {
     "all",
     "any",
     "set",
+    "dict",
     "complex",
     # Exception constructors are only meaningful inside raise statements; the
     # transpiler emits them as panics.

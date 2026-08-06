@@ -70,9 +70,10 @@ def build_blueprint_plan_prompt(
 ) -> str:
     """Return the planning prompt for generating a ``blueprint.aero``.
 
-    The prompt explicitly instructs the model to emit a polyglot
-    ``hybrid_rust_python`` blueprint whenever the user intent involves both
-    Python and Rust/PyO3/Maturin/FFI, and includes a concrete few-shot example.
+    The prompt instructs the model to emit a universal ``graph_polyglot``
+    blueprint. The model may propose any language/toolchain (Go, C#, Java, Zig,
+    Mojo, etc.) because missing ``PolyglotEmitterPlugin`` modules are synthesized
+    and validated on demand.
     """
     import re
 
@@ -113,4 +114,74 @@ def build_blueprint_plan_prompt(
     return "\n".join(parts)
 
 
-__all__ = ["PromptBuilder", "build_blueprint_plan_prompt"]
+EMITTER_PLUGIN_SYNTHESIS_SYSTEM_PROMPT = """You are the Aero-Forge Emitter Synthesis Agent.
+Your task is to generate a complete, self-contained Python class that subclasses `PolyglotEmitterPlugin` for a programming language requested by the user.
+
+Base class contract (you may copy this structure):
+
+```python
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Dict, List, Set
+
+class BoundaryContract(Enum):
+    C_ABI = "c_abi"
+    PYO3_MATURIN = "pyo3_maturin"
+    WASM_WASI = "wasm_wasi"
+    JNI = "jni"
+    CGO = "cgo"
+    PINVOKE = "pinvoke"
+    CUDA_HIP_C = "cuda_hip_c"
+
+@dataclass(frozen=True)
+class CapabilityDescriptor:
+    language_id: str
+    supported_boundaries: Set[BoundaryContract]
+    toolchains: List[str]
+    file_extensions: List[str]
+    supports_zero_copy: bool
+    supports_async_ffi: bool
+
+@dataclass
+class CodeArtifact:
+    file_path: str
+    content: str
+    language: str
+    is_header: bool = False
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+class PolyglotEmitterPlugin(ABC):
+    @property
+    @abstractmethod
+    def descriptor(self) -> CapabilityDescriptor: ...
+    @abstractmethod
+    def emit_source_files(self, node_id: str, node_spec: Dict[str, Any], boundary_contracts: List[Dict[str, Any]]) -> List[CodeArtifact]: ...
+    @abstractmethod
+    def emit_build_manifest(self, node_id: str, dependencies: List[str], compiler_flags: List[str]) -> List[CodeArtifact]: ...
+```
+
+Rules:
+1. Return ONLY valid Python code inside a single markdown ```python ... ``` block.
+2. The class name must be `<Language>EmitterPlugin` (e.g. `ZigEmitterPlugin`).
+3. The `descriptor` property must return a `CapabilityDescriptor` whose `language_id` matches the requested language.
+4. `supported_boundaries` must be a set of `BoundaryContract` values and must include the boundary contract requested in the user prompt.
+5. `toolchains` and `file_extensions` must be non-empty lists.
+6. `emit_source_files` must return a list of `CodeArtifact` objects. The source files must implement a real exported function matching the first entry in `boundary_contracts` (use its `symbol`, `args`, and `return_type`).
+7. For C-ABI boundaries, export functions using the correct visibility for the target language:
+   - Zig: `export fn symbol(...) ...`
+   - Rust: `#[no_mangle] pub extern "C" fn symbol(...)`
+   - C/C++: `extern "C"` block
+   - Go: `//export symbol` above `func symbol(...)`
+   - C#: `[UnmanagedCallersOnly]`
+   - Java: JNI `JNIEXPORT ... JNICALL` signature
+8. `emit_build_manifest` must return a list of `CodeArtifact` objects for build files such as `Cargo.toml`, `CMakeLists.txt`, `build.zig`, `package.json`, `setup.py`, or a `Makefile`.
+9. Do not write placeholder comments, TODOs, or unimplemented stubs. Every emitted artifact must contain valid, compilable source or build configuration.
+"""
+
+
+__all__ = [
+    "PromptBuilder",
+    "build_blueprint_plan_prompt",
+    "EMITTER_PLUGIN_SYNTHESIS_SYSTEM_PROMPT",
+]

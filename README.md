@@ -14,14 +14,14 @@ Core value propositions:
 
 - **Zero-boilerplate native acceleration** - No `Cargo.toml`, `#[pyfunction]`, `build.rs`, or linker flags required.
 - **C-ABI Zero-Copy Dynamic Bridge** - Accelerated numerical functions compile to `.so`/`.dylib`/`.dll` via `clang++`/`g++` with native FFI bindings emitted by `cpp_emitter.py`.
-- **Multi-Language Build Matrix** - Native support for eight build targets: `pure_python`, `pure_rust`, `hybrid_rust_python`, `hybrid_cpp_python`, `hybrid_cpp_rust`, `multi_crate_rust`, `tri_polyglot_rust_cpp_python`, and `wasm`.
+- **Universal Multi-Language Build Matrix** - Native support for core targets (`pure_python`, `pure_rust`, `hybrid_rust_python`, `hybrid_cpp_python`, `hybrid_cpp_rust`, `multi_crate_rust`, `tri_polyglot_rust_cpp_python`, `wasm`) plus on-demand JIT emitter synthesis for any language/toolchain the LLM proposes (Go, C#, Java, Zig, Mojo, D, Nim, Fortran, etc.).
 - **Selective Acceleration Heuristics** - AST node evaluation routes heavy vector loops to C++ `extern "C"` shared libraries, concurrent/memory-safe work to Rust PyO3, and light or incompatible workloads back to CPython.
 - **Sub-millisecond execution pathways** - Numeric Python functions compile to native code and are cached at the AST node level for instant re-execution.
 - **Wavefront Parallel Acceleration Engine** - Dependency-graph wavefront analysis batches independent functions and UAST nodes across multi-crate and polyglot targets for parallel compilation and execution, cutting build matrix times and hot-loop overhead.
 - **Drop-In Workspace Portability** - `workspace.aeroc` is a packed binary workspace archive containing the `blueprint.aero` contract, source tree, and build metadata. Drag or copy it into an empty Aero-Forge workspace to scaffold, compile, and run the complete project.
 - **100% Deterministic Proof-Theoretic Self-Healing** - Build failures are repaired at native Rust speed (<1 ms per rewrite) by MELL energy invariants, E-Graph equality saturation (`egg`), category-theoretic FFI contract synthesis, and GoI `ΔM` perturbation bounding. The repair loop never calls an LLM.
 - **Interactive Co-Pilot & Action Cards** - The web Co-Pilot chat is workspace-aware (via `bundle_repo.py`), separates conversational advice from the executable build prompt using isolated ` ```build_prompt ` blocks, and renders `SUGGEST_BUILD_PROMPT` Action Cards with an editable prompt box and a one-click `[ Send to Builder & Run ]` trigger.
-- **Fall-forward safety** - Unsupported Python constructs gracefully fall back to CPython without panics.
+- **Proactive Synthesis Healing** - Unsupported Python constructs are healed into HIN-native forms by E-Graph equality saturation and SMT constraint solving before code is emitted. The legacy fall-forward-to-CPython path remains available as an explicit opt-in for cases that cannot be statically healed.
 
 ## Proactive Formal Synthesis Engine (Zero-Failure Architecture)
 
@@ -36,9 +36,9 @@ Aero-Forge has evolved from a reactive build-and-repair engine into a **proactiv
 ### Core Verification Pipeline
 
 - **HIN AST Normalization** — Python, Rust, and C++ AST fragments are unified into a single `networkx.MultiDiGraph` **Heterogeneous Information Network** $G_{\text{HIN}} = (V, E, \mathcal{T}, \mathcal{R})$. Double-Pushout (DPO) graph rewrites inject `FFIBoundary` nodes around raw string FFI calls, and an affine ownership lattice (`1`, `&`, `&mut`, `!`, $\bot$) propagates constraints across `TransfersOwnershipTo` edges.
-- **Neuro-Symbolic SMT Solving (Z3)** — Unresolved typed holes ($\square_i$) and cross-language FFI constraints (`OffsetOf`, `AlignOf`, import visibility) are solved by `SMTASTEngine`. UNSAT cores are captured for in-memory healing rather than allowed to reach disk.
-- **GoI Proof Net Verification** — Girard's *Geometry of Interaction* solver computes $EX(M, \sigma) = (I - \sigma^2) M (I - \sigma M)^{-1} (I - \sigma^2)$ and verifies nilpotency $(\sigma M)^N = 0$. This proves the absence of dynamic deadlocks and dropped async futures across language boundaries.
-- **Pre-Materialization In-Memory Healing** — `FallbackManager` applies structural AST repairs in memory using SMT UNSAT cores and GoI path cuts. Only after all verification gates pass does `ProactivePolyglotBuilder` call the materialization step.
+- **Neuro-Symbolic SMT Solving (Z3)** — Unresolved typed holes ($\square_i$) and cross-language FFI constraints (`OffsetOf`, `AlignOf`, import visibility) are solved by `SMTASTEngine`. For every dynamic variable in a Python UAST, the engine creates a Z3 native-type variable and adds constraints from literals, arithmetic, subscripts, comparisons, calls (`range`, `len`, `list`, `dict`, `set`, `sorted`), assignments, and loop-carried dependencies. The most specific native type (`i64`, `f64`, `usize`, `bool`, `String`, `Vec<T>`, `BTreeMap<K, V>`, `HashSet<T>`) is injected into the generated Rust/C++/bridge code, allowing the native compiler to optimize the function as if it were statically typed. UNSAT cores are captured for in-memory healing rather than allowed to reach disk.
+- **GoI Proof Net Verification** — Girard's *Geometry of Interaction* solver computes the wavefront execution matrix $EX(M, U) = (I - U \cdot M)^{-1} \cdot U$ and verifies nilpotency $(\sigma M)^N = 0$ on the loop-carried dependency matrix (with self-loops removed). This proves that even dynamic Python `for`/`while` loops are mathematically incapable of deadlocking across the HIN, because all cross-iteration dependencies eventually vanish. Singularity of $(I - U \cdot M)$ also detects cyclic build graphs before any disk write.
+- **Pre-Materialization In-Memory Healing** — `FallbackManager` applies structural AST repairs in memory using SMT UNSAT cores and GoI path cuts. Dict/set idioms (`d.get(k)`, `dict(...)`, `{...}`) are rewritten into HIN-native `DictConstructor`/`SetConstructor`/`KeyLookup` agents with MELL linear typing. Only after all verification gates pass does `ProactivePolyglotBuilder` call the materialization step.
 
 ### Pipeline Workflow
 
@@ -211,9 +211,23 @@ class ZigEmitterPlugin(PolyglotEmitterPlugin):
 EmitterRegistry.get_instance().register(ZigEmitterPlugin())
 ```
 
+## Universal Plugin Synthesis
+
+Aero-Forge is a **Universal Build System**: it is not constrained to the languages that ship with built-in emitters. When `blueprint.aero` requests a language or toolchain that has no hardcoded `PolyglotEmitterPlugin` (e.g., `zig`, `mojo`, `d`, `nim`, or `fortran`), the engine JIT-synthesizes a plugin on demand.
+
+The synthesis flow is deterministic and auditable:
+
+1. **Blueprint request** — the LLM planner emits a `graph_polyglot` node with `lang` and `toolchain` set to the desired value.
+2. **Registry miss** — `EmitterRegistry.get_plugin(..., synthesize=True)` notices the language is not registered and loads the `EMITTER_PLUGIN_SYNTHESIS_SYSTEM_PROMPT`.
+3. **LLM emitter generation** — an LLM writes a self-contained `PolyglotEmitterPlugin` subclass, including a `CapabilityDescriptor` with the supported `BoundaryContract` values and `emit_source_files` / `emit_build_manifest` implementations.
+4. **Deterministic validation** — the engine checks that the synthesized plugin defines a concrete class, exposes the requested language id and boundary type, returns `List[CodeArtifact]`, and implements a real exported function matching the first boundary contract.
+5. **Materialization** — the validated plugin is registered temporarily and used to emit source and manifest files; the native toolchain is then invoked through `SystemToolchainRouter`.
+
+This lets the LLM architect propose the right tool for the job (Go for a web server, C# NativeAOT for a P/Invoke kernel, Java JNI for an enterprise integration, Zig for a fast math library) without requiring hand-written plugins in the repo.
+
 ## Core Supported Build Targets
 
-Aero-Forge natively supports eight primary build targets, each with deterministic materialization and native toolchain invocation:
+Aero-Forge natively supports eight primary build targets, each with deterministic materialization and native toolchain invocation. Beyond these, the **Universal Plugin Synthesis** pipeline can materialize any language the LLM proposes.
 
 ### 1. Natively Accelerated Python
 
@@ -225,8 +239,8 @@ from aero_forge import accelerate
 @accelerate(target="rust_hin")
 def weighted_sum(scores: list[float], weights: list[float]) -> float:
     total = 0.0
-    for s, w in zip(scores, weights):
-        total += s * w
+    for i in range(len(scores)):
+        total += scores[i] * weights[i]
     return total
 ```
 
@@ -298,12 +312,13 @@ Supported outputs also include:
 - Tri-polyglot Python/Rust/C++ orchestration projects.
 - Multi-crate Rust monorepos.
 - Cross-compiled Rust artifacts and `wasm32-unknown-unknown` binaries.
+- **JIT-synthesized language targets** (Go, C#, Java, Zig, Mojo, D, Nim, etc.) produced by the Universal Plugin Synthesis pipeline.
 
 ## Key Features
 
 - **Native HIN Acceleration Core** - A Rust-based execution backend (`_native/src/hin_engine.rs`) lowers numeric Python into a **Holographic Interaction Net (HIN)** for fast, safe reduction with MELL linear typing and zero dynamic heap allocations.
 - **Fine-Grained AST Node Hash Caching** - Compilation artifacts are keyed by the hash of individual UAST nodes. Identical functions bypass `cargo build` entirely and load the cached native snippet instantly.
-- **Fall-Forward Precision Shield** - If the transpiler encounters an unsupported Python construct, the function is transparently routed back to native CPython execution. No panics, no crashes.
+- **Proactive Synthesis Healing** - Unsupported Python constructs are rewritten into HIN-native equivalents (`d.get(k)` → `d[k]`, `dict(...)` → `{...}`, `set.add(...)` → set constructors) by E-Graph equality saturation and SMT-driven type inference before a single file is written. The legacy fall-forward-to-CPython path remains as an explicit opt-in (`--precision-shield-mode permissive`).
 - **Universal Intent Detection** - Parses any high-level prompt to infer languages, build tools, module boundaries, and concurrency patterns. Hybrid stacks are never silently downgraded to a fallback.
 - **Declarative Blueprinting (`blueprint.aero`)** - Every build starts with a generated contract that declares `architecture`, `toolchains`, `manifest`, `contracts`, `functions`, and verification steps.
 - **Strict Blueprint Materialization** - Every manifest file, source module, native backend library, compiler config, and target binding declared in `blueprint.aero` is physically emitted and built.
@@ -622,7 +637,7 @@ If source files become corrupted or you want a clean slate, use **Regenerate Wor
 | `--discover` | Allow the LLM to design a new algorithm when no library entry matches. |
 | `--review` | Run an LLM self-review step before compilation. |
 | `--optimize` | Run an iterative LLM optimization loop. |
-| `--prompt-template <name>` | Choose one of `v1_minimal`, `v2_structured`, `v3_algorithm`, `v4_performance`, `v5_balanced` (default), `v6_creative`, `v7_conservative`, `v8_iterative`, `v9_transpiler_friendly`, `v10_correctness_focused`. |
+| `--prompt-template <name>` | Choose one of `v1_minimal`, `v2_structured`, `v3_algorithm`, `v4_performance`, `v5_balanced` (default), `v6_creative`, `v7_conservative`, `v8_iterative`, `v9_transpiler_friendly`, `v10_correctness_focused`, `v11_universal_architect`. |
 | `--build` | Run `aero-forge build` immediately after generation. |
 | `--json` | Output the final result as structured JSON for frontend integration. |
 | `--stream` | Emit NDJSON progress events during generation/build. |
@@ -865,6 +880,7 @@ Nine templates are included for different generation styles:
 | `v8_iterative` | Includes feedback from previous runs. |
 | `v9_transpiler_friendly` | Explicitly forbids edge-case constructs for maximum first-pass success. |
 | `v10_correctness_focused` | Prioritizes correct, maintainable code. |
+| `v11_universal_architect` | Universal polyglot design: any toolchain, SMT/GoI-backed safety, multi-language boundary planning. |
 
 Use `--prompt-template v5_balanced` to select one. `v5_balanced` is the default and was the most reliable in the prompt-engineering campaign.
 
@@ -932,13 +948,12 @@ The transpiler handles common numerical and algorithmic Python patterns:
 
 ## Known Limitations
 
-The transpiler is intentionally narrow. It works well for numerical/algorithmic code and produces clear errors for unsupported constructs.
+The transpiler targets numerical and algorithmic code. Most constructs are proactively healed into HIN-native equivalents before materialization.
 
-Currently not supported:
+Currently not natively supported (the engine will attempt AST healing; unhealed cases can opt-in to legacy CPython fallback):
 
-- `insert`, `remove`, and most other list methods (only `append`, `extend`, `pop`, and indexing/slicing are supported).
+- `insert`, `remove`, and most other list methods (only `append`, `extend`, `pop`, and indexing/slicing are supported; `dict`/`set` are now HIN-native).
 - Nested function, class, or method definitions (refactor to top-level functions).
-- Dictionaries and sets.
 - Complex class inheritance, properties, and dataclasses.
 - `try`/`except`, `with`, `yield`, `async`/`await`.
 - `eval`/`exec` and dynamic imports.
@@ -950,18 +965,20 @@ See `BLUEPRINT.md` and `stress_tests/README.md` for the full supported-construct
 
 ## How It Works
 
-1. **Intent & Classification** - The user provides a natural language prompt (LLM), an existing `.py` file, or drags-and-drops a `workspace.aeroc` archive. The prompt is classified into an `architecture` (e.g. `pure_python`, `pure_rust`, `hybrid_rust_python`, `hybrid_cpp_python`, `hybrid_cpp_rust`, `multi_crate_rust`, `tri_polyglot_rust_cpp_python`, `wasm`) and `toolchains`.
+1. **Intent & Classification** - The user provides a natural language prompt (LLM), an existing `.py` file, or drags-and-drops a `workspace.aeroc` archive. The prompt is classified into an `architecture` (e.g. `pure_python`, `pure_rust`, `hybrid_rust_python`, `hybrid_cpp_python`, `hybrid_cpp_rust`, `multi_crate_rust`, `tri_polyglot_rust_cpp_python`, `wasm`) and `toolchains`. The LLM may propose any language or toolchain (Go, C#, Java, Zig, Mojo, etc.); the engine will synthesize and validate the required emitter plugin.
 2. **Blueprint** - A `blueprint.aero` file is generated describing the workspace, manifest, contracts, and verification steps.
 3. **Materialize** - Every file declared in the blueprint is physically emitted, including `Cargo.toml`, `pyproject.toml`, `build.rs`, `src/cpp_core/native.cpp`, `src/lib.rs`, `src/main.rs`, Python wrappers, and tests.
 4. **Parse** - The Python source is parsed into an AST.
-5. **Transpile** - A deterministic Python-to-Rust transpiler lowers the AST through a UAST/HIN intermediate. The Holographic Interaction Net (HIN) is reduced in the zero-heap Rust arena (`_native/src/hin_engine.rs`) with MELL-typed wires, and code generators emit PyO3 `#[pyfunction]`/`#[pyclass]`, C-ABI `extern "C"` C++ wrappers, WASM, or CUDA C depending on the selected target.
-6. **Scaffold** - A temporary Cargo crate, full workspace, or polyglot package is generated automatically, with `.cargo/config.toml` network resilience settings.
-7. **Compile** - `cargo build --release`, `g++/clang++ -fPIC -shared`, or `maturin build` produces the native artifact, depending on the selected architecture.
-8. **Cache** - The compiled native artifact is keyed by the hash of the UAST node so identical functions re-execute without recompiling.
-9. **Wavefront Schedule** - A Geometry-of-Interaction (GoI) matrix solver (`EX(M, U) = (I - U·M)⁻¹·U`) batches independent UAST nodes and functions into wavefronts. Incremental `ΔM` repairs avoid full DAG recomputation during multi-round generation and healing.
-10. **Test** - `pytest` and `cargo test` run against the generated code in an isolated sandbox.
-11. **Heal** - On failure, the orchestrator builds a workspace HINGraph, computes `ΔM` failure influence zones, and applies deterministic AST/pattern-based repairs. It escalates to focused, subgraph-limited LLM healing when static repairs are insufficient, and offers one-click "Regenerate Workspace from Blueprint" recovery.
-12. **Explain** - Optional LLM-generated summaries are produced for human viewing after the build.
+5. **SMT Type Inference** - `SMTASTEngine` resolves every dynamic typed hole ($\square_i$) from usage, producing a concrete native type for each variable and injecting it into the generated bridge code.
+6. **GoI Deadlock Proving** - The Geometry-of-Interaction solver builds the loop-carried dependency matrix, removes self-loops, and verifies $(\sigma M)^N = 0$ for pure-Python `for`/`while` loops, certifying that no dynamic HIN deadlock can occur.
+7. **Transpile** - A deterministic Python-to-native transpiler lowers the AST through a UAST/HIN intermediate. The Holographic Interaction Net (HIN) is reduced in the zero-heap Rust arena (`_native/src/hin_engine.rs`) with MELL-typed wires, and code generators emit PyO3 `#[pyfunction]`/`#[pyclass]`, C-ABI `extern "C"` C++ wrappers, WASM, CUDA C, or JIT-synthesized emitters depending on the selected target.
+8. **Scaffold** - A temporary Cargo crate, full workspace, or polyglot package is generated automatically, with `.cargo/config.toml` network resilience settings.
+9. **Compile** - `cargo build --release`, `g++/clang++ -fPIC -shared`, `maturin build`, or the synthesized toolchain command produces the native artifact, depending on the selected target.
+10. **Cache** - The compiled native artifact is keyed by the hash of the UAST node so identical functions re-execute without recompiling.
+11. **Wavefront Schedule** - A Geometry-of-Interaction (GoI) matrix solver (`EX(M, U) = (I - U·M)⁻¹·U`) batches independent UAST nodes and functions into wavefronts. Incremental `ΔM` repairs avoid full DAG recomputation during multi-round generation and healing.
+12. **Test** - `pytest` and `cargo test` run against the generated code in an isolated sandbox.
+13. **Heal** - On failure, the orchestrator builds a workspace HINGraph, computes `ΔM` failure influence zones, and applies deterministic AST/pattern-based repairs. It escalates to focused, subgraph-limited LLM healing when static repairs are insufficient, and offers one-click "Regenerate Workspace from Blueprint" recovery.
+14. **Explain** - Optional LLM-generated summaries are produced for human viewing after the build.
 
 ## Web Integration and Session Isolation
 

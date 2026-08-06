@@ -52,11 +52,13 @@ from aero_forge.scaffold.pre_write_validator import (
 from aero_forge.scaffold.workspace import OutOfTreeWorkspace
 from aero_forge.errors import (
     BuildStageError,
+    HeuristicWarning,
     UnsupportedError,
     UserError,
     check_toolchain,
     classify_cargo_error,
 )
+from aero_forge.builder.fallback_manager import FallbackManager
 from aero_forge.healing.healer import DeterministicHealer
 from aero_forge.llm import LLMError, get_llm_client
 from aero_forge.orchestrator.error_classifier import (
@@ -92,7 +94,9 @@ from aero_forge.orchestrator.stack_classifier import (
     default_manifest_for_architecture,
 )
 from aero_forge.precision_shield.shield import Shield
+from aero_forge.precision_shield.smt_solver import SMTASTEngine
 from aero_forge.sandbox.manager import Sandbox, ensure_cargo_in_path
+from aero_forge.scheduler import goi_solver
 from aero_forge.scaffold.cargo_runner import cargo_build
 from aero_forge.scaffold.engine import (
     Engine,
@@ -333,6 +337,7 @@ class Orchestrator:
         target: Optional[str] = None,
         target_mode: str = TargetMode.PYO3,
         config_override: Optional[ConfigOverride] = None,
+        precision_shield_mode: Optional[str] = None,
     ):
         overrides: Dict[str, Any] = {}
         if max_iterations is not None:
@@ -386,6 +391,7 @@ class Orchestrator:
         self.compiler_flags = compiler_flags or []
         self.target = target
         self.target_mode = target_mode
+        self.precision_shield_mode = precision_shield_mode
 
         self.cache = FixCache(enabled=self.settings["CACHE_ENABLED"])
         # prompt_builder and llm_client are retained for API compatibility but
@@ -454,14 +460,29 @@ class Orchestrator:
                 "",
             )
 
+        # Proactive pre-write AST healing: rewrite dict.get() / dict() into
+        # HIN-compatible subscripts and literals before routing.
+        fallback_manager = FallbackManager()
+        changed, source, ast_diagnostics = fallback_manager.remediate_collection_ast(source)
+        if changed:
+            for diag in ast_diagnostics:
+                logger.warning("[AST heal] %s", diag)
+            try:
+                tree = ast.parse(source)
+            except SyntaxError as exc:
+                return self._partial_result(
+                    0,
+                    None,
+                    f"AST healing produced invalid Python: {exc} (line {exc.lineno})",
+                    "",
+                )
+
         for name in self.function_names:
             try:
                 found, _ = _find_top_level(tree, name)
             except UnsupportedError:
-                # Non-HIN constructs such as async/await are routed to the
-                # standard Python runtime instead of failing the build.
                 route_payload = classify(source, function_names=self.function_names)
-                return self._run_general_purpose(source, route_payload)
+                return self._route_or_warn(source, route_payload)
             if found is None:
                 return self._partial_result(
                     0, None, f"Function or class {name!r} not found", ""
@@ -469,7 +490,7 @@ class Orchestrator:
 
         route_payload = classify(source, function_names=self.function_names)
         if route_payload["route"] != HIN_COMPUTE:
-            return self._run_general_purpose(source, route_payload)
+            return self._route_or_warn(source, route_payload)
 
         check_toolchain()
         last_working_source: Optional[str] = None
@@ -592,6 +613,28 @@ class Orchestrator:
         if artifact is not None:
             result["artifact"] = str(artifact)
         return result
+
+    def _route_or_warn(
+        self, source: str, route_payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Route to CPython fallback only when explicitly permitted.
+
+        By default the proactive polyglot builder raises a heuristic warning
+        instead of silently falling back, forcing an explicit choice between
+        manual refactoring and a CPython fallback (``precision_shield_mode``
+        must be ``permissive``).
+        """
+        if str(self.precision_shield_mode).lower() == "permissive":
+            return self._run_general_purpose(source, route_payload)
+
+        reasons = route_payload.get("reasons", [])
+        warning = (
+            "HeuristicWarning: function(s) cannot be healed into a Tier-1 "
+            f"(rust_hin) or Tier-2 pathway. Reasons: {reasons}. "
+            "Refactor manually or set precision_shield_mode='permissive' for CPython fallback."
+        )
+        logger.warning(warning)
+        return self._partial_result(0, None, warning, "\n".join(reasons))
 
     def build(
         self,
@@ -883,6 +926,34 @@ class Orchestrator:
             if _find_top_level(tree, name)[0] is None:
                 raise _BuildFailure(f"Function or class {name!r} not found")
 
+        # Neuro-symbolic SMT type inference: resolve typed holes from usage.
+        smt_types_by_function: Dict[str, Dict[str, str]] = {}
+        try:
+            smt_engine = SMTASTEngine()
+            for func_node in tree.body:
+                if not isinstance(func_node, ast.FunctionDef):
+                    continue
+                inferred = smt_engine.infer_native_types(
+                    source, function_name=func_node.name
+                )
+                for var, typ in inferred.items():
+                    _accel_log(
+                        "info", f"SMT resolved typed hole: {func_node.name}.{var} -> {typ}"
+                    )
+                smt_types_by_function[func_node.name] = inferred
+        except Exception as exc:
+            logger.debug("SMT type inference skipped: %s", exc)
+
+        # GoI deadlock-freedom proof for concurrent loop nests.
+        try:
+            nilpotent, reason = goi_solver.check_python_loops_nilpotent(source)
+            if nilpotent:
+                _accel_log("info", f"GoI deadlock proven: nilpotent ({reason})")
+            else:
+                _accel_log("warning", f"GoI deadlock check failed: {reason}")
+        except Exception as exc:
+            logger.debug("GoI nilpotency check skipped: %s", exc)
+
         # Use the source stem for the module name so multiple functions from the
         # same file are compiled into a single extension.
         module_name = f"aero_forge_{self.source_path.stem}"
@@ -935,6 +1006,7 @@ class Orchestrator:
                 function_names=self.function_names,
                 source=source,
                 target_mode=self.target_mode,
+                smt_inferred_types=smt_types_by_function,
             )
 
             lib_rs = crate_root / "src" / "lib.rs"

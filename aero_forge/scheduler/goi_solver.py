@@ -15,6 +15,8 @@ parallel matrix pass.
 
 from __future__ import annotations
 
+import ast
+from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -250,3 +252,128 @@ def precedence_scores(
     # Row-norm as a simple scalar precedence for each node.
     scores = np.linalg.norm(EX, axis=1)
     return {node: float(scores[i]) for i, node in enumerate(nodes)}
+
+
+def goi_nilpotency_check(M: Any, max_power: Optional[int] = None) -> bool:
+    """Return True if ``(σ M)^N = 0`` for some ``N``.
+
+    ``σ M`` is ``M`` with its diagonal removed (no self-loops).  Nilpotency
+    of the loop-carried dependency matrix proves that the corresponding
+    concurrent loop nest can never deadlock.
+    """
+    M_arr = _as_array(M).astype(np.float64)
+    if M_arr.ndim != 2 or M_arr.shape[0] != M_arr.shape[1]:
+        return False
+    n = M_arr.shape[0]
+    if n == 0:
+        return True
+    sigma = M_arr.copy()
+    np.fill_diagonal(sigma, 0.0)
+    limit = max_power or n
+    power = sigma.copy()
+    for _ in range(1, limit + 1):
+        if np.allclose(power, 0.0, atol=1e-12):
+            return True
+        power = power @ sigma
+    return False
+
+
+def _loop_dependency_matrix(func: ast.FunctionDef) -> Tuple[np.ndarray, List[str]]:
+    """Build a per-statement loop-carried dependency matrix.
+
+    An edge ``src -> tgt`` means that a write to ``tgt`` in the loop body reads
+    ``src``.  Self-loops are removed because a variable depending on its own
+    previous value cannot deadlock.  Cross-statement false dependencies (e.g.
+    ``count = count + 1`` creating an edge to ``total``) are avoided by only
+    wiring loads to stores that appear in the same statement.
+    """
+    edges: set = set()
+    all_names: set = set()
+
+    def _names(node: ast.AST, ctx_type: type) -> set:
+        return {
+            child.id
+            for child in ast.walk(node)
+            if isinstance(child, ast.Name) and isinstance(child.ctx, ctx_type)
+        }
+
+    def _process(stmts: List[ast.stmt]) -> None:
+        for stmt in stmts:
+            if isinstance(stmt, (ast.For, ast.While)):
+                if isinstance(stmt, ast.For):
+                    iter_loads = _names(stmt.iter, ast.Load)
+                    all_names.update(iter_loads)
+                    for target in ast.walk(stmt.target):
+                        if isinstance(target, ast.Name) and isinstance(
+                            target.ctx, ast.Store
+                        ):
+                            all_names.add(target.id)
+                            for src in iter_loads:
+                                if src != target.id:
+                                    edges.add((src, target.id))
+                _process(stmt.body)
+                _process(stmt.orelse)
+            elif isinstance(stmt, ast.If):
+                _process(stmt.body)
+                _process(stmt.orelse)
+            elif isinstance(stmt, ast.With):
+                # Context expressions provide loads; ``as`` targets are stores.
+                for item in stmt.items:
+                    loads = _names(item.context_expr, ast.Load)
+                    if item.optional_vars:
+                        stores = _names(item.optional_vars, ast.Store)
+                        all_names.update(loads | stores)
+                        for s in stores:
+                            for l in loads:
+                                if l != s:
+                                    edges.add((l, s))
+                _process(stmt.body)
+            else:
+                loads = _names(stmt, ast.Load)
+                stores = _names(stmt, ast.Store)
+                all_names.update(loads | stores)
+                for s in stores:
+                    for l in loads:
+                        if l != s:
+                            edges.add((l, s))
+
+    _process(func.body)
+    if not all_names:
+        return np.zeros((0, 0), dtype=np.float64), []
+    nodes = sorted(all_names)
+    index = {name: i for i, name in enumerate(nodes)}
+    M = np.zeros((len(nodes), len(nodes)), dtype=np.float64)
+    for src, tgt in edges:
+        M[index[tgt], index[src]] = 1.0
+    return M, nodes
+
+
+def check_python_loops_nilpotent(
+    source: str,
+    function_name: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """Check that every loop in ``source`` has a nilpotent dependency matrix.
+
+    Returns ``(True, reason)`` when no loop-carried cycles are detected,
+    otherwise ``(False, reason)``.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False, "source could not be parsed"
+    funcs = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+    if function_name:
+        funcs = [f for f in funcs if f.name == function_name]
+    if not funcs:
+        return True, "no function found"
+    for func in funcs:
+        M, nodes = _loop_dependency_matrix(func)
+        if M.size == 0:
+            continue
+        if not goi_nilpotency_check(M):
+            return (
+                False,
+                f"loop dependency matrix for {func.name} is not nilpotent: "
+                f"potential deadlock among {nodes}",
+            )
+    return True, "all loop dependency matrices nilpotent (deadlock-free)"
