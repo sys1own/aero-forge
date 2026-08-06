@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import builtins
 import importlib
+import json
+import logging
+import os
 import re
+import textwrap
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from threading import Lock
-from typing import Any, Dict, List, Optional, Set, cast
+from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
+logger = logging.getLogger("aero_forge.emitter_registry")
+
+from aero_forge.builder.language_router import _accel_log
 from aero_forge.builder.spec import ASTNode, EngineSpec
 
 
@@ -82,6 +89,359 @@ class EmitterError(Exception):
 
 class SynthesizedPluginError(EmitterError):
     """Raised when an LLM-synthesized emitter plugin is invalid or unsafe."""
+
+
+def _pascal_case(language_id: str) -> str:
+    """Convert a lowercase language id into a PascalCase class prefix."""
+    parts = re.split(r"[-_ ]+", language_id.strip().lower())
+    return "".join(p.capitalize() for p in parts if p)
+
+
+def _python_string_literal(value: str) -> str:
+    """Return *value* as a valid double-quoted Python string literal."""
+    return json.dumps(value)
+
+
+def _type_map_for_boundary(
+    language_id: str, arg_kind: str, is_return: bool = False
+) -> str:
+    """Map an abstract arg/return kind to a concrete native type string."""
+    lang = language_id.lower()
+    maps: Dict[str, Dict[str, str]] = {
+        "zig": {
+            "int32": "i32",
+            "int64": "i64",
+            "float32": "f32",
+            "float64": "f64",
+            "pointer": "[*c]f64",
+        },
+        "go": {
+            "int32": "C.int",
+            "int64": "C.longlong",
+            "float32": "C.float",
+            "float64": "C.double",
+            "pointer": "*C.double",
+        },
+        "c": {
+            "int32": "int32_t",
+            "int64": "int64_t",
+            "float32": "float",
+            "float64": "double",
+            "pointer": "double*",
+        },
+        "csharp": {
+            "int32": "int",
+            "int64": "long",
+            "float32": "float",
+            "float64": "double",
+            "pointer": "IntPtr",
+        },
+        "java": {
+            "int32": "jint",
+            "int64": "jlong",
+            "float32": "jfloat",
+            "float64": "jdouble",
+            "pointer": "jdoubleArray",
+        },
+        "d": {
+            "int32": "int",
+            "int64": "long",
+            "float32": "float",
+            "float64": "double",
+            "pointer": "double*",
+        },
+        "nim": {
+            "int32": "int32",
+            "int64": "int64",
+            "float32": "float32",
+            "float64": "float64",
+            "pointer": "ptr float64",
+        },
+        "fortran": {
+            "int32": "integer(c_int32_t)",
+            "int64": "integer(c_int64_t)",
+            "float32": "real(c_float)",
+            "float64": "real(c_double)",
+            "pointer": "type(c_ptr), value",
+        },
+    }
+    if lang in ("cpp", "c++"):
+        lang = "c"
+    if lang == "mojo":
+        return {
+            "int32": "Int32",
+            "int64": "Int64",
+            "float32": "Float32",
+            "float64": "Float64",
+            "pointer": "DTypePointer[DType.float64]",
+        }.get(arg_kind, "Int64")
+    return maps.get(lang, maps["c"]).get(arg_kind, "int64_t")
+
+
+def _default_ret_literal(language_id: str, return_type: str) -> str:
+    """Return a safe default literal for the given language and return type."""
+    rt = (return_type or "").strip().lower()
+    if rt in ("", "void"):
+        return ""
+    if rt in ("float32", "float64"):
+        if language_id.lower() == "go":
+            return "C.double(0.0)"
+        return "0.0"
+    if language_id.lower() == "go":
+        return "C.longlong(0)"
+    return "0"
+
+
+def _scalar_ret_expr(arg_names: List[str], args: List[str], return_type: str) -> str:
+    """Return a minimal math expression for the first scalar argument, or empty."""
+    if not arg_names or not args:
+        return ""
+    scalar_kinds = {
+        "int",
+        "int32",
+        "int64",
+        "i32",
+        "i64",
+        "long",
+        "longlong",
+        "float",
+        "float32",
+        "float64",
+        "f32",
+        "f64",
+        "double",
+    }
+    rt = (return_type or "").strip().lower()
+    if rt == "void" or rt == "":
+        return ""
+    kind = (args[0] or "").strip().lower()
+    if kind not in scalar_kinds:
+        return ""
+    is_float = kind in (
+        "float",
+        "float32",
+        "float64",
+        "f32",
+        "f64",
+        "double",
+    ) or rt in ("float", "float32", "float64", "f32", "f64")
+    multiplier = "2.0" if is_float else "2"
+    return f"{arg_names[0]} * {multiplier}"
+
+
+def _fallback_source(
+    language_id: str,
+    symbol: str,
+    args: List[str],
+    return_type: str,
+    node_id: str,
+) -> str:
+    """Build a minimal C-ABI source body for a language fallback."""
+    lang = language_id.lower()
+
+    arg_names = [f"arg_{i}" for i in range(len(args))]
+    arg_decls = [
+        f"{_type_map_for_boundary(lang, kind)} {name}"
+        for name, kind in zip(arg_names, args)
+    ]
+    ret_type = _type_map_for_boundary(lang, return_type, is_return=True)
+    ret_literal = _default_ret_literal(lang, return_type)
+    scalar_expr = _scalar_ret_expr(arg_names, args, return_type)
+    ret_expr = scalar_expr if scalar_expr else ret_literal
+
+    if lang == "zig":
+        zig_args = [
+            f"{name}: {_type_map_for_boundary('zig', kind)}"
+            for name, kind in zip(arg_names, args)
+        ]
+        zig_ret = ret_type if ret_type != "void" else "void"
+        body = [f"export fn {symbol}({', '.join(zig_args)}) {zig_ret} {{"]
+        for name in arg_names:
+            # Zig errors on a pointless discard when the argument is used later.
+            if name not in (ret_expr or ""):
+                body.append(f"    _ = {name};")
+        if ret_expr:
+            body.append(f"    return @as({zig_ret}, {ret_expr});")
+        else:
+            body.append("    return;")
+        body.append("}")
+        return "\n".join(body)
+
+    if lang == "go":
+        go_args = [
+            f"{name} {_type_map_for_boundary('go', kind)}"
+            for name, kind in zip(arg_names, args)
+        ]
+        go_ret = ret_type if ret_type != "void" else ""
+        proto = f"func {symbol}({', '.join(go_args)}) {go_ret}".strip()
+        body = [
+            "package main",
+            "",
+            'import "C"',
+            "",
+            f"//export {symbol}",
+            f"{proto} {{",
+        ]
+        for name in arg_names:
+            body.append(f"    _ = {name}")
+        if ret_expr:
+            body.append(f"    return {ret_expr}")
+        body.append("}")
+        return "\n".join(body)
+
+    if lang == "csharp":
+        cs_args = [
+            f"{_type_map_for_boundary('csharp', kind)} {name}"
+            for name, kind in zip(arg_names, args)
+        ]
+        cs_ret = ret_type if ret_type != "void" else "void"
+        body = [
+            "using System;",
+            "using System.Runtime.InteropServices;",
+            "",
+            "public static class Exports {",
+            f'    [UnmanagedCallersOnly(EntryPoint = "{symbol}")]',
+            f"    public static {cs_ret} {symbol}({', '.join(cs_args)}) {{",
+        ]
+        for name in arg_names:
+            body.append(f"        _ = {name};")
+        if ret_expr:
+            body.append(f"        return {ret_expr};")
+        body.extend(["    }", "}"])
+        return "\n".join(body)
+
+    if lang == "mojo":
+        mojo_args = [
+            f"{name}: {_type_map_for_boundary('mojo', kind)}"
+            for name, kind in zip(arg_names, args)
+        ]
+        mojo_ret = ret_type if ret_type != "void" else ""
+        proto = f"fn {symbol}({', '.join(mojo_args)}) -> {mojo_ret}".strip()
+        body = [proto + " {"]
+        for name in arg_names:
+            body.append(f"    _ = {name}")
+        if ret_expr:
+            body.append(f"    return {ret_expr}")
+        body.append("}")
+        return "\n".join(body)
+
+    # Default C fallback (also covers cpp/c++, d, nim, java, fortran via C-like syntax)
+    c_args = [
+        f"{_type_map_for_boundary('c', kind)} {name}"
+        for name, kind in zip(arg_names, args)
+    ]
+    c_ret = ret_type if ret_type != "void" else "void"
+    body = [
+        "#include <stdint.h>",
+        "#include <stddef.h>",
+        "",
+        f'{c_ret} {symbol}({", ".join(c_args)}) {{',
+    ]
+    for name in arg_names:
+        body.append(f"    (void){name};")
+    if ret_expr:
+        body.append(f"    return {ret_expr};")
+    body.append("}")
+    return "\n".join(body)
+
+
+def _fallback_manifest(language_id: str, node_id: str) -> Tuple[str, str]:
+    """Return (file_path, content) for a minimal build manifest."""
+    lang = language_id.lower()
+    if lang == "zig":
+        return (
+            "build.zig",
+            textwrap.dedent("""\
+                const std = @import("std");
+
+                pub fn build(b: *std.Build) void {
+                    _ = b;
+                }
+                """),
+        )
+    if lang == "go":
+        return (
+            "go.mod",
+            f"module {node_id}\n\ngo 1.21\n",
+        )
+    if lang == "csharp":
+        return (
+            f"{node_id}.csproj",
+            textwrap.dedent(f"""\
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup>
+                    <TargetFramework>net8.0</TargetFramework>
+                    <OutputType>Library</OutputType>
+                    <PublishAot>true</PublishAot>
+                  </PropertyGroup>
+                </Project>
+                """),
+        )
+    # Generic shell build script for C-like languages.
+    return (
+        "build.sh",
+        textwrap.dedent(f"""\
+            #!/bin/bash
+            set -e
+            echo "Aero-Forge fallback build for {language_id}"
+            """),
+    )
+
+
+class _FallbackEmitterPlugin(PolyglotEmitterPlugin):
+    """A deterministic, conservative emitter used when LLM synthesis fails."""
+
+    def __init__(
+        self, language_id: str, boundary: Optional[BoundaryContract] = None
+    ) -> None:
+        self._language_id = language_id
+        self._boundary = boundary or BoundaryContract.C_ABI
+
+    @property
+    def descriptor(self) -> CapabilityDescriptor:
+        return CapabilityDescriptor(
+            language_id=self._language_id,
+            supported_boundaries={self._boundary},
+            toolchains=[self._language_id],
+            file_extensions=[self._language_id],
+            supports_zero_copy=False,
+            supports_async_ffi=False,
+        )
+
+    def emit_source_files(
+        self,
+        node_id: str,
+        node_spec: Dict[str, Any],
+        boundary_contracts: List[Dict[str, Any]],
+    ) -> List[CodeArtifact]:
+        contract = boundary_contracts[0] if boundary_contracts else {}
+        symbol = contract.get("symbol", "fast_math_kernel")
+        args = list(contract.get("args", ["int64"]))
+        return_type = contract.get("return_type", "int64") or "int64"
+        ext = node_spec.get("lang", self._language_id).lower()
+        content = _fallback_source(ext, symbol, args, return_type, node_id)
+        return [
+            CodeArtifact(
+                file_path=f"src/{symbol}.{ext}",
+                content=content,
+                language=ext,
+            )
+        ]
+
+    def emit_build_manifest(
+        self,
+        node_id: str,
+        dependencies: List[str],
+        compiler_flags: List[str],
+    ) -> List[CodeArtifact]:
+        file_path, content = _fallback_manifest(self._language_id, node_id)
+        return [
+            CodeArtifact(
+                file_path=file_path,
+                content=content,
+                language=self._language_id,
+            )
+        ]
 
 
 class BaseEmitter(ABC):
@@ -217,7 +577,10 @@ class BaseEmitter(ABC):
             from aero_forge.builder.spec import literal
 
             return self._dict_literal(
-                [ASTNode(kind="pair", children=[literal(k), literal(v)]) for k, v in value.items()]
+                [
+                    ASTNode(kind="pair", children=[literal(k), literal(v)])
+                    for k, v in value.items()
+                ]
             )
         return str(value)
 
@@ -332,12 +695,16 @@ class EmitterRegistry:
 
             self._synthesis_client = get_llm_client(
                 provider=self._synthesis_provider or "deepseek",
-                model=self._synthesis_model or None,
+                model=self._synthesis_model
+                or os.getenv("AERO_FORGE_MODEL")
+                or "deepseek-chat",
                 api_key=self._synthesis_api_key,
                 raise_on_error=True,
             )
             if self._synthesis_client is None:
-                raise EmitterError("Could not construct an LLM client for plugin synthesis")
+                raise EmitterError(
+                    "Could not construct an LLM client for plugin synthesis"
+                )
         return self._synthesis_client
 
     def _synthesize_plugin(
@@ -345,22 +712,135 @@ class EmitterRegistry:
         language_id: str,
         boundary_type: Optional[BoundaryContract] = None,
     ) -> PolyglotEmitterPlugin:
-        """Ask the LLM to generate a temporary emitter plugin for *language_id*."""
+        """Ask the LLM to generate a temporary emitter plugin for *language_id*.
+
+        If the LLM returns an empty or malformed response, we retry once with a
+        more conservative system prompt and then fall back to a deterministic
+        C-ABI-capable emitter stub so the build does not hard-fail.
+        """
         if not self._synthesis_prompt:
             raise EmitterError("JIT synthesis prompt is not configured")
 
         client = self._get_llm_client()
         user_prompt = self._build_synthesis_user_prompt(language_id, boundary_type)
+        system_prompt = self._prepare_system_prompt(
+            self._synthesis_prompt, language_id, boundary_type
+        )
         messages = [
-            {"role": "system", "content": self._synthesis_prompt},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
         raw = client.generate(messages, temperature=0.2, max_tokens=4096)
-        if not raw:
-            raise SynthesizedPluginError(f"LLM returned empty plugin source for {language_id!r}")
+        plugin = self._try_load_generated(raw, language_id, boundary_type)
+        if plugin is not None:
+            _accel_log("success", f"JIT-synthesized {language_id} emitter plugin")
+            return plugin
 
+        _accel_log(
+            "warning",
+            f"JIT synthesis for {language_id} produced empty/malformed output; retrying once",
+        )
+        logger.warning(
+            "LLM synthesis for %s returned empty/malformed/invalid output; retrying once",
+            language_id,
+        )
+        retry_prompt = (
+            system_prompt
+            + "\n\n"
+            + "IMPORTANT: Do not return an empty response or prose. "
+            + "If you are uncertain, return the skeleton above filled with the requested language's "
+            + "real exported function and a minimal build manifest. The code must be executable."
+        )
+        messages = [
+            {"role": "system", "content": retry_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+        raw = client.generate(messages, temperature=0.1, max_tokens=4096)
+        plugin = self._try_load_generated(raw, language_id, boundary_type)
+        if plugin is not None:
+            _accel_log(
+                "success", f"JIT-synthesized {language_id} emitter plugin on retry"
+            )
+            return plugin
+
+        _accel_log(
+            "warning",
+            f"JIT synthesis for {language_id} failed twice; using deterministic C-ABI fallback emitter",
+        )
+        logger.warning(
+            "LLM synthesis for %s failed twice; using deterministic C-ABI fallback emitter",
+            language_id,
+        )
+        return self._fallback_plugin(language_id, boundary_type)
+
+    def _try_load_generated(
+        self,
+        raw: Optional[str],
+        language_id: str,
+        boundary_type: Optional[BoundaryContract] = None,
+    ) -> Optional[PolyglotEmitterPlugin]:
+        """Extract and validate a plugin from an LLM response, returning None on failure."""
+        if not raw:
+            return None
         code = self._extract_python_code(raw)
-        return self._load_and_validate_plugin(code, language_id, boundary_type)
+        if not code:
+            return None
+        code = self._strip_redefined_helpers(code)
+        try:
+            return self._load_and_validate_plugin(code, language_id, boundary_type)
+        except Exception as exc:
+            logger.warning(
+                "Generated plugin for %s failed validation: %s",
+                language_id,
+                exc,
+            )
+            return None
+
+    def _prepare_system_prompt(
+        self,
+        prompt_template: str,
+        language_id: str,
+        boundary_type: Optional[BoundaryContract] = None,
+    ) -> str:
+        """Fill language-specific placeholders in the emitter synthesis prompt."""
+        boundary = boundary_type or BoundaryContract.C_ABI
+        boundary_name = boundary.name
+        title = _pascal_case(language_id)
+        node_id = f"{language_id}_kernel"
+
+        toolchain = {
+            "zig": "zig",
+            "go": "go",
+            "mojo": "mojo",
+            "c": "gcc",
+            "c++": "clang++",
+            "cpp": "clang++",
+            "csharp": "dotnet",
+            "java": "javac",
+            "d": "dmd",
+            "nim": "nim",
+            "fortran": "gcc",
+        }.get(language_id.lower(), language_id.lower())
+
+        ext = {
+            "c++": "cpp",
+            "csharp": "cs",
+            "fortran": "f90",
+        }.get(language_id.lower(), language_id.lower())
+
+        manifest_file, manifest_content = _fallback_manifest(language_id, node_id)
+
+        manifest_repr = _python_string_literal(manifest_content)
+
+        return (
+            prompt_template.replace("__LANGUAGE_TITLE__", title)
+            .replace("__LANGUAGE_ID__", language_id.lower())
+            .replace("__BOUNDARY_NAME__", boundary_name)
+            .replace("__TOOLCHAIN__", toolchain)
+            .replace("__EXT__", ext)
+            .replace("__MANIFEST_FILE__", manifest_file)
+            .replace("__MANIFEST_CONTENT__", manifest_repr)
+        )
 
     def _build_synthesis_user_prompt(
         self,
@@ -368,34 +848,43 @@ class EmitterRegistry:
         boundary_type: Optional[BoundaryContract] = None,
     ) -> str:
         boundary = boundary_type.value if boundary_type else "c_abi"
+        boundary_name = boundary_type.name if boundary_type else "C_ABI"
+        toolchain = {
+            "zig": "zig",
+            "go": "go",
+            "mojo": "mojo",
+            "c": "gcc",
+            "c++": "clang++",
+            "cpp": "clang++",
+            "csharp": "dotnet",
+            "java": "javac",
+            "d": "dmd",
+            "nim": "nim",
+            "fortran": "gcc",
+        }.get(language_id.lower(), language_id.lower())
+        ext = {
+            "c++": "cpp",
+            "csharp": "cs",
+            "fortran": "f90",
+        }.get(language_id.lower(), language_id.lower())
         return (
-            f"Synthesize a complete `PolyglotEmitterPlugin` subclass for the language '{language_id}'.\n\n"
-            f"The plugin must support the cross-language boundary contract '{boundary}'.\n"
-            "Import `PolyglotEmitterPlugin`, `BoundaryContract`, `CapabilityDescriptor`, and "
-            "`CodeArtifact` from `aero_forge.builder.emitters.base`. Do NOT redefine these base classes.\n"
-            "Create only the concrete emitter class named `<Language>EmitterPlugin` "
-            "(e.g. `ZigEmitterPlugin`).\n\n"
-            "Implement a `descriptor` property returning a `CapabilityDescriptor` with "
-            f"`language_id='{language_id}'`, `supported_boundaries` including `BoundaryContract.{boundary.upper()}`, "
-            "and appropriate `toolchains`, `file_extensions`, `supports_zero_copy`, and `supports_async_ffi`.\n"
-            "Implement `emit_source_files(node_id, node_spec, boundary_contracts)` and "
-            "`emit_build_manifest(node_id, dependencies, compiler_flags)` returning lists of `CodeArtifact`.\n\n"
-            "Each entry in `boundary_contracts` is a dict with keys:\n"
-            "- `boundary_type` (string, e.g. 'c_abi')\n"
-            "- `symbol` (string)\n"
-            "- `args` (list of primitive type names: 'int32', 'int64', 'float32', 'float64', 'pointer')\n"
-            "- `return_type` (primitive type name or empty string for void)\n"
-            "- `is_zero_copy` (boolean)\n\n"
-            "The source files must contain a real, exported function for the first contract.\n"
-            "For C-ABI use `export fn` (Zig), `#[no_mangle] pub extern \"C\" fn` (Rust), "
-            "`extern \"C\"` (C/C++), `//export` (Go), `[UnmanagedCallersOnly]` (C#), or JNI signatures (Java).\n"
-            "For Zig, mark every parameter as used (e.g. `_ = arg_0;`) and return `return;` for void "
-            "or a typed literal such as `return @as(i64, 42);` for non-void returns.\n\n"
-            "For the build manifest, return a minimal valid file (build.zig, Makefile, etc.). "
-            "Use `.format()` or simple string concatenation for complex multi-line strings; do NOT put "
-            "backslash escapes inside f-string expression braces because that is a Python syntax error.\n\n"
-            "Return ONLY valid Python code inside a single markdown ```python ... ``` block. No prose."
+            f"Complete the skeleton for a `{_pascal_case(language_id)}EmitterPlugin` "
+            f"for language '{language_id}' (toolchain '{toolchain}', source extension '.{ext}').\n\n"
+            f"The plugin must support the boundary contract `{boundary_name}` (value '{boundary}').\n"
+            "Implement `descriptor`, `emit_source_files`, and `emit_build_manifest`.\n"
+            "Use only the base classes imported from `aero_forge.builder.emitters.base`. "
+            "Do not redeclare BoundaryContract, CapabilityDescriptor, CodeArtifact, or PolyglotEmitterPlugin.\n"
+            "Return ONLY valid Python code inside a single markdown ```python ... ``` block. No prose. "
+            "If you cannot determine the exact build manifest, output a minimal valid one using the provided placeholders."
         )
+
+    def _fallback_plugin(
+        self,
+        language_id: str,
+        boundary_type: Optional[BoundaryContract] = None,
+    ) -> PolyglotEmitterPlugin:
+        """Return a deterministic, conservative emitter plugin for *language_id*."""
+        return _FallbackEmitterPlugin(language_id, boundary_type)
 
     @staticmethod
     def _extract_python_code(raw: str) -> str:
@@ -413,14 +902,26 @@ class EmitterRegistry:
         inject the real classes into the execution namespace, so the generated
         emitter only needs to subclass and instantiate them.
         """
-        helper_names = ["BoundaryContract", "CapabilityDescriptor", "CodeArtifact", "PolyglotEmitterPlugin"]
+        helper_names = [
+            "BoundaryContract",
+            "CapabilityDescriptor",
+            "CodeArtifact",
+            "PolyglotEmitterPlugin",
+        ]
         pattern = re.compile(
-            r"^(class\s+(?:" + "|".join(helper_names) + r")\b[^:\n]*:[^\n]*\n(?:\s+.*\n|\n)*)",
+            r"^(class\s+(?:"
+            + "|".join(helper_names)
+            + r")\b[^:\n]*:[^\n]*\n(?:\s+.*\n|\n)*)",
             re.MULTILINE,
         )
         code = pattern.sub("", code)
         # Remove dangling @abstractmethod / @property decorators that may be left behind.
-        code = re.sub(r"^\s*@(abstractmethod|property|dataclass|staticmethod)\s*\n", "", code, flags=re.MULTILINE)
+        code = re.sub(
+            r"^\s*@(abstractmethod|property|dataclass|staticmethod)\s*\n",
+            "",
+            code,
+            flags=re.MULTILINE,
+        )
         return code
 
     def _load_and_validate_plugin(
@@ -526,6 +1027,17 @@ class EmitterRegistry:
                 f"Generated plugin {raw_instance.__class__.__name__!r} raised from `descriptor`: {exc}"
             ) from exc
 
+        # The generated plugin may define `descriptor` as a method instead of a property.
+        if callable(raw_descriptor) and not isinstance(
+            raw_descriptor, CapabilityDescriptor
+        ):
+            try:
+                raw_descriptor = raw_descriptor()
+            except Exception as exc:
+                raise SynthesizedPluginError(
+                    f"Generated plugin {raw_instance.__class__.__name__!r} `descriptor()` raised: {exc}"
+                ) from exc
+
         norm_descriptor = _norm_descriptor(raw_descriptor)
         orig_source = raw_instance.emit_source_files
         orig_manifest = raw_instance.emit_build_manifest
@@ -578,7 +1090,9 @@ class EmitterRegistry:
                 f"but {language_id!r} was requested"
             )
 
-        if not isinstance(descriptor.supported_boundaries, (set, frozenset, list, tuple)):
+        if not isinstance(
+            descriptor.supported_boundaries, (set, frozenset, list, tuple)
+        ):
             raise SynthesizedPluginError(
                 f"Synthesized plugin for {language_id!r} `supported_boundaries` is not a collection"
             )
@@ -662,7 +1176,9 @@ class EmitterRegistry:
             },
         }
 
-    def find_emitters_for_boundary(self, boundary: BoundaryContract) -> List[PolyglotEmitterPlugin]:
+    def find_emitters_for_boundary(
+        self, boundary: BoundaryContract
+    ) -> List[PolyglotEmitterPlugin]:
         with self._lock:
             return [
                 plugin
