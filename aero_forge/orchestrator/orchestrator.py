@@ -1374,9 +1374,12 @@ def _strip_markdown_fences(text: str) -> str:
     """Remove optional YAML/JSON code fences from an LLM response.
 
     Tolerates language/path labels (e.g. `` ```yaml:blueprint.aero ``) and
-    surrounding prose.
+    surrounding prose. Uses the SSP token delimiters first, then falls back to
+    markdown fence removal.
     """
-    text = text.strip()
+    from aero_forge.orchestrator.prompt_builder import extract_aero_logic
+
+    text = extract_aero_logic(text)
     text = re.sub(
         r"^```\s*(?:\w+)?\s*(?::\s*[^\n\r]*)?\s*\r?\n",
         "",

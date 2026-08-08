@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 from aero_forge.blueprint_templates import load_all_templates
@@ -222,8 +223,50 @@ Required substitutions (already filled in the prompt you receive):
 """
 
 
+def extract_aero_logic(raw: str) -> str:
+    """Return the payload delimited by ``__AERO_LOGIC_START__`` / ``__AERO_LOGIC_END__``.
+
+    The Aero-Forge Structured Synthesis Payload requires the model to wrap every
+    machine-readable response in these markers. If the markers are present, all
+    surrounding prose and markdown are ignored. Falls back to markdown fenced
+    code blocks, then to the trimmed raw text.
+    """
+    if not raw:
+        return ""
+    text = raw.strip()
+
+    start_match = re.search(
+        r"__AERO_LOGIC_START__\s*\r?\n?",
+        text,
+        re.IGNORECASE,
+    )
+    end_match = re.search(
+        r"\r?\n?\s*__AERO_LOGIC_END__",
+        text,
+        re.IGNORECASE,
+    )
+    if (
+        start_match
+        and end_match
+        and end_match.start() >= start_match.end()
+    ):
+        return text[start_match.end():end_match.start()].strip()
+
+    # Markdown fence fallback.
+    fenced = re.findall(
+        r"```\s*(?:\w*)\s*(?::\s*[^\n\r]*?)?\s*\r?\n([\s\S]*?)\r?\n?\s*```",
+        text,
+        re.DOTALL | re.IGNORECASE,
+    )
+    if fenced:
+        return fenced[-1].strip()
+
+    return text
+
+
 __all__ = [
     "PromptBuilder",
     "build_blueprint_plan_prompt",
     "EMITTER_PLUGIN_SYNTHESIS_SYSTEM_PROMPT",
+    "extract_aero_logic",
 ]

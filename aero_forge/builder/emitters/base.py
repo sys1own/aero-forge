@@ -169,6 +169,50 @@ class ContentDensityValidator:
             count += len(re.findall(pattern, cleaned))
         return count
 
+    @classmethod
+    def has_execution_flow(cls, content: str, language: str) -> bool:
+        """Return True when *content* has a non-zero GoI execution matrix.
+
+        For Python we compute the block-diagonal union of per-function
+        loop-dependency matrices. Functions with no computational statements
+        (empty body or only `pass`) produce an empty matrix; in that case we
+        fall back to module-level functional density so that CLI/loader-style
+        Python files are not rejected. For non-Python sources we use the generic
+        functional-node count as a proxy.
+        """
+        language = (language or "").lower()
+        is_python = language == "python" or content.lstrip().startswith(("import ", "from "))
+        if not is_python:
+            return cls._count_generic_nodes(content) >= cls.MIN_GENERIC_FUNCTIONAL_NODES
+
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            # Syntactically invalid Python is deferred to the syntax validator.
+            return True
+
+        import numpy as np
+        from aero_forge.scheduler.goi_solver import _loop_dependency_matrix
+
+        matrices = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                M, _ = _loop_dependency_matrix(node)
+                if M.size:
+                    matrices.append(M)
+        if matrices:
+            total = sum(M.shape[0] for M in matrices)
+            result = np.zeros((total, total), dtype=np.float64)
+            offset = 0
+            for M in matrices:
+                n = M.shape[0]
+                result[offset : offset + n, offset : offset + n] = M
+                offset += n
+            return result.size > 0 and bool(result.any())
+
+        # No function bodies with loop-carried flow: use module-level density.
+        return cls._count_python_nodes(content) >= cls.MIN_FUNCTIONAL_NODES
+
 
 class PolyglotEmitterPlugin(ABC):
     """Plugin interface for language-specific source emitters."""
@@ -1016,15 +1060,17 @@ class EmitterRegistry:
                 f"JIT synthesis for {language_id}: LLM returned an empty response"
             )
 
-        has_start = "__AERO_LOGIC_START__" in raw
-        has_end = "__AERO_LOGIC_END__" in raw
+        from aero_forge.orchestrator.prompt_builder import extract_aero_logic
+
+        has_start = bool(re.search(r"__AERO_LOGIC_START__", raw, re.IGNORECASE))
+        has_end = bool(re.search(r"__AERO_LOGIC_END__", raw, re.IGNORECASE))
         if require_delimiters and not (has_start and has_end):
             raise StructuralViolationError(
                 f"JIT synthesis for {language_id}: response is missing the required "
                 f"__AERO_LOGIC_START__ / __AERO_LOGIC_END__ delimiters"
             )
 
-        code = self._extract_python_code(raw)
+        code = extract_aero_logic(raw)
         if not code:
             raise StructuralViolationError(
                 f"JIT synthesis for {language_id}: could not extract Python code from raw response"
@@ -1149,10 +1195,15 @@ class EmitterRegistry:
             f"Boundary contract: `{boundary_name}` (value '{boundary}').",
         ]
         if compacted:
+            compacted_text = (
+                json.dumps(compacted, indent=2, sort_keys=False)
+                if isinstance(compacted, dict)
+                else str(compacted)
+            )
             parts.extend([
                 "",
                 "Compacted functional context (contracts, functions, SMT types):",
-                str(compacted),
+                compacted_text,
             ])
         if smt_types:
             parts.extend([
@@ -1303,25 +1354,22 @@ class EmitterRegistry:
 
     @staticmethod
     def _extract_python_code(raw: str) -> str:
-        """Extract Python source using deterministic token delimiters.
+        """Extract Python source using the Aero-Forge SSP delimiters.
 
         The model is instructed to wrap the completed class between
         ``__AERO_LOGIC_START__`` and ``__AERO_LOGIC_END__``.  If those
-        delimiters are present, the body between them is returned verbatim.
-        As a compatibility fallback we also accept markdown ```python fences,
-        but a missing token pair is treated as a structural violation and raises.
+        markers are present, the body between them is returned verbatim. As
+        a compatibility fallback we also scan for markdown ```python fences
+        and structural keywords, but a missing token pair in a strict parse
+        is treated as a structural violation by the caller.
         """
         if not raw:
             return ""
-        text = raw.strip()
+        from aero_forge.orchestrator.prompt_builder import extract_aero_logic
 
-        # 1. Deterministic token delimiters (preferred).
-        start_match = re.search(r"__AERO_LOGIC_START__\s*\r?\n", text, re.IGNORECASE)
-        end_match = re.search(r"\r?\n\s*__AERO_LOGIC_END__", text, re.IGNORECASE)
-        if start_match and end_match and end_match.start() > start_match.end():
-            return text[start_match.end():end_match.start()].strip()
+        text = extract_aero_logic(raw)
 
-        # 2. Markdown fenced block fallback (legacy/chatty models).
+        # Markdown fenced block fallback (legacy/chatty models).
         all_fenced = re.findall(
             r"```\s*(\w*)\s*(?::\s*[^\n\r]*?)?\s*\r?\n([\s\S]*?)\r?\n?\s*```",
             text,
@@ -1342,7 +1390,7 @@ class EmitterRegistry:
         if all_fenced:
             return all_fenced[0][1].strip()
 
-        # 3. Structural keyword scan.
+        # Structural keyword scan.
         lines = text.splitlines()
         start = 0
         for i, line in enumerate(lines):

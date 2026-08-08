@@ -1,7 +1,7 @@
 """System prompt for the Builder Code Emission agent.
 
-The Builder Code Emission agent receives a single node or edge specification
-from a `graph_polyglot` blueprint and emits idiomatic source files plus the
+The Builder Code Emission agent receives a compacted functional matrix and a
+language-appropriate source skeleton, then emits idiomatic source files plus the
 corresponding toolchain manifest. It is the runtime companion of
 `aero_forge.builder.materializers.graph_materializer`.
 """
@@ -13,25 +13,23 @@ from typing import Any, Dict, List, Optional
 
 BUILDER_EMITTER_SYSTEM_PROMPT = """\
 You are the Aero-Forge Builder Code Emission Agent. Your job is to generate
-exact, compilable source code for a single node or a single cross-language FFI
-edge in a `graph_polyglot` blueprint. You are not limited to built-in languages;
-if the node requests an uncommon language or toolchain, synthesize a valid
-`PolyglotEmitterPlugin`-compatible implementation and the matching build manifest.
+exact, compilable source code for a single node in a `graph_polyglot` blueprint.
+You are not limited to built-in languages; if the node requests an uncommon
+language or toolchain, emit a valid implementation for that toolchain.
 
 INPUT
-You will receive:
-- A `node` object with `node_id`, `lang`, `toolchain`, optional `source_files`,
-  `compiler_flags`, `exports`, and an optional `spec` describing functions.
-- A list of `boundary_contracts` for that node. Each contract has:
-  `boundary_type`, `symbol`, `args`, `return_type`, `is_zero_copy`, `source`,
-  `target`.
+You will receive a `context` object containing:
+- `compacted_context`: a Compacted Functional Matrix (CFM) with project metadata,
+  contracts, function signatures, and SMT-inferred native types.
+- `skeleton`: a file skeleton containing imports, function signatures, and any
+  `@accelerate` decorators. The body markers are `__AERO_IN_FILL__`.
 
 OUTPUT RULES
-1. The user JSON contains a `skeleton` field with a language-appropriate function
-   signature. Use it as the starting shape: keep the function name, parameters, and
-   decorators, but replace the placeholder body with a real implementation.
-2. Return ONLY source code inside well-labeled Markdown fences. Each fence
-   MUST be labeled with the target file path using the form:
+1. Wrap the entire response between `__AERO_LOGIC_START__` and `__AERO_LOGIC_END__`
+   on their own lines. No prose, markdown commentary, explanations, or apologies
+   may appear outside these delimiters.
+2. Inside the delimiters, emit each file as a fenced Markdown block labeled with
+   the target file path:
    ```<lang>:<relative/path>
    ...
    ```
@@ -39,14 +37,19 @@ OUTPUT RULES
    ```cpp:cpp_engine/src/kernels.cpp
    // ...
    ```
-3. Do NOT include explanations, TODOs, or placeholder stubs (no "// TODO",
-   no `pass`, no `todo!()`). The generated code must compile with the stated
-   toolchain on the first pass and must implement a real baseline for every
-   requested symbol.
-4. Generate every file listed in `node.source_files`, including headers and
-   the build manifest (Cargo.toml, CMakeLists.txt, pyproject.toml, go.mod,
+3. Use the `skeleton` as the starting shape: keep all imports, function names,
+   parameter names, decorators, and return types exactly as provided. Replace
+   only `__AERO_IN_FILL__` markers with real implementation bodies.
+4. Do NOT include explanations, TODOs, or placeholder stubs (no "// TODO",
+   no `pass`, no `todo!()`, no `unimplemented!()`). The generated code must
+   compile with the stated toolchain on the first pass and implement a real
+   baseline for every requested symbol.
+5. Generate every file listed in `node.source_files`, including headers and the
+   build manifest (Cargo.toml, CMakeLists.txt, pyproject.toml, go.mod,
    .csproj, build.gradle, etc.). Manifest fences use their language label
    (e.g. `toml`, `xml`) and the exact manifest path (e.g. `Cargo.toml`).
+6. Respect the SMT-inferred native types in `compacted_context.smt_types` when
+   choosing concrete types for variables and parameters.
 
 LANGUAGE-SPECIFIC FFI IDIOMS
 - C_ABI:
@@ -58,6 +61,12 @@ LANGUAGE-SPECIFIC FFI IDIOMS
     only when necessary.
   * Python C-ABI loader: `ctypes.CDLL("./lib<node_id>.so")` with explicit
     `argtypes` and `restype`.
+- ZIG:
+  * Use `export fn symbol(arg_0: i64) i64 { ... }` for C-ABI exports.
+  * `std.mem.Allocator.alloc/resize` length arguments must be `usize`; cast any
+    signed `i64` values with `@intCast(usize, expr)` before passing.
+  * Slice indexing with an `i64` index is allowed (`sieve[@intCast(i)]`) only
+    when the cast target is inferred from context; otherwise cast to `usize`.
 - PYO3_MATURIN:
   * Rust: `use pyo3::prelude::*;` and `#[pyfunction] fn symbol(...) -> PyResult<...>`.
   * Expose via `#[pymodule] fn <node_id>(_py: Python, m: &PyModule) -> PyResult<()>`.
@@ -99,8 +108,46 @@ MANIFEST RULES
 """
 
 
-def _build_skeleton(node: Dict[str, Any], contracts: List[Dict[str, Any]]) -> str:
-    """Return a language-appropriate function skeleton for the node."""
+def _py_type(a: str) -> str:
+    return {"int64": "int", "float64": "float", "pointer": "list"}.get(a, "Any")
+
+
+def _rust_type(a: str) -> str:
+    return {"int64": "i64", "float64": "f64", "pointer": "*const f64"}.get(a, "i64")
+
+
+def _cpp_type(a: str) -> str:
+    return {"int64": "int64_t", "float64": "double", "pointer": "const double*"}.get(a, "int64_t")
+
+
+def _go_type(a: str) -> str:
+    return {"int64": "C.int64_t", "float64": "C.double", "pointer": "unsafe.Pointer"}.get(a, "C.int64_t")
+
+
+def _smt_type_env(node: Dict[str, Any], contracts: List[Dict[str, Any]]) -> Dict[str, str]:
+    """Collect SMT-inferred native types from the node and contracts."""
+    types: Dict[str, str] = {}
+    extra = (node or {}).get("extra") or {}
+    types.update(extra.get("smt_types") or {})
+    types.update((node or {}).get("smt_types") or {})
+    for contract in contracts or []:
+        if isinstance(contract, dict):
+            types.update(contract.get("smt_types") or {})
+            types.update((contract.get("extra") or {}).get("smt_types") or {})
+    return types
+
+
+def _build_skeleton(
+    node: Dict[str, Any],
+    contracts: List[Dict[str, Any]],
+    *,
+    compacted_context: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Return a language-appropriate function skeleton for the node.
+
+    The skeleton contains only imports, signatures, decorators, and
+    ``__AERO_IN_FILL__`` markers so the model only has to fill in the body.
+    """
     lang = (node.get("lang") or node.get("language") or "python").lower()
     node_id = node.get("node_id", "module")
     symbol = node_id
@@ -112,64 +159,79 @@ def _build_skeleton(node: Dict[str, Any], contracts: List[Dict[str, Any]]) -> st
         args = list(contract.get("args") or [])
         return_type = contract.get("return_type", "")
 
-    def _py_type(a: str) -> str:
-        return {"int64": "int", "float64": "float", "pointer": "list"}.get(a, "Any")
-
-    def _rust_type(a: str) -> str:
-        return {"int64": "i64", "float64": "f64", "pointer": "*const f64"}.get(a, "i64")
-
-    def _cpp_type(a: str) -> str:
-        return {"int64": "int64_t", "float64": "double", "pointer": "const double*"}.get(a, "int64_t")
-
-    def _go_type(a: str) -> str:
-        return {"int64": "C.int64_t", "float64": "C.double", "pointer": "unsafe.Pointer"}.get(a, "C.int64_t")
+    type_env = _smt_type_env(node, contracts)
 
     arg_names = [f"arg{i}" for i in range(len(args))]
+
     if lang in ("python", "py"):
         arg_str = ", ".join(
-            f"{n}: {_py_type(a)}" for n, a in zip(arg_names, args)
+            f"{n}: {type_env.get(n, _py_type(a))}" for n, a in zip(arg_names, args)
         ) or "*args"
-        ret = f" -> {_py_type(return_type)}" if return_type else ""
-        return f"def {symbol}({arg_str}){ret}:\n    \"\"\"Implement {symbol}.\"\"\"\n    pass"
+        ret = f" -> {type_env.get('return', _py_type(return_type))}" if return_type else ""
+        accel_decorator = ""
+        target = (node.get("target") or node.get("accelerate_target") or "")
+        if target:
+            accel_decorator = f"@accelerate(target='{target}')\n"
+        imports = ["from aero_forge.decorators import accelerate" if accel_decorator else ""]
+        imports = [i for i in imports if i]
+        lines = imports + [accel_decorator + f"def {symbol}({arg_str}){ret}:", f'    """Implement {symbol}."""', "    __AERO_IN_FILL__"]
+        return "\n".join(lines)
+
     if lang in ("rust", "rs"):
         arg_str = ", ".join(
-            f"{n}: {_rust_type(a)}" for n, a in zip(arg_names, args)
+            f"{n}: {type_env.get(n, _rust_type(a))}" for n, a in zip(arg_names, args)
         ) or ""
-        ret = f" -> {_rust_type(return_type)}" if return_type else ""
-        return f"#[no_mangle]\npub extern \"C\" fn {symbol}({arg_str}){ret} {{\n    // implementation\n}}"
+        ret = f" -> {type_env.get('return', _rust_type(return_type))}" if return_type else ""
+        return f"#[no_mangle]\npub extern \"C\" fn {symbol}({arg_str}){ret} {{\n    __AERO_IN_FILL__\n}}"
+
     if lang in ("cpp", "c++", "cxx"):
         arg_str = ", ".join(
-            f"{_cpp_type(a)} {n}" for n, a in zip(arg_names, args)
+            f"{type_env.get(n, _cpp_type(a))} {n}" for n, a in zip(arg_names, args)
         ) or "void"
-        ret = _cpp_type(return_type) if return_type else "void"
-        return f'extern "C" {ret} {symbol}({arg_str}) {{\n    // implementation\n}}'
+        ret = type_env.get("return", _cpp_type(return_type)) if return_type else "void"
+        return f'extern "C" {ret} {symbol}({arg_str}) {{\n    __AERO_IN_FILL__\n}}'
+
     if lang in ("go", "golang"):
         arg_str = ", ".join(
-            f"{n} {_go_type(a)}" for n, a in zip(arg_names, args)
+            f"{n} {type_env.get(n, _go_type(a))}" for n, a in zip(arg_names, args)
         ) or ""
-        ret = _go_type(return_type) if return_type else ""
-        return f"//export {symbol}\nfunc {symbol}({arg_str}) {ret} {{\n    // implementation\n}}"
+        ret = type_env.get("return", _go_type(return_type)) if return_type else ""
+        ret_str = f" {ret}" if ret else ""
+        return f"//export {symbol}\nfunc {symbol}({arg_str}){ret_str} {{\n    __AERO_IN_FILL__\n}}"
+
+    if lang == "zig":
+        arg_str = ", ".join(
+            f"{n}: {type_env.get(n, _rust_type(a))}" for n, a in zip(arg_names, args)
+        ) or ""
+        ret = type_env.get("return", _rust_type(return_type)) if return_type else "void"
+        return f"export fn {symbol}({arg_str}) {ret} {{\n    __AERO_IN_FILL__\n}}"
+
     return f"// Implement {symbol} for {lang}\n"
 
 
 def format_builder_emitter_user_prompt(
     node: Dict[str, Any],
     boundary_contracts: Optional[List[Dict[str, Any]]] = None,
+    *,
+    compacted_context: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Return a user prompt that feeds a node spec into the Builder Emission Agent."""
     import json
 
     contracts = boundary_contracts or []
-    skeleton = _build_skeleton(node, contracts)
+    skeleton = _build_skeleton(node, contracts, compacted_context=compacted_context)
+    context = compacted_context or {}
     payload = {
-        "node": node,
-        "boundary_contracts": contracts,
+        "compacted_context": context,
         "skeleton": skeleton,
     }
     return (
-        "Generate source and manifest for the following graph node. "
-        "Return code in fenced Markdown blocks only. Use the `skeleton` field "
-        "as the starting function signature and replace the placeholder body with a "
-        "real implementation. Do not return an empty response or prose.\n\n"
-        f"```json\n{json.dumps(payload, indent=2)}\n```"
+        "Generate source and manifest files for the following graph node. "
+        "The Compacted Functional Matrix below is the exclusive context you need. "
+        "Use the `skeleton` field as the starting file: keep all imports, "
+        "signatures, and decorators, and replace every `__AERO_IN_FILL__` marker "
+        "with real implementation code. "
+        "Do not return prose, TODOs, or empty responses. "
+        "Wrap the entire response between `__AERO_LOGIC_START__` and `__AERO_LOGIC_END__`.\n\n"
+        f"```json\n{json.dumps(payload, indent=2, default=str)}\n```"
     )
