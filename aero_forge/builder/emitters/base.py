@@ -9,10 +9,12 @@ import json
 import logging
 import os
 import re
+import tempfile
 import textwrap
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from threading import Lock
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, cast
 
@@ -24,6 +26,7 @@ from aero_forge.builder.language_router import (
     _accel_log,
 )
 from aero_forge.builder.spec import ASTNode, EngineSpec
+from aero_forge.scheduler.goi_solver import _loop_dependency_matrix
 
 
 class BoundaryContract(Enum):
@@ -200,6 +203,10 @@ class EmitterError(Exception):
 
 class SynthesizedPluginError(EmitterError):
     """Raised when an LLM-synthesized emitter plugin is invalid or unsafe."""
+
+
+class StructuralViolationError(EmitterError):
+    """Raised when an LLM response violates the required token-delimited structure."""
 
 
 def _pascal_case(language_id: str) -> str:
@@ -907,17 +914,25 @@ class EmitterRegistry:
     ) -> PolyglotEmitterPlugin:
         """Ask the LLM to generate a temporary emitter plugin for *language_id*.
 
-        If the LLM returns an empty or malformed response, we retry once with a
-        more conservative system prompt and then fall back to a deterministic
-        C-ABI-capable emitter stub so the build does not hard-fail.
+        A deterministic skeleton is materialised to disk before the first LLM call.
+        The model must return the completed skeleton wrapped between
+        ``__AERO_LOGIC_START__`` and ``__AERO_LOGIC_END__``.  If the first
+        response is empty, structurally invalid, or hollow (empty GoI execution
+        matrix), a second attempt is made with the v11_universal_architect
+        guidance before falling back to the conservative C-ABI emitter.
         """
         if not self._synthesis_prompt:
             raise EmitterError("JIT synthesis prompt is not configured")
 
-        client = self._get_llm_client()
-        user_prompt = self._build_synthesis_user_prompt(
+        skeleton_path, skeleton_content = self._build_skeleton_file(
             language_id, boundary_type, node_spec, contracts
         )
+        _accel_log(
+            "info",
+            f"Materialized skeleton file for {language_id} at {skeleton_path}",
+        )
+
+        client = self._get_llm_client()
         system_prompt = self._prepare_system_prompt(
             self._synthesis_prompt,
             language_id,
@@ -925,64 +940,55 @@ class EmitterRegistry:
             node_spec,
             contracts,
         )
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
-        raw = client.generate(messages, temperature=0.2, max_tokens=4096)
-        plugin = self._try_load_generated(raw, language_id, boundary_type)
-        if plugin is not None:
-            _accel_log("success", f"JIT-synthesized {language_id} emitter plugin")
-            return plugin
-
-        if not raw:
-            _accel_log(
-                "warning",
-                f"JIT synthesis for {language_id}: LLM returned an empty response",
-            )
-        else:
-            _accel_log(
-                "warning",
-                f"JIT synthesis for {language_id}: first attempt produced empty/malformed output; "
-                f"raw preview: {raw[:800]!r}",
-            )
-        logger.warning(
-            "LLM synthesis for %s returned empty/malformed/invalid output; retrying once",
-            language_id,
+        user_prompt = self._build_synthesis_user_prompt(
+            language_id, boundary_type, node_spec, contracts
         )
-        retry_prompt = (
-            system_prompt
-            + "\n\n"
-            + "IMPORTANT: Do not return an empty response or prose. "
-            + "If you are uncertain, return the skeleton above filled with the requested language's "
-            + "real exported function and a minimal build manifest. The code must be executable."
-        )
-        messages = [
-            {"role": "system", "content": retry_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
-        raw = client.generate(messages, temperature=0.1, max_tokens=4096)
-        plugin = self._try_load_generated(raw, language_id, boundary_type)
-        if plugin is not None:
-            _accel_log(
-                "success", f"JIT-synthesized {language_id} emitter plugin on retry"
-            )
-            return plugin
 
-        if not raw:
-            _accel_log(
-                "warning",
-                f"JIT synthesis for {language_id}: retry also returned an empty response",
-            )
-        else:
-            _accel_log(
-                "warning",
-                f"JIT synthesis for {language_id}: retry produced empty/malformed output; "
-                f"raw preview: {raw[:800]!r}",
-            )
+        v11_guidance = self._v11_universal_guidance()
+        attempts = [
+            ("direct", system_prompt, user_prompt),
+            (
+                "v11_universal",
+                system_prompt + "\n\n" + v11_guidance,
+                user_prompt,
+            ),
+        ]
+
+        last_error: Optional[Exception] = None
+        for label, sys, usr in attempts:
+            try:
+                raw = client.generate(
+                    [{"role": "system", "content": sys}, {"role": "user", "content": usr}],
+                    temperature=0.2,
+                    max_tokens=4096,
+                )
+                if not raw:
+                    raise StructuralViolationError(
+                        f"LLM returned an empty response during {label} synthesis for {language_id}"
+                    )
+                plugin = self._try_load_generated(
+                    raw, language_id, boundary_type, require_delimiters=(label == "direct")
+                )
+                self._verify_plugin_logic(plugin, language_id)
+                _accel_log("success", "Logic In-Fill Successful")
+                _accel_log("success", f"JIT-synthesized {language_id} emitter plugin ({label})")
+                return plugin
+            except StructuralViolationError as exc:
+                _accel_log("error", f"JIT synthesis structural violation ({label}): {exc}")
+                raw_preview = (raw or "")[:800]
+                _accel_log("error", f"Raw preview: {raw_preview!r}")
+                last_error = exc
+            except SynthesizedPluginError as exc:
+                _accel_log("warning", f"JIT synthesis hollow logic ({label}): {exc}")
+                last_error = exc
+            except Exception as exc:
+                _accel_log("warning", f"JIT synthesis {label} failed: {exc}")
+                last_error = exc
+
         _accel_log(
             "warning",
-            f"JIT synthesis for {language_id} failed twice; using deterministic C-ABI fallback emitter",
+            f"JIT synthesis for {language_id} failed after {len(attempts)} attempts; "
+            f"using deterministic C-ABI fallback emitter",
         )
         logger.warning(
             "LLM synthesis for %s failed twice; using deterministic C-ABI fallback emitter",
@@ -995,34 +1001,41 @@ class EmitterRegistry:
         raw: Optional[str],
         language_id: str,
         boundary_type: Optional[BoundaryContract] = None,
-    ) -> Optional[PolyglotEmitterPlugin]:
-        """Extract and validate a plugin from an LLM response, returning None on failure."""
+        require_delimiters: bool = True,
+    ) -> PolyglotEmitterPlugin:
+        """Extract and validate a plugin from an LLM response.
+
+        Raises:
+            StructuralViolationError: when the response is empty or missing the
+                required token delimiters.
+            SynthesizedPluginError: when the extracted code is not a valid
+                ``PolyglotEmitterPlugin`` subclass.
+        """
         if not raw:
-            _accel_log("warning", f"JIT synthesis for {language_id}: raw response is empty")
-            return None
+            raise StructuralViolationError(
+                f"JIT synthesis for {language_id}: LLM returned an empty response"
+            )
+
+        has_start = "__AERO_LOGIC_START__" in raw
+        has_end = "__AERO_LOGIC_END__" in raw
+        if require_delimiters and not (has_start and has_end):
+            raise StructuralViolationError(
+                f"JIT synthesis for {language_id}: response is missing the required "
+                f"__AERO_LOGIC_START__ / __AERO_LOGIC_END__ delimiters"
+            )
+
         code = self._extract_python_code(raw)
         if not code:
-            _accel_log(
-                "warning",
-                f"JIT synthesis for {language_id}: could not extract Python code from raw response; "
-                f"raw preview: {raw[:800]!r}",
+            raise StructuralViolationError(
+                f"JIT synthesis for {language_id}: could not extract Python code from raw response"
             )
-            return None
         code = self._strip_redefined_helpers(code)
         try:
             return self._load_and_validate_plugin(code, language_id, boundary_type)
         except Exception as exc:
-            _accel_log(
-                "warning",
-                f"JIT synthesis for {language_id}: extracted code failed validation; "
-                f"raw preview: {raw[:800]!r}; error: {exc}",
-            )
-            logger.warning(
-                "Generated plugin for %s failed validation: %s",
-                language_id,
-                exc,
-            )
-            return None
+            raise SynthesizedPluginError(
+                f"JIT synthesis for {language_id}: extracted code failed validation: {exc}"
+            ) from exc
 
     def _prepare_system_prompt(
         self,
@@ -1119,19 +1132,166 @@ class EmitterRegistry:
             language_id, symbol, args, return_type
         )
         context = _function_context_from_node(node_spec)
+        smt_types = self._synthesis_smt_types(node_spec, contracts)
 
-        return (
+        compacted = node_spec.get("_compacted_context") if node_spec else None
+        parts = [
             f"Complete the skeleton for a `{_pascal_case(language_id)}EmitterPlugin` "
-            f"for language '{language_id}' (toolchain '{toolchain}', source extension '.{ext}').\n\n"
-            f"The plugin must generate source code for this exact function signature:\n{signature}\n\n"
-            f"Semantic purpose:\n{context}\n\n"
-            f"The plugin must support the boundary contract `{boundary_name}` (value '{boundary}').\n"
-            "Implement `descriptor`, `emit_source_files`, and `emit_build_manifest`.\n"
-            "Use only the base classes imported from `aero_forge.builder.emitters.base`. "
-            "Do not redeclare BoundaryContract, CapabilityDescriptor, CodeArtifact, or PolyglotEmitterPlugin.\n"
-            "Return ONLY valid Python code inside a single markdown ```python ... ``` block. No prose. "
-            "If you cannot determine the exact build manifest, output a minimal valid one using the provided placeholders."
+            f"for language '{language_id}' (toolchain '{toolchain}', source extension '.{ext}').",
+            "",
+            "You MUST:",
+            "1. Output ONLY the completed class wrapped between __AERO_LOGIC_START__ and __AERO_LOGIC_END__.",
+            "2. Replace every __AERO_IN_FILL__ marker with real, compilable logic.",
+            "3. Do not write prose, markdown fences, TODOs, or placeholder summaries.",
+            "",
+            f"Function signature:\n{signature}",
+            f"Semantic purpose:\n{context}",
+            f"Boundary contract: `{boundary_name}` (value '{boundary}').",
+        ]
+        if compacted:
+            parts.extend([
+                "",
+                "Compacted functional context (contracts, functions, SMT types):",
+                str(compacted),
+            ])
+        if smt_types:
+            parts.extend([
+                "",
+                "SMT-inferred native types for the generated function body:",
+                json.dumps(smt_types, indent=2, sort_keys=True),
+            ])
+        parts.extend([
+            "",
+            "Implement `descriptor`, `emit_source_files`, and `emit_build_manifest` using only the base classes imported in the skeleton. "
+            "Do not redeclare BoundaryContract, CapabilityDescriptor, CodeArtifact, or PolyglotEmitterPlugin.",
+        ])
+        return "\n".join(parts)
+
+    @staticmethod
+    def _synthesis_smt_types(
+        node_spec: Optional[Dict[str, Any]],
+        contracts: Optional[List[Dict[str, Any]]],
+    ) -> Dict[str, str]:
+        """Collect SMT-inferred native types from node/extra and contract metadata."""
+        types: Dict[str, str] = {}
+        if node_spec:
+            extra = node_spec.get("extra") or {}
+            types.update(extra.get("smt_types") or {})
+            types.update(node_spec.get("smt_types") or {})
+        for contract in contracts or []:
+            if isinstance(contract, dict):
+                types.update(contract.get("smt_types") or {})
+                extra = contract.get("extra") or {}
+                types.update(extra.get("smt_types") or {})
+        return types
+
+    @staticmethod
+    def _v11_universal_guidance() -> str:
+        """Return the v11_universal_architect planning guidance for retries."""
+        from aero_forge.prompts import get_template
+
+        try:
+            template = get_template("v11_universal_architect")
+            return (
+                "Use the following universal polyglot architect guidance when "
+                "completing the skeleton:\n" + template.system_prompt
+            )
+        except Exception:
+            return (
+                "Use the v11_universal_architect template: design the emitter as a "
+                "strict C-ABI Python extension class that emits real, compilable "
+                "source code for the requested language. Fill every skeleton marker "
+                "and wrap the completed class in __AERO_LOGIC_START__ / __AERO_LOGIC_END__."
+            )
+
+    def _build_skeleton_file(
+        self,
+        language_id: str,
+        boundary_type: Optional[BoundaryContract] = None,
+        node_spec: Optional[Dict[str, Any]] = None,
+        contracts: Optional[List[Dict[str, Any]]] = None,
+    ) -> Tuple[Path, str]:
+        """Materialize the boilerplate skeleton to disk and return its path/content."""
+        prompt = self._prepare_system_prompt(
+            self._synthesis_prompt or "",
+            language_id,
+            boundary_type,
+            node_spec,
+            contracts,
         )
+        # Locate a workspace directory from the node spec, otherwise a temp dir.
+        workspace: Path
+        if node_spec:
+            candidate = node_spec.get("workspace") or node_spec.get("output_dir")
+            if candidate:
+                workspace = Path(candidate)
+            else:
+                workspace = Path(tempfile.gettempdir()) / f"aero_jit_{language_id}_skeleton"
+        else:
+            workspace = Path(tempfile.gettempdir()) / f"aero_jit_{language_id}_skeleton"
+        workspace.mkdir(parents=True, exist_ok=True)
+        path = workspace / f"{language_id}_emitter_skeleton.py"
+        path.write_text(prompt, encoding="utf-8")
+        return path, prompt
+
+    @staticmethod
+    def _execution_matrix_for_source(source: str) -> Any:
+        """Return whether *source* contains any non-empty dependency matrix.
+
+        We concatenate each top-level function's loop-dependency matrix into a
+        block-diagonal matrix so that functions with different variable sets
+        can be checked together.  Empty (size 0) or all-zero result indicates
+        hollow logic with no computational dependency flow.
+        """
+        import numpy as np
+
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return np.zeros((0, 0), dtype=np.float64)
+        funcs = [
+            node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+        ]
+        if not funcs:
+            return np.zeros((0, 0), dtype=np.float64)
+        matrices = []
+        for func in funcs:
+            M, _ = _loop_dependency_matrix(func)
+            if M.size:
+                matrices.append(M)
+        if not matrices:
+            return np.zeros((0, 0), dtype=np.float64)
+
+        # Block-diagonal concatenation to avoid broadcasting mismatches.
+        total = sum(M.shape[0] for M in matrices)
+        result = np.zeros((total, total), dtype=np.float64)
+        offset = 0
+        for M in matrices:
+            n = M.shape[0]
+            result[offset : offset + n, offset : offset + n] = M
+            offset += n
+        return result
+
+    def _verify_plugin_logic(
+        self,
+        plugin: PolyglotEmitterPlugin,
+        language_id: str,
+    ) -> None:
+        """Raise SynthesizedPluginError if the plugin body has no dependency flow."""
+        source = getattr(plugin, "__source__", "")
+        if not source:
+            import inspect
+
+            try:
+                source = inspect.getsource(plugin.__class__)
+            except (OSError, TypeError):
+                source = ""
+        M = self._execution_matrix_for_source(source)
+        if M.size == 0 or not M.any():
+            raise SynthesizedPluginError(
+                f"Synthesized {language_id} emitter has an empty execution matrix; "
+                "no functional dependency flow was detected (hollow logic)."
+            )
 
     def _fallback_plugin(
         self,
@@ -1143,20 +1303,28 @@ class EmitterRegistry:
 
     @staticmethod
     def _extract_python_code(raw: str) -> str:
-        """Extract Python source from a fenced code block or conversational text.
+        """Extract Python source using deterministic token delimiters.
 
-        Strategies (tried in order):
-        1. Markdown code fences (with or without language tag).
-        2. First-to-last structural keyword (``import``/``from``/``class``/``def``).
-        3. The entire stripped response if it parses as Python.
+        The model is instructed to wrap the completed class between
+        ``__AERO_LOGIC_START__`` and ``__AERO_LOGIC_END__``.  If those
+        delimiters are present, the body between them is returned verbatim.
+        As a compatibility fallback we also accept markdown ```python fences,
+        but a missing token pair is treated as a structural violation and raises.
         """
         if not raw:
             return ""
-        # 1. Fenced blocks: prefer an explicitly python-tagged block, then any
-        # block that contains a class/def/import.
+        text = raw.strip()
+
+        # 1. Deterministic token delimiters (preferred).
+        start_match = re.search(r"__AERO_LOGIC_START__\s*\r?\n", text, re.IGNORECASE)
+        end_match = re.search(r"\r?\n\s*__AERO_LOGIC_END__", text, re.IGNORECASE)
+        if start_match and end_match and end_match.start() > start_match.end():
+            return text[start_match.end():end_match.start()].strip()
+
+        # 2. Markdown fenced block fallback (legacy/chatty models).
         all_fenced = re.findall(
             r"```\s*(\w*)\s*(?::\s*[^\n\r]*?)?\s*\r?\n([\s\S]*?)\r?\n?\s*```",
-            raw,
+            text,
             re.DOTALL | re.IGNORECASE,
         )
         python_fenced = [
@@ -1174,9 +1342,7 @@ class EmitterRegistry:
         if all_fenced:
             return all_fenced[0][1].strip()
 
-        # 2. No fences: locate the first structural keyword and shrink from the
-        # end until the result parses.
-        text = raw.strip()
+        # 3. Structural keyword scan.
         lines = text.splitlines()
         start = 0
         for i, line in enumerate(lines):
@@ -1192,7 +1358,6 @@ class EmitterRegistry:
             except SyntaxError:
                 continue
 
-        # 3. Entire response if it is already valid Python.
         try:
             ast.parse(text)
             return text
@@ -1282,6 +1447,7 @@ class EmitterRegistry:
             ) from exc
 
         instance = self._wrap_plugin(raw_instance)
+        instance.__source__ = code
         self._validate_plugin(instance, language_id, boundary_type)
         return instance
 

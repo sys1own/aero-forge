@@ -116,7 +116,7 @@ def build_blueprint_plan_prompt(
 
 
 EMITTER_PLUGIN_SYNTHESIS_SYSTEM_PROMPT = """You are the Aero-Forge Emitter Synthesis Agent.
-Your ONLY task is to generate a complete, working Python class named `__LANGUAGE_TITLE__EmitterPlugin` that subclasses `PolyglotEmitterPlugin`.
+Your ONLY task is to COMPLETE the provided skeleton and return a working Python class named `__LANGUAGE_TITLE__EmitterPlugin` that subclasses `PolyglotEmitterPlugin`.
 
 You will be asked to emit a function with this exact signature:
 
@@ -126,24 +126,26 @@ Semantic purpose of the emitted function:
 __FUNCTION_CONTEXT__
 
 You MUST:
-1. Return ONLY valid Python code inside a single markdown ```python ... ``` block. No prose, no commentary outside the code block.
-2. Implement `descriptor`, `emit_source_files`, and `emit_build_manifest`.
-3. The `emit_source_files` method MUST emit real, compilable source code for `__LANGUAGE_ID__` that matches the exact signature above and implements the semantic purpose. Do NOT leave placeholder expressions like `arg_0 * 2` unless the semantic purpose explicitly says so.
-4. If the semantic purpose is empty or vague, implement a sensible numeric operation that matches the signature and returns a meaningful scalar.
-5. Use the appropriate language syntax:
+1. Return ONLY the completed class between the delimiters `__AERO_LOGIC_START__` and `__AERO_LOGIC_END__`. Do not output prose, markdown headers, explanations, conversational text, or code commentary outside those delimiters.
+2. Fill in EVERY section marked with `__AERO_IN_FILL__` or `# AERO-TODO`. Do not leave any placeholder logic in `emit_source_files`.
+3. Implement `descriptor`, `emit_source_files`, and `emit_build_manifest`.
+4. The `emit_source_files` method MUST emit real, compilable source code for `__LANGUAGE_ID__` that matches the exact signature above and implements the semantic purpose. Do NOT leave placeholder expressions like `arg_0 * 2` unless the semantic purpose explicitly says so.
+5. If the semantic purpose is empty or vague, implement a sensible numeric operation that matches the signature and returns a meaningful scalar.
+6. Use the appropriate language syntax:
    - Zig: `export fn` with `i64`, `f64`, `[*c]f64`, etc. An `export fn` returning a scalar C type CANNOT use `try`; handle fallible calls with `catch (return 0)` or `catch unreachable`.
    - Go: `//export` + `import "C"` and use `C.longlong`, `C.double`, `*C.double`.
    - C/C++: `extern "C"` with `int64_t`, `double`, `double*`.
    - C#: `[UnmanagedCallersOnly(EntryPoint = "...")]`.
    - Java: JNI signatures.
    - Mojo: `fn` with `Int64`, `Float64`, `DTypePointer[DType.float64]`.
-6. `toolchains` and `file_extensions` must be non-empty lists.
-7. Do not redeclare `BoundaryContract`, `CapabilityDescriptor`, `CodeArtifact`, or `PolyglotEmitterPlugin`.
-8. Do not write TODO comments, placeholder comments, or unimplemented stubs.
+7. `toolchains` and `file_extensions` must be non-empty lists.
+8. Do not redeclare `BoundaryContract`, `CapabilityDescriptor`, `CodeArtifact`, or `PolyglotEmitterPlugin`.
+9. Do not write TODO comments, placeholder comments, or unimplemented stubs outside the fill markers.
+10. The response must start exactly with `__AERO_LOGIC_START__` on its own line and end exactly with `__AERO_LOGIC_END__` on its own line.
 
-Skeleton:
+Skeleton to complete:
 
-```python
+__AERO_LOGIC_START__
 from aero_forge.builder.emitters.base import (
     BoundaryContract,
     CapabilityDescriptor,
@@ -198,25 +200,11 @@ class __LANGUAGE_TITLE__EmitterPlugin(PolyglotEmitterPlugin):
         else:
             ret = "void"
 
-        # Replace the body below with a real implementation that matches the
-        # semantic purpose and the exact signature:
+        # The body below must implement the exact function signature:
         #   __FUNCTION_SIGNATURE__
-        body_lines = [f"export fn {symbol}({arg_list}) {ret} {{"]
-        body_lines.append("    // IMPLEMENT the real algorithm here")
-        if ret != "void":
-            body_lines.append(f"    return @as({ret}, 0);")
-        else:
-            body_lines.append("    return;")
-        body_lines.append("}")
-        source = "\\n".join(body_lines)
-
-        return [
-            CodeArtifact(
-                file_path=f"{node_id}/src/{symbol}.__EXT__",
-                content=source,
-                language="__LANGUAGE_ID__",
-            )
-        ]
+        # Use ONLY the parameters in arg_names ({arg_list}).
+        # Do not introduce arg_1, arg_2, or other undeclared identifiers.
+        __AERO_IN_FILL__
 
     def emit_build_manifest(self, node_id, dependencies, compiler_flags):
         manifest = __MANIFEST_CONTENT__
@@ -227,7 +215,7 @@ class __LANGUAGE_TITLE__EmitterPlugin(PolyglotEmitterPlugin):
                 language="__LANGUAGE_ID__",
             )
         ]
-```
+__AERO_LOGIC_END__
 
 Required substitutions (already filled in the prompt you receive):
 - `__LANGUAGE_TITLE__`, `__LANGUAGE_ID__`, `__BOUNDARY_NAME__`, `__TOOLCHAIN__`, `__EXT__`, `__MANIFEST_FILE__`, `__MANIFEST_CONTENT__`, `__FUNCTION_SIGNATURE__`, `__FUNCTION_CONTEXT__`.

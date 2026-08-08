@@ -1720,4 +1720,189 @@ def plan_workspace(
     return blueprint
 
 
-__all__ = ["Orchestrator", "ForgeError", "plan_workspace"]
+class CompactedContextGenerator:
+    """Extract a dense, LLM-friendly functional matrix from a blueprint.
+
+    The compacted context intentionally strips prose, full source bodies, and
+    implementation details. It retains only the information an in-fill model
+    needs to synthesize logic: project identity, exported contracts, function
+    signatures, and any SMT-inferred native types.
+    """
+
+    def __init__(self, blueprint: Any) -> None:
+        self.blueprint = blueprint
+
+    def generate(self) -> str:
+        """Return the compacted context as a JSON string and log the event."""
+        context = self._build_context()
+        context_json = json.dumps(context, indent=2, default=str, sort_keys=False)
+        _accel_log("info", "Compacted Context Sent")
+        return context_json
+
+    def _build_context(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {}
+        if hasattr(self.blueprint, "model_dump"):
+            data = self.blueprint.model_dump(mode="json")
+        elif hasattr(self.blueprint, "dict"):
+            data = self.blueprint.dict()
+        else:
+            data = dict(self.blueprint)
+
+        return {
+            "project": data.get("project") or data.get("metadata", {}).get("project_name", "aero_forge_project"),
+            "architecture": data.get("architecture", "pure_python"),
+            "contracts": self._compact_contracts(data),
+            "functions": self._compact_functions(data),
+            "smt_types": self._compact_smt_types(data),
+        }
+
+    def _compact_contracts(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        contracts: List[Dict[str, Any]] = []
+
+        # Graph polyglot edges.
+        for edge in data.get("edges", []):
+            if not isinstance(edge, dict):
+                continue
+            contracts.append(
+                {
+                    "id": f"{edge.get('source', 'unknown')}->{edge.get('target', 'unknown')}",
+                    "source": edge.get("source", ""),
+                    "target": edge.get("target", ""),
+                    "symbol": edge.get("symbol", ""),
+                    "args": edge.get("args", []),
+                    "return_type": edge.get("return_type", ""),
+                    "boundary": str(edge.get("boundary_type", "")),
+                }
+            )
+
+        # Legacy Blueprint contracts and ABI contracts.
+        for contract in data.get("contracts", []):
+            if isinstance(contract, dict):
+                contracts.append(
+                    {
+                        "id": contract.get("name", ""),
+                        "name": contract.get("name", ""),
+                        "signature": contract.get("signature", ""),
+                        "language": contract.get("language", ""),
+                    }
+                )
+            elif hasattr(contract, "model_dump"):
+                c = contract.model_dump(mode="json")
+                contracts.append(
+                    {
+                        "id": c.get("name", ""),
+                        "name": c.get("name", ""),
+                        "signature": c.get("signature", ""),
+                        "language": c.get("language", ""),
+                    }
+                )
+
+        for abi in data.get("abi_contracts", []):
+            if isinstance(abi, dict):
+                sig = abi.get("signature") or {}
+                contracts.append(
+                    {
+                        "id": abi.get("contract_id", ""),
+                        "source": abi.get("source_language", ""),
+                        "target": abi.get("target_language", ""),
+                        "symbol": abi.get("export_symbol", ""),
+                        "args": [e.get("type", "") for e in sig.get("inputs", [])],
+                        "return_type": ", ".join(e.get("type", "") for e in sig.get("outputs", [])),
+                        "boundary": abi.get("binding_framework", ""),
+                    }
+                )
+            elif hasattr(abi, "model_dump"):
+                a = abi.model_dump(mode="json")
+                sig = a.get("signature") or {}
+                contracts.append(
+                    {
+                        "id": a.get("contract_id", ""),
+                        "source": a.get("source_language", ""),
+                        "target": a.get("target_language", ""),
+                        "symbol": a.get("export_symbol", ""),
+                        "args": [e.get("type", "") for e in sig.get("inputs", [])],
+                        "return_type": ", ".join(e.get("type", "") for e in sig.get("outputs", [])),
+                        "boundary": a.get("binding_framework", ""),
+                    }
+                )
+
+        return contracts
+
+    def _compact_functions(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        functions: List[Dict[str, Any]] = []
+
+        # v2 Blueprint FunctionSpec entries.
+        for fn in data.get("functions", []):
+            if isinstance(fn, dict):
+                functions.append(
+                    {
+                        "name": fn.get("name") or fn.get("output_name", ""),
+                        "file": str(fn.get("file", "")),
+                    }
+                )
+            elif hasattr(fn, "model_dump"):
+                f = fn.model_dump(mode="json")
+                functions.append(
+                    {
+                        "name": f.get("name") or f.get("output_name", ""),
+                        "file": str(f.get("file", "")),
+                    }
+                )
+
+        # Graph polyglot nodes annotated with exported functions.
+        for node in data.get("nodes", []):
+            if not isinstance(node, dict):
+                if hasattr(node, "model_dump"):
+                    node = node.model_dump(mode="json")
+                else:
+                    continue
+            exports = node.get("exports") or []
+            for symbol in exports:
+                functions.append(
+                    {
+                        "name": symbol,
+                        "node_id": node.get("node_id", ""),
+                        "lang": node.get("lang", ""),
+                    }
+                )
+
+        # Manifest entries with inferred function names from source files.
+        for entry in data.get("manifest", []):
+            if isinstance(entry, dict):
+                path = entry.get("path", "")
+                if isinstance(path, str) and path.endswith(".py"):
+                    functions.append(
+                        {
+                            "name": Path(path).stem,
+                            "file": path,
+                            "lang": entry.get("lang", "python"),
+                        }
+                    )
+            elif hasattr(entry, "model_dump"):
+                e = entry.model_dump(mode="json")
+                path = e.get("path", "")
+                if isinstance(path, str) and path.endswith(".py"):
+                    functions.append(
+                        {
+                            "name": Path(path).stem,
+                            "file": path,
+                            "lang": e.get("lang", "python"),
+                        }
+                    )
+
+        return functions
+
+    def _compact_smt_types(self, data: Dict[str, Any]) -> Dict[str, str]:
+        smt: Dict[str, str] = {}
+        metadata = data.get("metadata") or {}
+        if isinstance(metadata, dict):
+            smt.update(metadata.get("smt_types") or {})
+        for node in data.get("nodes", []):
+            if hasattr(node, "model_dump"):
+                node = node.model_dump(mode="json")
+            if isinstance(node, dict):
+                smt.update((node.get("extra") or {}).get("smt_types") or {})
+        return smt
+
+
+__all__ = ["Orchestrator", "ForgeError", "plan_workspace", "CompactedContextGenerator"]

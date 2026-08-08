@@ -544,6 +544,11 @@ class GraphPolyglotMaterializer:
         lang = node_spec.get("lang", "").lower()
         boundary = self._boundary_contract_for_contracts(contracts)
         node_spec["_synthesis_context"] = self._synthesis_context
+        node_spec["_compacted_context"] = self._compacted_context
+        node_spec.setdefault("extra", {})
+        if self._smt_types:
+            node_spec["extra"].setdefault("smt_types", {})
+            node_spec["extra"]["smt_types"].update(self._smt_types)
         plugin = self.registry.get_plugin(
             lang,
             synthesize=True,
@@ -1257,6 +1262,10 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
         self._synthesis_context = hin_graph_spec.get("metadata", {}).get(
             "prompt", hin_graph_spec.get("metadata", {}).get("description", "")
         )
+        self._compacted_context = hin_graph_spec.get("metadata", {}).get(
+            "synthesis_context", ""
+        )
+        self._smt_types = hin_graph_spec.get("metadata", {}).get("smt_types", {})
         node_map = {n["node_id"]: n for n in nodes}
         for edge in edges:
             self._maybe_simplify_python_c_abi_edge(edge, node_map)
