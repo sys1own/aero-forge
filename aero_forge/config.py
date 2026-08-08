@@ -13,6 +13,20 @@ from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
 
+def get_aero_forge_dir() -> Path:
+    """Return the root Aero-Forge data directory, creating it if necessary."""
+    path = Path(os.getenv("AERO_FORGE_HOME", Path.home() / ".aero_forge"))
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_toolchains_dir() -> Path:
+    """Return the directory used for auto-bootstrapped toolchains."""
+    path = Path(os.getenv("AERO_FORGE_TOOLCHAINS", get_aero_forge_dir() / "toolchains"))
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def find_config(start: Optional[Path] = None) -> Optional[Path]:
     """Search the current directory and parents for ``accelerate.toml``."""
     directory = start or Path.cwd()
@@ -456,6 +470,8 @@ __all__ = [
     "current_override",
     "find_config",
     "get",
+    "get_aero_forge_dir",
+    "get_toolchains_dir",
     "load_config",
     "override",
     "resolve_settings",

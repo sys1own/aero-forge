@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from aero_forge.toolchain_bootstrap import ToolchainBootstrap, ToolchainNotFoundError
+
 
 class SystemToolchainRouter:
     """Invoke native host toolchains for graph materializer build stages."""
@@ -21,6 +23,7 @@ class SystemToolchainRouter:
         "cargo": "cargo",
         "cmake": "cmake",
         "go": "go",
+        "mojo": "mojo",
         "nvcc": "nvcc",
         "zig": "zig",
         "dotnet": "dotnet",
@@ -35,6 +38,82 @@ class SystemToolchainRouter:
     def _exec_path(cls, toolchain: str) -> Optional[str]:
         name = cls.TOOLCHAIN_EXEC_MAP.get(toolchain, toolchain)
         return shutil.which(name)
+
+    @classmethod
+    def ensure_available(
+        cls,
+        toolchain: str,
+        *,
+        bootstrap: bool = True,
+    ) -> str:
+        """Return the resolved executable path, bootstrapping if necessary.
+
+        Raises:
+            ToolchainNotFoundError: with a human-facing diagnostic when the
+                toolchain is missing and cannot be auto-bootstrapped.
+        """
+        name = (toolchain or "").strip().lower()
+        if not name:
+            raise ToolchainNotFoundError("", "Empty toolchain name")
+
+        # Fast path: already on PATH.
+        path = cls._exec_path(name)
+        if path:
+            return path
+
+        # Try an automatic portable download.
+        if bootstrap:
+            try:
+                bootstrapped = ToolchainBootstrap.ensure(name)
+            except ToolchainNotFoundError:
+                bootstrapped = None
+            if bootstrapped:
+                return bootstrapped
+
+        # Final fallback: raise with a clear install command.
+        raise ToolchainNotFoundError(
+            name,
+            f"Toolchain {name!r} not found on PATH",
+            ToolchainBootstrap.diagnostic(name),
+        )
+
+    @classmethod
+    def preflight_nodes(
+        cls,
+        nodes: List[Dict[str, Any]],
+        *,
+        bootstrap: bool = True,
+        build: bool = True,
+    ) -> None:
+        """Verify (and optionally bootstrap) every toolchain referenced by *nodes*.
+
+        When ``build`` is ``False``, only log a warning for missing toolchains so
+        that file-emission-only tests and dry runs are not blocked.
+        """
+        seen: set[str] = set()
+        for node in nodes:
+            toolchain = (node.get("toolchain") or node.get("lang") or "").strip().lower()
+            if not toolchain or toolchain in seen:
+                continue
+            seen.add(toolchain)
+            try:
+                cls.ensure_available(toolchain, bootstrap=bootstrap)
+            except ToolchainNotFoundError as exc:
+                if build:
+                    raise
+                _accel_log(
+                    "warning",
+                    f"Toolchain {toolchain!r} not available, but build=False; continuing: {exc}",
+                )
+
+    @classmethod
+    def preflight_plugin(cls, descriptor: Any) -> None:
+        """Verify toolchains declared in a synthesized ``CapabilityDescriptor``."""
+        toolchains: List[str] = []
+        if descriptor is not None:
+            toolchains = getattr(descriptor, "toolchains", None) or []
+        for toolchain in toolchains:
+            cls.ensure_available(toolchain)
 
     @classmethod
     def _build_command(
@@ -182,8 +261,17 @@ class SystemToolchainRouter:
         """
         toolchain = (node_spec.get("toolchain") or node_spec.get("lang") or "").lower()
         _accel_log("info", f"Dispatching {toolchain} build for node {node_id}")
-        if not cls._exec_path(toolchain):
-            raise RuntimeError(f"toolchain {toolchain!r} not found on PATH")
+        try:
+            cls.ensure_available(toolchain)
+        except ToolchainNotFoundError as exc:
+            diagnostic = exc.install_command or ""
+            _accel_log(
+                "error",
+                f"Toolchain {toolchain!r} unavailable for {node_id}: {exc}"
+            )
+            raise RuntimeError(
+                f"toolchain {toolchain!r} not found on PATH.\n{diagnostic}"
+            ) from exc
 
         source_files = list(node_spec.get("source_files", []))
         compiler_flags = list(node_spec.get("compiler_flags", []))

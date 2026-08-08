@@ -14,6 +14,7 @@ from typing import Optional
 from aero_forge.config import ConfigOverride, Tier
 from aero_forge.errors import UnsupportedError, classify_cargo_error
 from aero_forge.llm import get_llm_client
+from aero_forge.toolchain_bootstrap import ToolchainBootstrap
 
 
 def explain_error(
@@ -88,6 +89,26 @@ def _local_explanation(error_log: str) -> str:
         return (
             f"Unsupported Python construct: {reason}\n"
             f"Suggestion: rewrite the code to avoid this construct, or use a supported equivalent."
+        )
+    # Toolchain availability failures should surface a concrete install command.
+    toolchain_match = re.search(
+        r"toolchain\s+['\"]?([a-z0-9_+-]+)['\"]?\s+(?:not found on PATH|unavailable|is required)",
+        error_log,
+        re.I,
+    )
+    if not toolchain_match:
+        # Also catch the materializer's pre-flight message form.
+        toolchain_match = re.search(
+            r"Toolchain\s+['\"]?([a-z0-9_+-]+)['\"]?\s+is required but not available",
+            error_log,
+            re.I,
+        )
+    if toolchain_match:
+        toolchain = toolchain_match.group(1).lower()
+        return (
+            f"Toolchain {toolchain!r} is not installed or not on PATH.\n"
+            f"{ToolchainBootstrap.diagnostic(toolchain)}\n"
+            "Install it and re-run the build, or ensure AERO_FORGE_TOOLCHAINS points to a bin directory."
         )
     # Pytest failures are distinct from Cargo/Rust compile failures.
     if re.search(r"test_.*::test_|\bPASSED\b|\bFAILED\b|\bERROR\b", error_log):

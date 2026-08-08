@@ -18,7 +18,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple, cast
 
 logger = logging.getLogger("aero_forge.emitter_registry")
 
-from aero_forge.builder.language_router import _accel_log
+from aero_forge.builder.language_router import (
+    SystemToolchainRouter,
+    ToolchainNotFoundError,
+    _accel_log,
+)
 from aero_forge.builder.spec import ASTNode, EngineSpec
 
 
@@ -744,6 +748,18 @@ class EmitterRegistry:
                     node_spec=node_spec,
                     contracts=contracts,
                 )
+                # Pre-flight the toolchains the synthesized plugin declares and warn
+                # early; the materializer will enforce availability before dispatch.
+                try:
+                    SystemToolchainRouter.preflight_plugin(plugin.descriptor)
+                except ToolchainNotFoundError as exc:
+                    logger.warning(
+                        "Synthesized %s emitter requires toolchain %s which is not "
+                        "available; materializer will raise before build dispatch: %s",
+                        key,
+                        exc.toolchain,
+                        exc,
+                    )
                 self._plugins[key] = plugin
                 return plugin
             raise EmitterError(
