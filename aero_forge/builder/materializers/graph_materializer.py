@@ -53,12 +53,18 @@ from aero_forge.config import resolve_llm_provider
 from aero_forge.llm.clients import get_llm_client
 from aero_forge.orchestrator.prompt_builder import (
     EMITTER_PLUGIN_SYNTHESIS_SYSTEM_PROMPT,
+    extract_aero_logic,
 )
 from aero_forge.prompts.builder_emitter import (
     BUILDER_EMITTER_SYSTEM_PROMPT,
+    _build_skeleton,
     format_builder_emitter_user_prompt,
 )
-from aero_forge.scheduler.goi_solver import GoIWavefrontSolver, GoiSolverError
+from aero_forge.scheduler.goi_solver import (
+    GoIWavefrontSolver,
+    GoiSolverError,
+    _loop_dependency_matrix,
+)
 from aero_forge.scaffold.contract_synth import (
     DynamicContractSynthesizer,
     FFIBoundaryEdge,
@@ -107,6 +113,20 @@ class GraphPolyglotMaterializer:
         self._config_override = config_override
         self._synthesis_context = ""
         self._ensure_emitters_loaded()
+
+    @staticmethod
+    def _parse_compacted_context(raw: Any) -> Dict[str, Any]:
+        """Normalize the CFM payload to a dictionary."""
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str) and raw.strip():
+            try:
+                import json
+
+                return dict(json.loads(raw))
+            except Exception:
+                return {"context": raw}
+        return {}
 
     def _get_llm_client(self) -> Any:
         """Return a lazily constructed LLM client."""
@@ -278,18 +298,21 @@ class GraphPolyglotMaterializer:
     def _extract_code_artifacts(raw: str) -> List[CodeArtifact]:
         """Parse fenced code blocks with optional ``lang:path`` labels.
 
-        Tolerates surrounding markdown headers, conversational summaries, and
-        inconsistent whitespace around the opening/closing fence tokens. If no
-        blocks are found, the whole raw response is returned as a single
-        untyped artifact for downstream path assignment.
+        First strips the Aero-Forge SSP delimiters ``__AERO_LOGIC_START__`` /
+        ``__AERO_LOGIC_END__`` so surrounding prose is ignored. Tolerates
+        surrounding markdown headers, conversational summaries, and inconsistent
+        whitespace around fence tokens. If no blocks are found, the whole inner
+        response is returned as a single untyped artifact for downstream path
+        assignment.
         """
         artifacts: List[CodeArtifact] = []
+        payload = extract_aero_logic(raw)
         # Allow empty language token (e.g. bare ```) and optional path labels.
         pattern = re.compile(
             r"```\s*(\w*)\s*(?::\s*([^\n\r]*?))?\s*\r?\n([\s\S]*?)\r?\n?\s*```",
             re.DOTALL | re.IGNORECASE,
         )
-        for match in pattern.finditer(raw):
+        for match in pattern.finditer(payload):
             lang = (match.group(1) or "").strip().lower()
             file_path = (match.group(2) or "").strip()
             content = match.group(3)
@@ -299,9 +322,9 @@ class GraphPolyglotMaterializer:
                 CodeArtifact(file_path=file_path, content=content, language=lang)
             )
         if not artifacts:
-            # Format-agnostic fallback: emit the entire stripped response so that
-            # the materializer can attempt path assignment and density validation.
-            stripped = raw.strip()
+            # Format-agnostic fallback: emit the entire stripped inner response so
+            # that the materializer can attempt path assignment and density validation.
+            stripped = payload.strip()
             if stripped:
                 artifacts.append(
                     CodeArtifact(file_path="", content=stripped, language="")
@@ -464,34 +487,68 @@ class GraphPolyglotMaterializer:
             or self._llm_api_key
         )
 
+    @staticmethod
+    def _v11_universal_guidance() -> str:
+        """Return additional v11_universal_architect planning guidance."""
+        try:
+            from aero_forge.prompts import get_template
+
+            template = get_template("v11_universal_architect")
+            return (
+                "\n\nUse the following universal polyglot architect guidance when "
+                "completing the skeleton:\n" + template.system_prompt
+            )
+        except Exception:
+            return (
+                "\n\nUse the v11_universal_architect template: design the node as a "
+                "strict C-ABI native function, replace every __AERO_IN_FILL__ marker, "
+                "and wrap the entire response in __AERO_LOGIC_START__ / __AERO_LOGIC_END__."
+            )
+
     def _emit_with_llm(
         self, node_id: str, node_spec: Dict[str, Any], contracts: List[Dict[str, Any]]
     ) -> List[CodeArtifact]:
         """Ask the Builder Code Emission Agent to emit source and manifest files.
 
-        Retries once with a stricter prompt and, if the LLM still returns an empty
-        or unparseable response, falls back to the deterministic baseline emitter.
+        Materializes a skeleton file on disk, passes the compacted functional
+        matrix as the exclusive context, and requires the response to be wrapped
+        in ``__AERO_LOGIC_START__`` / ``__AERO_LOGIC_END__``. Retries once with
+        the v11_universal_architect template if the response is empty, malformed,
+        or below the functional density threshold.
         """
         client = self._get_llm_client()
-        user_prompt = format_builder_emitter_user_prompt(node_spec, contracts)
-        strict_note = (
-            "\n\nIMPORTANT: Do not return an empty response or prose. "
-            "Return only well-labeled Markdown fences. "
-            "If you are uncertain, emit the requested files using the skeleton above "
-            "with a minimal real implementation."
+
+        # Materialize the source skeleton to disk before calling the LLM.
+        skeleton = _build_skeleton(
+            node_spec, contracts, compacted_context=self._compacted_context
         )
+        skeleton_dir = self.workspace_root / ".aero_skeletons"
+        skeleton_dir.mkdir(parents=True, exist_ok=True)
+        skeleton_path = skeleton_dir / f"{node_id}_skeleton.txt"
+        skeleton_path.write_text(skeleton, encoding="utf-8")
+        _accel_log(
+            "info",
+            f"Materialized source skeleton for {node_id} at {skeleton_path}",
+        )
+
+        user_prompt = format_builder_emitter_user_prompt(
+            node_spec,
+            contracts,
+            compacted_context=self._compacted_context,
+        )
+        v11_guidance = self._v11_universal_guidance()
 
         last_exc: Optional[Exception] = None
         for attempt, (system, tokens, temp) in enumerate(
             [
                 (BUILDER_EMITTER_SYSTEM_PROMPT, 4096, 0.2),
-                (BUILDER_EMITTER_SYSTEM_PROMPT + strict_note, 8192, 0.1),
+                (BUILDER_EMITTER_SYSTEM_PROMPT + v11_guidance, 8192, 0.1),
             ]
         ):
             if attempt > 0:
                 _accel_log(
                     "warning",
-                    f"Builder Code Emission Agent for {node_id} returned empty/malformed output; retrying",
+                    f"Builder Code Emission Agent for {node_id} returned empty/malformed/low-density output; retrying with v11_universal",
                 )
             try:
                 raw = client.generate(
@@ -516,12 +573,24 @@ class GraphPolyglotMaterializer:
                 )
                 continue
             artifacts = self._extract_code_artifacts(raw)
-            if artifacts:
-                return self._assign_artifact_paths(artifacts, node_id, node_spec)
+            if not artifacts:
+                _accel_log(
+                    "warning",
+                    f"Builder Code Emission Agent for {node_id}: could not extract code artifacts; "
+                    f"raw preview: {raw[:800]!r}",
+                )
+                continue
+            assigned = self._assign_artifact_paths(artifacts, node_id, node_spec)
+            # Functional density validation: source files must contain real logic.
+            if all(
+                self._is_build_manifest(a) or self._artifact_has_density(a)
+                for a in assigned
+            ):
+                _accel_log("success", f"Builder Code Emission for {node_id}: logic in-fill successful")
+                return assigned
             _accel_log(
                 "warning",
-                f"Builder Code Emission Agent for {node_id}: could not extract code artifacts; "
-                f"raw preview: {raw[:800]!r}",
+                f"Builder Code Emission Agent for {node_id}: extracted artifacts below functional density; retrying",
             )
 
         _accel_log(
@@ -1262,9 +1331,8 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
         self._synthesis_context = hin_graph_spec.get("metadata", {}).get(
             "prompt", hin_graph_spec.get("metadata", {}).get("description", "")
         )
-        self._compacted_context = hin_graph_spec.get("metadata", {}).get(
-            "synthesis_context", ""
-        )
+        raw_compacted = hin_graph_spec.get("metadata", {}).get("synthesis_context", "")
+        self._compacted_context = self._parse_compacted_context(raw_compacted)
         self._smt_types = hin_graph_spec.get("metadata", {}).get("smt_types", {})
         node_map = {n["node_id"]: n for n in nodes}
         for edge in edges:
@@ -1347,6 +1415,13 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                             raise MaterializationError(
                                 f"Synthesis Incompleteness for {artifact.file_path}: {exc}"
                             ) from exc
+                        if not ContentDensityValidator.has_execution_flow(
+                            artifact.content, artifact.language
+                        ):
+                            raise MaterializationError(
+                                f"GoI verification failed for {artifact.file_path}: "
+                                "zero execution matrix (hollow logic)"
+                            )
                     written_artifacts.append(
                         {
                             "node_id": node_id,
