@@ -35,6 +35,7 @@ from aero_forge.blueprint import (
 )
 from aero_forge.builder import build_engine, spec_from_python
 from aero_forge.builder.intent_compiler import IntentCompiler, IntentCompilerError
+from aero_forge.builder.language_router import _deduplicate_command_args
 from aero_forge.cache.build_cache import BuildCache
 from aero_forge.cache.fix_cache import FixCache
 from aero_forge.config import ConfigOverride, Tier, load_config, resolve_llm_provider, resolve_settings
@@ -1043,8 +1044,45 @@ class Orchestrator:
             env = os.environ.copy()
             env["CARGO_TARGET_DIR"] = str(self._cargo_target)
             if self.compiler_flags:
+                # ``--release`` is a Cargo flag; Cargo also adds it via
+                # ``cargo_build(release=True)``.  Keep only rustc-recognised
+                # flags (primarily ``-C``/``-L`` options) and collapse exact
+                # duplicates so ``-C opt-level=3`` is not repeated.
+                _CARGO_ONLY_FLAGS = {
+                    "--release",
+                    "--target",
+                    "--manifest-path",
+                    "--offline",
+                    "--locked",
+                    "--frozen",
+                    "--features",
+                    "--all-features",
+                    "--no-default-features",
+                    "--jobs",
+                    "-j",
+                    "--profile",
+                    "--package",
+                    "-p",
+                    "--bin",
+                    "--example",
+                    "--test",
+                    "--bench",
+                    "--workspace",
+                    "--exclude",
+                    "--verbose",
+                    "-v",
+                    "--quiet",
+                    "-q",
+                    "--color",
+                    "--message-format",
+                }
+                rustc_flags = [
+                    f
+                    for f in _deduplicate_command_args(self.compiler_flags)
+                    if f not in _CARGO_ONLY_FLAGS
+                ]
                 env["RUSTFLAGS"] = " ".join(
-                    [os.environ.get("RUSTFLAGS", "")] + self.compiler_flags
+                    [os.environ.get("RUSTFLAGS", "")] + rustc_flags
                 ).strip()
 
             try:

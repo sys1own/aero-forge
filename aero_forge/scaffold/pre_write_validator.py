@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from aero_forge.builder.language_router import _deduplicate_command_args
 from aero_forge.orchestrator.router import classify_build_intent
 from aero_forge.scaffold.cargo_runner import cargo_build, maturin_build
 from aero_forge.scaffold.module_guard import ensure_package_structure
@@ -779,7 +780,7 @@ class PreWriteValidator:
                 result = maturin_build(workspace_root, timeout=300)
             else:
                 result = subprocess.run(
-                    command,
+                    _deduplicate_command_args(command),
                     cwd=workspace_root,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,

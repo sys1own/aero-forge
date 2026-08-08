@@ -23,6 +23,8 @@ from typing import Any, Dict, List, Optional
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from aero_forge.builder.language_router import _deduplicate_command_args
+
 logger = logging.getLogger("aero_forge.blueprint.schema")
 
 
@@ -516,7 +518,7 @@ class BlueprintV3(BaseModel):
                     }
                 try:
                     subprocess.run(
-                        cmd_parts,
+                        _deduplicate_command_args(cmd_parts),
                         cwd=str(workspace),
                         env=env,
                         check=True,
@@ -545,7 +547,9 @@ class BlueprintV3(BaseModel):
                 }
             try:
                 subprocess.run(
-                    ["cargo", "build", "--release"] + artifact.compiler_flags,
+                    _deduplicate_command_args(
+                        ["cargo", "build", "--release"] + artifact.compiler_flags
+                    ),
                     cwd=str(workspace),
                     env=env,
                     check=True,
@@ -577,7 +581,10 @@ class BlueprintV3(BaseModel):
                 obj.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     subprocess.run(
-                        [compiler, "-c", str(src), "-o", str(obj)] + artifact.compiler_flags,
+                        _deduplicate_command_args(
+                            [compiler, "-c", str(src), "-o", str(obj)]
+                            + artifact.compiler_flags
+                        ),
                         cwd=str(workspace),
                         env=env,
                         check=True,
