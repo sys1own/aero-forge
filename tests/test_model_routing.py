@@ -11,7 +11,7 @@ from aero_forge.llm import OpenAIClient, get_llm_client
 @pytest.mark.parametrize(
     "provider,fast_model,reasoning_model",
     [
-        ("deepseek", "deepseek-v4-flash", "deepseek-v4-pro"),
+        ("deepseek", "deepseek-v4-flash", "deepseek-chat"),
         ("openai", "gpt-4o-mini", "gpt-4o"),
         ("gemini", "gemini-2.5-flash", "gemini-2.5-pro"),
         ("openrouter", "anthropic/claude-3-haiku", "anthropic/claude-3.5-sonnet"),
@@ -28,7 +28,7 @@ def test_aero_llm_tier_fast_env_json_override(monkeypatch):
     monkeypatch.setenv("AERO_LLM_TIER_FAST", json.dumps({"deepseek": "deepseek-chat"}))
     assert resolve_tier_model("deepseek", "fast") == "deepseek-chat"
     # Reasoning tier stays on its default.
-    assert resolve_tier_model("deepseek", "reasoning") == "deepseek-v4-pro"
+    assert resolve_tier_model("deepseek", "reasoning") == "deepseek-chat"
 
 
 def test_aero_llm_tier_fast_env_raw_model_for_provider(monkeypatch):

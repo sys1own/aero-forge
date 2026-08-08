@@ -93,7 +93,7 @@ def run_matrix() -> Dict[str, Any]:
     """Run every prompt through generate_and_build and collect results."""
     results: List[Dict[str, Any]] = []
     provider = os.getenv("AERO_FORGE_LLM_PROVIDER", "deepseek")
-    model = os.getenv("AERO_FORGE_MODEL", "deepseek-v4-pro")
+    model = os.getenv("AERO_FORGE_MODEL", "deepseek-chat")
 
     for name, prompt, signature_hint, example in MATRIX:
         output_dir = _default_output_dir(name)

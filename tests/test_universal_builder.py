@@ -102,7 +102,7 @@ def test_universal_builder_hybrid_blueprint_and_build(tmp_path: Path) -> None:
         tmp_path,
         project_name="double_pipeline",
         llm_provider="deepseek",
-        model="deepseek-v4-pro",
+        model="deepseek-chat",
     )
 
     blueprint = tmp_path / "blueprint.aero"

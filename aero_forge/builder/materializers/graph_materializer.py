@@ -31,13 +31,16 @@ from aero_forge.blueprint.schema import (
     BindingFramework,
     BlueprintV3,
     BuildArtifact,
+    ContextState,
     ExecutionStrategyV3,
+    LLMContext,
     Metadata,
     write_v3_blueprint,
 )
 from aero_forge.builder.emitters.base import (
     BoundaryContract,
     CodeArtifact,
+    ContentDensityValidator,
     EmitterRegistry,
     PolyglotEmitterPlugin,
 )
@@ -1098,8 +1101,11 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                 project_name=project,
                 status="finalized",
                 generation_method="llm_synthesized",
+                llm_initialized=True,
+                auto_generated=True,
                 description=f"graph_polyglot blueprint for {project}",
             ),
+            llm_context=LLMContext(state=ContextState.synthesized),
             build_pipeline=build_pipeline,
             abi_contracts=abi_contracts,
             execution_strategy=execution_strategy,
@@ -1195,6 +1201,25 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                     else:
                         artifact_output_dir = node_dir
                     self._write_artifact(artifact, artifact_output_dir)
+                    if artifact.language not in {
+                        "bash",
+                        "json",
+                        "yaml",
+                        "toml",
+                        "markdown",
+                        "text",
+                        "cmake",
+                        "make",
+                        "makefile",
+                    } and not artifact.is_header:
+                        try:
+                            ContentDensityValidator.validate(
+                                artifact.content, artifact.language
+                            )
+                        except ValueError as exc:
+                            raise MaterializationError(
+                                f"Synthesis Incompleteness for {artifact.file_path}: {exc}"
+                            ) from exc
                     written_artifacts.append(
                         {
                             "node_id": node_id,

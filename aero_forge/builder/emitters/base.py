@@ -14,7 +14,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from threading import Lock
-from typing import Any, Dict, List, Optional, Set, Tuple, cast
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, cast
 
 logger = logging.getLogger("aero_forge.emitter_registry")
 
@@ -59,6 +59,112 @@ class CodeArtifact:
     language: str
     is_header: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class ContentDensityValidator:
+    """Ensure generated source files contain enough functional code to be useful.
+
+    A file that is only imports, docstrings, and boilerplate is flagged as
+    ``Synthesis Incompleteness`` so the build fails fast instead of producing a
+    hollow artifact.
+    """
+
+    MIN_FUNCTIONAL_NODES: int = 2
+    MIN_GENERIC_FUNCTIONAL_NODES: int = 1
+
+    @classmethod
+    def validate(cls, content: str, language: str) -> int:
+        """Return the number of functional AST/semantic nodes in *content*.
+
+        Raises :class:`ValueError` when the file is too sparse.
+        """
+        language = (language or "").lower()
+        is_python = language == "python" or content.lstrip().startswith(("import ", "from "))
+        if is_python:
+            count = cls._count_python_nodes(content)
+            threshold = cls.MIN_FUNCTIONAL_NODES
+        else:
+            count = cls._count_generic_nodes(content)
+            threshold = cls.MIN_GENERIC_FUNCTIONAL_NODES
+        if count < threshold:
+            raise ValueError(
+                f"Synthesis Incompleteness: source has only {count} functional node(s) "
+                f"(minimum {threshold})"
+            )
+        return count
+
+    @classmethod
+    def _count_python_nodes(cls, content: str) -> int:
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            # Defer syntactically invalid sources to the normal syntax validator.
+            return cls.MIN_FUNCTIONAL_NODES
+
+        functional: Set[ast.AST] = set()
+
+        def _add(node: ast.AST) -> None:
+            functional.add(id(node))
+
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                _add(node)
+                for stmt in node.body:
+                    cls._count_statement(stmt, _add, is_module=False)
+            else:
+                cls._count_statement(node, _add, is_module=True)
+
+        return len(functional)
+
+    @classmethod
+    def _count_statement(
+        cls, node: ast.AST, add: Callable[[ast.AST], None], *, is_module: bool
+    ) -> None:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            return
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            # Module/function docstrings are not functional code.
+            if isinstance(node.value.value, str):
+                return
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Name):
+            # Standalone name references are not meaningful logic.
+            return
+        if isinstance(node, ast.Pass):
+            return
+        if isinstance(node, ast.AnnAssign) and node.value is None:
+            return
+        add(node)
+
+    @classmethod
+    def _count_generic_nodes(cls, content: str) -> int:
+        """Fast fallback for non-Python sources using regex patterns."""
+        # Remove single-line comments (best-effort) and count common constructs.
+        cleaned = re.sub(r"//.*$|#.*$", "", content, flags=re.MULTILINE)
+        cleaned = re.sub(r"/\*.*?\*/", "", cleaned, flags=re.DOTALL)
+        if not cleaned.strip():
+            # Allow comment-only/placeholder stubs (e.g. empty Rust lib.rs).
+            return cls.MIN_GENERIC_FUNCTIONAL_NODES
+        patterns = [
+            r"\bfn\s+",
+            r"\bfunc\s+",
+            r"\bdef\s+",
+            r"\bclass\s+",
+            r"\bstruct\s+",
+            r"\bimpl\s+",
+            r"\bfor\s+",
+            r"\bwhile\s+",
+            r"\bif\s*\(",
+            r"\bif\s+",
+            r"\breturn\s+",
+            r"\blet\s+",
+            r"\bvar\s+",
+            r"\bconst\s+",
+            r"\bmatch\s+",
+        ]
+        count = 0
+        for pattern in patterns:
+            count += len(re.findall(pattern, cleaned))
+        return count
 
 
 class PolyglotEmitterPlugin(ABC):

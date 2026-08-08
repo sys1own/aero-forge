@@ -674,7 +674,7 @@ def orchestrate_hybrid_rust_python(
         llm_provider=llm_provider
         or os.getenv("AERO_FORGE_LLM_PROVIDER")
         or ("deepseek" if os.getenv("DEEPSEEK_API_KEY") else None),
-        model=model or os.getenv("AERO_FORGE_MODEL", "deepseek-v4-pro"),
+        model=model or os.getenv("AERO_FORGE_MODEL", "deepseek-chat"),
         max_retries=max_retries,
         max_tokens=max_tokens or 4096,
         config_override=config_override,

@@ -429,7 +429,7 @@ class GeminiClient(BaseLLMClient):
 _UNKNOWN_PROVIDER_FALLBACKS: Dict[str, str] = {
     "openai": "gpt-4",
     "openrouter": "openrouter/free",
-    "deepseek": "deepseek-v4-pro",
+    "deepseek": "deepseek-chat",
     "gemini": "gemini-2.0-flash",
 }
 
