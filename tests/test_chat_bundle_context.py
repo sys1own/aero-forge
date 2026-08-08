@@ -40,7 +40,7 @@ def test_multi_file_generate_includes_project_context(tmp_path: Path) -> None:
         session = ChatSession(
             tmp_path,
             llm_provider="deepseek",
-            model="deepseek-v4-pro",
+            model="deepseek-chat",
             progress_callback=lambda _: None,
         )
         result = session.process(
@@ -86,7 +86,7 @@ def test_bundle_excludes_build_artifacts_from_context(tmp_path: Path) -> None:
         session = ChatSession(
             tmp_path,
             llm_provider="deepseek",
-            model="deepseek-v4-pro",
+            model="deepseek-chat",
             progress_callback=lambda _: None,
         )
         result = session.process("Update the Python engine. This is a hybrid Python and Rust project.")
@@ -130,7 +130,7 @@ def test_multi_file_generate_self_heals_test_typo(tmp_path: Path) -> None:
         session = ChatSession(
             tmp_path,
             llm_provider="deepseek",
-            model="deepseek-v4-pro",
+            model="deepseek-chat",
             progress_callback=lambda _: None,
         )
         session.process("Build a hybrid Python and Rust demo project with tests.")
@@ -168,7 +168,7 @@ def test_reply_messages_include_project_context(tmp_path: Path) -> None:
             return "You have an app.py file."
 
     with patch("aero_forge.chat.get_llm_client", return_value=FakeClient()):
-        session = ChatSession(tmp_path, llm_provider="deepseek", model="deepseek-v4-pro")
+        session = ChatSession(tmp_path, llm_provider="deepseek", model="deepseek-chat")
         session.reply("What files do I have?")
 
     system_message = captured["messages"][0]["content"]

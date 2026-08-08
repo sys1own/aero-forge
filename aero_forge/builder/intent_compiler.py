@@ -548,6 +548,12 @@ class IntentCompiler:
 
         modification_plan = self._build_modification_plan(v2, output_dir)
 
+        metadata = dict(v2.metadata)
+        metadata.setdefault("schema_version", "2.0.0")
+        metadata["llm_initialized"] = "true"
+        metadata["auto_generated"] = "true"
+        metadata["generation_method"] = "llm_synthesized"
+
         return Blueprint(
             project=project,
             architecture=architecture,
@@ -564,7 +570,7 @@ class IntentCompiler:
             execution_strategy=v2.execution_strategy,
             abi_contracts=v2.abi_contracts,
             verification_nodes=v2.verification_nodes,
-            metadata=v2.metadata,
+            metadata=metadata,
             module_graph=v2.module_graph,
             cargo_dependencies=v2.cargo_dependencies,
             modification_plan=modification_plan,

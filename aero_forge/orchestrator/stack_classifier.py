@@ -111,8 +111,21 @@ def classify_stack(prompt: str) -> StackClassification:
     has_rust = "rust" in languages
     has_cpp = "cpp" in languages
     has_hybrid_word = _has_any(tokens, ["hybrid", "polyglot", "mixed", "mixed language", "multi language"])
-    has_python_only = _has_any(tokens, ["pure python", "python only"])
+
+    lower = prompt.lower()
+    has_python_only = (
+        "pure_python" in lower
+        or "pure python" in lower
+        or "python only" in lower
+        or _has_any(tokens, ["pure python", "python only"])
+    )
     has_rust_only = _has_any(tokens, ["pure rust", "rust only", "cargo only"])
+    # A prompt like "pure_python ... use @accelerate(target='rust_hin')" is a
+    # single-language Python function that should be compiled through the HIN
+    # pipeline, not materialized as a multi-language graph.
+    has_accelerate = "@accelerate" in lower
+    if has_accelerate and (has_python or "python" in lower) and not has_hybrid_word:
+        has_python_only = True
 
     if has_python and has_rust and has_cpp:
         architecture = INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON
@@ -140,6 +153,8 @@ def classify_stack(prompt: str) -> StackClassification:
 
     if has_python_only:
         architecture = INTENT_PURE_PYTHON
+        # Keep only the Python toolchain for a single-language accelerated function.
+        raw_toolchains = {"python"} | {t for t in raw_toolchains if t == "python"}
     if has_rust_only:
         architecture = INTENT_PURE_RUST
 

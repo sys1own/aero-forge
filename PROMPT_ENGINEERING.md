@@ -13,7 +13,7 @@ iterations**.
 ## Campaign Setup
 
 - Provider: `deepseek` (`https://api.deepseek.com/v1`)
-- Model: default (`deepseek-v4-pro`)
+- Model: default (`deepseek-chat`)
 - Test cases (4): `fibonacci`, `factorial`, `gcd`, `is_prime`
 - Templates evaluated: `v2_structured` through `v8_iterative`
 - `v1_minimal` was omitted from the live run because it lacks the transpiler

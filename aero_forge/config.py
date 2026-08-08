@@ -218,7 +218,7 @@ class Tier(str, Enum):
 DEFAULT_TIER_MODELS: Dict[str, Dict[str, str]] = {
     "deepseek": {
         "fast": "deepseek-v4-flash",
-        "reasoning": "deepseek-v4-pro",
+        "reasoning": "deepseek-chat",
     },
     "openai": {
         "fast": "gpt-4o-mini",

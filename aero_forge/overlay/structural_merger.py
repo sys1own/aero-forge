@@ -58,14 +58,14 @@ class StructuralMerger:
     def _split_python(cls, text: str) -> Dict[str, Tuple[str, ast.AST]]:
         tree = ast.parse(text)
         lines = text.splitlines()
-        append_newline = text.endswith("\n")
         entities: Dict[str, Tuple[str, ast.AST]] = {}
         for i, node in enumerate(tree.body):
             start = node.lineno - 1
             end = getattr(node, "end_lineno", start + 1) or start + 1
             entity_text = "\n".join(lines[start:end])
-            if append_newline:
-                entity_text += "\n"
+            # Ensure every top-level entity is terminated so concatenation never
+            # collapses distinct statements onto a single line.
+            entity_text = entity_text.rstrip("\n") + "\n"
             entities[cls._entity_id(node)] = (entity_text, node)
         return entities
 

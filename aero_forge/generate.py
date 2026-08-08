@@ -12,7 +12,9 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from aero_forge.blueprint import (
     Blueprint,
+    ContractEntry,
     FunctionSpec,
+    LLMConfig,
     discover_functions,
     generate_blueprint,
 )
@@ -266,6 +268,45 @@ def _derive_export_names(source: str) -> List[str]:
     return _detect_public_names(source)
 
 
+def _derive_contracts(source: str) -> List[ContractEntry]:
+    """Create ContractEntry objects from public top-level function signatures."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+
+    contracts: List[ContractEntry] = []
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            continue
+        if node.name.startswith("_"):
+            continue
+        if isinstance(node, ast.FunctionDef):
+            args = ast.unparse(node.args)
+            returns = f" -> {ast.unparse(node.returns)}" if node.returns else ""
+            signature = f"def {node.name}({args}){returns}:"
+            contracts.append(
+                ContractEntry(
+                    name=node.name,
+                    python_name=node.name,
+                    signature=signature,
+                    language="python",
+                    purpose="llm_synthesized",
+                )
+            )
+        else:
+            contracts.append(
+                ContractEntry(
+                    name=node.name,
+                    python_name=node.name,
+                    signature=f"class {node.name}:",
+                    language="python",
+                    purpose="llm_synthesized",
+                )
+            )
+    return contracts
+
+
 def _find_generated_python_paths(output_dir: Path) -> Tuple[Path, Path]:
     """Return the primary implementation and test paths in ``output_dir``.
 
@@ -509,6 +550,8 @@ def write_generated_project(
     constraints: Optional[str] = None,
     module_name: Optional[str] = None,
     validate: bool = True,
+    llm_provider: Optional[str] = None,
+    model: Optional[str] = None,
 ) -> Tuple[Path, Path, Blueprint]:
     """Write implementation, tests, and a blueprint to ``output_dir``.
 
@@ -605,6 +648,21 @@ def write_generated_project(
         prompt=prompt,
         constraints=constraints,
     )
+    # Populate the functional contracts and LLM provenance fields so later gates
+    # (SMTASTEngine, HIN AST normalization) are not skipped.
+    blueprint.contracts = _derive_contracts(implementation)
+    blueprint.llm = LLMConfig(
+        provider=llm_provider or "none",
+        model=model,
+    )
+    blueprint.metadata = {
+        **(blueprint.metadata or {}),
+        "schema_version": "2.0.0",
+        "llm_initialized": "true",
+        "auto_generated": "true",
+        "generation_method": "llm_synthesized",
+    }
+
     blueprint_path = output_dir / "blueprint.aero"
     from aero_forge.blueprint import write_blueprint
 
@@ -789,6 +847,19 @@ def _normalize_numeric_literals(source: str) -> str:
     return source
 
 
+def _is_accelerate_decorator(node: ast.AST) -> bool:
+    """Return True for @accelerate(...) or @target markers."""
+    if isinstance(node, ast.Name):
+        return node.id in {"accelerate", "target"}
+    if isinstance(node, ast.Call):
+        func = node.func
+        if isinstance(func, ast.Name):
+            return func.id in {"accelerate", "target"}
+        if isinstance(func, ast.Attribute):
+            return func.attr in {"accelerate", "target"}
+    return False
+
+
 def sanitize_generated_code(source: str) -> str:
     """Remove unsupported constructs that commonly appear in LLM output.
 
@@ -808,6 +879,18 @@ def sanitize_generated_code(source: str) -> str:
 
         def visit_Assert(self, node: ast.Assert) -> ast.AST:  # type: ignore[misc]
             return ast.Pass()
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> ast.AST:
+            node.decorator_list = [
+                d for d in node.decorator_list if not _is_accelerate_decorator(d)
+            ]
+            return self.generic_visit(node)
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> ast.AST:
+            node.decorator_list = [
+                d for d in node.decorator_list if not _is_accelerate_decorator(d)
+            ]
+            return self.generic_visit(node)
 
     sanitized = ast.unparse(Sanitizer().visit(tree))
     return _flatten_nested_functions(sanitized)
@@ -1034,6 +1117,15 @@ def generate_project(
     )
     implementation, tests = parse_generated_response(response)
     implementation = sanitize_generated_code(implementation)
+
+    # Fail fast if the LLM emitted a hollow source file (imports/docstrings only).
+    from aero_forge.builder.emitters.base import ContentDensityValidator
+
+    try:
+        ContentDensityValidator.validate(implementation, language="python")
+    except ValueError as exc:
+        raise GenerationError(f"Synthesis Incompleteness: {exc}") from exc
+
     if review:
         implementation = _review_code(
             implementation,
@@ -1072,6 +1164,8 @@ def generate_project(
         prompt=prompt,
         constraints=constraints,
         module_name=module_name,
+        llm_provider=llm_provider,
+        model=model,
     )
     if progress_callback:
         progress_callback("Code written; ready to compile.")
@@ -1209,10 +1303,13 @@ def generate_and_build(
             "iterations": [],
         }
     except GenerationError as exc:
-        # When the single-function generator returns an empty/malformed response,
-        # the prompt is likely a project-level polyglot request.  Route it through
-        # the proactive graph builder, which JIT-synthesizes missing emitter plugins.
-        if "empty" in str(exc).lower() or "malformed" in str(exc).lower():
+        # Only fall back to the project-level graph builder when the prompt is
+        # genuinely a multi-language / universal project request.  Single-language
+        # Python prompts (especially pure_python + @accelerate) must not be silently
+        # downgraded to a graph_polyglot build that can produce hollow files.
+        fallback_reason = str(exc).lower()
+        is_universal = _is_universal_project_prompt(prompt)
+        if is_universal and ("empty" in fallback_reason or "malformed" in fallback_reason):
             override_key = getattr(config_override, "api_key", None) if config_override else None
             return ProactivePolyglotBuilder().synthesize_and_build(
                 prompt,
@@ -1310,10 +1407,20 @@ def generate_and_build(
                     output_dir=None,
                     project_name=project_name,
                 )
-                bp.metadata = intent_bp.metadata
+                bp.metadata = {
+                    **(bp.metadata or {}),
+                    **(intent_bp.metadata or {}),
+                    "llm_initialized": "true",
+                    "auto_generated": "true",
+                    "generation_method": "llm_synthesized",
+                }
                 bp.execution_strategy = intent_bp.execution_strategy
                 bp.abi_contracts = intent_bp.abi_contracts
                 bp.module_graph = intent_bp.module_graph
+                bp.llm = LLMConfig(provider=llm_provider or "none", model=model)
+                bp.contracts = _derive_contracts(implementation)
+                bp.prompt = prompt
+                bp.constraints = constraints
                 # Verification nodes are left empty for the single-function path
                 # because the generated source name is not known by the compiler.
                 bp.verification_nodes = []
