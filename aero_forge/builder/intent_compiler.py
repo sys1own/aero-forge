@@ -71,6 +71,7 @@ STRICT OPERATIONAL RULES:
 9. DO NOT generate placeholder stubs ("// TODO", "pass", "todo!()"). Every node and contract must be fully specified.
 10. FILE BOUNDARY CONSTRAINT: only list `source_files` explicitly required by the prompt. Include custom build files such as `build.sh` and `cpp_engine/CMakeLists.txt` exactly as requested.
 11. ARTIFACT HYGIENE: NEVER stage, commit, or list generated binary targets, virtual environments, distribution metadata, or package archives as deliverables.
+12. TOOLCHAIN FLAG HYGIENE: For `cargo` and `maturin` nodes, do NOT include `--release` in `compiler_flags`; the dispatcher always adds it. Only include extra Cargo flags (e.g. `--features <feature>`) when the feature is declared in the node's manifest. Do not include `-C` rustc flags in `compiler_flags`; pass those via the `RUSTFLAGS` environment if necessary.
 
 Example JSON shape:
 {

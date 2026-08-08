@@ -8,9 +8,66 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from aero_forge.toolchain_bootstrap import ToolchainBootstrap, ToolchainNotFoundError
+
+
+# Flags whose value is provided as the next token.  These are treated as a
+# single ``flag value`` key when deduplicating so ``-C opt-level=3`` and
+# ``-C debuginfo=0`` are both kept, but two identical ``-C opt-level=3``
+# tokens are collapsed.
+_VALUE_FLAGS = frozenset({
+    "-C", "-O", "-o", "-I", "-L", "-l", "-D",
+    "--target", "--manifest-path", "--out-dir", "--features", "--bin",
+    "--package", "--example", "--test", "--bench", "--jobs",
+})
+
+
+def _deduplicate_command_args(args: Sequence[str]) -> List[str]:
+    """Return *args* with redundant flag tokens removed.
+
+    Positional arguments are always preserved.  Flags with attached values
+    (``-O3``, ``--opt=val``) and flags with separate values (``-C val``)
+    are deduplicated as entire units, so ``--release`` appears only once
+    but ``-C opt-level=3 -C debuginfo=0`` still contains two distinct
+    ``-C`` invocations.
+    """
+    result: List[str] = []
+    seen: set[str] = set()
+    i = 0
+    n = len(args)
+    while i < n:
+        arg = args[i]
+        if not arg.startswith("-"):
+            result.append(arg)
+            i += 1
+            continue
+
+        if "=" in arg:
+            key = arg
+            if key not in seen:
+                seen.add(key)
+                result.append(arg)
+            i += 1
+            continue
+
+        if arg in _VALUE_FLAGS and i + 1 < n:
+            value = args[i + 1]
+            key = f"{arg} {value}"
+            if key not in seen:
+                seen.add(key)
+                result.append(arg)
+                result.append(value)
+            i += 2
+            continue
+
+        if arg not in seen:
+            seen.add(arg)
+            result.append(arg)
+        i += 1
+
+    return result
 
 
 class SystemToolchainRouter:
@@ -126,7 +183,7 @@ class SystemToolchainRouter:
     ) -> List[str]:
         if toolchain in ("gcc", "clang", "c"):
             out = workspace_dir / f"lib{node_id}.so"
-            return [
+            cmd = [
                 cls._exec_path(toolchain) or toolchain,
                 "-shared",
                 "-fPIC",
@@ -135,9 +192,10 @@ class SystemToolchainRouter:
                 *source_files,
                 *compiler_flags,
             ]
+            return _deduplicate_command_args(cmd)
         if toolchain in ("clang++", "g++"):
             out = workspace_dir / f"lib{node_id}.so"
-            return [
+            cmd = [
                 cls._exec_path(toolchain) or toolchain,
                 "-shared",
                 "-fPIC",
@@ -147,10 +205,11 @@ class SystemToolchainRouter:
                 *source_files,
                 *compiler_flags,
             ]
+            return _deduplicate_command_args(cmd)
         if toolchain == "go":
             out = workspace_dir / f"{node_id}.so"
             src = source_files[0] if source_files else f"{node_id}.go"
-            return [
+            cmd = [
                 cls._exec_path("go") or "go",
                 "build",
                 "-buildmode=c-shared",
@@ -159,28 +218,35 @@ class SystemToolchainRouter:
                 src,
                 *compiler_flags,
             ]
+            return _deduplicate_command_args(cmd)
         if toolchain == "cmake":
             # CMake configure is the first step; the build step is handled in dispatch.
-            return [cls._exec_path("cmake") or "cmake", "-B", "build", "."]
+            return _deduplicate_command_args(
+                [cls._exec_path("cmake") or "cmake", "-B", "build", "."]
+            )
         if toolchain == "cargo":
-            return [
+            cmd = [
                 cls._exec_path("cargo") or "cargo",
                 "build",
                 "--release",
                 *compiler_flags,
             ]
+            return _deduplicate_command_args(cmd)
         if toolchain == "maturin":
-            return [
+            cmd = [
                 cls._exec_path("maturin") or "maturin",
                 "build",
                 "--release",
                 *compiler_flags,
             ]
+            return _deduplicate_command_args(cmd)
         if toolchain == "dotnet":
-            return [cls._exec_path("dotnet") or "dotnet", "build", *compiler_flags]
+            return _deduplicate_command_args(
+                [cls._exec_path("dotnet") or "dotnet", "build", *compiler_flags]
+            )
         if toolchain == "nvcc":
             out = workspace_dir / f"{node_id}.so"
-            return [
+            cmd = [
                 cls._exec_path("nvcc") or "nvcc",
                 "-shared",
                 "-o",
@@ -188,6 +254,7 @@ class SystemToolchainRouter:
                 *source_files,
                 *compiler_flags,
             ]
+            return _deduplicate_command_args(cmd)
         if toolchain == "zig":
             out = workspace_dir / f"lib{node_id}.so"
             zig = cls._exec_path("zig") or "zig"
@@ -219,7 +286,7 @@ class SystemToolchainRouter:
                         zig_flags.append("-mcpu=native")
                     else:
                         zig_flags.append(flag)
-                return [
+                cmd = [
                     zig,
                     "build-lib",
                     "-dynamic",
@@ -230,7 +297,8 @@ class SystemToolchainRouter:
                     *source_files,
                     *zig_flags,
                 ]
-            return [
+                return _deduplicate_command_args(cmd)
+            cmd = [
                 zig,
                 "cc",
                 "-shared",
@@ -239,12 +307,13 @@ class SystemToolchainRouter:
                 *source_files,
                 *compiler_flags,
             ]
+            return _deduplicate_command_args(cmd)
         if toolchain in ("python", "py", "cpython"):
             py = cls._exec_path("python3") or cls._exec_path("python") or "python3"
             target = source_files[0] if source_files else ""
             if not target:
-                return [py, "--version"]
-            return [py, "-m", "py_compile", target]
+                return _deduplicate_command_args([py, "--version"])
+            return _deduplicate_command_args([py, "-m", "py_compile", target])
         raise ValueError(f"unsupported toolchain: {toolchain}")
 
     @classmethod
@@ -275,6 +344,21 @@ class SystemToolchainRouter:
 
         source_files = list(node_spec.get("source_files", []))
         compiler_flags = list(node_spec.get("compiler_flags", []))
+
+        # Cargo/Maturin accept Cargo flags on the command line; rustc `-C` flags
+        # belong in RUSTFLAGS.  Split them so `-C opt-level=3` is not rejected.
+        env: Optional[Dict[str, str]] = None
+        if toolchain in ("cargo", "maturin"):
+            cargo_flags = [f for f in compiler_flags if not f.startswith("-C")]
+            rustc_flags = [f for f in compiler_flags if f.startswith("-C")]
+            if rustc_flags:
+                env = os.environ.copy()
+                env["RUSTFLAGS"] = " ".join(
+                    [os.environ.get("RUSTFLAGS", "")]
+                    + _deduplicate_command_args(rustc_flags)
+                ).strip()
+            compiler_flags = cargo_flags
+
         cmd = cls._build_command(
             toolchain, node_id, source_files, compiler_flags, Path(workspace_dir)
         )
@@ -283,6 +367,7 @@ class SystemToolchainRouter:
             result = subprocess.run(
                 cmd,
                 cwd=str(workspace_dir),
+                env=env,
                 capture_output=True,
                 text=True,
                 check=True,
