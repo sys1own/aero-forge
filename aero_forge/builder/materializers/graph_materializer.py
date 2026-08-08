@@ -279,11 +279,14 @@ class GraphPolyglotMaterializer:
         """Parse fenced code blocks with optional ``lang:path`` labels.
 
         Tolerates surrounding markdown headers, conversational summaries, and
-        inconsistent whitespace around the opening/closing fence tokens.
+        inconsistent whitespace around the opening/closing fence tokens. If no
+        blocks are found, the whole raw response is returned as a single
+        untyped artifact for downstream path assignment.
         """
         artifacts: List[CodeArtifact] = []
+        # Allow empty language token (e.g. bare ```) and optional path labels.
         pattern = re.compile(
-            r"```\s*(\w+)\s*(?::\s*([^\n\r]*?))?\s*\r?\n([\s\S]*?)\r?\n?\s*```",
+            r"```\s*(\w*)\s*(?::\s*([^\n\r]*?))?\s*\r?\n([\s\S]*?)\r?\n?\s*```",
             re.DOTALL | re.IGNORECASE,
         )
         for match in pattern.finditer(raw):
@@ -295,6 +298,14 @@ class GraphPolyglotMaterializer:
             artifacts.append(
                 CodeArtifact(file_path=file_path, content=content, language=lang)
             )
+        if not artifacts:
+            # Format-agnostic fallback: emit the entire stripped response so that
+            # the materializer can attempt path assignment and density validation.
+            stripped = raw.strip()
+            if stripped:
+                artifacts.append(
+                    CodeArtifact(file_path="", content=stripped, language="")
+                )
         return artifacts
 
     def _assign_artifact_paths(
@@ -493,11 +504,25 @@ class GraphPolyglotMaterializer:
                 )
             except Exception as exc:
                 last_exc = exc
+                _accel_log(
+                    "warning",
+                    f"Builder Code Emission Agent for {node_id}: LLM call failed; error: {exc}",
+                )
                 continue
-            if raw:
-                artifacts = self._extract_code_artifacts(raw)
-                if artifacts:
-                    return self._assign_artifact_paths(artifacts, node_id, node_spec)
+            if not raw:
+                _accel_log(
+                    "warning",
+                    f"Builder Code Emission Agent for {node_id}: LLM returned an empty response",
+                )
+                continue
+            artifacts = self._extract_code_artifacts(raw)
+            if artifacts:
+                return self._assign_artifact_paths(artifacts, node_id, node_spec)
+            _accel_log(
+                "warning",
+                f"Builder Code Emission Agent for {node_id}: could not extract code artifacts; "
+                f"raw preview: {raw[:800]!r}",
+            )
 
         _accel_log(
             "warning",

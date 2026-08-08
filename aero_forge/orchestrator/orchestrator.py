@@ -1371,14 +1371,27 @@ def _validate_blueprint_against_intent(
 
 
 def _strip_markdown_fences(text: str) -> str:
-    """Remove optional YAML/JSON code fences from an LLM response."""
+    """Remove optional YAML/JSON code fences from an LLM response.
+
+    Tolerates language/path labels (e.g. `` ```yaml:blueprint.aero ``) and
+    surrounding prose.
+    """
     text = text.strip()
-    if text.startswith("```"):
-        # Drop the opening fence line (e.g. ```yaml)
-        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+    text = re.sub(
+        r"^```\s*(?:\w+)?\s*(?::\s*[^\n\r]*)?\s*\r?\n",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"^```\s*(?:\w+)?\s*(?::\s*[^\n\r]*)?\s*$",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
     if text.endswith("```"):
         text = text[:-3].strip()
-    return text
+    return text.strip()
 
 
 def _parse_llm_blueprint(
@@ -1388,10 +1401,16 @@ def _parse_llm_blueprint(
 ) -> Optional[Blueprint]:
     """Parse a raw LLM YAML response into a ``Blueprint``."""
     if not raw:
+        _accel_log("warning", "orchestrator._llm_plan_blueprint: LLM returned an empty response")
         return None
     try:
-        data = yaml.safe_load(_strip_markdown_fences(raw))
+        cleaned = _strip_markdown_fences(raw)
+        data = yaml.safe_load(cleaned)
         if not isinstance(data, dict):
+            _accel_log(
+                "warning",
+                f"orchestrator._llm_plan_blueprint: parsed YAML did not produce a dict; raw preview: {raw[:800]!r}",
+            )
             return None
         if "llm" in data and isinstance(data["llm"], dict):
             data["llm"] = LLMConfig.model_validate(data["llm"])
@@ -1399,6 +1418,11 @@ def _parse_llm_blueprint(
             data["llm"] = LLMConfig(provider=llm_provider, model=model)
         return Blueprint.model_validate(data)
     except Exception as exc:
+        _accel_log(
+            "warning",
+            f"orchestrator._llm_plan_blueprint: failed to parse LLM blueprint response; "
+            f"raw preview: {raw[:800]!r}; error: {exc}",
+        )
         logger.warning("Failed to parse LLM blueprint response: %s", exc)
         return None
 

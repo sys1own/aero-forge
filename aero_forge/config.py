@@ -115,6 +115,8 @@ class ConfigOverride:
     max_retries: Optional[int] = None
     cache_enabled: Optional[bool] = None
     max_iterations: Optional[int] = None
+    max_tokens: Optional[int] = None
+    reduced_context: Optional[bool] = None
     compiler_flags: Optional[List[str]] = field(default_factory=list)
     target: Optional[str] = None
 
@@ -141,8 +143,10 @@ DEFAULTS: Dict[str, Any] = {
     "MODEL": None,
     "API_KEY": None,
     "MAX_RETRIES": 3,
+    "MAX_TOKENS": 4096,
     "CACHE_ENABLED": True,
     "MAX_ITERATIONS": 5,
+    "REDUCED_CONTEXT": False,
     "COMPILER_FLAGS": [],
     "TARGET": None,
 }
@@ -439,6 +443,12 @@ def resolve_settings(
     env_max_iter = _env_int("AERO_FORGE_MAX_ITERATIONS")
     if env_max_iter is not None:
         settings["MAX_ITERATIONS"] = env_max_iter
+    env_max_tokens = _env_int("AERO_FORGE_MAX_TOKENS")
+    if env_max_tokens is not None:
+        settings["MAX_TOKENS"] = env_max_tokens
+    env_reduced = _env_bool("AERO_FORGE_REDUCED_CONTEXT")
+    if env_reduced is not None:
+        settings["REDUCED_CONTEXT"] = env_reduced
 
     # Backward compat: AERO_FORGE_USE_LLM=false forces provider to none.
     env_use_llm = _env_bool("AERO_FORGE_USE_LLM")

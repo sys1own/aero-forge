@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import json
 import logging
 import os
 import re
@@ -39,6 +40,18 @@ from aero_forge.algorithms import (
 )
 
 logger = logging.getLogger("aero_forge.generate")
+
+
+def _accel_log(level: str, message: str) -> None:
+    """Append a structured line to the per-session accelerator log if set."""
+    log_path = os.environ.get("AERO_FORGE_ACCEL_LOG")
+    if not log_path:
+        return
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"level": level, "message": message}, default=str) + "\n")
+    except Exception:
+        pass
 
 
 CODE_FENCE_RE = re.compile(
@@ -370,6 +383,15 @@ def extract_code_blocks(text: str) -> List[Tuple[Optional[str], str]]:
         code = match.group(2).strip("\n")
         if code:
             blocks.append((lang, code))
+
+    # Format-agnostic fallback: if the whole response looks like source code,
+    # surface it as a single untyped block so callers can still parse it.
+    if not blocks:
+        stripped = text.strip()
+        if stripped and any(
+            stripped.startswith(prefix) for prefix in ("import ", "from ", "def ", "class ")
+        ):
+            blocks.append((None, stripped))
     return blocks
 
 
@@ -391,6 +413,7 @@ def parse_generated_response(text: str) -> Tuple[str, str]:
         # No markdown fences; extract plain ``def`` functions from raw text.
         impl, tests = _extract_functions_from_text(text)
         if not impl:
+            _accel_log("warning", "generate: no code blocks or function definitions found in LLM response")
             raise GenerationError("No code blocks or function definitions found in LLM response")
         return impl, tests
 
@@ -436,24 +459,53 @@ def extract_explanation(text: str) -> str:
 
 
 def _extract_functions_from_text(text: str) -> Tuple[str, str]:
-    """Extract the first implementation and any test functions from raw text."""
+    """Extract the first implementation and any test functions from raw text.
+
+    Fallback strategies:
+    1. Lines that start a new ``def`` block.
+    2. Any structural keyword (``import``, ``from``, ``class``, ``def``) marking
+       the start of a Python module, extracting through the end of the text.
+    3. The entire stripped text if nothing else is found.
+    """
     lines = text.splitlines()
     boundaries: List[int] = []
     for i, line in enumerate(lines):
-        if line.startswith("def "):
+        stripped = line.strip()
+        if stripped.startswith("def "):
             boundaries.append(i)
-    if not boundaries:
-        return "", ""
-    blocks: List[str] = []
-    for idx, start in enumerate(boundaries):
-        end = boundaries[idx + 1] if idx + 1 < len(boundaries) else len(lines)
-        blocks.append("\n".join(lines[start:end]).strip())
-    impl_blocks = [b for b in blocks if not b.startswith("def test_")]
-    test_blocks = [b for b in blocks if b.startswith("def test_")]
-    impl = impl_blocks[0] if impl_blocks else blocks[0]
-    # Auto-generate a minimal test if none were provided.
-    tests = "\n\n".join(test_blocks) if test_blocks else ""
-    return impl, tests
+    if boundaries:
+        blocks: List[str] = []
+        for idx, start in enumerate(boundaries):
+            end = boundaries[idx + 1] if idx + 1 < len(boundaries) else len(lines)
+            blocks.append("\n".join(lines[start:end]).strip())
+        impl_blocks = [b for b in blocks if not b.startswith("def test_")]
+        test_blocks = [b for b in blocks if b.startswith("def test_")]
+        impl = impl_blocks[0] if impl_blocks else blocks[0]
+        tests = "\n\n".join(test_blocks) if test_blocks else ""
+        return impl, tests
+
+    # No function boundaries: scan for the first structural keyword and try to
+    # parse the snippet; otherwise return the whole text only if it parses.
+    start = -1
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith(("import ", "from ", "class ", "def ")):
+            start = i
+            break
+    if start == -1:
+        try:
+            ast.parse(text)
+            return text.strip(), ""
+        except SyntaxError:
+            return "", ""
+    for end in range(len(lines), start, -1):
+        snippet = "\n".join(lines[start:end])
+        try:
+            ast.parse(snippet)
+            return snippet.strip(), ""
+        except SyntaxError:
+            continue
+    return text.strip(), ""
 
 
 def _skeleton_for_prompt(prompt: str, selected: Optional[Algorithm] = None) -> str:
@@ -488,6 +540,88 @@ def _skeleton_for_prompt(prompt: str, selected: Optional[Algorithm] = None) -> s
         f"    pass\n"
         f"```"
     )
+
+
+def _has_min_functional_nodes(source: str, min_nodes: int = 3) -> bool:
+    """Return True when *source* contains at least ``min_nodes`` functional AST nodes.
+
+    Imports, ``pass`` statements, and module-level docstrings are ignored. This
+    catches hollow responses that contain only imports/comments or a bare stub.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return False
+    count = 0
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom, ast.Pass)):
+            continue
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            continue
+        if isinstance(
+            node,
+            (
+                ast.FunctionDef,
+                ast.ClassDef,
+                ast.For,
+                ast.While,
+                ast.If,
+                ast.Try,
+                ast.With,
+                ast.Assign,
+                ast.AugAssign,
+                ast.AnnAssign,
+                ast.Return,
+                ast.Raise,
+                ast.Assert,
+                ast.Call,
+                ast.ListComp,
+                ast.DictComp,
+                ast.SetComp,
+                ast.Dict,
+                ast.Set,
+                ast.Subscript,
+                ast.BinOp,
+                ast.UnaryOp,
+                ast.BoolOp,
+                ast.Compare,
+            ),
+        ):
+            count += 1
+        if count >= min_nodes:
+            return True
+    return False
+
+
+def _extract_first_python_code(text: str) -> str:
+    """Return the first plausible Python source block from an LLM response."""
+    blocks = extract_code_blocks(text)
+    for lang, code in blocks:
+        if lang in (None, "python", "py"):
+            return code
+    if blocks:
+        return blocks[0][1]
+    impl, _ = _extract_functions_from_text(text)
+    return impl or text
+
+
+def _reduced_context_user_prompt(
+    prompt: str,
+    constraints: Optional[str],
+    selected: Optional[Algorithm],
+) -> str:
+    """Return a compact user prompt for the content-density fallback retry."""
+    user_prompt = _build_user_prompt(prompt, constraints, algorithm_context="")
+    if selected:
+        user_prompt += (
+            f"\nAlgorithm hint: {selected.name}. "
+            "Implement the function directly; do not include explanation."
+        )
+    return user_prompt
 
 
 def generate_from_prompt(
@@ -564,13 +698,18 @@ def generate_from_prompt(
             "the algorithm choice, complexity, and tradeoffs."
         )
 
+    from aero_forge.config import resolve_settings
+
+    settings = resolve_settings(override=config_override)
     if max_tokens is None:
-        max_tokens = int(os.getenv("AERO_FORGE_MAX_TOKENS", "4096"))
+        max_tokens = int(settings.get("MAX_TOKENS", os.getenv("AERO_FORGE_MAX_TOKENS", "4096")))
+    reduced_context = bool(settings.get("REDUCED_CONTEXT", False))
 
     v11_template = get_template("v11_universal_architect")
     skeleton_note = _skeleton_for_prompt(prompt, selected)
 
-    attempts: List[Tuple[List[Dict[str, str]], int, float]] = [
+    # Initial attempts. The second attempt uses the v11 template with a skeleton.
+    attempts: List[Tuple[List[Dict[str, str]], int, float, str]] = [
         (
             [
                 {"role": "system", "content": template.system_prompt},
@@ -578,6 +717,7 @@ def generate_from_prompt(
             ],
             max_tokens,
             0.2,
+            "default_template",
         ),
         (
             [
@@ -586,18 +726,59 @@ def generate_from_prompt(
             ],
             max(max_tokens, 8192),
             0.1,
+            "v11_skeleton",
         ),
     ]
 
-    for idx, (messages, tokens, temperature) in enumerate(attempts):
+    for idx, (messages, tokens, temperature, label) in enumerate(attempts):
         if idx > 0:
             logger.warning(
-                "generate_from_prompt: empty response on first attempt; "
+                "generate_from_prompt: empty/low-density response on first attempt; "
                 "retrying with v11_universal_architect template and skeleton"
             )
         response = client.generate(messages, temperature=temperature, max_tokens=tokens)
-        if response:
+        if not response:
+            _accel_log("warning", f"generate_from_prompt ({label}): LLM returned an empty response")
+            continue
+        first_code = _extract_first_python_code(response)
+        if _has_min_functional_nodes(first_code):
             return response
+        _accel_log(
+            "warning",
+            f"generate_from_prompt ({label}): response parsed but has fewer than 3 functional AST nodes; "
+            f"raw preview: {response[:500]!r}",
+        )
+        logger.warning(
+            "generate_from_prompt (%s): response parsed but has fewer than 3 functional AST nodes",
+            label,
+        )
+
+    # Deterministic reduced-context retry: strip algorithm context and explanation
+    # requests to save tokens and force code output.
+    if reduced_context or True:
+        reduced_note = (
+            "\n\nREDUCED CONTEXT: Do not include explanation, algorithm discussion, or "
+            "markdown headers. Return only the complete implementation inside a single "
+            "```python block using the skeleton above."
+        )
+        reduced_user = _reduced_context_user_prompt(prompt, constraints, selected)
+        messages = [
+            {"role": "system", "content": v11_template.system_prompt},
+            {"role": "user", "content": reduced_user + skeleton_note + reduced_note},
+        ]
+        _accel_log("info", "generate_from_prompt: reduced-context fallback retry")
+        response = client.generate(messages, temperature=0.1, max_tokens=max(max_tokens, 4096))
+        if not response:
+            _accel_log("warning", "generate_from_prompt (reduced): LLM returned an empty response")
+        else:
+            first_code = _extract_first_python_code(response)
+            if _has_min_functional_nodes(first_code):
+                return response
+            _accel_log(
+                "warning",
+                f"generate_from_prompt (reduced): response parsed but has fewer than 3 functional AST nodes; "
+                f"raw preview: {response[:500]!r}",
+            )
 
     raise GenerationError("LLM returned an empty response after retry")
 
