@@ -27,7 +27,10 @@ You will receive:
   `target`.
 
 OUTPUT RULES
-1. Return ONLY source code inside well-labeled Markdown fences. Each fence
+1. The user JSON contains a `skeleton` field with a language-appropriate function
+   signature. Use it as the starting shape: keep the function name, parameters, and
+   decorators, but replace the placeholder body with a real implementation.
+2. Return ONLY source code inside well-labeled Markdown fences. Each fence
    MUST be labeled with the target file path using the form:
    ```<lang>:<relative/path>
    ...
@@ -36,11 +39,11 @@ OUTPUT RULES
    ```cpp:cpp_engine/src/kernels.cpp
    // ...
    ```
-2. Do NOT include explanations, TODOs, or placeholder stubs (no "// TODO",
+3. Do NOT include explanations, TODOs, or placeholder stubs (no "// TODO",
    no `pass`, no `todo!()`). The generated code must compile with the stated
    toolchain on the first pass and must implement a real baseline for every
    requested symbol.
-3. Generate every file listed in `node.source_files`, including headers and
+4. Generate every file listed in `node.source_files`, including headers and
    the build manifest (Cargo.toml, CMakeLists.txt, pyproject.toml, go.mod,
    .csproj, build.gradle, etc.). Manifest fences use their language label
    (e.g. `toml`, `xml`) and the exact manifest path (e.g. `Cargo.toml`).
@@ -96,6 +99,59 @@ MANIFEST RULES
 """
 
 
+def _build_skeleton(node: Dict[str, Any], contracts: List[Dict[str, Any]]) -> str:
+    """Return a language-appropriate function skeleton for the node."""
+    lang = (node.get("lang") or node.get("language") or "python").lower()
+    node_id = node.get("node_id", "module")
+    symbol = node_id
+    args: List[str] = []
+    return_type = ""
+    if contracts:
+        contract = contracts[0]
+        symbol = contract.get("symbol", node_id)
+        args = list(contract.get("args") or [])
+        return_type = contract.get("return_type", "")
+
+    def _py_type(a: str) -> str:
+        return {"int64": "int", "float64": "float", "pointer": "list"}.get(a, "Any")
+
+    def _rust_type(a: str) -> str:
+        return {"int64": "i64", "float64": "f64", "pointer": "*const f64"}.get(a, "i64")
+
+    def _cpp_type(a: str) -> str:
+        return {"int64": "int64_t", "float64": "double", "pointer": "const double*"}.get(a, "int64_t")
+
+    def _go_type(a: str) -> str:
+        return {"int64": "C.int64_t", "float64": "C.double", "pointer": "unsafe.Pointer"}.get(a, "C.int64_t")
+
+    arg_names = [f"arg{i}" for i in range(len(args))]
+    if lang in ("python", "py"):
+        arg_str = ", ".join(
+            f"{n}: {_py_type(a)}" for n, a in zip(arg_names, args)
+        ) or "*args"
+        ret = f" -> {_py_type(return_type)}" if return_type else ""
+        return f"def {symbol}({arg_str}){ret}:\n    \"\"\"Implement {symbol}.\"\"\"\n    pass"
+    if lang in ("rust", "rs"):
+        arg_str = ", ".join(
+            f"{n}: {_rust_type(a)}" for n, a in zip(arg_names, args)
+        ) or ""
+        ret = f" -> {_rust_type(return_type)}" if return_type else ""
+        return f"#[no_mangle]\npub extern \"C\" fn {symbol}({arg_str}){ret} {{\n    // implementation\n}}"
+    if lang in ("cpp", "c++", "cxx"):
+        arg_str = ", ".join(
+            f"{_cpp_type(a)} {n}" for n, a in zip(arg_names, args)
+        ) or "void"
+        ret = _cpp_type(return_type) if return_type else "void"
+        return f'extern "C" {ret} {symbol}({arg_str}) {{\n    // implementation\n}}'
+    if lang in ("go", "golang"):
+        arg_str = ", ".join(
+            f"{n} {_go_type(a)}" for n, a in zip(arg_names, args)
+        ) or ""
+        ret = _go_type(return_type) if return_type else ""
+        return f"//export {symbol}\nfunc {symbol}({arg_str}) {ret} {{\n    // implementation\n}}"
+    return f"// Implement {symbol} for {lang}\n"
+
+
 def format_builder_emitter_user_prompt(
     node: Dict[str, Any],
     boundary_contracts: Optional[List[Dict[str, Any]]] = None,
@@ -103,12 +159,17 @@ def format_builder_emitter_user_prompt(
     """Return a user prompt that feeds a node spec into the Builder Emission Agent."""
     import json
 
+    contracts = boundary_contracts or []
+    skeleton = _build_skeleton(node, contracts)
     payload = {
         "node": node,
-        "boundary_contracts": boundary_contracts or [],
+        "boundary_contracts": contracts,
+        "skeleton": skeleton,
     }
     return (
         "Generate source and manifest for the following graph node. "
-        "Return code in fenced Markdown blocks only.\n\n"
+        "Return code in fenced Markdown blocks only. Use the `skeleton` field "
+        "as the starting function signature and replace the placeholder body with a "
+        "real implementation. Do not return an empty response or prose.\n\n"
         f"```json\n{json.dumps(payload, indent=2)}\n```"
     )

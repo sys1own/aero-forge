@@ -448,6 +448,7 @@ class RustGenerator:
         arg_names, arg_types = self._strip_self_params(arg_names, arg_types)
         self.arg_names = arg_names
         self.arg_types = arg_types
+        self.arg_defaults = self._extract_positional_defaults(func, arg_names)
 
         annotated_return = _annotation_to_rust_type(func.returns, self.class_names)
         # Generic annotations such as ``list`` or ``List`` produce ``Vec<?>``.
@@ -1213,6 +1214,28 @@ class RustGenerator:
                 return "Vec<?>"
             return f"Vec<{self._type_of(expr.elts[0])}>"
         if isinstance(expr, ast.ListComp):
+            # Infer the element type by temporarily typing the loop variable(s)
+            # from the iterable, then resolving the comprehension's expression.
+            if len(expr.generators) == 1:
+                gen = expr.generators[0]
+                iter_type = self._type_of(gen.iter)
+                if iter_type.startswith("Vec<"):
+                    var_type = _element_type(iter_type)
+                    old_types: Dict[str, Optional[str]] = {}
+                    if isinstance(gen.target, ast.Name):
+                        old_types[gen.target.id] = self.type_env.get(gen.target.id)
+                        self.type_env[gen.target.id] = var_type
+                    elif isinstance(gen.target, ast.Tuple):
+                        # tuple unpacking is only supported for enumerate/zip in the emitter.
+                        pass
+                    try:
+                        return f"Vec<{self._type_of(expr.elt)}>"
+                    finally:
+                        for name, old in old_types.items():
+                            if old is None:
+                                self.type_env.pop(name, None)
+                            else:
+                                self.type_env[name] = old
             return f"Vec<{self._type_of(expr.elt)}>"
         if isinstance(expr, ast.Tuple):
             elts = [self._type_of(e) for e in expr.elts]
@@ -1386,6 +1409,34 @@ class RustGenerator:
             if name not in ("self", "cls")
         ]
         return [n for n, _ in filtered], [t for _, t in filtered]
+
+    @staticmethod
+    def _extract_positional_defaults(
+        func: ast.FunctionDef, arg_names: List[str]
+    ) -> List[Optional[str]]:
+        """Return a Rust-literal default for each positional argument, if any.
+
+        Only numeric defaults are preserved because PyO3's ``signature``
+        attribute accepts Rust numeric literals. Other defaults are dropped,
+        which leaves the parameter required in the generated extension.
+        """
+        defaults: List[Optional[str]] = [None] * len(arg_names)
+        raw = func.args.defaults
+        if not raw:
+            return defaults
+        # ``raw`` lines up with the last ``len(raw)`` positional arguments.
+        for offset, node in enumerate(raw):
+            idx = len(arg_names) - len(raw) + offset
+            if idx < 0:
+                continue
+            if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+                defaults[idx] = repr(node.value)
+            elif isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+                if isinstance(node.operand, ast.Constant) and isinstance(
+                    node.operand.value, (int, float)
+                ):
+                    defaults[idx] = f"-{repr(node.operand.value)}"
+        return defaults
 
     def _collect_assigned(self) -> set[str]:
         names: set[str] = set()
@@ -1875,9 +1926,16 @@ class RustGenerator:
         if self.target_mode == TargetMode.C_ABI:
             header = f"{allow_unused}fn {self.rust_function_name}({args}) -> {return_type} {{"
         else:
+            signature_attr = ""
+            if any(d is not None for d in getattr(self, "arg_defaults", [])):
+                sig_parts = [
+                    f"{name} = {default}" if default is not None else name
+                    for name, default in zip(self.arg_names, self.arg_defaults)
+                ]
+                signature_attr = f', signature = ({", ".join(sig_parts)})'
             header = (
                 f"{allow_unused}"
-                f'#[pyfunction(name = "{self.orig_name}")]\n'
+                f'#[pyfunction(name = "{self.orig_name}"{signature_attr})]\n'
                 f"fn {self.rust_function_name}({args}) -> {return_type} {{"
             )
 
