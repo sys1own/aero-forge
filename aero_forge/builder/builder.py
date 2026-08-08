@@ -310,6 +310,24 @@ class ProactivePolyglotBuilder:
                 f"ProactivePolyglotBuilder could not compile prompt to graph: {last_error}"
             ) from last_error
 
+        # Build a compacted functional matrix so downstream synthesis is concise
+        # and deterministic. The context is attached to the graph metadata so the
+        # materializer can inject it into emitter plugin synthesis.
+        from aero_forge.builder.smt_engine import SkeletonTypeInjector
+        from aero_forge.orchestrator.orchestrator import CompactedContextGenerator
+
+        compacted = CompactedContextGenerator(graph).generate()
+        graph.metadata.setdefault("synthesis_context", "")
+        graph.metadata["synthesis_context"] = compacted
+
+        # Seed any SMT-inferred native types from the original prompt skeleton if
+        # the user provided a Python implementation stub.
+        if prompt:
+            type_env = SkeletonTypeInjector.infer_type_env(prompt)
+            if type_env:
+                graph.metadata.setdefault("smt_types", {})
+                graph.metadata["smt_types"].update(type_env)
+
         materializer = GraphPolyglotMaterializer(
             output_dir,
             llm_provider=provider,
