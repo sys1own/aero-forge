@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 from dataclasses import dataclass, field
@@ -202,6 +203,32 @@ class ProactivePolyglotBuilder:
             "designing the blueprint:\n" + template.system_prompt
         )
 
+    @staticmethod
+    def _graph_prompt_skeleton(prompt: str) -> str:
+        """Return a response skeleton so the LLM starts the blueprint immediately."""
+        skeleton = {
+            "project": "generated_project",
+            "architecture": "pure_python",
+            "primary_entrypoint": "main.py",
+            "build_script": "build.sh",
+            "nodes": [
+                {
+                    "node_id": "main",
+                    "lang": "python",
+                    "toolchain": "python",
+                    "source_files": ["main.py"],
+                    "exports": ["main"],
+                }
+            ],
+            "edges": [],
+            "metadata": {},
+        }
+        return (
+            "\n\nStart your response from this JSON skeleton and complete only the missing values:\n"
+            f"{json.dumps(skeleton, indent=2)}\n"
+            "\nDo not return prose outside the final JSON."
+        )
+
     def synthesize_and_build(
         self,
         prompt: str,
@@ -249,6 +276,7 @@ class ProactivePolyglotBuilder:
 
         last_error: Optional[Exception] = None
         graph = None
+        skeleton_note = self._graph_prompt_skeleton(prompt)
         for attempt, extra in enumerate(
             [
                 "",
@@ -264,7 +292,10 @@ class ProactivePolyglotBuilder:
                     "Retrying graph intent synthesis with v11 universal architect guidance"
                 )
             try:
-                text = prompt if not extra else f"{prompt}\n\n{extra}"
+                if extra:
+                    text = f"{prompt}\n\n{extra}\n{skeleton_note}"
+                else:
+                    text = f"{prompt}\n\n{skeleton_note}"
                 graph = compiler.compile_prompt_to_graph(
                     text, output_dir=output_dir
                 )

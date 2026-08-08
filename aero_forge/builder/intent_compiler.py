@@ -2,7 +2,9 @@
 
 import json
 import logging
+import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -28,6 +30,19 @@ from aero_forge.config import Tier
 from aero_forge.llm.clients import get_llm_client
 
 logger = logging.getLogger("aero_forge.intent")
+
+
+def _accel_log(level: str, message: str) -> None:
+    """Append a structured line to the per-session accelerator log if set."""
+    log_path = os.environ.get("AERO_FORGE_ACCEL_LOG")
+    if not log_path:
+        return
+    try:
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f'{timestamp} [{level}] {message}\n')
+    except Exception:
+        pass
 
 
 class IntentCompilerError(Exception):
@@ -93,13 +108,50 @@ Example JSON shape:
 
 
 def _strip_markdown_fences(text: str) -> str:
-    """Remove optional JSON/YAML code fences from an LLM response."""
+    """Remove optional JSON/YAML code fences from an LLM response.
+
+    Tolerates language/path labels (e.g. `` ```json:plan.json ``) and surrounding
+    prose by only stripping the first and last fence tokens.
+    """
     text = text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+    # Strip opening fence with optional language/path label.
+    text = re.sub(r"^```\s*(?:\w+)?\s*(?::\s*[^\n\r]*)?\s*\r?\n", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^```\s*(?:\w+)?\s*(?::\s*[^\n\r]*)?\s*$", "", text, flags=re.IGNORECASE)
+    # Strip trailing fence.
     if text.endswith("```"):
         text = text[:-3].strip()
-    return text
+    return text.strip()
+
+
+def _find_balanced_json(text: str) -> Optional[str]:
+    """Return the first balanced JSON object literal found in *text*."""
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        in_string = False
+        escape = False
+        for i, ch in enumerate(text[start:], start=start):
+            if in_string:
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    escape = True
+                    continue
+                if ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+        break
+    return None
 
 
 def _extract_json(raw: str) -> Any:
@@ -110,10 +162,10 @@ def _extract_json(raw: str) -> Any:
     except json.JSONDecodeError:
         pass
     # Try to locate the first balanced JSON object.
-    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-    if match:
+    balanced = _find_balanced_json(cleaned)
+    if balanced:
         try:
-            return json.loads(match.group(0))
+            return json.loads(balanced)
         except json.JSONDecodeError:
             pass
     # YAML is more tolerant of trailing commas and unquoted strings.
@@ -458,6 +510,7 @@ class IntentCompiler:
         for attempt in range(self.max_schema_retries):
             raw = client.generate(messages, temperature=0.2, max_tokens=4096)
             if not raw:
+                _accel_log("warning", f"intent_compiler.compile_prompt attempt {attempt + 1}: LLM returned an empty response")
                 last_error = IntentCompilerError("LLM returned an empty response")
                 messages.append({"role": "assistant", "content": ""})
                 messages.append(
@@ -471,6 +524,11 @@ class IntentCompiler:
                 v2 = BlueprintSchemaV2.model_validate(data)
             except (JsonSchemaValidationError, Exception) as exc:
                 last_error = exc
+                _accel_log(
+                    "warning",
+                    f"intent_compiler.compile_prompt attempt {attempt + 1}: schema validation failed; "
+                    f"raw preview: {raw[:800]!r}; error: {exc}",
+                )
                 logger.warning("Intent JSON schema validation failed (attempt %d): %s", attempt + 1, exc)
                 messages.append({"role": "assistant", "content": raw})
                 messages.append(
@@ -627,6 +685,7 @@ class IntentCompiler:
         for attempt in range(self.max_schema_retries):
             raw = client.generate(messages, temperature=0.2, max_tokens=4096)
             if not raw:
+                _accel_log("warning", f"intent_compiler.compile_prompt_to_graph attempt {attempt + 1}: LLM returned an empty response")
                 last_error = IntentCompilerError("LLM returned an empty response")
                 messages.append({"role": "assistant", "content": ""})
                 messages.append(
@@ -638,6 +697,11 @@ class IntentCompiler:
                 data = _extract_json(raw)
             except Exception as exc:
                 last_error = exc
+                _accel_log(
+                    "warning",
+                    f"intent_compiler.compile_prompt_to_graph attempt {attempt + 1}: JSON extraction failed; "
+                    f"raw preview: {raw[:800]!r}; error: {exc}",
+                )
                 logger.warning("Intent JSON extraction failed (attempt %d): %s", attempt + 1, exc)
                 messages.append({"role": "assistant", "content": raw})
                 messages.append(
@@ -665,6 +729,11 @@ class IntentCompiler:
                 v2 = BlueprintSchemaV2.model_validate(normalized)
             except Exception as exc:
                 last_error = exc
+                _accel_log(
+                    "warning",
+                    f"intent_compiler.compile_prompt_to_graph attempt {attempt + 1}: schema validation failed; "
+                    f"raw preview: {raw[:800]!r}; error: {exc}",
+                )
                 logger.warning("Intent schema validation failed (attempt %d): %s", attempt + 1, exc)
                 messages.append({"role": "assistant", "content": raw})
                 messages.append(

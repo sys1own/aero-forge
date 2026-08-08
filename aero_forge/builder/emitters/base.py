@@ -935,10 +935,17 @@ class EmitterRegistry:
             _accel_log("success", f"JIT-synthesized {language_id} emitter plugin")
             return plugin
 
-        _accel_log(
-            "warning",
-            f"JIT synthesis for {language_id} produced empty/malformed output; retrying once",
-        )
+        if not raw:
+            _accel_log(
+                "warning",
+                f"JIT synthesis for {language_id}: LLM returned an empty response",
+            )
+        else:
+            _accel_log(
+                "warning",
+                f"JIT synthesis for {language_id}: first attempt produced empty/malformed output; "
+                f"raw preview: {raw[:800]!r}",
+            )
         logger.warning(
             "LLM synthesis for %s returned empty/malformed/invalid output; retrying once",
             language_id,
@@ -962,6 +969,17 @@ class EmitterRegistry:
             )
             return plugin
 
+        if not raw:
+            _accel_log(
+                "warning",
+                f"JIT synthesis for {language_id}: retry also returned an empty response",
+            )
+        else:
+            _accel_log(
+                "warning",
+                f"JIT synthesis for {language_id}: retry produced empty/malformed output; "
+                f"raw preview: {raw[:800]!r}",
+            )
         _accel_log(
             "warning",
             f"JIT synthesis for {language_id} failed twice; using deterministic C-ABI fallback emitter",
@@ -980,14 +998,25 @@ class EmitterRegistry:
     ) -> Optional[PolyglotEmitterPlugin]:
         """Extract and validate a plugin from an LLM response, returning None on failure."""
         if not raw:
+            _accel_log("warning", f"JIT synthesis for {language_id}: raw response is empty")
             return None
         code = self._extract_python_code(raw)
         if not code:
+            _accel_log(
+                "warning",
+                f"JIT synthesis for {language_id}: could not extract Python code from raw response; "
+                f"raw preview: {raw[:800]!r}",
+            )
             return None
         code = self._strip_redefined_helpers(code)
         try:
             return self._load_and_validate_plugin(code, language_id, boundary_type)
         except Exception as exc:
+            _accel_log(
+                "warning",
+                f"JIT synthesis for {language_id}: extracted code failed validation; "
+                f"raw preview: {raw[:800]!r}; error: {exc}",
+            )
             logger.warning(
                 "Generated plugin for %s failed validation: %s",
                 language_id,
@@ -1114,29 +1143,41 @@ class EmitterRegistry:
 
     @staticmethod
     def _extract_python_code(raw: str) -> str:
-        """Extract Python source from a fenced code block or conversational text."""
+        """Extract Python source from a fenced code block or conversational text.
+
+        Strategies (tried in order):
+        1. Markdown code fences (with or without language tag).
+        2. First-to-last structural keyword (``import``/``from``/``class``/``def``).
+        3. The entire stripped response if it parses as Python.
+        """
         if not raw:
             return ""
-        # Prefer explicitly-tagged python fences, then any fence.  The regex
-        # tolerates optional language/path labels and prose surrounding the fence.
-        fenced = re.findall(
-            r"```\s*(?:python|py)?\s*(?::\s*[^\n\r]*?)?\s*\r?\n([\s\S]*?)\r?\n?\s*```",
+        # 1. Fenced blocks: prefer an explicitly python-tagged block, then any
+        # block that contains a class/def/import.
+        all_fenced = re.findall(
+            r"```\s*(\w*)\s*(?::\s*[^\n\r]*?)?\s*\r?\n([\s\S]*?)\r?\n?\s*```",
             raw,
             re.DOTALL | re.IGNORECASE,
         )
-        if not fenced:
-            fenced = re.findall(
-                r"```\s*(?:\w+)?\s*(?::\s*[^\n\r]*?)?\s*\r?\n([\s\S]*?)\r?\n?\s*```",
-                raw,
-                re.DOTALL | re.IGNORECASE,
-            )
-        if fenced:
-            # Prefer the first Python-tagged fence, otherwise the first fence.
-            return fenced[0].strip()
+        python_fenced = [
+            code for lang, code in all_fenced if lang.lower() in ("python", "py")
+        ]
+        if python_fenced:
+            return python_fenced[0].strip()
+        for _, code in all_fenced:
+            stripped = code.strip()
+            if any(
+                stripped.startswith(prefix)
+                for prefix in ("import ", "from ", "class ", "def ")
+            ):
+                return stripped
+        if all_fenced:
+            return all_fenced[0][1].strip()
 
-        # No fences: attempt to locate a parseable Python snippet.
-        raw = raw.strip()
-        lines = raw.splitlines()
+        # 2. No fences: locate the first structural keyword and shrink from the
+        # end until the result parses.
+        text = raw.strip()
+        lines = text.splitlines()
         start = 0
         for i, line in enumerate(lines):
             stripped = line.strip()
@@ -1150,6 +1191,13 @@ class EmitterRegistry:
                 return snippet.strip()
             except SyntaxError:
                 continue
+
+        # 3. Entire response if it is already valid Python.
+        try:
+            ast.parse(text)
+            return text
+        except SyntaxError:
+            pass
         return raw
 
     @staticmethod
