@@ -1127,13 +1127,16 @@ def generate_and_build(
         # bridge should be routed through the graph materializer, which can
         # JIT-synthesize the required emitter plugin and validate boundaries.
         output_dir.mkdir(parents=True, exist_ok=True)
+        override_key = getattr(config_override, "api_key", None) if config_override else None
         return ProactivePolyglotBuilder().synthesize_and_build(
             prompt,
             output_dir,
             llm_provider=llm_provider,
             llm_model=model,
+            llm_api_key=override_key,
             prompt_template=prompt_template,
             max_retries=max_retries,
+            config_override=config_override,
         )
 
     if variants > 1:
@@ -1210,13 +1213,16 @@ def generate_and_build(
         # the prompt is likely a project-level polyglot request.  Route it through
         # the proactive graph builder, which JIT-synthesizes missing emitter plugins.
         if "empty" in str(exc).lower() or "malformed" in str(exc).lower():
+            override_key = getattr(config_override, "api_key", None) if config_override else None
             return ProactivePolyglotBuilder().synthesize_and_build(
                 prompt,
                 output_dir,
                 llm_provider=llm_provider,
                 llm_model=model,
+                llm_api_key=override_key,
                 prompt_template=prompt_template,
                 max_retries=max_retries,
+                config_override=config_override,
             )
         raise
 

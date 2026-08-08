@@ -105,10 +105,16 @@ class ConfigOverride:
     target: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        """Return a uppercase-keyed settings dict suitable for ``resolve_settings``."""
+        """Return a uppercase-keyed settings dict suitable for ``resolve_settings``.
+
+        Empty strings and empty lists are treated as "not set" so they do not
+        shadow environment variables or file-level defaults.
+        """
         result: Dict[str, Any] = {}
         for key, value in asdict(self).items():
             if value is None:
+                continue
+            if isinstance(value, str) and value.strip() == "":
                 continue
             if key == "compiler_flags" and not value:
                 continue
@@ -350,12 +356,29 @@ def override(
         _tls.override_stack.pop()
 
 
+def _coalesce_str(value: Any) -> Optional[str]:
+    """Treat empty/whitespace-only strings as ``None``."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip() == "":
+        return None
+    return value
+
+
 def resolve_settings(
     file_config: Optional[Dict[str, Any]] = None,
     override: Optional[ConfigOverride] = None,
     **overrides: Any,
 ) -> Dict[str, Any]:
-    """Merge defaults, file config, environment variables, and explicit overrides."""
+    """Merge defaults, file config, environment variables, and explicit overrides.
+
+    Precedence (highest first):
+        1. Request-scoped ``ConfigOverride`` / thread-local override.
+        2. Explicit keyword arguments (e.g. CLI flags).
+        3. Environment variables.
+        4. ``[llm]`` block / top-level keys in ``accelerate.toml``.
+        5. Defaults.
+    """
     file_config = file_config or {}
     settings = dict(DEFAULTS)
 
@@ -364,20 +387,35 @@ def resolve_settings(
         if key in file_config:
             settings[key] = file_config[key]
 
+    # Honor a nested [llm] section for provider/model/api_key if no top-level key.
+    llm_section = file_config.get("llm") or {}
+    if isinstance(llm_section, dict):
+        if settings.get("LLM_PROVIDER") is None:
+            settings["LLM_PROVIDER"] = _coalesce_str(llm_section.get("provider"))
+        if settings.get("API_KEY") is None:
+            settings["API_KEY"] = _coalesce_str(llm_section.get("api_key"))
+        if settings.get("MODEL") is None:
+            settings["MODEL"] = _coalesce_str(llm_section.get("model"))
+
     # Environment overrides: provider is resolved from explicit flags, environment,
     # and available API keys; API key is resolved from the matching env var.
-    provider_from_file = settings.get("LLM_PROVIDER")
-    resolved_provider = resolve_llm_provider(
-        os.getenv("AERO_FORGE_LLM_PROVIDER") or provider_from_file
-    )
+    provider_from_file = _coalesce_str(settings.get("LLM_PROVIDER"))
+    env_provider = _coalesce_str(os.getenv("AERO_FORGE_LLM_PROVIDER"))
+    resolved_provider = resolve_llm_provider(env_provider or provider_from_file)
     settings["LLM_PROVIDER"] = resolved_provider or "none"
 
-    if settings.get("API_KEY") is None:
-        settings["API_KEY"] = _resolve_api_key(settings.get("LLM_PROVIDER"))
+    env_api_key = _resolve_api_key(settings.get("LLM_PROVIDER"))
+    if env_api_key:
+        settings["API_KEY"] = env_api_key
+    elif settings.get("API_KEY") is None and isinstance(llm_section, dict):
+        settings["API_KEY"] = _coalesce_str(llm_section.get("api_key"))
 
-    env_model = os.getenv("AERO_FORGE_MODEL")
+    env_model = _coalesce_str(os.getenv("AERO_FORGE_MODEL"))
     if env_model:
         settings["MODEL"] = env_model
+    elif settings.get("MODEL") is None and isinstance(llm_section, dict):
+        settings["MODEL"] = _coalesce_str(llm_section.get("model"))
+
     env_retries = _env_int("AERO_FORGE_MAX_RETRIES")
     if env_retries is not None:
         settings["MAX_RETRIES"] = env_retries
@@ -394,17 +432,20 @@ def resolve_settings(
         settings["LLM_PROVIDER"] = "none"
         settings["API_KEY"] = None
 
-    # Request-scoped override (explicit or thread-local)
+    # Explicit overrides (e.g. CLI flags) -- applied before request-scoped
+    # overrides so that ``ConfigOverride`` still wins, but after environment so
+    # explicit CLI flags can override environment defaults.
+    for key, value in overrides.items():
+        coerced = _coalesce_str(value)
+        if coerced is not None:
+            settings[key] = coerced
+
+    # Request-scoped override (explicit or thread-local) takes highest precedence.
     active = override or current_override()
     if active is not None:
         for key, value in active.to_dict().items():
             if value is not None:
                 settings[key] = value
-
-    # Explicit overrides (e.g. CLI flags)
-    for key, value in overrides.items():
-        if value is not None:
-            settings[key] = value
 
     return settings
 

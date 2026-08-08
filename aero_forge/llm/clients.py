@@ -467,6 +467,21 @@ def get_llm_client(
         if override.max_retries is not None:
             max_retries = override.max_retries
 
+    # Treat empty/whitespace values as unset so they cannot shadow environment
+    # variables or file-level defaults.
+    if isinstance(provider, str):
+        provider = provider.strip()
+    if provider is not None and not provider:
+        provider = None
+    if isinstance(model, str):
+        model = model.strip()
+    if model is not None and not model:
+        model = None
+    if isinstance(api_key, str):
+        api_key = api_key.strip()
+    if api_key is not None and not api_key:
+        api_key = None
+
     if not provider or provider.lower() in {"none", "null", ""}:
         return None
 
