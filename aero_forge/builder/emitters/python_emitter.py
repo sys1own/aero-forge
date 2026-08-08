@@ -257,18 +257,35 @@ def _ctypes_loader_source(node_id: str, boundary_contracts: List[dict]) -> str:
     argtypes = ", ".join(ctype_for.get(a, "ctypes.c_int64") for a in args)
     restype = ctype_for.get(return_type, "ctypes.c_int64")
 
+    # Build a demo call that matches the C-ABI argument list.  Pointer arguments
+    # are given a scratch buffer so callers with vector signatures still run.
+    call_args: List[str] = []
+    for a in args:
+        if a == "pointer":
+            call_args.append("(ctypes.c_double * 1024)()")
+        elif a in ("float32", "float64"):
+            call_args.append("42.0")
+        else:
+            call_args.append("42")
+    call = f"{symbol}({', '.join(call_args)})"
+
     return f'''"""Auto-generated Python CLI for the C-ABI bridge."""
 import ctypes
 import os
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
-if _SCRIPT_DIR.name == "{node_id}":
-    _WORKSPACE = _SCRIPT_DIR.parent
-else:
-    _WORKSPACE = _SCRIPT_DIR
+_LIB_NAME = "lib{source_node}.so"
+_LIB_PATH: Path | None = None
+for _p in (_SCRIPT_DIR, *_SCRIPT_DIR.parents):
+    _candidate = _p / "{source_node}" / _LIB_NAME
+    if _candidate.exists():
+        _LIB_PATH = _candidate
+        break
+if _LIB_PATH is None:
+    # Fall back to a conventional sibling layout.
+    _LIB_PATH = _SCRIPT_DIR.parent / "{source_node}" / _LIB_NAME
 
-_LIB_PATH = _WORKSPACE / "{source_node}" / "lib{source_node}.so"
 _LIB = ctypes.CDLL(str(_LIB_PATH))
 
 {symbol} = _LIB.{symbol}
@@ -276,7 +293,7 @@ _LIB = ctypes.CDLL(str(_LIB_PATH))
 {symbol}.restype = {restype}
 
 if __name__ == "__main__":
-    result = {symbol}(42)
+    result = {call}
     print(f"{symbol}(42) = {{result}}")
 '''
 

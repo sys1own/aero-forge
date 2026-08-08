@@ -13,12 +13,15 @@ manifests are generated instead of default stubs.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import stat
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+logger = logging.getLogger("aero_forge.graph_materializer")
 
 import numpy as np
 
@@ -38,7 +41,11 @@ from aero_forge.builder.emitters.base import (
     EmitterRegistry,
     PolyglotEmitterPlugin,
 )
-from aero_forge.builder.language_router import SystemToolchainRouter
+from aero_forge.builder.language_router import (
+    SystemToolchainRouter,
+    ToolchainNotFoundError,
+    _accel_log,
+)
 from aero_forge.config import resolve_llm_provider
 from aero_forge.llm.clients import get_llm_client
 from aero_forge.orchestrator.prompt_builder import (
@@ -1132,6 +1139,17 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
 
         self._guard_requested_files(nodes)
         self._guard_requested_symbols(nodes, edges)
+
+        # Pre-flight toolchain availability: bootstrap or fail fast with a clear
+        # human-facing diagnostic before any GoI wavefront work is wasted.
+        try:
+            SystemToolchainRouter.preflight_nodes(nodes, build=build)
+        except ToolchainNotFoundError as exc:
+            diagnostic = exc.install_command or ""
+            _accel_log("error", f"Toolchain pre-flight failed for {exc.toolchain}: {exc}")
+            raise MaterializationError(
+                f"Toolchain {exc.toolchain!r} is required but not available.\n{diagnostic}"
+            ) from exc
 
         M, labels, order = self._build_adjacency_matrix(nodes, edges)
         U = np.eye(len(labels), dtype=np.float64) * 0.5
