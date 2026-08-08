@@ -115,9 +115,26 @@ class SystemToolchainRouter:
             # Native Zig source vs C/C++ source compiled with zig cc.
             if any(str(f).endswith(".zig") for f in source_files):
                 # Native `zig build-lib` uses -O <Mode>, not -O3, and -mcpu, not -march.
+                # Strip whitespace, drop empty tokens, and ignore duplicated/overlapping
+                # optimization flags so the fixed `-O ReleaseFast` pair is not shadowed.
                 zig_flags: List[str] = []
-                for flag in compiler_flags:
+                skip_next = False
+                for i, raw in enumerate(compiler_flags):
+                    if skip_next:
+                        skip_next = False
+                        continue
+                    flag = raw.strip()
+                    if not flag:
+                        continue
                     if flag in ("-O3", "-O2", "-O1", "-Os", "-Oz"):
+                        continue
+                    if flag == "-O":
+                        # Skip the -O flag and, if present, the next optimization mode.
+                        skip_next = True
+                        continue
+                    if flag in ("ReleaseFast", "ReleaseSafe", "ReleaseSmall", "Debug"):
+                        continue
+                    if flag.startswith("-O"):
                         continue
                     if flag == "-march=native":
                         zig_flags.append("-mcpu=native")

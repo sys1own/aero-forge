@@ -72,6 +72,8 @@ class GraphPolyglotMaterializer:
         llm_provider: LLM provider name for Builder Code Emission Agent calls.
         llm_model: model name for the Builder Code Emission Agent.
         llm_api_key: API key for the Builder Code Emission Agent.
+        config_override: optional request-scoped override used to inherit keys
+            and provider settings passed from the web dashboard or SandboxManager.
     """
 
     def __init__(
@@ -83,6 +85,7 @@ class GraphPolyglotMaterializer:
         llm_provider: Optional[str] = None,
         llm_model: Optional[str] = None,
         llm_api_key: Optional[str] = None,
+        config_override: Optional[Any] = None,
     ) -> None:
         self.workspace_root = Path(workspace_root)
         self.registry = registry or EmitterRegistry.get_instance()
@@ -91,6 +94,7 @@ class GraphPolyglotMaterializer:
         self._llm_provider = llm_provider
         self._llm_model = llm_model
         self._llm_api_key = llm_api_key
+        self._config_override = config_override
         self._synthesis_context = ""
         self._ensure_emitters_loaded()
 
@@ -102,6 +106,7 @@ class GraphPolyglotMaterializer:
                 provider=provider,
                 model=self._llm_model or "deepseek-chat",
                 api_key=self._llm_api_key,
+                config_override=self._config_override,
                 raise_on_error=True,
                 max_retries=3,
             )
@@ -492,11 +497,14 @@ class GraphPolyglotMaterializer:
         """Pass the configured LLM client/prompt to the plugin registry."""
         if self.registry._synthesis_prompt is None:
             provider = resolve_llm_provider(self._llm_provider)
+            resolved_key = self._llm_api_key
+            if not resolved_key and self._config_override is not None:
+                resolved_key = getattr(self._config_override, "api_key", None)
             self.registry.configure_jit_synthesis(
                 llm_client=self._llm_client,
                 provider=provider,
                 model=self._llm_model,
-                api_key=self._llm_api_key,
+                api_key=resolved_key,
                 prompt=EMITTER_PLUGIN_SYNTHESIS_SYSTEM_PROMPT,
             )
 

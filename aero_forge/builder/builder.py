@@ -212,6 +212,7 @@ class ProactivePolyglotBuilder:
         llm_api_key: Optional[str] = None,
         prompt_template: Optional[str] = None,
         max_retries: int = 3,
+        config_override: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Compile a natural-language prompt to a graph blueprint and build it.
 
@@ -224,16 +225,26 @@ class ProactivePolyglotBuilder:
         from aero_forge.builder.materializers.graph_materializer import (
             GraphPolyglotMaterializer,
         )
-        from aero_forge.config import resolve_llm_provider
+        from aero_forge.config import resolve_llm_provider, _resolve_api_key
 
         provider = resolve_llm_provider(llm_provider) or "deepseek"
         model = llm_model or "deepseek-chat"
 
+        # Honor an explicitly passed key first, then a request-scoped override,
+        # then resolve from the environment so that web/dashboard calls inherit
+        # the configured credentials without requiring global env vars.
+        resolved_key = llm_api_key
+        if not resolved_key and config_override is not None:
+            resolved_key = getattr(config_override, "api_key", None)
+        if not resolved_key:
+            resolved_key = _resolve_api_key(provider)
+
         compiler = IntentCompiler(
             provider=provider,
             model=model,
-            api_key=llm_api_key,
+            api_key=resolved_key,
             max_retries=max_retries,
+            config_override=config_override,
         )
 
         last_error: Optional[Exception] = None
@@ -272,7 +283,8 @@ class ProactivePolyglotBuilder:
             output_dir,
             llm_provider=provider,
             llm_model=model,
-            llm_api_key=llm_api_key,
+            llm_api_key=resolved_key,
+            config_override=config_override,
         )
         result = materializer.materialize(
             graph.model_dump(mode="json"), build=True
