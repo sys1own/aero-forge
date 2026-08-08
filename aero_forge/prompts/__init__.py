@@ -376,10 +376,17 @@ You may use `sorted(values)` with no key and `int()`/`float()` casts; keep tuple
 If a function indexes into a list, guard against empty input with `if len(<name>) == 0: return -1` before indexing. For matrix multiplication, check `if not a or not b` before accessing `a[0]` or `b[0]`; do not return a plain `[]`. Instead return a zero matrix with the correct outer dimensions (`[[0.0] * cols for _ in range(rows)]` for float matrices). Do not alias `result[i]` to a temporary list; set `result[i][j] = total` directly after the inner loop.
 
 STATIC ANALYSIS RULES (the pre-write validator will reject code that violates these):
-- Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` (with `from typing import Any`) or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
+- Do NOT import `dict`, `list`, or `set` from `typing`; they are built-in generic types in Python 3.9+. Only import `Any` from `typing` when needed (e.g. `from typing import Any`).
+- Do NOT use bare `dict` or `list` type annotations. Always use explicit generic forms such as `dict[str, Any]` or `list[int]`. Bare `Dict`/`List` from `typing` is also rejected.
+- Do NOT use `X | None` union syntax in type annotations.
+- Do NOT use `Optional[...]` or `=None` default argument values. All parameters must be required (no optional dict/set objects passed from the test harness).
+- Do NOT use default argument values of any kind (e.g. `max_iter: int = 64` or `metadata: dict[str, Any] = None`).
 - Do NOT use dynamic reflection builtins (`hasattr`, `getattr`, `setattr`, `eval()`, `exec()`). Use `isinstance()` for type checks or `try...except AttributeError:` for safe attribute access.
 - State machine enums must inherit from `IntEnum` only (e.g. `from enum import IntEnum`) or be a plain `@dataclass`; no raw `Enum`, `Flag`, or multi-base class hierarchies.
 - Do NOT return `[]` from matrix/array functions or tensor-processing routines. On empty input, initialize and return a zero-filled target structure with the correct outer dimensions (e.g. `[[0.0] * cols for _ in range(rows)]` for float matrices), never a plain empty list.
+- Dict values must be scalars (int/float/bool/str). Do NOT store `set`, `list`, or other collections inside a `dict`. Use separate top-level `set`/`list` variables instead.
+- `set.add()` is only supported on a top-level `set` variable, never on a value retrieved from a `dict`.
+- Dictionary metadata and set-based sparsity tracking must be local variables inside the function, never function parameters.
 """,
     "Universal polyglot architect: any toolchain, SMT/GoI-backed safety.",
 )

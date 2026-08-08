@@ -1117,16 +1117,22 @@ class EmitterRegistry:
         """Extract Python source from a fenced code block or conversational text."""
         if not raw:
             return ""
-        # Prefer explicitly-tagged python fences, then any fence.
+        # Prefer explicitly-tagged python fences, then any fence.  The regex
+        # tolerates optional language/path labels and prose surrounding the fence.
         fenced = re.findall(
-            r"```(?:python|py)?\s*\n(.*?)\n```",
+            r"```\s*(?:python|py)?\s*(?::\s*[^\n\r]*?)?\s*\r?\n([\s\S]*?)\r?\n?\s*```",
             raw,
             re.DOTALL | re.IGNORECASE,
         )
         if not fenced:
-            fenced = re.findall(r"```\s*\n(.*?)\n```", raw, re.DOTALL)
+            fenced = re.findall(
+                r"```\s*(?:\w+)?\s*(?::\s*[^\n\r]*?)?\s*\r?\n([\s\S]*?)\r?\n?\s*```",
+                raw,
+                re.DOTALL | re.IGNORECASE,
+            )
         if fenced:
-            return fenced[-1].strip()
+            # Prefer the first Python-tagged fence, otherwise the first fence.
+            return fenced[0].strip()
 
         # No fences: attempt to locate a parseable Python snippet.
         raw = raw.strip()

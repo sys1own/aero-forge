@@ -42,7 +42,7 @@ logger = logging.getLogger("aero_forge.generate")
 
 
 CODE_FENCE_RE = re.compile(
-    r"```(?:\w*)\s*\n(.*?)```",
+    r"```\s*(?:\w+)?\s*(?::\s*[^\n\r]*?)?\s*\r?\n([\s\S]*?)\r?\n?\s*```",
     re.DOTALL | re.IGNORECASE,
 )
 
@@ -357,14 +357,19 @@ def extract_code_blocks(text: str) -> List[Tuple[Optional[str], str]]:
     """Extract all ```...``` code fences from ``text``.
 
     Returns a list of ``(language_hint, code)`` tuples. The hint is the token
-    after the opening backticks, if any.
+    after the opening backticks, if any.  The regex tolerates surrounding prose,
+    optional file-path labels (``lang:path``), and variable whitespace.
     """
     blocks: List[Tuple[Optional[str], str]] = []
-    pattern = re.compile(r"```\s*(\w*)\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+    pattern = re.compile(
+        r"```\s*(\w*)\s*(?::\s*[^\n\r]*?)?\s*\r?\n([\s\S]*?)\r?\n?\s*```",
+        re.DOTALL | re.IGNORECASE,
+    )
     for match in pattern.finditer(text):
         lang = match.group(1).lower() or None
         code = match.group(2).strip("\n")
-        blocks.append((lang, code))
+        if code:
+            blocks.append((lang, code))
     return blocks
 
 
@@ -451,6 +456,40 @@ def _extract_functions_from_text(text: str) -> Tuple[str, str]:
     return impl, tests
 
 
+def _skeleton_for_prompt(prompt: str, selected: Optional[Algorithm] = None) -> str:
+    """Return a minimal Python skeleton note derived from *prompt*."""
+    func_name = "solution"
+    if selected is not None:
+        func_name = selected.name
+    else:
+        # Use the first meaningful domain noun sequence from the prompt.
+        words = re.findall(r"[A-Za-z_]+", prompt or "")
+        filtered = [
+            w
+            for w in words
+            if w.lower() not in _STOP_WORDS and len(w) > 2
+        ]
+        if filtered:
+            func_name = _sanitize_module_name("_".join(filtered[:3]))
+    decorators = ""
+    lower = prompt.lower()
+    if "@accelerate" in lower:
+        # Extract a target if one is present.
+        match = re.search(r"@accelerate\([^)]*target\s*=\s*['\"]([^'\"]+)['\"]", prompt)
+        target = match.group(1) if match else "rust_hin"
+        decorators = f"@accelerate(target='{target}')\n"
+    return (
+        "\n\nUse the following skeleton. Replace `solution` with the exact function name, "
+        "fill in the correct parameter types and body, and return the complete implementation "
+        "inside a single ```python block.\n\n"
+        f"```python\n"
+        f"{decorators}def {func_name}(...):\n"
+        f"    \"\"\"Implement the requested algorithm.\"\"\"\n"
+        f"    pass\n"
+        f"```"
+    )
+
+
 def generate_from_prompt(
     prompt: str,
     *,
@@ -525,20 +564,42 @@ def generate_from_prompt(
             "the algorithm choice, complexity, and tradeoffs."
         )
 
-    messages: List[Dict[str, str]] = [
-        {"role": "system", "content": template.system_prompt},
-        {
-            "role": "user",
-            "content": user_prompt,
-        },
-    ]
-
     if max_tokens is None:
         max_tokens = int(os.getenv("AERO_FORGE_MAX_TOKENS", "4096"))
-    response = client.generate(messages, temperature=0.2, max_tokens=max_tokens)
-    if not response:
-        raise GenerationError("LLM returned an empty response")
-    return response
+
+    v11_template = get_template("v11_universal_architect")
+    skeleton_note = _skeleton_for_prompt(prompt, selected)
+
+    attempts: List[Tuple[List[Dict[str, str]], int, float]] = [
+        (
+            [
+                {"role": "system", "content": template.system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens,
+            0.2,
+        ),
+        (
+            [
+                {"role": "system", "content": v11_template.system_prompt},
+                {"role": "user", "content": user_prompt + skeleton_note},
+            ],
+            max(max_tokens, 8192),
+            0.1,
+        ),
+    ]
+
+    for idx, (messages, tokens, temperature) in enumerate(attempts):
+        if idx > 0:
+            logger.warning(
+                "generate_from_prompt: empty response on first attempt; "
+                "retrying with v11_universal_architect template and skeleton"
+            )
+        response = client.generate(messages, temperature=temperature, max_tokens=tokens)
+        if response:
+            return response
+
+    raise GenerationError("LLM returned an empty response after retry")
 
 
 def write_generated_project(

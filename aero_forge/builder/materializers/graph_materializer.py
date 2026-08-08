@@ -276,10 +276,16 @@ class GraphPolyglotMaterializer:
 
     @staticmethod
     def _extract_code_artifacts(raw: str) -> List[CodeArtifact]:
-        """Parse fenced code blocks with optional ``lang:path`` labels."""
+        """Parse fenced code blocks with optional ``lang:path`` labels.
+
+        Tolerates surrounding markdown headers, conversational summaries, and
+        inconsistent whitespace around the opening/closing fence tokens.
+        """
         artifacts: List[CodeArtifact] = []
-        # Match ```lang:path ... ``` or ```lang ... ```
-        pattern = re.compile(r"```(\w+)(?::([^\n\r]+))?\r?\n(.*?)```", re.DOTALL)
+        pattern = re.compile(
+            r"```\s*(\w+)\s*(?::\s*([^\n\r]*?))?\s*\r?\n([\s\S]*?)\r?\n?\s*```",
+            re.DOTALL | re.IGNORECASE,
+        )
         for match in pattern.finditer(raw):
             lang = (match.group(1) or "").strip().lower()
             file_path = (match.group(2) or "").strip()
@@ -411,27 +417,93 @@ class GraphPolyglotMaterializer:
             assigned.append(artifact)
         return assigned
 
+    @staticmethod
+    def _is_build_manifest(artifact: CodeArtifact) -> bool:
+        """Return True for known build manifest artifacts."""
+        return Path(artifact.file_path).name in {
+            "Cargo.toml",
+            "CMakeLists.txt",
+            "pyproject.toml",
+            "go.mod",
+            "build.gradle",
+            "pom.xml",
+            "build.sh",
+            "Makefile",
+            "CMakeLists.txt",
+        } or str(artifact.file_path).endswith(".csproj")
+
+    @staticmethod
+    def _artifact_has_density(artifact: CodeArtifact) -> bool:
+        """Return True when *artifact* contains enough functional code."""
+        if artifact.is_header or GraphPolyglotMaterializer._is_build_manifest(artifact):
+            return True
+        try:
+            ContentDensityValidator.validate(
+                artifact.content, artifact.language or "text"
+            )
+            return True
+        except ValueError:
+            return False
+
+    def _is_llm_available(self) -> bool:
+        """Return True when an LLM client/provider is configured."""
+        return bool(
+            self._llm_client is not None
+            or self._llm_provider
+            or self._llm_api_key
+        )
+
     def _emit_with_llm(
         self, node_id: str, node_spec: Dict[str, Any], contracts: List[Dict[str, Any]]
     ) -> List[CodeArtifact]:
-        """Ask the Builder Code Emission Agent to emit source and manifest files."""
+        """Ask the Builder Code Emission Agent to emit source and manifest files.
+
+        Retries once with a stricter prompt and, if the LLM still returns an empty
+        or unparseable response, falls back to the deterministic baseline emitter.
+        """
         client = self._get_llm_client()
         user_prompt = format_builder_emitter_user_prompt(node_spec, contracts)
-        messages = [
-            {"role": "system", "content": BUILDER_EMITTER_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ]
-        raw = client.generate(messages, temperature=0.2, max_tokens=4096)
-        if not raw:
-            raise MaterializationError(
-                f"LLM returned empty emission for node {node_id!r}"
-            )
-        artifacts = self._extract_code_artifacts(raw)
-        if not artifacts:
-            raise MaterializationError(
-                f"Builder Code Emission Agent for node {node_id!r} did not return any fenced code blocks"
-            )
-        return self._assign_artifact_paths(artifacts, node_id, node_spec)
+        strict_note = (
+            "\n\nIMPORTANT: Do not return an empty response or prose. "
+            "Return only well-labeled Markdown fences. "
+            "If you are uncertain, emit the requested files using the skeleton above "
+            "with a minimal real implementation."
+        )
+
+        last_exc: Optional[Exception] = None
+        for attempt, (system, tokens, temp) in enumerate(
+            [
+                (BUILDER_EMITTER_SYSTEM_PROMPT, 4096, 0.2),
+                (BUILDER_EMITTER_SYSTEM_PROMPT + strict_note, 8192, 0.1),
+            ]
+        ):
+            if attempt > 0:
+                _accel_log(
+                    "warning",
+                    f"Builder Code Emission Agent for {node_id} returned empty/malformed output; retrying",
+                )
+            try:
+                raw = client.generate(
+                    [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=temp,
+                    max_tokens=tokens,
+                )
+            except Exception as exc:
+                last_exc = exc
+                continue
+            if raw:
+                artifacts = self._extract_code_artifacts(raw)
+                if artifacts:
+                    return self._assign_artifact_paths(artifacts, node_id, node_spec)
+
+        _accel_log(
+            "warning",
+            f"Builder Code Emission Agent for {node_id} failed; falling back to deterministic baseline",
+        )
+        return self._emit_baseline_for_node(node_id, node_spec, contracts)
 
     def _emit_node_artifacts(
         self, node_id: str, node_spec: Dict[str, Any], contracts: List[Dict[str, Any]]
@@ -456,6 +528,9 @@ class GraphPolyglotMaterializer:
         )
         source_artifacts = list(plugin.emit_source_files(node_id, node_spec, contracts))
         source_artifacts = self._postprocess_source_artifacts(source_artifacts)
+
+        # Build the manifest from the plugin first; the LLM fallback below may
+        # replace it if it emits its own manifest fences.
         manifest_artifacts = plugin.emit_build_manifest(
             node_id,
             node_spec.get("dependencies", []),
@@ -465,6 +540,24 @@ class GraphPolyglotMaterializer:
             manifest_artifacts = [manifest_artifacts]
         else:
             manifest_artifacts = list(manifest_artifacts)
+
+        # If the plugin emitted hollow source files (e.g. only imports/docstrings),
+        # ask the Builder Code Emission Agent to synthesize real logic.  This is
+        # the Proactive Synthesis fallback path.
+        if self._is_llm_available() and not all(
+            self._artifact_has_density(a) for a in source_artifacts
+        ):
+            try:
+                llm_artifacts = self._emit_with_llm(node_id, node_spec, contracts)
+            except MaterializationError:
+                llm_artifacts = []
+            if llm_artifacts:
+                llm_source = [a for a in llm_artifacts if not self._is_build_manifest(a)]
+                llm_manifests = [a for a in llm_artifacts if self._is_build_manifest(a)]
+                if llm_source:
+                    source_artifacts = self._postprocess_source_artifacts(llm_source)
+                if llm_manifests:
+                    manifest_artifacts = llm_manifests
 
         # Keep the node's source_files in sync with the emitted artifacts so the
         # toolchain router compiles the files that the plugin actually wrote.
