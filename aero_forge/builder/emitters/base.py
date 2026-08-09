@@ -145,8 +145,8 @@ class ContentDensityValidator:
         cleaned = re.sub(r"//.*$|#.*$", "", content, flags=re.MULTILINE)
         cleaned = re.sub(r"/\*.*?\*/", "", cleaned, flags=re.DOTALL)
         if not cleaned.strip():
-            # Allow comment-only/placeholder stubs (e.g. empty Rust lib.rs).
-            return cls.MIN_GENERIC_FUNCTIONAL_NODES
+            # Comment-only/placeholder stubs are hollow and must trigger a retry.
+            return 0
         patterns = [
             r"\bfn\s+",
             r"\bfunc\s+",
@@ -558,13 +558,17 @@ def _fallback_source(
         "#include <stdint.h>",
         "#include <stddef.h>",
         "",
+        "#ifdef __cplusplus",
+        'extern "C" {',
+        "#endif",
+        "",
         f'{c_ret} {symbol}({", ".join(c_args)}) {{',
     ]
     for name in arg_names:
         body.append(f"    (void){name};")
     if ret_expr:
         body.append(f"    return {ret_expr};")
-    body.append("}")
+    body.extend(["}", "", "#ifdef __cplusplus", "} // extern \"C\"", "#endif"])
     return "\n".join(body)
 
 
@@ -1060,22 +1064,26 @@ class EmitterRegistry:
                 f"JIT synthesis for {language_id}: LLM returned an empty response"
             )
 
-        from aero_forge.orchestrator.prompt_builder import extract_aero_logic
-
-        has_start = bool(re.search(r"__AERO_LOGIC_START__", raw, re.IGNORECASE))
-        has_end = bool(re.search(r"__AERO_LOGIC_END__", raw, re.IGNORECASE))
-        if require_delimiters and not (has_start and has_end):
-            raise StructuralViolationError(
-                f"JIT synthesis for {language_id}: response is missing the required "
-                f"__AERO_LOGIC_START__ / __AERO_LOGIC_END__ delimiters"
-            )
-
-        code = extract_aero_logic(raw)
+        # Markdown-agnostic extraction: SSP tokens first, then Markdown fences,
+        # then structural keyword scans. Any valid Python class/function block is
+        # accepted before declaring the response empty.
+        code = self._fuzzy_extract_python_code(raw)
         if not code:
             raise StructuralViolationError(
-                f"JIT synthesis for {language_id}: could not extract Python code from raw response"
+                f"JIT synthesis for {language_id}: response is missing the required "
+                f"__AERO_LOGIC_START__ / __AERO_LOGIC_END__ delimiters and no Python "
+                f"code block could be found"
             )
+
         code = self._strip_redefined_helpers(code)
+        # Markdown-agnostic logic density gate: imports/comments-only payloads are
+        # considered hollow and trigger a retry with the v11 template.
+        try:
+            ContentDensityValidator.validate(code, "python")
+        except ValueError as exc:
+            raise SynthesizedPluginError(
+                f"JIT synthesis for {language_id}: extracted code is hollow ({exc})"
+            ) from exc
         try:
             return self._load_and_validate_plugin(code, language_id, boundary_type)
         except Exception as exc:
@@ -1353,7 +1361,7 @@ class EmitterRegistry:
         return _FallbackEmitterPlugin(language_id, boundary_type)
 
     @staticmethod
-    def _extract_python_code(raw: str) -> str:
+    def _fuzzy_extract_python_code(raw: str) -> str:
         """Extract Python source using the Aero-Forge SSP delimiters.
 
         The model is instructed to wrap the completed class between
@@ -1412,6 +1420,10 @@ class EmitterRegistry:
         except SyntaxError:
             pass
         return raw
+
+    def _extract_python_code(self, raw: str) -> str:
+        """Compatibility alias for ``_fuzzy_extract_python_code``."""
+        return self._fuzzy_extract_python_code(raw)
 
     @staticmethod
     def _strip_redefined_helpers(code: str) -> str:

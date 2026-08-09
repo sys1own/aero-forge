@@ -339,7 +339,9 @@ class DynamicContractSynthesizer:
     def synthesize_boundary(self, edge: FFIBoundaryEdge) -> GeneratedFFIBridge:
         """Dispatch to the generator matching the edge boundary type."""
         boundary = edge.boundary_type.replace("-", "_").lower()
-        if boundary in ("c_abi", "cabi", "c"):
+        if boundary in ("c_abi", "cabi", "c", "wasm_wasi", "wasm", "wasi"):
+            # WASM modules are exposed through a C-ABI boundary; the Rust source
+            # is compiled with the requested `--target` triple (e.g. wasm32-*).
             return self._synth_c_abi_boundary(edge)
         if boundary in ("pyo3", "pyo3_maturin", "python_rust"):
             return self._synth_pyo3_boundary(edge)

@@ -163,6 +163,15 @@ class ABIContract(BaseModel):
             "extern_c": "c_abi",
             "c_api": "c_abi",
             "c_ffi": "c_abi",
+            # WebAssembly and pybind11 are normalized to c_abi because the engine
+            # exposes them through a C-ABI boundary (cargo --target wasm32-* or
+            # pybind11 extern "C" exports).
+            "wasm_bindgen": "c_abi",
+            "wasm": "c_abi",
+            "wasi": "c_abi",
+            "wasm32": "c_abi",
+            "pybind11": "c_abi",
+            "pybind": "c_abi",
         }
         value = synonyms.get(value, value)
         if value not in {"c_abi", "pyo3", "ctypes"}:
@@ -170,7 +179,20 @@ class ABIContract(BaseModel):
                 value = "pyo3"
             elif "ctypes" in value:
                 value = "ctypes"
-            elif any(k in value for k in ("c_abi", "cabi", "native", "extern", "c_api", "c_ffi")):
+            elif any(
+                k in value
+                for k in (
+                    "c_abi",
+                    "cabi",
+                    "native",
+                    "extern",
+                    "c_api",
+                    "c_ffi",
+                    "wasm",
+                    "bindgen",
+                    "pybind",
+                )
+            ):
                 value = "c_abi"
         allowed = {"c_abi", "pyo3", "ctypes"}
         if value not in allowed:
