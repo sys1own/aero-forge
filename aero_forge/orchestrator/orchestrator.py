@@ -1751,13 +1751,23 @@ class CompactedContextGenerator:
         else:
             data = dict(self.blueprint)
 
-        return {
+        architecture = data.get("architecture", "pure_python")
+        context: Dict[str, Any] = {
             "project": data.get("project") or data.get("metadata", {}).get("project_name", "aero_forge_project"),
-            "architecture": data.get("architecture", "pure_python"),
+            "architecture": architecture,
             "contracts": self._compact_contracts(data),
             "functions": self._compact_functions(data),
             "smt_types": self._compact_smt_types(data),
         }
+
+        if architecture == "pure_python":
+            _accel_log("info", "Architecture: pure_python confirmed")
+            context["negative_constraints"] = (
+                "DO NOT import rust_core, cpp_core, or use any @accelerate decorators. "
+                "This is a pure CPython target."
+            )
+
+        return context
 
     def _compact_contracts(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
         contracts: List[Dict[str, Any]] = []

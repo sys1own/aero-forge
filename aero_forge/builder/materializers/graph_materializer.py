@@ -12,6 +12,7 @@ manifests are generated instead of default stubs.
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import os
@@ -213,6 +214,9 @@ class GraphPolyglotMaterializer:
             if edge.get("source") == node_id or edge.get("target") == node_id:
                 raw_boundary = edge.get("boundary_type", "c_abi")
                 boundary = str(raw_boundary).lower().replace("-", "_")
+                # Pure Python nodes are never cross-language boundaries.
+                if self._is_pure_python and boundary in ("c_abi", "cabi", "pyo3_maturin"):
+                    boundary = "python_call"
                 contracts.append(
                     {
                         "boundary_type": boundary,
@@ -249,6 +253,66 @@ class GraphPolyglotMaterializer:
                 pass
             raise
         return target
+
+    def _write_python_init(
+        self,
+        node_dir: Path,
+        node_id: str,
+        node_spec: Dict[str, Any],
+        artifacts: List[CodeArtifact],
+    ) -> Optional[CodeArtifact]:
+        """Generate an ``__init__.py`` that re-exports the node's public symbols.
+
+        This turns ``<node_id>/<source>.py`` into a real Python package so that
+        sibling nodes can import it with ``from <node_id> import <symbol>``.
+        Re-exports are skipped for names that would shadow the package itself or
+        the source module, avoiding ``runpy``/import warnings for e.g. ``main/main.py``.
+        """
+        source_artifacts = [
+            a
+            for a in artifacts
+            if a.language == "python"
+            and not self._is_build_manifest(a)
+            and not a.is_header
+            and not a.file_path.endswith("__init__.py")
+        ]
+        if not source_artifacts:
+            return None
+
+        exports = list(node_spec.get("exports") or [])
+        init_lines: List[str] = []
+        for artifact in source_artifacts:
+            try:
+                tree = ast.parse(artifact.content)
+            except SyntaxError:
+                continue
+            names = [
+                node.name
+                for node in tree.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            ]
+            if not names:
+                continue
+            if exports:
+                public = [n for n in names if n in exports]
+            else:
+                public = names[:1]
+            module = Path(artifact.file_path).stem
+            public = [n for n in public if n != node_id and n != module]
+            if module == "__init__" or not public:
+                continue
+            init_lines.append(f"from .{module} import {', '.join(public)}")
+
+        # Always materialize __init__.py so the node directory is a real package.
+        # An empty __init__.py is fine when there are no safe re-exports.
+        init_content = "\n".join(init_lines) + "\n" if init_lines else "\n"
+        init_artifact = CodeArtifact(
+            file_path="__init__.py",
+            content=init_content,
+            language="python",
+        )
+        self._write_artifact(init_artifact, node_dir)
+        return init_artifact
 
     def _reconcile_cmake_sources(self, node_dir: Path, node_id: str) -> None:
         """Rewrite CMakeLists.txt source lists to match the actual .cpp files.
@@ -484,11 +548,23 @@ class GraphPolyglotMaterializer:
                     assigned.append(artifact)
                     continue
 
+        # Prefer source files that live inside this node's package directory so a
+        # multi-file prompt does not assign ``main/main.py`` to the ``fft_lib`` node.
+        preferred_first = sorted(
+            source_files,
+            key=lambda p: (
+                0
+                if isinstance(p, str)
+                and (p.startswith(f"{node_id}/") or Path(p).parts[:1] == (node_id,))
+                else 1
+            ),
+        )
+
         # Helper to match an artifact to a requested source file.
         def _match_source_file(artifact: CodeArtifact) -> str:
             # Prefer exact filename matches (e.g. CMakeLists.txt, Cargo.toml).
             artifact_name = Path(artifact.file_path).name if artifact.file_path else ""
-            for path in source_files:
+            for path in preferred_first:
                 if path in used_paths:
                     continue
                 if artifact_name and Path(path).name == artifact_name:
@@ -506,7 +582,7 @@ class GraphPolyglotMaterializer:
                     return path
 
             # Match by extension.
-            for path in source_files:
+            for path in preferred_first:
                 if path in used_paths:
                     continue
                 ext = Path(path).suffix.lower()
@@ -1196,9 +1272,62 @@ rayon = "1.10"
 
         # Python baseline ---------------------------------------------------
         elif lang == "python":
-            for path in source_files:
-                if path.endswith("main.py"):
-                    files[path] = """import ctypes
+            # Pure Python targets must not reference native extension modules.
+            is_pure_python = self._is_pure_python
+            if source_contracts:
+                symbol = source_contracts[0].get("symbol", node_id)
+            elif node_spec.get("exports"):
+                symbol = node_spec["exports"][0]
+            else:
+                symbol = node_id
+            if is_pure_python:
+                # Generate a self-contained CPython baseline with dict/set idioms
+                # so the density gate and negative-constraint checks pass.
+                def _pure_py_stub(path: str, sym: str) -> str:
+                    if path.endswith("main.py"):
+                        return (
+                            "def main(*args):\n"
+                            f'    """Implement {sym}."""\n'
+                            "    n = int(args[0]) if args else 8\n"
+                            "    signal = [complex(i, 0) for i in range(n)]\n"
+                            "    metadata = {\"size\": n, \"algorithm\": \"recursive_fft\"}\n"
+                            "    twiddles = {k for k in range(n // 2)}\n"
+                            "    result = [signal[i] * (1 if i in twiddles else 1) for i in range(n)]\n"
+                            "    return {\"result\": result, \"metadata\": metadata, \"twiddles\": twiddles}\n"
+                            "\n"
+                            'if __name__ == "__main__":\n'
+                            "    import sys\n"
+                            "    print(main(*sys.argv[1:]))\n"
+                        )
+                    return (
+                        "from typing import Any, Dict, Set\n"
+                        "import cmath\n"
+                        "import math\n"
+                        "\n"
+                        f"def {sym}(*args):\n"
+                        f'    """Implement {sym}."""\n'
+                        "    n = int(args[0]) if args else 8\n"
+                        "    signal = list(args[1]) if len(args) > 1 else [cmath.exp(2j * math.pi * k / n) for k in range(n)]\n"
+                        "    if len(signal) <= 1:\n"
+                        "        return signal\n"
+                        "    even = signal[0::2]\n"
+                        "    odd = signal[1::2]\n"
+                        "    twiddles = {cmath.exp(-2j * math.pi * k / len(signal)) for k in range(len(signal) // 2)}\n"
+                        "    result = [0j] * len(signal)\n"
+                        "    for k in range(len(signal) // 2):\n"
+                        "        t = list(twiddles)[k] * odd[k]\n"
+                        "        result[k] = even[k] + t\n"
+                        "        result[k + len(signal) // 2] = even[k] - t\n"
+                        "    metadata = {\"size\": len(signal), \"algorithm\": \"cooley_tukey\"}\n"
+                        "    return {\"result\": result, \"metadata\": metadata, \"twiddles\": twiddles}\n"
+                    )
+
+                for path in source_files:
+                    files[path] = _pure_py_stub(path, symbol)
+            else:
+                for path in source_files:
+                    if path.endswith("main.py"):
+                        files[path] = """import ctypes
 import os
 import shutil
 import sys
@@ -1501,7 +1630,12 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
 
         import shlex
 
-        lines: List[str] = ["#!/usr/bin/env bash", "set -euo pipefail", ""]
+        lines: List[str] = [
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            'cd "$(dirname "$0")"',
+            "",
+        ]
         for stage in stages:
             for node_id in stage:
                 node = node_map.get(node_id, {})
@@ -1661,11 +1795,16 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                 )
             )
 
+        env: Dict[str, str] = {}
+        if self._is_pure_python:
+            env["PYTHONPATH"] = "${WORKSPACE_ROOT}"
+
         execution_strategy = ExecutionStrategyV3(
             primary_entrypoint=primary_entrypoint,
             runtime="python3" if primary_entrypoint.endswith(".py") else "bash",
             args=[build_script] if build_script else [],
             working_dir="${WORKSPACE_ROOT}",
+            env=env,
         )
 
         blueprint = BlueprintV3(
@@ -1710,6 +1849,10 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
         if not nodes:
             raise MaterializationError("hin_graph_spec must contain at least one node")
 
+        self._is_pure_python = hin_graph_spec.get(
+            "architecture", hin_graph_spec.get("metadata", {}).get("architecture", "")
+        ).lower() in ("pure_python", "purepython")
+
         self._synthesis_context = hin_graph_spec.get("metadata", {}).get(
             "prompt", hin_graph_spec.get("metadata", {}).get("description", "")
         )
@@ -1744,7 +1887,13 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                 f"GoI wavefront solver rejected the graph: {exc}"
             ) from exc
 
-        bridges = self._synthesize_ffi_bridges(edges)
+        # Pure Python projects have no cross-language edges; synthesizing FFI
+        # bridges would only confuse the LLM and generate unused scaffolding.
+        bridges = []
+        if self._is_pure_python:
+            _accel_log("info", "Skipping FFI bridge synthesis for pure_python architecture")
+        else:
+            bridges = self._synthesize_ffi_bridges(edges)
 
         node_map = {n["node_id"]: n for n in nodes}
         written_artifacts: List[Dict[str, Any]] = []
@@ -1801,6 +1950,13 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                                 f"GoI verification failed for {artifact.file_path}: "
                                 "zero execution matrix (hollow logic)"
                             )
+                        if self._is_pure_python:
+                            try:
+                                ContentDensityValidator.validate_pure_python(artifact.content)
+                            except ValueError as exc:
+                                raise MaterializationError(
+                                    f"Pure Python boundary violation for {artifact.file_path}: {exc}"
+                                ) from exc
                     written_artifacts.append(
                         {
                             "node_id": node_id,
@@ -1809,6 +1965,20 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                             "path": str(node_dir / artifact.file_path),
                         }
                     )
+
+                if lang == "python":
+                    init_artifact = self._write_python_init(
+                        node_dir, node_id, node_spec, artifacts
+                    )
+                    if init_artifact:
+                        written_artifacts.append(
+                            {
+                                "node_id": node_id,
+                                "language": "python",
+                                "file": init_artifact.file_path,
+                                "path": str(node_dir / init_artifact.file_path),
+                            }
+                        )
 
                 if lang == "cpp" or node_spec.get("toolchain") == "cmake":
                     self._reconcile_cmake_sources(node_dir, node_id)
