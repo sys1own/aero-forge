@@ -434,7 +434,10 @@ def parse_generated_response(text: str) -> Tuple[str, str]:
     ``__AERO_TESTS_END__``. Falls back to fenced code blocks and then to
     plain ``def`` extraction.
     """
-    from aero_forge.orchestrator.prompt_builder import extract_aero_logic
+    from aero_forge.orchestrator.prompt_builder import (
+        TruncatedAeroLogicError,
+        extract_aero_logic,
+    )
 
     # Only use the token-based SSP extractor when the response actually carries
     # Aero-Forge markers.  Otherwise we want the multi-block fenced extraction so
@@ -442,7 +445,10 @@ def parse_generated_response(text: str) -> Tuple[str, str]:
     has_ssp = "__AERO_LOGIC_START__" in text or "__AERO_LOGIC_END__" in text
 
     if has_ssp:
-        impl = extract_aero_logic(text)
+        try:
+            impl = extract_aero_logic(text)
+        except TruncatedAeroLogicError:
+            impl = ""
         if impl:
             # Look for an explicit tests section in the raw response.
             tests_match = re.search(
@@ -656,9 +662,15 @@ def _has_min_functional_nodes(source: str, min_nodes: int = 3) -> bool:
 
 def _extract_first_python_code(text: str) -> str:
     """Return the first plausible Python source block from an LLM response."""
-    from aero_forge.orchestrator.prompt_builder import extract_aero_logic
+    from aero_forge.orchestrator.prompt_builder import (
+        TruncatedAeroLogicError,
+        extract_aero_logic,
+    )
 
-    payload = extract_aero_logic(text)
+    try:
+        payload = extract_aero_logic(text)
+    except TruncatedAeroLogicError:
+        payload = ""
     if payload:
         return payload
     blocks = extract_code_blocks(text)

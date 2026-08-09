@@ -223,6 +223,12 @@ Required substitutions (already filled in the prompt you receive):
 """
 
 
+class TruncatedAeroLogicError(ValueError):
+    """Raised when the LLM response opened ``__AERO_LOGIC_START__`` but did not close it."""
+
+    pass
+
+
 def extract_aero_logic(raw: str) -> str:
     """Return the payload delimited by ``__AERO_LOGIC_START__`` / ``__AERO_LOGIC_END__``.
 
@@ -230,6 +236,11 @@ def extract_aero_logic(raw: str) -> str:
     machine-readable response in these markers. If the markers are present, all
     surrounding prose and markdown are ignored. Falls back to markdown fenced
     code blocks, then to the trimmed raw text.
+
+    Raises:
+        TruncatedAeroLogicError: when the start marker is present but the end
+        marker is missing, so the caller can flag the response as truncated
+        rather than materialising partial code.
     """
     if not raw:
         return ""
@@ -248,9 +259,9 @@ def extract_aero_logic(raw: str) -> str:
     if start_match:
         if end_match and end_match.start() >= start_match.end():
             return text[start_match.end():end_match.start()].strip()
-        # Truncated response: keep everything after the start marker so the
-        # fence parser can still extract partial code.
-        return text[start_match.end():].strip()
+        # The model opened the SSP block but never closed it; the response is
+        # almost certainly truncated mid-statement. Do not attempt to parse it.
+        raise TruncatedAeroLogicError("Truncated response: missing __AERO_LOGIC_END__")
 
     # Markdown fence fallback (first fenced block is the primary implementation).
     fenced = re.findall(
@@ -266,6 +277,7 @@ def extract_aero_logic(raw: str) -> str:
 
 __all__ = [
     "PromptBuilder",
+    "TruncatedAeroLogicError",
     "build_blueprint_plan_prompt",
     "EMITTER_PLUGIN_SYNTHESIS_SYSTEM_PROMPT",
     "extract_aero_logic",

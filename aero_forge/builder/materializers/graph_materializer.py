@@ -44,6 +44,7 @@ from aero_forge.builder.emitters.base import (
     ContentDensityValidator,
     EmitterRegistry,
     PolyglotEmitterPlugin,
+    SyntaxValidator,
 )
 from aero_forge.builder.language_router import (
     SystemToolchainRouter,
@@ -54,6 +55,7 @@ from aero_forge.config import resolve_llm_provider
 from aero_forge.llm.clients import get_llm_client
 from aero_forge.orchestrator.prompt_builder import (
     EMITTER_PLUGIN_SYNTHESIS_SYSTEM_PROMPT,
+    TruncatedAeroLogicError,
     extract_aero_logic,
 )
 from aero_forge.prompts.builder_emitter import (
@@ -92,6 +94,8 @@ class GraphPolyglotMaterializer:
         config_override: optional request-scoped override used to inherit keys
             and provider settings passed from the web dashboard or SandboxManager.
     """
+
+    MAX_PURE_PYTHON_SOURCE_SIZE: int = 8192
 
     def __init__(
         self,
@@ -556,19 +560,21 @@ else:
                         f"Guard: node {node_id!r} requests binary artifact {path!r}; only source files are allowed"
                     )
 
-    @staticmethod
-    def _extract_code_artifacts(raw: str) -> List[CodeArtifact]:
+    def _extract_code_artifacts(self, raw: str) -> List[CodeArtifact]:
         """Parse fenced code blocks with optional ``lang:path`` labels.
 
         First strips the Aero-Forge SSP delimiters ``__AERO_LOGIC_START__`` /
         ``__AERO_LOGIC_END__`` so surrounding prose is ignored. Tolerates
         surrounding markdown headers, conversational summaries, and inconsistent
-        whitespace around fence tokens. If no blocks are found, the whole inner
-        response is returned as a single untyped artifact for downstream path
-        assignment.
+        whitespace around fence tokens. If the response is truncated (missing
+        ``__AERO_LOGIC_END__``), returns an empty list so the caller can retry.
         """
         artifacts: List[CodeArtifact] = []
-        payload = extract_aero_logic(raw)
+        try:
+            payload = extract_aero_logic(raw)
+        except TruncatedAeroLogicError as exc:
+            _accel_log("error", f"SSP parser: {exc}")
+            return artifacts
         # Allow empty language token (e.g. bare ```) and optional path labels.
         pattern = re.compile(
             r"```\s*(\w*)\s*(?::\s*([^\n\r]*?))?\s*\r?\n([\s\S]*?)\r?\n?\s*```",
@@ -783,12 +789,33 @@ else:
             "build.rs",
         } or str(artifact.file_path).endswith(".csproj")
 
-    @staticmethod
-    def _artifact_has_density(artifact: CodeArtifact) -> bool:
-        """Return True when *artifact* contains enough functional code."""
-        if artifact.is_header or GraphPolyglotMaterializer._is_build_manifest(artifact):
+    def _artifact_is_valid(
+        self,
+        artifact: CodeArtifact,
+        node_spec: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Return True when *artifact* is syntactically valid and dense enough."""
+        if artifact.is_header or self._is_build_manifest(artifact):
             return True
         try:
+            SyntaxValidator.validate(artifact.content, artifact.language or "text")
+        except (SyntaxError, IndentationError) as exc:
+            _accel_log(
+                "error",
+                f"Syntax verification failed for {artifact.file_path}: {exc}",
+            )
+            return False
+        try:
+            if (
+                getattr(self, "_is_pure_python", False)
+                and len(artifact.content.encode("utf-8"))
+                > self.MAX_PURE_PYTHON_SOURCE_SIZE
+            ):
+                raise ValueError(
+                    f"Compactness constraint violated: {artifact.file_path} is "
+                    f"{len(artifact.content.encode('utf-8'))} bytes "
+                    f"(max {self.MAX_PURE_PYTHON_SOURCE_SIZE})"
+                )
             ContentDensityValidator.validate(
                 artifact.content, artifact.language or "text"
             )
@@ -1002,17 +1029,19 @@ else:
                     f"Builder Code Emission Agent for {node_id}: no artifacts belong to this node",
                 )
                 continue
-            # Functional density validation: source files must contain real logic.
+            # Post-synthesis validation: source files must be syntactically valid
+            # and contain enough functional code to be useful.
             if all(
-                self._is_build_manifest(a) or self._artifact_has_density(a)
+                self._is_build_manifest(a) or self._artifact_is_valid(a, node_spec)
                 for a in assigned
             ):
                 _accel_log("success", f"Builder Code Emission for {node_id}: logic in-fill successful")
                 _accel_log("success", "Skeleton In-Fill Successful")
+                _accel_log("success", "Syntax Verification Passed")
                 return assigned
             _accel_log(
                 "warning",
-                f"Builder Code Emission Agent for {node_id}: extracted artifacts below functional density; retrying",
+                f"Builder Code Emission Agent for {node_id}: extracted artifacts below functional density or syntax invalid; retrying",
             )
 
         _accel_log(
@@ -1062,11 +1091,13 @@ else:
         else:
             manifest_artifacts = list(manifest_artifacts)
 
-        # If the plugin emitted hollow source files (e.g. only imports/docstrings)
-        # or failed to define the required export symbols, ask the Builder Code
-        # Emission Agent to synthesize real logic.  This is the Proactive
-        # Synthesis fallback path.
-        density_ok = all(self._artifact_has_density(a) for a in source_artifacts)
+        # If the plugin emitted hollow source files (e.g. only imports/docstrings),
+        # emitted syntactically invalid code, or failed to define the required
+        # export symbols, ask the Builder Code Emission Agent to synthesize real
+        # logic.  This is the Proactive Synthesis fallback path.
+        density_ok = all(
+            self._artifact_is_valid(a, node_spec) for a in source_artifacts
+        )
         symbols_ok = self._artifacts_define_symbols(
             source_artifacts, node_id, node_spec, contracts
         )
@@ -2108,10 +2139,13 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                         and not self._is_build_manifest(artifact)
                     ):
                         try:
+                            SyntaxValidator.validate(
+                                artifact.content, artifact.language
+                            )
                             ContentDensityValidator.validate(
                                 artifact.content, artifact.language
                             )
-                        except ValueError as exc:
+                        except (SyntaxError, ValueError) as exc:
                             raise MaterializationError(
                                 f"Synthesis Incompleteness for {artifact.file_path}: {exc}"
                             ) from exc
@@ -2129,6 +2163,7 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                                 raise MaterializationError(
                                     f"Pure Python boundary violation for {artifact.file_path}: {exc}"
                                 ) from exc
+                        _accel_log("success", "Syntax Verification Passed")
                     written_artifacts.append(
                         {
                             "node_id": node_id,
