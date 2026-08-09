@@ -106,6 +106,13 @@ def _is_universal_project_prompt(prompt: str) -> bool:
         "wasm",
         "webassembly",
         "compile",
+        "pyo3",
+        "maturin",
+        "rust extension",
+        "rust layer",
+        "acceleration layer",
+        "ffi",
+        "foreign function",
     ]
     if has_non_python and any(m in lower for m in project_markers):
         return True

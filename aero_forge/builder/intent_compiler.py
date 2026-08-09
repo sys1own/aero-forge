@@ -76,7 +76,14 @@ YOUR SOLE PURPOSE IS TO CONVERT UNSTRUCTURED USER DOMAIN PROMPTS INTO A VALID `P
 
 STRICT OPERATIONAL RULES:
 1. OUTPUT ONLY VALID JSON. DO NOT INCLUDE PREFACES, FOOTERS, MARKDOWN EXPLANATIONS, OR CODE BLOCK TEXT OUTSIDE THE JSON OBJECT.
-2. `architecture` MUST be "graph_polyglot" unless the request is explicitly a single-language project. Never fall back to legacy target strings like "tri_polyglot_rust_cpp_python" or generic stub names like "sliding_window_dtw" / "orchestrate".
+2. `architecture` MUST reflect the actual languages and intent:
+   - Single-language Python -> "pure_python"
+   - Single-language Rust -> "pure_rust"
+   - Python + Rust only (e.g., adding Rust acceleration to Python) -> "hybrid_rust_python"
+   - Python + C++ -> "hybrid_cpp_python"
+   - Rust + C++ -> "hybrid_cpp_rust"
+   - Python + Rust + C++ -> "tri_polyglot_rust_cpp_python"
+   - Only use "graph_polyglot" when the prompt explicitly describes a multi-node information network that does not match one of the above known architectures.
 3. `nodes` MUST be a list of objects with: `node_id` (unique), `lang` (language name such as python, rust, cpp, go, csharp, java, zig, mojo, nim, or any other target language), `toolchain` (one of: gcc, clang, clang++, cargo, go, nvcc, zig, dotnet, maturin, python, javac, cmake, or a language-specific toolchain), `source_files` (list of relative paths, optional), `compiler_flags` (list, optional), `exports` (list, optional). If the requested language is not in the built-in set (python, rust, cpp, go, csharp, java), the EmitterRegistry will JIT-synthesize a `PolyglotEmitterPlugin` for it.
 4. `edges` MUST be a list of cross-language FFI boundary objects with: `source`, `target` (both matching `node_id`s), `boundary_type` (one of: C_ABI, PYO3_MATURIN, WASM_WASI, JNI, CGO, PINVOKE, CUDA_HIP_C), `symbol`, `args` (list of primitive type names: int32, int64, float32, float64, pointer), `return_type` (primitive type name or ""), `is_zero_copy` (boolean).
 5. `primary_entrypoint` MUST be the user's requested entrypoint path (e.g. "python_interface/main.py") instead of any default like "run_shell.py".

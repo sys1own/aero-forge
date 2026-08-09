@@ -69,6 +69,8 @@ SKIP_DIRS = {
     ".pytest_cache",
     ".cargo",
     ".git",
+    ".aero",
+    ".aero_skeletons",
     ".aero-forge-cache",
     ".build_cache",
     ".overlays",
