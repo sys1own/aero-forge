@@ -1772,19 +1772,39 @@ class CompactedContextGenerator:
     def _compact_contracts(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
         contracts: List[Dict[str, Any]] = []
 
+        is_pure_python = data.get("architecture", "").lower() in (
+            "pure_python",
+            "purepython",
+        )
+
         # Graph polyglot edges.
         for edge in data.get("edges", []):
             if not isinstance(edge, dict):
                 continue
+            boundary = str(edge.get("boundary_type", ""))
+            args = list(edge.get("args", []))
+            return_type = edge.get("return_type", "")
+            if is_pure_python:
+                # Internal Python-to-Python edges are not FFI boundaries.
+                boundary = "python_call"
+                type_map = {
+                    "pointer": "list",
+                    "int64": "int",
+                    "float64": "float",
+                    "int32": "int",
+                    "float32": "float",
+                }
+                args = [type_map.get(a, a) for a in args]
+                return_type = type_map.get(return_type, return_type)
             contracts.append(
                 {
                     "id": f"{edge.get('source', 'unknown')}->{edge.get('target', 'unknown')}",
                     "source": edge.get("source", ""),
                     "target": edge.get("target", ""),
                     "symbol": edge.get("symbol", ""),
-                    "args": edge.get("args", []),
-                    "return_type": edge.get("return_type", ""),
-                    "boundary": str(edge.get("boundary_type", "")),
+                    "args": args,
+                    "return_type": return_type,
+                    "boundary": boundary,
                 }
             )
 

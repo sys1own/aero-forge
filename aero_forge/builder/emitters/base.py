@@ -102,12 +102,17 @@ class ContentDensityValidator:
 
         This enforces the negative constraint emitted in the Compacted
         Functional Matrix: ``pure_python`` targets must not reference
-        ``rust_core``, ``cpp_core``, or ``@accelerate`` decorators.
+        ``rust_core``, ``cpp_core``, ``ctypes``, ``cffi``, ``pyo3``,
+        ``ffi_bridges`` scaffolding, or ``@accelerate`` decorators.
         """
-        if re.search(r"\brust_core\b|\bcpp_core\b", content, re.IGNORECASE):
+        if re.search(
+            r"\b(?:rust_core|cpp_core|ctypes|cffi|pyo3|ffi_bridges)\b",
+            content,
+            re.IGNORECASE,
+        ):
             raise ValueError(
                 "Forbidden native dependency in pure_python source: "
-                "rust_core/cpp_core imports are not allowed."
+                "rust_core/cpp_core/ctypes/cffi/pyo3/ffi_bridges are not allowed."
             )
         if re.search(r"@\s*accelerate\s*\(", content):
             raise ValueError(

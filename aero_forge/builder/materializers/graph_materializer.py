@@ -20,7 +20,7 @@ import re
 import stat
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger("aero_forge.graph_materializer")
 
@@ -261,12 +261,12 @@ class GraphPolyglotMaterializer:
         node_spec: Dict[str, Any],
         artifacts: List[CodeArtifact],
     ) -> Optional[CodeArtifact]:
-        """Generate an ``__init__.py`` that re-exports the node's public symbols.
+        """Generate ``__init__.py`` files that re-export the node's public symbols.
 
-        This turns ``<node_id>/<source>.py`` into a real Python package so that
-        sibling nodes can import it with ``from <node_id> import <symbol>``.
+        For pure Python projects, create one ``__init__.py`` per package
+        directory (e.g. ``fft_lib/__init__.py``) instead of one per node.
         Re-exports are skipped for names that would shadow the package itself or
-        the source module, avoiding ``runpy``/import warnings for e.g. ``main/main.py``.
+        the source module.
         """
         source_artifacts = [
             a
@@ -280,39 +280,65 @@ class GraphPolyglotMaterializer:
             return None
 
         exports = list(node_spec.get("exports") or [])
-        init_lines: List[str] = []
+        # Determine package directories from the source artifact paths.
+        package_dirs: Set[str] = set()
         for artifact in source_artifacts:
-            try:
-                tree = ast.parse(artifact.content)
-            except SyntaxError:
+            parts = Path(artifact.file_path).parts
+            if len(parts) > 1:
+                package_dirs.add(parts[0])
+            elif self._is_pure_python:
+                # Top-level pure-Python files do not need an __init__.py.
                 continue
-            names = [
-                node.name
-                for node in tree.body
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-            ]
-            if not names:
-                continue
-            if exports:
-                public = [n for n in names if n in exports]
             else:
-                public = names[:1]
-            module = Path(artifact.file_path).stem
-            public = [n for n in public if n != node_id and n != module]
-            if module == "__init__" or not public:
-                continue
-            init_lines.append(f"from .{module} import {', '.join(public)}")
+                package_dirs.add("")
 
-        # Always materialize __init__.py so the node directory is a real package.
-        # An empty __init__.py is fine when there are no safe re-exports.
-        init_content = "\n".join(init_lines) + "\n" if init_lines else "\n"
-        init_artifact = CodeArtifact(
-            file_path="__init__.py",
-            content=init_content,
-            language="python",
-        )
-        self._write_artifact(init_artifact, node_dir)
-        return init_artifact
+        if self._is_pure_python and not package_dirs:
+            return None
+
+        first_init: Optional[CodeArtifact] = None
+        for pkg_dir in sorted(package_dirs):
+            init_lines: List[str] = []
+            for artifact in source_artifacts:
+                artifact_parts = Path(artifact.file_path).parts
+                if pkg_dir:
+                    if artifact_parts[0] != pkg_dir:
+                        continue
+                    rel_module = Path(*artifact_parts[1:]).with_suffix("").as_posix()
+                else:
+                    if len(artifact_parts) > 1:
+                        continue
+                    rel_module = Path(artifact.file_path).with_suffix("").as_posix()
+                try:
+                    tree = ast.parse(artifact.content)
+                except SyntaxError:
+                    continue
+                names = [
+                    node.name
+                    for node in tree.body
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                ]
+                if not names:
+                    continue
+                if exports:
+                    public = [n for n in names if n in exports]
+                else:
+                    public = names[:1]
+                public = [n for n in public if n != pkg_dir and n != rel_module]
+                if not public:
+                    continue
+                init_lines.append(f"from .{rel_module} import {', '.join(public)}")
+
+            init_content = "\n".join(init_lines) + "\n" if init_lines else "\n"
+            init_path = str(Path(pkg_dir) / "__init__.py") if pkg_dir else "__init__.py"
+            init_artifact = CodeArtifact(
+                file_path=init_path,
+                content=init_content,
+                language="python",
+            )
+            self._write_artifact(init_artifact, node_dir)
+            if first_init is None:
+                first_init = init_artifact
+        return first_init
 
     def _write_rust_pymodule_init(
         self,
@@ -1328,7 +1354,11 @@ rayon = "1.10"
             if is_pure_python:
                 # Generate a self-contained CPython baseline with dict/set idioms
                 # so the density gate and negative-constraint checks pass.
-                def _pure_py_stub(path: str, sym: str) -> str:
+                def _pure_py_stub(
+                    path: str,
+                    sym: str,
+                    contract: Optional[Dict[str, Any]] = None,
+                ) -> str:
                     if path.endswith("main.py"):
                         return (
                             "def main(*args):\n"
@@ -1344,31 +1374,64 @@ rayon = "1.10"
                             "    import sys\n"
                             "    print(main(*sys.argv[1:]))\n"
                         )
+                    type_map = {
+                        "pointer": "list",
+                        "int64": "int",
+                        "float64": "float",
+                        "int32": "int",
+                        "float32": "float",
+                    }
+                    if contract:
+                        arg_types = [
+                            type_map.get(a, "Any") for a in contract.get("args", [])
+                        ]
+                        arg_names = [f"arg{i}" for i in range(len(arg_types))]
+                        return_type = contract.get("return_type", "")
+                        ret = " -> list" if return_type == "pointer" else ""
+                        arg_str = ", ".join(
+                            f"{n}: {t}" for n, t in zip(arg_names, arg_types)
+                        )
+                        body_lines = [
+                            f"def {sym}({arg_str}){ret}:",
+                            f'    """Implement {sym}."""',
+                            "    n = int(arg1) if arg1 is not None else 8",
+                            "    signal = list(arg0) if arg0 is not None else [cmath.exp(2j * math.pi * k / n) for k in range(n)]",
+                        ]
+                    else:
+                        body_lines = [
+                            f"def {sym}(*args):",
+                            f'    """Implement {sym}."""',
+                            "    n = int(args[0]) if args else 8",
+                            "    signal = list(args[1]) if len(args) > 1 else [cmath.exp(2j * math.pi * k / n) for k in range(n)]",
+                        ]
+                    body_lines.extend(
+                        [
+                            "    if len(signal) <= 1:",
+                            "        return signal",
+                            "    even = signal[0::2]",
+                            "    odd = signal[1::2]",
+                            "    twiddles = {cmath.exp(-2j * math.pi * k / len(signal)) for k in range(len(signal) // 2)}",
+                            "    result = [0j] * len(signal)",
+                            "    for k in range(len(signal) // 2):",
+                            "        t = list(twiddles)[k] * odd[k]",
+                            "        result[k] = even[k] + t",
+                            "        result[k + len(signal) // 2] = even[k] - t",
+                            '    metadata = {"size": len(signal), "algorithm": "cooley_tukey"}',
+                            '    return {"result": result, "metadata": metadata, "twiddles": twiddles}',
+                        ]
+                    )
                     return (
                         "from typing import Any, Dict, Set\n"
                         "import cmath\n"
-                        "import math\n"
-                        "\n"
-                        f"def {sym}(*args):\n"
-                        f'    """Implement {sym}."""\n'
-                        "    n = int(args[0]) if args else 8\n"
-                        "    signal = list(args[1]) if len(args) > 1 else [cmath.exp(2j * math.pi * k / n) for k in range(n)]\n"
-                        "    if len(signal) <= 1:\n"
-                        "        return signal\n"
-                        "    even = signal[0::2]\n"
-                        "    odd = signal[1::2]\n"
-                        "    twiddles = {cmath.exp(-2j * math.pi * k / len(signal)) for k in range(len(signal) // 2)}\n"
-                        "    result = [0j] * len(signal)\n"
-                        "    for k in range(len(signal) // 2):\n"
-                        "        t = list(twiddles)[k] * odd[k]\n"
-                        "        result[k] = even[k] + t\n"
-                        "        result[k + len(signal) // 2] = even[k] - t\n"
-                        "    metadata = {\"size\": len(signal), \"algorithm\": \"cooley_tukey\"}\n"
-                        "    return {\"result\": result, \"metadata\": metadata, \"twiddles\": twiddles}\n"
+                        "import math\n\n"
+                        + "\n".join(body_lines)
+                        + "\n"
                     )
 
                 for path in source_files:
-                    files[path] = _pure_py_stub(path, symbol)
+                    files[path] = _pure_py_stub(
+                        path, symbol, source_contracts[0] if source_contracts else None
+                    )
             else:
                 for path in source_files:
                     if path.endswith("main.py"):
@@ -1814,43 +1877,44 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             n.get("node_id"): (n.get("lang") or n.get("language", "")).lower()
             for n in hin_graph_spec.get("nodes", [])
         }
-        for edge in hin_graph_spec.get("edges", []):
-            inputs = [
-                ABIArgument(name=f"arg_{i}", type=t)
-                for i, t in enumerate(edge.get("args", []))
-            ]
-            outputs = []
-            if edge.get("return_type"):
-                outputs.append(ABIArgument(name="return", type=edge.get("return_type")))
+        if not self._is_pure_python:
+            for edge in hin_graph_spec.get("edges", []):
+                inputs = [
+                    ABIArgument(name=f"arg_{i}", type=t)
+                    for i, t in enumerate(edge.get("args", []))
+                ]
+                outputs = []
+                if edge.get("return_type"):
+                    outputs.append(ABIArgument(name="return", type=edge.get("return_type")))
 
-            boundary = str(edge.get("boundary_type", "c_abi"))
-            binding_map = {
-                "c_abi": BindingFramework.c_abi,
-                "pyo3_maturin": BindingFramework.pyo3,
-                "cgo": BindingFramework.c,
-                "pinvoke": BindingFramework.c_abi,
-                "jni": BindingFramework.c_abi,
-                "wasm_wasi": BindingFramework.c_abi,
-                "cuda_hip_c": BindingFramework.c_abi,
-            }
-            binding = binding_map.get(boundary, BindingFramework.c_abi)
+                boundary = str(edge.get("boundary_type", "c_abi"))
+                binding_map = {
+                    "c_abi": BindingFramework.c_abi,
+                    "pyo3_maturin": BindingFramework.pyo3,
+                    "cgo": BindingFramework.c,
+                    "pinvoke": BindingFramework.c_abi,
+                    "jni": BindingFramework.c_abi,
+                    "wasm_wasi": BindingFramework.c_abi,
+                    "cuda_hip_c": BindingFramework.c_abi,
+                }
+                binding = binding_map.get(boundary, BindingFramework.c_abi)
 
-            source = edge.get("source", "")
-            target = edge.get("target", "")
-            source_language = edge.get("source_lang") or node_id_to_lang.get(source, source)
-            target_language = edge.get("target_lang") or node_id_to_lang.get(target, target)
+                source = edge.get("source", "")
+                target = edge.get("target", "")
+                source_language = edge.get("source_lang") or node_id_to_lang.get(source, source)
+                target_language = edge.get("target_lang") or node_id_to_lang.get(target, target)
 
-            abi_contracts.append(
-                ABIContractV3(
-                    contract_id=f"{source}_{target}_{edge.get('symbol')}",
-                    symbol=edge.get("symbol", ""),
-                    source_language=source_language,
-                    target_language=target_language,
-                    binding_framework=binding,
-                    inputs=inputs,
-                    outputs=outputs,
+                abi_contracts.append(
+                    ABIContractV3(
+                        contract_id=f"{source}_{target}_{edge.get('symbol')}",
+                        symbol=edge.get("symbol", ""),
+                        source_language=source_language,
+                        target_language=target_language,
+                        binding_framework=binding,
+                        inputs=inputs,
+                        outputs=outputs,
+                    )
                 )
-            )
 
         env: Dict[str, str] = {}
         if self._is_pure_python:
@@ -1859,7 +1923,7 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
         execution_strategy = ExecutionStrategyV3(
             primary_entrypoint=primary_entrypoint,
             runtime="python3" if primary_entrypoint.endswith(".py") else "bash",
-            args=[build_script] if build_script else [],
+            args=[] if self._is_pure_python else ([build_script] if build_script else []),
             working_dir="${WORKSPACE_ROOT}",
             env=env,
         )
@@ -1962,21 +2026,32 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                 if not node_spec:
                     continue
                 lang = node_spec.get("lang", "").lower()
-                node_dir = self.workspace_root / node_id
                 contracts = self._boundary_contracts_for_node(node_id, edges)
                 # Capture the user's requested package paths before the plugin mutates
                 # source_files with the files it actually emitted.
                 original_source_files = list(node_spec.get("source_files") or [])
+                # Pure Python projects write files directly under the workspace root
+                # using the user's requested package paths (e.g. fft_lib/core.py).
+                # We only keep a leading ``node_id/`` prefix when the user explicitly
+                # listed a path starting with that prefix, preventing phantom node
+                # directories like ``main/main.py``.
+                if self._is_pure_python and lang == "python":
+                    node_dir = self.workspace_root
+                else:
+                    node_dir = self.workspace_root / node_id
                 artifacts = self._emit_node_artifacts(node_id, node_spec, contracts)
+                normalized_source_files: List[str] = []
                 for artifact in artifacts:
-                    # Strip a leading ``node_id/`` package directory so files are
-                    # always written directly under the node directory.  This keeps
-                    # build commands (cmake, cargo, python -m py_compile) simple:
-                    # they run with ``cwd`` set to ``node_dir`` and use relative
-                    # paths as emitted.
                     prefix = f"{node_id}/"
                     if artifact.file_path.startswith(prefix):
-                        artifact.file_path = artifact.file_path[len(prefix):]
+                        if self._is_pure_python and lang == "python":
+                            if not any(
+                                isinstance(p, str) and p.startswith(prefix)
+                                for p in original_source_files
+                            ):
+                                artifact.file_path = artifact.file_path[len(prefix):]
+                        else:
+                            artifact.file_path = artifact.file_path[len(prefix):]
                     self._write_artifact(artifact, node_dir)
                     if (
                         artifact.language not in {
@@ -2023,6 +2098,17 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                             "path": str(node_dir / artifact.file_path),
                         }
                     )
+                    if not self._is_build_manifest(artifact) and not artifact.is_header:
+                        normalized_source_files.append(artifact.file_path)
+                if (
+                    self._is_pure_python
+                    and lang == "python"
+                    and normalized_source_files
+                ):
+                    # Align source_files with the workspace-relative paths actually
+                    # written so toolchain dispatch (e.g. python -m py_compile)
+                    # finds the files from the workspace root.
+                    node_spec["source_files"] = normalized_source_files
 
                 if lang == "python":
                     init_artifact = self._write_python_init(
