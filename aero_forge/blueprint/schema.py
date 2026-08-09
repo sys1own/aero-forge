@@ -79,6 +79,22 @@ class Metadata(BaseModel):
     auto_generated: bool = False
     description: str = ""
 
+    @model_validator(mode="before")
+    @classmethod
+    def _ensure_llm_initialized(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        """Finalized LLM-synthesized blueprints must have llm_initialized true."""
+        if not isinstance(values, dict):
+            return values
+        status = values.get("status")
+        method = values.get("generation_method")
+        if (
+            status == "finalized"
+            and method == "llm_synthesized"
+            and not values.get("llm_initialized")
+        ):
+            values["llm_initialized"] = True
+        return values
+
 
 class ComputeHotspot(BaseModel):
     name: str

@@ -235,7 +235,11 @@ class ContentDensityValidator:
                 result[offset : offset + n, offset : offset + n] = M
                 offset += n
             if result.size == 0 or not result.any():
-                return False
+                # A pure entrypoint (e.g. ``main.py``) may have no loop-carried
+                # writes but still performs a real function call; fall back to
+                # module-level functional density so simple orchestrators are not
+                # rejected as hollow.
+                return cls._count_python_nodes(content) >= cls.MIN_FUNCTIONAL_NODES
             # GoI Proof-Net verification: confirm the execution matrix is non-zero
             # using the native Rust solver.
             try:

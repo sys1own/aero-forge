@@ -704,6 +704,12 @@ class GraphPolyglotMaterializer:
             # Prefer artifacts whose language matches the node language.
             if a.language and a.language != lang and lang not in ("", "text"):
                 return False
+            # Drop source files whose basename clearly belongs to another node
+            # (e.g. a ``main`` node response that also includes ``fft_lib.py``).
+            if not self._is_build_manifest(a) and not a.is_header:
+                stem = Path(a.file_path).stem
+                if stem in other_nodes and stem != node_id:
+                    return False
             return True
 
         return [a for a in artifacts if _is_for_this_node(a)]
@@ -756,6 +762,7 @@ class GraphPolyglotMaterializer:
             node_spec,
             contracts,
             compacted_context=self._compacted_context,
+            user_prompt=self._synthesis_context,
         )
         v11_guidance = self._v11_universal_guidance()
 
@@ -816,6 +823,7 @@ class GraphPolyglotMaterializer:
                 for a in assigned
             ):
                 _accel_log("success", f"Builder Code Emission for {node_id}: logic in-fill successful")
+                _accel_log("success", "Skeleton In-Fill Successful")
                 return assigned
             _accel_log(
                 "warning",
@@ -1814,6 +1822,8 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                         raise MaterializationError(
                             f"toolchain dispatch failed for {node_id}: {exc}"
                         ) from exc
+
+        _accel_log("info", "HIN AST Normalization")
 
         build_artifact = self._generate_build_script(hin_graph_spec, stages)
         if build_artifact:

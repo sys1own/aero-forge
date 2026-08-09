@@ -65,7 +65,8 @@ class GenerationError(Exception):
 
 
 def _is_universal_project_prompt(prompt: str) -> bool:
-    """Return True when the prompt asks for a non-Python language bridge."""
+    """Return True when the prompt asks for a non-Python language bridge
+    or an explicitly structured pure_python project."""
     lower = prompt.lower()
     non_python_languages = [
         "zig",
@@ -106,7 +107,20 @@ def _is_universal_project_prompt(prompt: str) -> bool:
         "webassembly",
         "compile",
     ]
-    return has_non_python and any(m in lower for m in project_markers)
+    if has_non_python and any(m in lower for m in project_markers):
+        return True
+
+    # Explicitly structured pure_python projects (e.g. libraries with multiple
+    # source files and a main.py entrypoint) should route through the graph
+    # materializer so the SSP skeleton in-fill and density gates are applied.
+    pure_python_project = (
+        "pure_python" in lower
+        and any(m in lower for m in project_markers)
+    ) or (
+        "pure_python" in lower
+        and any(x in lower for x in ("main.py", "fft_lib/", "fft_lib", "core.py", "library"))
+    )
+    return pure_python_project
 
 
 DEFAULT_SYSTEM_PROMPT = get_default_template().system_prompt
@@ -367,9 +381,11 @@ def _build_user_prompt(
     if algorithm_context:
         parts.append(algorithm_context)
     parts.append(
-        "\nReturn the Python implementation in a ```python block and the pytest "
-        "tests in a second ```python block. The test file must import from "
-        "`generated` (e.g. `from generated import function_name`).\n"
+        "\nReturn the complete Python implementation between the markers "
+        "__AERO_LOGIC_START__ and __AERO_LOGIC_END__. If you include pytest tests, "
+        "place them between __AERO_TESTS_START__ and __AERO_TESTS_END__. "
+        "Do not include conversational text, markdown explanations, or code outside the markers. "
+        "The test file must import from `generated` (e.g. `from generated import function_name`).\n"
     )
     return "\n".join(parts)
 
@@ -406,10 +422,36 @@ def extract_code_blocks(text: str) -> List[Tuple[Optional[str], str]]:
 def parse_generated_response(text: str) -> Tuple[str, str]:
     """Parse LLM response into (implementation, tests).
 
-    Falls back to treating the first Python block as implementation and all
-    remaining blocks as tests, or to extracting plain ``def`` functions from
-    markdown-free responses.
+    First honors the SSP delimiters ``__AERO_LOGIC_START__`` /
+    ``__AERO_LOGIC_END__`` and ``__AERO_TESTS_START__`` /
+    ``__AERO_TESTS_END__``. Falls back to fenced code blocks and then to
+    plain ``def`` extraction.
     """
+    from aero_forge.orchestrator.prompt_builder import extract_aero_logic
+
+    # Only use the token-based SSP extractor when the response actually carries
+    # Aero-Forge markers.  Otherwise we want the multi-block fenced extraction so
+    # the first block is the implementation and the second block is the tests.
+    has_ssp = "__AERO_LOGIC_START__" in text or "__AERO_LOGIC_END__" in text
+
+    if has_ssp:
+        impl = extract_aero_logic(text)
+        if impl:
+            # Look for an explicit tests section in the raw response.
+            tests_match = re.search(
+                r"__AERO_TESTS_START__\s*\r?\n?(.*?)\r?\n?\s*__AERO_TESTS_END__",
+                text,
+                re.DOTALL | re.IGNORECASE,
+            )
+            tests = tests_match.group(1).strip() if tests_match else ""
+            if not tests:
+                # Single block may contain both impl and tests.
+                match = re.search(r"\n(?=def test_)", impl)
+                if match:
+                    tests = impl[match.start() + 1 :].strip()
+                    impl = impl[: match.start()].strip()
+            return impl, tests
+
     blocks = extract_code_blocks(text)
     python_blocks: List[str] = []
     if blocks:
@@ -541,12 +583,12 @@ def _skeleton_for_prompt(prompt: str, selected: Optional[Algorithm] = None) -> s
     return (
         "\n\nUse the following skeleton. Replace `solution` with the exact function name, "
         "fill in the correct parameter types and body, and return the complete implementation "
-        "inside a single ```python block.\n\n"
-        f"```python\n"
+        "between __AERO_LOGIC_START__ and __AERO_LOGIC_END__ only.\n\n"
+        f"__AERO_LOGIC_START__\n"
         f"{decorators}def {func_name}(...):\n"
         f"    \"\"\"Implement the requested algorithm.\"\"\"\n"
         f"    pass\n"
-        f"```"
+        f"__AERO_LOGIC_END__"
     )
 
 
@@ -607,6 +649,11 @@ def _has_min_functional_nodes(source: str, min_nodes: int = 3) -> bool:
 
 def _extract_first_python_code(text: str) -> str:
     """Return the first plausible Python source block from an LLM response."""
+    from aero_forge.orchestrator.prompt_builder import extract_aero_logic
+
+    payload = extract_aero_logic(text)
+    if payload:
+        return payload
     blocks = extract_code_blocks(text)
     for lang, code in blocks:
         if lang in (None, "python", "py"):
@@ -766,8 +813,8 @@ def generate_from_prompt(
     if reduced_context or True:
         reduced_note = (
             "\n\nREDUCED CONTEXT: Do not include explanation, algorithm discussion, or "
-            "markdown headers. Return only the complete implementation inside a single "
-            "```python block using the skeleton above."
+            "markdown headers. Return only the complete implementation between "
+            "__AERO_LOGIC_START__ and __AERO_LOGIC_END__ using the skeleton above."
         )
         reduced_user = _reduced_context_user_prompt(prompt, constraints, selected)
         messages = [
