@@ -108,20 +108,41 @@ MANIFEST RULES
 """
 
 
-def _py_type(a: str) -> str:
+def _looks_like_bytes(symbol: str) -> bool:
+    """Heuristic: symbols/ids with these tokens usually denote byte buffers."""
+    return any(tok in symbol.lower() for tok in (
+        "key", "buf", "byte", "aes", "sbox", "iv", "nonce", "schedule", "hash",
+        "digest", "cipher", "block", "round", "seed", "entropy", "secret",
+    ))
+
+
+def _py_type(a: str, symbol: str = "") -> str:
     return {"int64": "int", "float64": "float", "pointer": "list"}.get(a, "Any")
 
 
-def _rust_type(a: str) -> str:
-    return {"int64": "i64", "float64": "f64", "pointer": "*const f64"}.get(a, "i64")
+def _rust_type(a: str, symbol: str = "") -> str:
+    if a == "pointer":
+        # Mutable pointers let the generated body write output buffers without
+        # fighting Rust's ownership rules in ``from_raw_parts_mut``.
+        return "*mut u8" if _looks_like_bytes(symbol) else "*mut f64"
+    return {"int64": "i64", "float64": "f64"}.get(a, "i64")
 
 
-def _cpp_type(a: str) -> str:
-    return {"int64": "int64_t", "float64": "double", "pointer": "const double*"}.get(a, "int64_t")
+def _cpp_type(a: str, symbol: str = "") -> str:
+    if a == "pointer":
+        return "uint8_t*" if _looks_like_bytes(symbol) else "double*"
+    return {"int64": "int64_t", "float64": "double"}.get(a, "int64_t")
 
 
-def _go_type(a: str) -> str:
+def _go_type(a: str, symbol: str = "") -> str:
     return {"int64": "C.int64_t", "float64": "C.double", "pointer": "unsafe.Pointer"}.get(a, "C.int64_t")
+
+
+def _zig_type(a: str, symbol: str = "") -> str:
+    """Zig-compatible type for C-ABI pointers and primitives."""
+    if a == "pointer":
+        return "[*c]u8" if _looks_like_bytes(symbol) else "[*c]f64"
+    return {"int64": "i64", "float64": "f64"}.get(a, "i64")
 
 
 def _smt_type_env(node: Dict[str, Any], contracts: List[Dict[str, Any]]) -> Dict[str, str]:
@@ -165,45 +186,45 @@ def _build_skeleton(
 
     if lang in ("python", "py"):
         arg_str = ", ".join(
-            f"{n}: {type_env.get(n, _py_type(a))}" for n, a in zip(arg_names, args)
+            f"{n}: {type_env.get(n, _py_type(a, symbol))}" for n, a in zip(arg_names, args)
         ) or "*args"
-        ret = f" -> {type_env.get('return', _py_type(return_type))}" if return_type else ""
+        ret = f" -> {type_env.get('return', _py_type(return_type, symbol))}" if return_type else ""
         accel_decorator = ""
         target = (node.get("target") or node.get("accelerate_target") or "")
         if target:
             accel_decorator = f"@accelerate(target='{target}')\n"
-        imports = ["from aero_forge.decorators import accelerate" if accel_decorator else ""]
+        imports = ["from typing import Any", "from aero_forge.decorators import accelerate" if accel_decorator else ""]
         imports = [i for i in imports if i]
-        lines = imports + [accel_decorator + f"def {symbol}({arg_str}){ret}:", f'    """Implement {symbol}."""', "    __AERO_IN_FILL__"]
+        lines = imports + ["", accel_decorator + f"def {symbol}({arg_str}){ret}:", f'    """Implement {symbol}."""', "    __AERO_IN_FILL__"]
         return "\n".join(lines)
 
     if lang in ("rust", "rs"):
         arg_str = ", ".join(
-            f"{n}: {type_env.get(n, _rust_type(a))}" for n, a in zip(arg_names, args)
+            f"{n}: {type_env.get(n, _rust_type(a, symbol))}" for n, a in zip(arg_names, args)
         ) or ""
-        ret = f" -> {type_env.get('return', _rust_type(return_type))}" if return_type else ""
+        ret = f" -> {type_env.get('return', _rust_type(return_type, symbol))}" if return_type else ""
         return f"#[no_mangle]\npub extern \"C\" fn {symbol}({arg_str}){ret} {{\n    __AERO_IN_FILL__\n}}"
 
     if lang in ("cpp", "c++", "cxx"):
         arg_str = ", ".join(
-            f"{type_env.get(n, _cpp_type(a))} {n}" for n, a in zip(arg_names, args)
+            f"{type_env.get(n, _cpp_type(a, symbol))} {n}" for n, a in zip(arg_names, args)
         ) or "void"
-        ret = type_env.get("return", _cpp_type(return_type)) if return_type else "void"
+        ret = type_env.get("return", _cpp_type(return_type, symbol)) if return_type else "void"
         return f'extern "C" {ret} {symbol}({arg_str}) {{\n    __AERO_IN_FILL__\n}}'
 
     if lang in ("go", "golang"):
         arg_str = ", ".join(
-            f"{n} {type_env.get(n, _go_type(a))}" for n, a in zip(arg_names, args)
+            f"{n} {type_env.get(n, _go_type(a, symbol))}" for n, a in zip(arg_names, args)
         ) or ""
-        ret = type_env.get("return", _go_type(return_type)) if return_type else ""
+        ret = type_env.get("return", _go_type(return_type, symbol)) if return_type else ""
         ret_str = f" {ret}" if ret else ""
         return f"//export {symbol}\nfunc {symbol}({arg_str}){ret_str} {{\n    __AERO_IN_FILL__\n}}"
 
     if lang == "zig":
         arg_str = ", ".join(
-            f"{n}: {type_env.get(n, _rust_type(a))}" for n, a in zip(arg_names, args)
+            f"{n}: {type_env.get(n, _zig_type(a, symbol))}" for n, a in zip(arg_names, args)
         ) or ""
-        ret = type_env.get("return", _rust_type(return_type)) if return_type else "void"
+        ret = type_env.get("return", _zig_type(return_type, symbol)) if return_type else "void"
         return f"export fn {symbol}({arg_str}) {ret} {{\n    __AERO_IN_FILL__\n}}"
 
     return f"// Implement {symbol} for {lang}\n"

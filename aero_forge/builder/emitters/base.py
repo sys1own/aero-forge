@@ -73,7 +73,7 @@ class ContentDensityValidator:
     """
 
     MIN_FUNCTIONAL_NODES: int = 2
-    MIN_GENERIC_FUNCTIONAL_NODES: int = 1
+    MIN_GENERIC_FUNCTIONAL_NODES: int = 2
 
     @classmethod
     def validate(cls, content: str, language: str) -> int:
@@ -140,29 +140,53 @@ class ContentDensityValidator:
 
     @classmethod
     def _count_generic_nodes(cls, content: str) -> int:
-        """Fast fallback for non-Python sources using regex patterns."""
-        # Remove single-line comments (best-effort) and count common constructs.
+        """Fast fallback for non-Python sources using regex patterns.
+
+        Counts only real computational work: control flow, function calls, and
+        operators.  Declarations (``let``/``const``/``var``/``struct``/``class``),
+        bare ``return`` statements, and ``_ = arg_*`` suppression lines are
+        *not* counted, so a stub like ``fn f() { _ = arg_0; return 0; }``
+        returns 0 and triggers a retry.
+        """
+        # Remove C++/Zig/Rust block comments and single-line comments.
         cleaned = re.sub(r"//.*$|#.*$", "", content, flags=re.MULTILINE)
         cleaned = re.sub(r"/\*.*?\*/", "", cleaned, flags=re.DOTALL)
         if not cleaned.strip():
-            # Comment-only/placeholder stubs are hollow and must trigger a retry.
             return 0
+
+        # Strip import/include/use lines and ``const x = @import(...)`` imports.
+        cleaned = re.sub(
+            r"^\s*(?:#include|import|use|using)\b.*$",
+            "",
+            cleaned,
+            flags=re.MULTILINE | re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"^\s*const\s+\w+\s*=\s*@import\s*\([^)]*\)\s*;\s*$",
+            "",
+            cleaned,
+            flags=re.MULTILINE,
+        )
+
+        # Remove suppression placeholders: ``_ = arg_*;``, ``let _ = ...;``,
+        # and ``return 0/arg_*;`` before counting.  This specifically targets the
+        # hollow stubs produced by under-trained responses.
+        cleaned = re.sub(r"_\s*=\s*arg_\d+\s*;", "", cleaned)
+        cleaned = re.sub(r"\b(?:let|var|const)\s+_\s*=\s*[^;]+;", "", cleaned)
+        cleaned = re.sub(r"return\s+(?:0|arg_\d+|_)\s*;", "", cleaned, flags=re.IGNORECASE)
+
+        if not cleaned.strip():
+            return 0
+
         patterns = [
-            r"\bfn\s+",
+            # Function definitions (Zig/Go/Rust/C/Mojo/General).
+            r'\b(?:export\s+)?(?:pub\s+)?(?:extern\s+(?:"C"\s+))?fn\s+',
             r"\bfunc\s+",
             r"\bdef\s+",
-            r"\bclass\s+",
-            r"\bstruct\s+",
-            r"\bimpl\s+",
-            r"\bfor\s+",
-            r"\bwhile\s+",
-            r"\bif\s*\(",
-            r"\bif\s+",
-            r"\breturn\s+",
-            r"\blet\s+",
-            r"\bvar\s+",
-            r"\bconst\s+",
-            r"\bmatch\s+",
+            # Control flow.
+            r"\b(?:if|for|while|loop|switch|match)\b",
+            # Assignment (=) and operators (arithmetic, comparison, logical, bitwise).
+            r"==|!=|<=|>=|&&|\|\||[\+\-*/%&|^<>!]=?",
         ]
         count = 0
         for pattern in patterns:
@@ -191,7 +215,9 @@ class ContentDensityValidator:
             # Syntactically invalid Python is deferred to the syntax validator.
             return True
 
+        import json
         import numpy as np
+        from aero_forge._native import execution_matrix_nonzero
         from aero_forge.scheduler.goi_solver import _loop_dependency_matrix
 
         matrices = []
@@ -208,7 +234,14 @@ class ContentDensityValidator:
                 n = M.shape[0]
                 result[offset : offset + n, offset : offset + n] = M
                 offset += n
-            return result.size > 0 and bool(result.any())
+            if result.size == 0 or not result.any():
+                return False
+            # GoI Proof-Net verification: confirm the execution matrix is non-zero
+            # using the native Rust solver.
+            try:
+                return execution_matrix_nonzero(json.dumps(result.tolist()))
+            except Exception:
+                return bool(result.any())
 
         # No function bodies with loop-carried flow: use module-level density.
         return cls._count_python_nodes(content) >= cls.MIN_FUNCTIONAL_NODES
