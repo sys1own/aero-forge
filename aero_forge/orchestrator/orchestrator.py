@@ -661,13 +661,12 @@ class Orchestrator:
                 "toolchain manifests, and ABI contracts. Output only valid JSON."
             )
 
-    def _ensure_blueprint_enriched(self, blueprint: Blueprint) -> Blueprint:
-        """Return an LLM-enriched blueprint, or raise ForgeError.
+    def enrich_blueprint(self, blueprint: Blueprint) -> Blueprint:
+        """Run a synchronous v11 enrichment pass and return the enriched blueprint.
 
-        If the blueprint's ``llm_initialized`` flag is false and a prompt plus
-        an LLM client are available, this method invokes the v11 universal
-        architect for an enrichment pass before the build is allowed to proceed
-        to materialisation.
+        This is the single gate that must complete before any ProjectBuilder or
+        materialization step is allowed to touch the workspace disk. If the
+        blueprint is already marked ``llm_initialized`` the pass is a no-op.
         """
         metadata = blueprint.metadata if isinstance(blueprint.metadata, dict) else {}
         if self._is_enriched(metadata):
@@ -679,6 +678,7 @@ class Orchestrator:
                 "is available to run intent enrichment."
             )
         try:
+            _accel_log("info", "Enriching Blueprint (synchronous v11 pass)...")
             compiler = IntentCompiler(
                 llm_client=self.llm_client,
                 system_prompt_extra=self._v11_enrichment_guidance(),
@@ -692,11 +692,16 @@ class Orchestrator:
             enriched.metadata["status"] = "finalized"
             enriched.metadata["generation_method"] = "llm_synthesized"
             enriched.metadata["auto_generated"] = "false"
+            _accel_log("success", "Blueprint enrichment complete")
             return enriched
         except Exception as exc:
             raise ForgeError(
                 f"Blueprint Not Enriched: v11 enrichment pass failed: {exc}"
             ) from exc
+
+    def _ensure_blueprint_enriched(self, blueprint: Blueprint) -> Blueprint:
+        """Backward-compatible alias for :meth:`enrich_blueprint`."""
+        return self.enrich_blueprint(blueprint)
 
     def build(
         self,
@@ -724,7 +729,14 @@ class Orchestrator:
                 llm=LLMConfig(provider="none"),
             )
 
-        blueprint = self._ensure_blueprint_enriched(blueprint)
+        # Synchronous enrichment gate: the ProjectBuilder/BuildRunner must not
+        # touch disk until the blueprint is finalized.
+        blueprint = self.enrich_blueprint(blueprint)
+        if not self._is_enriched(blueprint.metadata):
+            raise ForgeError(
+                "Blueprint Not Enriched: build is blocked until the v11 "
+                "enrichment pass completes and llm_initialized is true."
+            )
 
         from aero_forge.build_runner import BuildRunner
 
