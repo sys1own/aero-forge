@@ -115,6 +115,10 @@ class ContentDensityValidator:
                 f"Synthesis Incompleteness: source has only {count} functional node(s) "
                 f"(minimum {threshold})"
             )
+        _accel_log(
+            "info",
+            f"Logic Density Gate passed: {count} functional node(s) in source",
+        )
         return count
 
     @classmethod
@@ -318,6 +322,68 @@ class ContentDensityValidator:
             return execution_matrix_nonzero(json.dumps(result.tolist()))
         except Exception:
             return bool(result.any())
+
+
+class ContextExhaustionError(RuntimeError):
+    """Raised when the Compacted Functional Matrix lacks a logic intent for a contracted symbol."""
+
+    def __init__(self, message: str, symbols: Optional[List[str]] = None) -> None:
+        super().__init__(message)
+        self.symbols = symbols or []
+
+
+class SLIIntentValidator:
+    """Validate that every contracted symbol has a logic intent in the CFM.
+
+    During the Semantic Logic In-Fill phase the Builder Emission Agent must be
+    able to look up each symbol it is asked to implement. If the Compacted
+    Functional Matrix does not contain an entry for a required symbol, the
+    validator raises ``ContextExhaustionError`` so the orchestrator can trigger
+    a focused LLM retry for that symbol.
+    """
+
+    @staticmethod
+    def _collect_cfm_symbols(compacted_context: Optional[Dict[str, Any]]) -> Set[str]:
+        """Return every symbol name present in the CFM."""
+        context = compacted_context or {}
+        symbols: Set[str] = set()
+        for fn in context.get("functions", []):
+            name = fn.get("name") or fn.get("symbol")
+            if name:
+                symbols.add(name)
+        impl_map = context.get("full_implementation_map") or {}
+        for entry in impl_map.get("symbols", []):
+            if isinstance(entry, dict):
+                name = entry.get("name") or entry.get("symbol")
+                if name:
+                    symbols.add(name)
+            elif isinstance(entry, str):
+                symbols.add(entry)
+        return symbols
+
+    @classmethod
+    def find_exhausted_symbols(
+        cls,
+        compacted_context: Optional[Dict[str, Any]],
+        required_symbols: List[str],
+    ) -> List[str]:
+        """Return required symbols that are missing from the CFM."""
+        cfm_symbols = cls._collect_cfm_symbols(compacted_context)
+        return [s for s in required_symbols if s not in cfm_symbols]
+
+    @classmethod
+    def validate(
+        cls,
+        compacted_context: Optional[Dict[str, Any]],
+        required_symbols: List[str],
+    ) -> None:
+        """Raise ``ContextExhaustionError`` if any required symbol lacks intent."""
+        exhausted = cls.find_exhausted_symbols(compacted_context, required_symbols)
+        if exhausted:
+            raise ContextExhaustionError(
+                f"Context Exhaustion: no logic intent in CFM for symbols: {exhausted}",
+                symbols=exhausted,
+            )
 
 
 class ContractIntegrityValidator:

@@ -229,6 +229,12 @@ class TruncatedAeroLogicError(ValueError):
     pass
 
 
+class ExtractionFailureError(ValueError):
+    """Raised when the SSP markers are present but the extracted payload is empty."""
+
+    pass
+
+
 def extract_aero_logic(raw: str) -> str:
     """Return the payload delimited by ``__AERO_LOGIC_START__`` / ``__AERO_LOGIC_END__``.
 
@@ -241,6 +247,8 @@ def extract_aero_logic(raw: str) -> str:
         TruncatedAeroLogicError: when the start marker is present but the end
         marker is missing, so the caller can flag the response as truncated
         rather than materialising partial code.
+        ExtractionFailureError: when the markers delimit an empty block, so the
+        caller can flag an extraction failure rather than treating it as no output.
     """
     if not raw:
         return ""
@@ -258,7 +266,13 @@ def extract_aero_logic(raw: str) -> str:
     )
     if start_match:
         if end_match and end_match.start() >= start_match.end():
-            return text[start_match.end():end_match.start()].strip()
+            extracted = text[start_match.end():end_match.start()].strip()
+            if not extracted:
+                raise ExtractionFailureError(
+                    "Extraction Failure: __AERO_LOGIC_START__ and __AERO_LOGIC_END__ "
+                    "present but the delimited payload is empty"
+                )
+            return extracted
         # The model opened the SSP block but never closed it; the response is
         # almost certainly truncated mid-statement. Do not attempt to parse it.
         raise TruncatedAeroLogicError("Truncated response: missing __AERO_LOGIC_END__")
@@ -278,6 +292,7 @@ def extract_aero_logic(raw: str) -> str:
 __all__ = [
     "PromptBuilder",
     "TruncatedAeroLogicError",
+    "ExtractionFailureError",
     "build_blueprint_plan_prompt",
     "EMITTER_PLUGIN_SYNTHESIS_SYSTEM_PROMPT",
     "extract_aero_logic",

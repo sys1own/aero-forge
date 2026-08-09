@@ -472,6 +472,7 @@ class IntentCompiler:
         max_schema_retries: int = 3,
         llm_client: Optional[Any] = None,
         config_override: Optional[Any] = None,
+        system_prompt_extra: Optional[str] = None,
     ):
         self.provider = provider or "deepseek"
         self.model = model
@@ -480,6 +481,7 @@ class IntentCompiler:
         self.max_schema_retries = max(1, max_schema_retries)
         self._llm_client = llm_client
         self.config_override = config_override
+        self._system_prompt_extra = system_prompt_extra or ""
 
     def compile_prompt(
         self,
@@ -508,8 +510,12 @@ class IntentCompiler:
         schema = BlueprintSchemaV2.model_json_schema()
         validator = Draft7Validator(schema)
 
+        system = _SYSTEM_PROMPT
+        if self._system_prompt_extra:
+            system = f"{system}\n\n{self._system_prompt_extra}"
+
         messages: List[Dict[str, str]] = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user", "content": prompt_text},
         ]
 
@@ -684,8 +690,12 @@ class IntentCompiler:
                 tier=Tier.REASONING,
             )
 
+        system = _GRAPH_SYSTEM_PROMPT
+        if self._system_prompt_extra:
+            system = f"{system}\n\n{self._system_prompt_extra}"
+
         messages: List[Dict[str, str]] = [
-            {"role": "system", "content": _GRAPH_SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user", "content": prompt_text},
         ]
 

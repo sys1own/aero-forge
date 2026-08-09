@@ -42,9 +42,11 @@ from aero_forge.builder.emitters.base import (
     BoundaryContract,
     CodeArtifact,
     ContentDensityValidator,
+    ContextExhaustionError,
     ContractIntegrityValidator,
     EmitterRegistry,
     PolyglotEmitterPlugin,
+    SLIIntentValidator,
     SyntaxValidator,
 )
 from aero_forge.builder.language_router import (
@@ -54,8 +56,10 @@ from aero_forge.builder.language_router import (
 )
 from aero_forge.config import resolve_llm_provider
 from aero_forge.llm.clients import get_llm_client
+from aero_forge.orchestrator.orchestrator import CompactedContextGenerator
 from aero_forge.orchestrator.prompt_builder import (
     EMITTER_PLUGIN_SYNTHESIS_SYSTEM_PROMPT,
+    ExtractionFailureError,
     TruncatedAeroLogicError,
     extract_aero_logic,
 )
@@ -66,7 +70,11 @@ from aero_forge.prompts.builder_emitter import (
     format_builder_emitter_user_prompt,
 )
 from aero_forge.translator import uast_to_python_source
-from aero_forge.builder.smt_engine import AttributeResolver
+from aero_forge.builder.smt_engine import (
+    AttributeResolver,
+    SMTSaturationError,
+    SkeletonTypeInjector,
+)
 from aero_forge.scheduler.goi_solver import (
     GoIWavefrontSolver,
     GoiSolverError,
@@ -599,6 +607,9 @@ else:
         except TruncatedAeroLogicError as exc:
             _accel_log("error", f"SSP parser: {exc}")
             return artifacts
+        except ExtractionFailureError as exc:
+            _accel_log("error", f"SSP parser: {exc}")
+            return artifacts
         # Allow empty language token (e.g. bare ```) and optional path labels.
         pattern = re.compile(
             r"```\s*(\w*)\s*(?::\s*([^\n\r]*?))?\s*\r?\n([\s\S]*?)\r?\n?\s*```",
@@ -657,7 +668,10 @@ else:
 
         Supports fenced blocks with language ``uast`` or ``json`` and raw JSON
         payloads. The SMT attribute resolver is applied before emission so the
-        engine (not the LLM) owns the final attribute spelling.
+        engine (not the LLM) owns the final attribute spelling. SMT saturation is
+        checked first: if Z3 returns an empty or UNSAT model for any function
+        body, the artifact is rejected so the proactive synthesis healer can
+        rewrite the intent.
         """
         if artifact.language not in ("uast", "json") and not artifact.content.strip().startswith(("{", "[")):
             return None
@@ -670,7 +684,31 @@ else:
         if not isinstance(data.get("body", []), list) and not isinstance(data.get("children", []), list):
             return None
         try:
-            resolver = AttributeResolver()
+            # First pass: emit source with the default resolver to obtain a
+            # concrete Python sketch that the SMT engine can analyze.
+            raw_source = uast_to_python_source(data)
+            func_names = [
+                node.name
+                for node in ast.walk(ast.parse(raw_source))
+                if isinstance(node, ast.FunctionDef)
+            ]
+            for name in func_names or [None]:
+                SkeletonTypeInjector.saturate(raw_source, name, target_language="python")
+
+            # Second pass: build an SMT-informed attribute resolver and emit the
+            # final source with correct attribute names (e.g. conj -> conjugate).
+            type_env: Dict[str, str] = {}
+            for name in func_names or [None]:
+                if name:
+                    env = SkeletonTypeInjector.infer_type_env_for_symbol(
+                        raw_source, name, target_language="python"
+                    )
+                else:
+                    env = SkeletonTypeInjector.infer_type_env(
+                        raw_source, target_language="python"
+                    )
+                type_env.update(env)
+            resolver = AttributeResolver(type_env=type_env)
             source = uast_to_python_source(data, attribute_resolver=resolver.resolve)
             _accel_log("info", f"UAST-to-Python emission succeeded for {artifact.file_path or '<unknown>'}")
             return CodeArtifact(
@@ -678,9 +716,11 @@ else:
                 content=source,
                 language="python",
             )
+        except SMTSaturationError as exc:
+            _accel_log("warning", f"UAST-to-Python SMT saturation failed: {exc}")
         except Exception as exc:
             _accel_log("warning", f"UAST-to-Python emission failed: {exc}")
-            return None
+        return None
 
     @staticmethod
     def _coerce_artifact_types(artifacts: List[CodeArtifact]) -> List[CodeArtifact]:
@@ -1138,6 +1178,19 @@ else:
         # the accelerator log shows the per-function SLI progression.
         for symbol, _args, _ret in _symbol_specs(node_spec, contracts):
             _accel_log("info", f"Materializing Symbol: {symbol}")
+
+        # Harden SLI intent retrieval: every contracted symbol must have a logic
+        # intent in the Compacted Functional Matrix. Missing intent triggers a
+        # focused retry for that symbol.
+        required_symbols = [symbol for symbol, _args, _ret in _symbol_specs(node_spec, contracts)]
+        try:
+            SLIIntentValidator.validate(self._compacted_context, required_symbols)
+        except ContextExhaustionError as exc:
+            _accel_log(
+                "error",
+                f"Context Exhaustion for {node_id}: {exc}",
+            )
+            missing_symbols = sorted(set((missing_symbols or []) + list(exc.symbols)))
 
         user_prompt = format_builder_emitter_user_prompt(
             node_spec,
@@ -2215,6 +2268,13 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             env=env,
         )
 
+        cfm_json = json.dumps(
+            self._compacted_context,
+            indent=2,
+            default=str,
+            sort_keys=False,
+        )
+
         blueprint = BlueprintV3(
             metadata=Metadata(
                 schema_version="3.0.0",
@@ -2225,6 +2285,7 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                 llm_initialized=True,
                 auto_generated=True,
                 description=f"{architecture} blueprint for {project}",
+                compacted_context=cfm_json,
             ),
             llm_context=LLMContext(state=ContextState.synthesized),
             build_pipeline=build_pipeline,
@@ -2282,6 +2343,16 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
         )
         raw_compacted = hin_graph_spec.get("metadata", {}).get("synthesis_context", "")
         self._compacted_context = self._parse_compacted_context(raw_compacted)
+        if not self._compacted_context:
+            try:
+                cfm = CompactedContextGenerator(hin_graph_spec).generate()
+                self._compacted_context = self._parse_compacted_context(cfm)
+            except Exception as exc:
+                _accel_log(
+                    "warning",
+                    f"Could not generate Compacted Functional Matrix: {exc}",
+                )
+                self._compacted_context = {}
         self._smt_types = hin_graph_spec.get("metadata", {}).get("smt_types", {})
         node_map = {n["node_id"]: n for n in nodes}
         self._normalize_rust_python_pyo3_boundary(edges, node_map)
