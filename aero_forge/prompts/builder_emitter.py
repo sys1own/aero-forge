@@ -8,7 +8,7 @@ corresponding toolchain manifest. It is the runtime companion of
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 BUILDER_EMITTER_SYSTEM_PROMPT = """\
@@ -46,13 +46,17 @@ OUTPUT RULES
    no `pass`, no `todo!()`, no `unimplemented!()`). The generated code must
    compile with the stated toolchain on the first pass and implement a real
    baseline for every requested symbol.
-5. Generate every file listed in `node.source_files`, including headers and the
+5. Full Implementation Map: the response must define **every** symbol listed in
+   `context.required_symbols`.  Do not omit, truncate, or skip any requested
+   function.  If `context.missing_symbols` is non-empty, those functions were
+   absent from a previous attempt and must be included now.
+6. Generate every file listed in `node.source_files`, including headers and the
    build manifest (Cargo.toml, CMakeLists.txt, pyproject.toml, go.mod,
    .csproj, build.gradle, etc.). Manifest fences use their language label
    (e.g. `toml`, `xml`) and the exact manifest path (e.g. `Cargo.toml`).
-6. Respect the SMT-inferred native types in `compacted_context.smt_types` when
+7. Respect the SMT-inferred native types in `compacted_context.smt_types` when
    choosing concrete types for variables and parameters.
-7. UAST sketches must use Python `ast` node names (`Module`, `FunctionDef`,
+8. UAST sketches must use Python `ast` node names (`Module`, `FunctionDef`,
    `Call`, `Attribute`, `BinOp`, `Compare`, etc.). Attribute names should follow
    the intent (e.g. `conj` on a complex value); the engine will rewrite them to
    the correct Python spelling (`conjugate`) via SMT verification.
@@ -171,6 +175,26 @@ def _smt_type_env(node: Dict[str, Any], contracts: List[Dict[str, Any]]) -> Dict
     return types
 
 
+def _symbol_specs(
+    node: Dict[str, Any], contracts: List[Dict[str, Any]]
+) -> List[Tuple[str, List[str], str]]:
+    """Return (symbol, args, return_type) specs for every contract/export.
+
+    The skeleton must expose every function the blueprint asks for so the LLM
+    fills in a complete implementation map rather than a single symbol.
+    """
+    specs: List[Tuple[str, List[str], str]] = []
+    for c in contracts or []:
+        sym = c.get("symbol") or node.get("node_id", "module")
+        specs.append((sym, list(c.get("args") or []), c.get("return_type", "")))
+    if not specs:
+        for sym in node.get("exports") or []:
+            specs.append((sym, [], ""))
+    if not specs:
+        specs.append((node.get("node_id", "module"), [], ""))
+    return specs
+
+
 def _build_skeleton(
     node: Dict[str, Any],
     contracts: List[Dict[str, Any]],
@@ -181,21 +205,12 @@ def _build_skeleton(
 
     The skeleton contains only imports, signatures, decorators, and
     ``__AERO_IN_FILL__`` markers so the model only has to fill in the body.
+    Every contracted/exported symbol gets its own signature block.
     """
     lang = (node.get("lang") or node.get("language") or "python").lower()
     node_id = node.get("node_id", "module")
-    symbol = node_id
-    args: List[str] = []
-    return_type = ""
-    if contracts:
-        contract = contracts[0]
-        symbol = contract.get("symbol", node_id)
-        args = list(contract.get("args") or [])
-        return_type = contract.get("return_type", "")
-
+    specs = _symbol_specs(node, contracts)
     type_env = _smt_type_env(node, contracts)
-
-    arg_names = [f"arg{i}" for i in range(len(args))]
 
     is_pyo3 = any(
         (c.get("boundary_type") or "").lower().replace("-", "_") == "pyo3_maturin"
@@ -219,53 +234,74 @@ def _build_skeleton(
         type_env = {k: pyo3_type_map.get(v.strip(), v) for k, v in type_env.items()}
 
     if lang in ("python", "py"):
-        arg_str = ", ".join(
-            f"{n}: {type_env.get(n, _py_type(a, symbol))}" for n, a in zip(arg_names, args)
-        ) or "*args"
-        ret = f" -> {type_env.get('return', _py_type(return_type, symbol))}" if return_type else ""
-        accel_decorator = ""
         target = (node.get("target") or node.get("accelerate_target") or "")
-        if target:
-            accel_decorator = f"@accelerate(target='{target}')\n"
+        accel_decorator = f"@accelerate(target='{target}')\n" if target else ""
         imports = ["from typing import Any", "from aero_forge.decorators import accelerate" if accel_decorator else ""]
         imports = [i for i in imports if i]
-        lines = imports + ["", accel_decorator + f"def {symbol}({arg_str}){ret}:", f'    """Implement {symbol}."""', "    __AERO_IN_FILL__"]
-        return "\n".join(lines)
+        lines = imports + [""]
+        for symbol, args, return_type in specs:
+            arg_names = [f"arg{i}" for i in range(len(args))]
+            arg_str = ", ".join(
+                f"{n}: {type_env.get(n, _py_type(a, symbol))}" for n, a in zip(arg_names, args)
+            ) or "*args"
+            ret = f" -> {type_env.get('return', _py_type(return_type, symbol))}" if return_type else ""
+            if accel_decorator:
+                lines.append(accel_decorator.rstrip())
+            lines.append(f"def {symbol}({arg_str}){ret}:")
+            lines.append(f'    """Implement {symbol}."""')
+            lines.append("    __AERO_IN_FILL__")
+            lines.append("")
+        return "\n".join(lines).rstrip()
 
     if lang in ("rust", "rs"):
-        rust_arg = lambda a, n: type_env.get(n, _rust_pyo3_type(a, symbol) if is_pyo3 else _rust_type(a, symbol))
-        rust_ret = lambda a: type_env.get("return", _rust_pyo3_type(a, symbol) if is_pyo3 else _rust_type(a, symbol))
-        arg_str = ", ".join(
-            f"{n}: {rust_arg(a, n)}" for n, a in zip(arg_names, args)
-        ) or ""
-        ret = f" -> {rust_ret(return_type)}" if return_type else ""
-        if is_pyo3:
-            return f"#[pyfunction]\npub fn {symbol}({arg_str}){ret} {{\n    __AERO_IN_FILL__\n}}"
-        return f"#[no_mangle]\npub extern \"C\" fn {symbol}({arg_str}){ret} {{\n    __AERO_IN_FILL__\n}}"
+        parts: List[str] = []
+        for symbol, args, return_type in specs:
+            arg_names = [f"arg{i}" for i in range(len(args))]
+            rust_arg = lambda a, n, sym=symbol: type_env.get(n, _rust_pyo3_type(a, sym) if is_pyo3 else _rust_type(a, sym))
+            rust_ret = lambda a, sym=symbol: type_env.get("return", _rust_pyo3_type(a, sym) if is_pyo3 else _rust_type(a, sym))
+            arg_str = ", ".join(f"{n}: {rust_arg(a, n)}" for n, a in zip(arg_names, args)) or ""
+            ret = f" -> {rust_ret(return_type)}" if return_type else ""
+            if is_pyo3:
+                parts.append(f"#[pyfunction]\npub fn {symbol}({arg_str}){ret} {{\n    __AERO_IN_FILL__\n}}")
+            else:
+                parts.append(f"#[no_mangle]\npub extern \"C\" fn {symbol}({arg_str}){ret} {{\n    __AERO_IN_FILL__\n}}")
+            parts.append("")
+        return "\n".join(parts).rstrip()
 
     if lang in ("cpp", "c++", "cxx"):
-        arg_str = ", ".join(
-            f"{type_env.get(n, _cpp_type(a, symbol))} {n}" for n, a in zip(arg_names, args)
-        ) or "void"
-        ret = type_env.get("return", _cpp_type(return_type, symbol)) if return_type else "void"
-        return f'extern "C" {ret} {symbol}({arg_str}) {{\n    __AERO_IN_FILL__\n}}'
+        parts: List[str] = []
+        for symbol, args, return_type in specs:
+            arg_names = [f"arg{i}" for i in range(len(args))]
+            arg_str = ", ".join(
+                f"{type_env.get(n, _cpp_type(a, symbol))} {n}" for n, a in zip(arg_names, args)
+            ) or "void"
+            ret = type_env.get("return", _cpp_type(return_type, symbol)) if return_type else "void"
+            parts.append(f'extern "C" {ret} {symbol}({arg_str}) {{\n    __AERO_IN_FILL__\n}}')
+            parts.append("")
+        return "\n".join(parts).rstrip()
 
     if lang in ("go", "golang"):
-        arg_str = ", ".join(
-            f"{n} {type_env.get(n, _go_type(a, symbol))}" for n, a in zip(arg_names, args)
-        ) or ""
-        ret = type_env.get("return", _go_type(return_type, symbol)) if return_type else ""
-        ret_str = f" {ret}" if ret else ""
-        return f"//export {symbol}\nfunc {symbol}({arg_str}){ret_str} {{\n    __AERO_IN_FILL__\n}}"
+        parts: List[str] = []
+        for symbol, args, return_type in specs:
+            arg_names = [f"arg{i}" for i in range(len(args))]
+            arg_str = ", ".join(f"{n} {type_env.get(n, _go_type(a, symbol))}" for n, a in zip(arg_names, args)) or ""
+            ret = type_env.get("return", _go_type(return_type, symbol)) if return_type else ""
+            ret_str = f" {ret}" if ret else ""
+            parts.append(f"//export {symbol}\nfunc {symbol}({arg_str}){ret_str} {{\n    __AERO_IN_FILL__\n}}")
+            parts.append("")
+        return "\n".join(parts).rstrip()
 
     if lang == "zig":
-        arg_str = ", ".join(
-            f"{n}: {type_env.get(n, _zig_type(a, symbol))}" for n, a in zip(arg_names, args)
-        ) or ""
-        ret = type_env.get("return", _zig_type(return_type, symbol)) if return_type else "void"
-        return f"export fn {symbol}({arg_str}) {ret} {{\n    __AERO_IN_FILL__\n}}"
+        parts: List[str] = []
+        for symbol, args, return_type in specs:
+            arg_names = [f"arg{i}" for i in range(len(args))]
+            arg_str = ", ".join(f"{n}: {type_env.get(n, _zig_type(a, symbol))}" for n, a in zip(arg_names, args)) or ""
+            ret = type_env.get("return", _zig_type(return_type, symbol)) if return_type else "void"
+            parts.append(f"export fn {symbol}({arg_str}) {ret} {{\n    __AERO_IN_FILL__\n}}")
+            parts.append("")
+        return "\n".join(parts).rstrip()
 
-    return f"// Implement {symbol} for {lang}\n"
+    return f"// Implement {specs[0][0]} for {lang}\n"
 
 
 def format_builder_emitter_user_prompt(
@@ -274,6 +310,7 @@ def format_builder_emitter_user_prompt(
     *,
     compacted_context: Optional[Dict[str, Any]] = None,
     user_prompt: str = "",
+    missing_symbols: Optional[List[str]] = None,
 ) -> str:
     """Return a user prompt that feeds a node spec into the Builder Emission Agent."""
     import json
@@ -281,17 +318,36 @@ def format_builder_emitter_user_prompt(
     contracts = boundary_contracts or []
     skeleton = _build_skeleton(node, contracts, compacted_context=compacted_context)
     context = compacted_context or {}
+    required_symbols = sorted(
+        {c.get("symbol", "") for c in contracts if c.get("symbol")}
+        | set(node.get("exports") or [])
+    )
     payload = {
         "user_prompt": user_prompt,
         "compacted_context": context,
         "skeleton": skeleton,
+        "required_symbols": required_symbols,
+        "missing_symbols": list(missing_symbols or []),
+        "full_implementation_map": (
+            "Implement every symbol in `required_symbols`. Do not omit, "
+            "truncate, or skip any requested function."
+        ),
     }
+    missing_note = ""
+    if missing_symbols:
+        missing_note = (
+            "INCOMPLETE MATERIALIZATION RETRY: the following symbols were "
+            f"missing from the previous attempt and MUST be included now: {missing_symbols}. "
+        )
     return (
         "Generate source and manifest files for the following graph node. "
         "The user request and the Compacted Functional Matrix below are the "
         "exclusive context you need. Use the `skeleton` field as the starting "
         "file: keep all imports, signatures, and decorators, and replace every "
         "`__AERO_IN_FILL__` marker with real implementation code. "
+        "You MUST implement ALL symbols listed in `required_symbols` as a "
+        "Full Implementation Map. Do not omit any function from the blueprint. "
+        + missing_note +
         "For Python targets, prefer emitting a UAST JSON sketch inside a "
         "```uast:<path> fence instead of raw source; the engine will lower it, "
         "run HIN verification, and resolve attribute names like `conj` to "

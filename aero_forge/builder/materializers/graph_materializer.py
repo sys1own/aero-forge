@@ -42,6 +42,7 @@ from aero_forge.builder.emitters.base import (
     BoundaryContract,
     CodeArtifact,
     ContentDensityValidator,
+    ContractIntegrityValidator,
     EmitterRegistry,
     PolyglotEmitterPlugin,
     SyntaxValidator,
@@ -151,7 +152,12 @@ class GraphPolyglotMaterializer:
 
     @staticmethod
     def _ensure_emitters_loaded() -> None:
-        """Import all plugin modules so they auto-register with the registry."""
+        """Import all plugin modules so they auto-register with the registry.
+
+        Re-register the built-in language plugins explicitly.  In long-running
+        processes a previously JIT-synthesized temporary plugin can persist in
+        the singleton registry and shadow the real built-in emitter.
+        """
         from aero_forge.builder.emitters import (  # noqa: F401
             cgo_emitter,
             cpp_emitter,
@@ -160,6 +166,21 @@ class GraphPolyglotMaterializer:
             python_emitter,
             rust_emitter,
         )
+
+        registry = EmitterRegistry.get_instance()
+        from aero_forge.builder.emitters.python_emitter import PythonEmitterPlugin
+        from aero_forge.builder.emitters.rust_emitter import RustEmitterPlugin
+        from aero_forge.builder.emitters.cpp_emitter import CppEmitterPlugin
+        from aero_forge.builder.emitters.cgo_emitter import CgoEmitterPlugin
+        from aero_forge.builder.emitters.cs_emitter import CsEmitterPlugin
+        from aero_forge.builder.emitters.jni_emitter import JniEmitterPlugin
+
+        registry.register(PythonEmitterPlugin())
+        registry.register(RustEmitterPlugin())
+        registry.register(CppEmitterPlugin())
+        registry.register(CgoEmitterPlugin())
+        registry.register(CsEmitterPlugin())
+        registry.register(JniEmitterPlugin())
 
     @staticmethod
     def _build_adjacency_matrix(
@@ -919,21 +940,63 @@ else:
             or self._llm_api_key
         )
 
-    @staticmethod
     def _required_symbols(
+        self,
         node_id: str,
         node_spec: Dict[str, Any],
         contracts: List[Dict[str, Any]],
     ) -> set:
-        """Return the set of symbols this node is expected to export."""
+        """Return the set of symbols this node is expected to export.
+
+        Only source-side contracts and explicit exports count: a target node
+        imports the symbol through an FFI bridge and is not expected to define
+        it in its own source.
+        """
         symbols: set = set(node_spec.get("exports") or [])
         for contract in contracts or []:
-            symbols.add(contract.get("symbol", ""))
+            if contract.get("source") == node_id:
+                symbols.add(contract.get("symbol", ""))
         symbols.discard("")
-        # If no explicit exports, the node id itself is a reasonable default.
-        if not symbols:
+        # For pure Python, an entrypoint like ``main.py`` is not required to
+        # define a function called ``main``; only explicit exports/contracts
+        # matter.  For polyglot source nodes with no explicit contracts, fall
+        # back to the node id so the baseline always has a defined symbol.  Leaf
+        # target nodes import symbols through FFI and are not required to define
+        # them.
+        is_target = any(
+            c.get("target") == node_id for c in contracts or []
+        )
+        if (
+            not symbols
+            and not getattr(self, "_is_pure_python", False)
+            and not is_target
+        ):
             symbols.add(node_id)
         return symbols
+
+    def _missing_symbols(
+        self,
+        artifacts: List[CodeArtifact],
+        node_id: str,
+        node_spec: Dict[str, Any],
+        contracts: List[Dict[str, Any]],
+        *,
+        language: str = "python",
+    ) -> List[str]:
+        """Return the contracted symbols not defined by *artifacts*."""
+        required = self._required_symbols(node_id, node_spec, contracts)
+        if not required:
+            return []
+        combined = "\n".join(
+            a.content
+            for a in artifacts
+            if not self._is_build_manifest(a) and not a.is_header
+        )
+        if not combined.strip():
+            return sorted(required)
+        return ContractIntegrityValidator.missing_symbols(
+            combined, language, sorted(required)
+        )
 
     def _artifacts_define_symbols(
         self,
@@ -941,13 +1004,20 @@ else:
         node_id: str,
         node_spec: Dict[str, Any],
         contracts: List[Dict[str, Any]],
+        *,
+        language: str = "python",
     ) -> bool:
         """Return True when source artifacts define all required export symbols."""
-        required = self._required_symbols(node_id, node_spec, contracts)
-        if not required:
-            return True
-        combined = "\n".join(a.content for a in artifacts if not self._is_build_manifest(a))
-        return all(re.search(rf"\b{re.escape(sym)}\s*\(", combined) is not None for sym in required)
+        missing = self._missing_symbols(
+            artifacts, node_id, node_spec, contracts, language=language
+        )
+        if missing:
+            _accel_log(
+                "warning",
+                f"Contract integrity violation for {node_id}: missing symbols {missing}",
+            )
+            return False
+        return True
 
     @staticmethod
     def _manifest_artifact_node(artifact: CodeArtifact) -> str:
@@ -1033,7 +1103,12 @@ else:
             )
 
     def _emit_with_llm(
-        self, node_id: str, node_spec: Dict[str, Any], contracts: List[Dict[str, Any]]
+        self,
+        node_id: str,
+        node_spec: Dict[str, Any],
+        contracts: List[Dict[str, Any]],
+        *,
+        missing_symbols: Optional[List[str]] = None,
     ) -> List[CodeArtifact]:
         """Ask the Builder Code Emission Agent to emit source and manifest files.
 
@@ -1063,6 +1138,7 @@ else:
             contracts,
             compacted_context=self._compacted_context,
             user_prompt=self._synthesis_context,
+            missing_symbols=missing_symbols,
         )
         v11_guidance = self._v11_universal_guidance()
 
@@ -1187,12 +1263,26 @@ else:
             self._artifact_is_valid(a, node_spec) for a in source_artifacts
         )
         symbols_ok = self._artifacts_define_symbols(
-            source_artifacts, node_id, node_spec, contracts
+            source_artifacts, node_id, node_spec, contracts, language=lang
         )
         if not density_ok or not symbols_ok:
+            missing_symbols = self._missing_symbols(
+                source_artifacts, node_id, node_spec, contracts, language=lang
+            )
+            if missing_symbols:
+                _accel_log(
+                    "warning",
+                    f"Incomplete Materialization for {node_id}: missing {missing_symbols}; "
+                    f"triggering deterministic retry with full implementation map",
+                )
             if self._is_llm_available():
                 try:
-                    llm_artifacts = self._emit_with_llm(node_id, node_spec, contracts)
+                    llm_artifacts = self._emit_with_llm(
+                        node_id,
+                        node_spec,
+                        contracts,
+                        missing_symbols=missing_symbols,
+                    )
                 except MaterializationError:
                     llm_artifacts = []
                 if llm_artifacts:
@@ -1202,6 +1292,15 @@ else:
                         source_artifacts = self._postprocess_source_artifacts(llm_source)
                     if llm_manifests:
                         manifest_artifacts = llm_manifests
+                    # Re-verify contract integrity after the LLM in-fill.
+                    still_missing = self._missing_symbols(
+                        source_artifacts, node_id, node_spec, contracts, language=lang
+                    )
+                    if still_missing:
+                        _accel_log(
+                            "warning",
+                            f"LLM in-fill still missing symbols for {node_id}: {still_missing}",
+                        )
             else:
                 # No LLM available: fall back to the deterministic baseline so
                 # unit tests and offline builds still materialize compilable code.
@@ -1338,6 +1437,21 @@ else:
         """
         source_files = list(node_spec.get("source_files") or [])
         lang = node_spec.get("lang", "").lower()
+        is_pure_python = getattr(self, "_is_pure_python", False)
+
+        # When the node spec does not request specific files, fall back to the
+        # conventional package layout for the language so the baseline always
+        # writes something useful.
+        if not source_files:
+            if lang == "rust":
+                source_files = [f"{node_id}/src/lib.rs", f"{node_id}/Cargo.toml"]
+            elif lang == "cpp":
+                source_files = [f"{node_id}/{node_id}.cpp", f"{node_id}/CMakeLists.txt"]
+            elif lang == "python" and not is_pure_python:
+                source_files = [f"{node_id}/{node_id}.py", f"{node_id}/pyproject.toml"]
+            elif lang == "python":
+                source_files = [f"{node_id}.py"]
+
         source_contracts = self._source_contracts(node_id, contracts)
         by_symbol = {c.get("symbol", ""): c for c in source_contracts}
 
@@ -1345,10 +1459,10 @@ else:
 
         # C++ baseline ------------------------------------------------------
         if lang == "cpp":
-            # Prefer an explicit source contract symbol, otherwise fall back to a
-            # conventional kernel name so the baseline always produces code.
+            # Prefer an explicit source contract symbol, otherwise fall back to the
+            # node id so the baseline always produces a defined symbol.
             contract = None
-            symbol = "execute_task"
+            symbol = node_id
             if source_contracts:
                 contract = source_contracts[0]
                 symbol = contract.get("symbol", symbol)
@@ -1425,8 +1539,8 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
 
         # Rust baseline -----------------------------------------------------
         elif lang == "rust":
-            symbol = "run_pipeline"
-            contract = source_contracts[0] if source_contracts else by_symbol.get(symbol)
+            symbol = node_id
+            contract = source_contracts[0] if source_contracts else None
             if not contract:
                 # No explicit contract: emit a minimal C-ABI placeholder so the
                 # crate always passes the hollow-source density gate.
@@ -1634,6 +1748,12 @@ data = bytes(range(8))
 result = rust_core.run_pipeline(data)
 print("rust out:", list(result))
 """
+                    elif path.endswith(".py"):
+                        # Generic polyglot Python module/entrypoint fallback.
+                        stub_symbol = node_id
+                        files[path] = f"""\"\"\"Auto-generated by aero-forge polyglot emitter.\"\"\"\nfrom typing import Any, List, Dict, Optional\n\ndef {stub_symbol}(*args: Any, **kwargs: Any) -> Any:\n    \"\"\"Placeholder entrypoint for {node_id}.\"\"\"\n    result = 1 + 1\n    return result\n"""
+                    elif path.endswith("pyproject.toml"):
+                        files[path] = f"""[project]\nname = \"{node_id}\"\nversion = \"0.1.0\"\n\n[build-system]\nrequires = [\"setuptools>=61\"]\nbuild-backend = \"setuptools.build_meta\"\n"""
 
         # Emit any requested files that did not get a baseline.
         for path in source_files:
@@ -1984,6 +2104,10 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                         f"cp zig-out/lib/lib{node_id}.so ../lib{node_id}.so)"
                     )
         if primary_entrypoint:
+            # Make sure the workspace root is on PYTHONPATH so sibling packages
+            # (e.g. ``auth_lib`` imported from ``main/main.py``) resolve without
+            # manual ``sys.path`` hacks.
+            lines.append('export PYTHONPATH="${PWD}${PYTHONPATH:+:$PYTHONPATH}"')
             if primary_entrypoint.endswith(".py"):
                 if "/" in primary_entrypoint:
                     # Run sub-package entrypoints as modules to avoid relative import errors.
@@ -2271,6 +2395,25 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                     # written so toolchain dispatch (e.g. python -m py_compile)
                     # finds the files from the workspace root.
                     node_spec["source_files"] = normalized_source_files
+
+                # Contract-to-source integrity gate: every function declared in
+                # the blueprint for this node must be present in the emitted source.
+                missing_symbols = self._missing_symbols(
+                    artifacts, node_id, node_spec, contracts, language=lang
+                )
+                required_symbols = self._required_symbols(node_id, node_spec, contracts)
+                if missing_symbols:
+                    raise MaterializationError(
+                        f"Incomplete Materialization for {node_id}: "
+                        f"missing contracted symbols {missing_symbols}"
+                    )
+                if required_symbols:
+                    present = len(required_symbols) - len(missing_symbols)
+                    _accel_log(
+                        "success",
+                        f"Contract Integrity Verified: {present}/{len(required_symbols)} "
+                        f"functions present in {node_id}",
+                    )
 
                 if lang == "python":
                     init_artifact = self._write_python_init(

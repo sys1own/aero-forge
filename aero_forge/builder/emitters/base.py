@@ -295,6 +295,69 @@ class ContentDensityValidator:
         return cls._count_python_nodes(content) >= cls.MIN_FUNCTIONAL_NODES
 
 
+class ContractIntegrityValidator:
+    """Verify that materialized source defines every symbol declared in the blueprint.
+
+    Contract-to-source integrity prevents hollow builds where the LLM emits
+    imports and boilerplate but omits requested functions.  Python sources are
+    checked with ``ast``; other languages fall back to declaration regexes.
+    """
+
+    @classmethod
+    def missing_symbols(
+        cls, content: str, language: str, symbols: List[str]
+    ) -> List[str]:
+        """Return the subset of *symbols* not defined in *content*."""
+        if not symbols:
+            return []
+        language = (language or "").lower()
+        is_python = (
+            language in ("python", "py")
+            or content.lstrip().startswith(("import ", "from "))
+        )
+        if is_python:
+            try:
+                tree = ast.parse(content)
+            except SyntaxError:
+                # If the source is not even parseable, treat every symbol as missing
+                # so the syntax validator will surface the real problem first.
+                return list(symbols)
+            defined: Set[str] = set()
+            for node in ast.walk(tree):
+                if isinstance(
+                    node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                ):
+                    defined.add(node.name)
+                elif isinstance(node, ast.Assign):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            defined.add(target.id)
+            return [s for s in symbols if s not in defined]
+
+        # Generic fallback for non-Python sources.
+        defined: Set[str] = set()
+        for sym in symbols:
+            if re.search(
+                rf"(?:^|\b)(?:def|fn|func|function|class|struct|interface)\s+{re.escape(sym)}\b",
+                content,
+                re.MULTILINE,
+            ):
+                defined.add(sym)
+            elif re.search(rf"\b{re.escape(sym)}\s*\(", content):
+                defined.add(sym)
+        return [s for s in symbols if s not in defined]
+
+    @classmethod
+    def validate(
+        cls, content: str, language: str, symbols: List[str]
+    ) -> List[str]:
+        """Raise :class:`ValueError` if any required *symbols* are missing."""
+        missing = cls.missing_symbols(content, language, symbols)
+        if missing:
+            raise ValueError(f"Missing contracted symbols: {missing}")
+        return missing
+
+
 class SyntaxValidator:
     """Non-destructive syntax validation for generated source artifacts.
 
