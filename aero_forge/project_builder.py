@@ -19,6 +19,7 @@ from aero_forge.blueprint import (
     generate_blueprint,
 )
 from aero_forge.build_runner import BuildRunner
+from aero_forge.builder.executor import is_artifact_path
 from aero_forge.build_summary import format_build_summary
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_project
@@ -41,13 +42,41 @@ def _safe_extract(zip_path: Path, dest: Path) -> None:
 
 
 def _zip_directory(src: Path, zip_path: Path, arc_root: Optional[str] = None) -> None:
-    """Zip the contents of ``src`` under an optional archive root directory."""
+    """Zip the contents of ``src`` under an optional archive root directory.
+
+    Internal skeleton directories and build caches are excluded, but the final
+    ``dist/`` output and source files are retained in the bundle.
+    """
     zip_path.parent.mkdir(parents=True, exist_ok=True)
     root = arc_root or src.name
+    skip_parts = {
+        ".aero_skeletons",
+        ".build_cache",
+        ".overlays",
+        ".aero_backup",
+        ".cargo",
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".git",
+        ".gitignore",
+        ".venv",
+        "venv",
+        "node_modules",
+        ".tox",
+        ".aero",
+        "target",
+    }
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for path in src.rglob("*"):
-            if path.is_file():
-                zf.write(path, f"{root}/{path.relative_to(src)}")
+            if not path.is_file():
+                continue
+            rel = path.relative_to(src)
+            if any(part in skip_parts for part in rel.parts):
+                continue
+            if is_artifact_path(rel) and "dist" not in rel.parts:
+                continue
+            zf.write(path, f"{root}/{rel}")
 
 
 class ProjectBuilder:

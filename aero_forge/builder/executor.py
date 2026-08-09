@@ -21,6 +21,7 @@ ARTIFACT_DIR_PATTERNS: Set[str] = {
     "target",
     ".git",
     ".aero",
+    ".aero_skeletons",
     ".build_cache",
     ".overlays",
     ".aero_backup",

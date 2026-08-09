@@ -206,12 +206,58 @@ class ProactivePolyglotBuilder:
     @staticmethod
     def _graph_prompt_skeleton(prompt: str) -> str:
         """Return a response skeleton so the LLM starts the blueprint immediately."""
-        skeleton = {
-            "project": "generated_project",
-            "architecture": "pure_python",
-            "primary_entrypoint": "main.py",
-            "build_script": "build.sh",
-            "nodes": [
+        lower = (prompt or "").lower()
+        has_rust = "rust" in lower or "pyo3" in lower or "cargo" in lower
+        has_cpp = "c++" in lower or "cpp" in lower or "cmake" in lower or "pybind11" in lower
+        has_python = "python" in lower or "pure_python" in lower
+
+        if has_rust and has_python and has_cpp:
+            architecture = "tri_polyglot_rust_cpp_python"
+            nodes = [
+                {"node_id": "rust_core", "lang": "rust", "toolchain": "cargo", "source_files": ["rust_core/src/lib.rs"], "exports": ["butterfly"]},
+                {"node_id": "cpp_engine", "lang": "cpp", "toolchain": "cmake", "source_files": ["cpp_engine/src/kernels.cpp"], "exports": ["execute_task"]},
+                {"node_id": "python_interface", "lang": "python", "toolchain": "python", "source_files": ["python_interface/main.py"], "exports": ["main"]},
+            ]
+            edges = [
+                {"source": "rust_core", "target": "python_interface", "boundary_type": "PYO3_MATURIN", "symbol": "butterfly", "args": ["pointer", "int64"], "return_type": "int64"},
+                {"source": "cpp_engine", "target": "python_interface", "boundary_type": "C_ABI", "symbol": "execute_task", "args": ["pointer"], "return_type": ""},
+            ]
+        elif has_rust and has_python:
+            architecture = "hybrid_rust_python"
+            nodes = [
+                {"node_id": "rust_core", "lang": "rust", "toolchain": "cargo", "source_files": ["rust_core/src/lib.rs"], "exports": ["butterfly"]},
+                {"node_id": "python_interface", "lang": "python", "toolchain": "python", "source_files": ["python_interface/main.py"], "exports": ["main"]},
+            ]
+            edges = [
+                {"source": "rust_core", "target": "python_interface", "boundary_type": "PYO3_MATURIN", "symbol": "butterfly", "args": ["pointer", "int64"], "return_type": "int64"},
+            ]
+        elif has_cpp and has_python:
+            architecture = "hybrid_cpp_python"
+            nodes = [
+                {"node_id": "cpp_engine", "lang": "cpp", "toolchain": "cmake", "source_files": ["cpp_engine/src/kernels.cpp"], "exports": ["execute_task"]},
+                {"node_id": "python_interface", "lang": "python", "toolchain": "python", "source_files": ["python_interface/main.py"], "exports": ["main"]},
+            ]
+            edges = [
+                {"source": "cpp_engine", "target": "python_interface", "boundary_type": "C_ABI", "symbol": "execute_task", "args": ["pointer"], "return_type": ""},
+            ]
+        elif has_rust and has_cpp:
+            architecture = "hybrid_cpp_rust"
+            nodes = [
+                {"node_id": "cpp_engine", "lang": "cpp", "toolchain": "cmake", "source_files": ["cpp_engine/src/kernels.cpp"], "exports": ["execute_task"]},
+                {"node_id": "rust_core", "lang": "rust", "toolchain": "cargo", "source_files": ["rust_core/src/lib.rs"], "exports": ["run_pipeline"]},
+            ]
+            edges = [
+                {"source": "cpp_engine", "target": "rust_core", "boundary_type": "C_ABI", "symbol": "execute_task", "args": ["pointer"], "return_type": ""},
+            ]
+        elif has_rust:
+            architecture = "pure_rust"
+            nodes = [
+                {"node_id": "rust_core", "lang": "rust", "toolchain": "cargo", "source_files": ["src/main.rs"], "exports": ["main"]},
+            ]
+            edges = []
+        else:
+            architecture = "pure_python"
+            nodes = [
                 {
                     "node_id": "main",
                     "lang": "python",
@@ -219,8 +265,16 @@ class ProactivePolyglotBuilder:
                     "source_files": ["main.py"],
                     "exports": ["main"],
                 }
-            ],
-            "edges": [],
+            ]
+            edges = []
+
+        skeleton = {
+            "project": "generated_project",
+            "architecture": architecture,
+            "primary_entrypoint": "python_interface/main.py" if has_python and (has_rust or has_cpp) else (nodes[0]["source_files"][0] if nodes else "main.py"),
+            "build_script": "build.sh",
+            "nodes": nodes,
+            "edges": edges,
             "metadata": {},
         }
         return (

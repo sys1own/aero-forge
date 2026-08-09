@@ -72,6 +72,7 @@ class BindingFramework(str, Enum):
 class Metadata(BaseModel):
     schema_version: str = "3.0.0"
     project_name: str = "aero_forge_project"
+    architecture: str = "pure_python"
     status: BlueprintStatus = BlueprintStatus.draft
     generation_method: GenerationMethod = GenerationMethod.manual
     transferable: bool = False
@@ -156,6 +157,34 @@ class ABIContractV3(BaseModel):
     inputs: List[ABIArgument] = Field(default_factory=list)
     outputs: List[ABIArgument] = Field(default_factory=list)
     description: str = ""
+
+    @field_validator("source_language", "target_language", mode="before")
+    @classmethod
+    def _normalize_language_identifier(cls, value: Any) -> str:
+        text = str(value or "").lower().strip().replace("+", "p")
+        # Strip leading dot, path separators, and obvious node-id suffixes.
+        text = re.sub(r"^[.\\/]+", "", text)
+        text = re.sub(r"[_-]core$|[_-]engine$|[_-]lib$|[_-]interface$", "", text)
+        synonyms = {
+            "py": "python",
+            "python": "python",
+            "rs": "rust",
+            "rust": "rust",
+            "c": "cpp",
+            "c++": "cpp",
+            "cpp": "cpp",
+            "cxx": "cpp",
+            "cc": "cpp",
+            "go": "go",
+            "zig": "zig",
+            "mojo": "mojo",
+            "java": "java",
+            "csharp": "csharp",
+            "cs": "csharp",
+            "javascript": "javascript",
+            "js": "javascript",
+        }
+        return synonyms.get(text, text) if text else "python"
 
 
 class ExecutionStrategyV3(BaseModel):

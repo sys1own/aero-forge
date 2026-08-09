@@ -120,6 +120,7 @@ def _source_files(session_dir: Path) -> Dict[str, str]:
             "__pycache__",
             ".pytest_cache",
             ".aero",
+            ".aero_skeletons",
             ".cargo",
             "crates",
         )

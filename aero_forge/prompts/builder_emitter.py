@@ -128,6 +128,13 @@ def _rust_type(a: str, symbol: str = "") -> str:
     return {"int64": "i64", "float64": "f64"}.get(a, "i64")
 
 
+def _rust_pyo3_type(a: str, symbol: str = "") -> str:
+    """PyO3-friendly Rust types for ``#[pyfunction]`` signatures."""
+    if a == "pointer":
+        return "Vec<u8>" if _looks_like_bytes(symbol) else "Vec<f64>"
+    return {"int64": "i64", "float64": "f64"}.get(a, "i64")
+
+
 def _cpp_type(a: str, symbol: str = "") -> str:
     if a == "pointer":
         return "uint8_t*" if _looks_like_bytes(symbol) else "double*"
@@ -184,6 +191,27 @@ def _build_skeleton(
 
     arg_names = [f"arg{i}" for i in range(len(args))]
 
+    is_pyo3 = any(
+        (c.get("boundary_type") or "").lower().replace("-", "_") == "pyo3_maturin"
+        for c in contracts
+    )
+
+    if is_pyo3 and lang in ("rust", "rs"):
+        pyo3_type_map = {
+            "&mut [f64]": "Vec<f64>",
+            "&[f64]": "Vec<f64>",
+            "*mut f64": "Vec<f64>",
+            "*const f64": "Vec<f64>",
+            "&mut [u8]": "Vec<u8>",
+            "&[u8]": "Vec<u8>",
+            "*mut u8": "Vec<u8>",
+            "*const u8": "Vec<u8>",
+            "double*": "Vec<f64>",
+            "float*": "Vec<f64>",
+            "uint8_t*": "Vec<u8>",
+        }
+        type_env = {k: pyo3_type_map.get(v.strip(), v) for k, v in type_env.items()}
+
     if lang in ("python", "py"):
         arg_str = ", ".join(
             f"{n}: {type_env.get(n, _py_type(a, symbol))}" for n, a in zip(arg_names, args)
@@ -199,10 +227,14 @@ def _build_skeleton(
         return "\n".join(lines)
 
     if lang in ("rust", "rs"):
+        rust_arg = lambda a, n: type_env.get(n, _rust_pyo3_type(a, symbol) if is_pyo3 else _rust_type(a, symbol))
+        rust_ret = lambda a: type_env.get("return", _rust_pyo3_type(a, symbol) if is_pyo3 else _rust_type(a, symbol))
         arg_str = ", ".join(
-            f"{n}: {type_env.get(n, _rust_type(a, symbol))}" for n, a in zip(arg_names, args)
+            f"{n}: {rust_arg(a, n)}" for n, a in zip(arg_names, args)
         ) or ""
-        ret = f" -> {type_env.get('return', _rust_type(return_type, symbol))}" if return_type else ""
+        ret = f" -> {rust_ret(return_type)}" if return_type else ""
+        if is_pyo3:
+            return f"#[pyfunction]\npub fn {symbol}({arg_str}){ret} {{\n    __AERO_IN_FILL__\n}}"
         return f"#[no_mangle]\npub extern \"C\" fn {symbol}({arg_str}){ret} {{\n    __AERO_IN_FILL__\n}}"
 
     if lang in ("cpp", "c++", "cxx"):

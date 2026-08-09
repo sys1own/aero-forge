@@ -314,6 +314,51 @@ class GraphPolyglotMaterializer:
         self._write_artifact(init_artifact, node_dir)
         return init_artifact
 
+    def _write_rust_pymodule_init(
+        self,
+        node_dir: Path,
+        node_id: str,
+        node_spec: Dict[str, Any],
+    ) -> Optional[CodeArtifact]:
+        """Generate an ``__init__.py`` for a PyO3 Rust crate.
+
+        The compiled artifact is ``lib<node_id>.so``; this loader bootstraps it
+        so sibling Python nodes can use ``from <node_id> import <symbol>``.
+        """
+        so_name = f"lib{node_id}.so"
+        exports = list(node_spec.get("exports") or [])
+        exports_str = ", ".join(repr(e) for e in exports)
+        content = f'''import os
+import importlib.util
+import sys
+
+_dir = os.path.dirname(os.path.abspath(__file__))
+_so_path = os.path.join(_dir, {repr(so_name)})
+
+if os.path.exists(_so_path):
+    # The compiled artifact is named ``librust_core.so`` but the PyO3 module
+    # inside expects to be loaded as the crate name ``rust_core``.  Load it
+    # under that name and replace the package entry in ``sys.modules`` so
+    # that ``from rust_core import butterfly`` resolves directly to the Rust
+    # extension.
+    _spec = importlib.util.spec_from_file_location({repr(node_id)}, _so_path)
+    _aero_rust_ext = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_aero_rust_ext)
+    sys.modules[{repr(node_id)}] = _aero_rust_ext
+    __all__ = [{exports_str}]
+    for _sym in __all__:
+        globals()[_sym] = getattr(_aero_rust_ext, _sym, None)
+else:
+    __all__ = []
+'''
+        init_artifact = CodeArtifact(
+            file_path="__init__.py",
+            content=content,
+            language="python",
+        )
+        self._write_artifact(init_artifact, node_dir)
+        return init_artifact
+
     def _reconcile_cmake_sources(self, node_dir: Path, node_id: str) -> None:
         """Rewrite CMakeLists.txt source lists to match the actual .cpp files.
 
@@ -1743,6 +1788,9 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
     ) -> Path:
         """Serialize a v3 ``blueprint.aero`` describing the materialized graph."""
         project = hin_graph_spec.get("project", "aero_forge_project")
+        architecture = hin_graph_spec.get(
+            "architecture", hin_graph_spec.get("metadata", {}).get("architecture", "graph_polyglot")
+        )
         primary_entrypoint = hin_graph_spec.get("primary_entrypoint", "run_shell.py")
         build_script = hin_graph_spec.get("build_script")
 
@@ -1762,6 +1810,10 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             )
 
         abi_contracts: List[ABIContractV3] = []
+        node_id_to_lang = {
+            n.get("node_id"): (n.get("lang") or n.get("language", "")).lower()
+            for n in hin_graph_spec.get("nodes", [])
+        }
         for edge in hin_graph_spec.get("edges", []):
             inputs = [
                 ABIArgument(name=f"arg_{i}", type=t)
@@ -1783,12 +1835,17 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             }
             binding = binding_map.get(boundary, BindingFramework.c_abi)
 
+            source = edge.get("source", "")
+            target = edge.get("target", "")
+            source_language = edge.get("source_lang") or node_id_to_lang.get(source, source)
+            target_language = edge.get("target_lang") or node_id_to_lang.get(target, target)
+
             abi_contracts.append(
                 ABIContractV3(
-                    contract_id=f"{edge.get('source')}_{edge.get('target')}_{edge.get('symbol')}",
+                    contract_id=f"{source}_{target}_{edge.get('symbol')}",
                     symbol=edge.get("symbol", ""),
-                    source_language=edge.get("source_lang", edge.get("source", "")),
-                    target_language=edge.get("target_lang", edge.get("target", "")),
+                    source_language=source_language,
+                    target_language=target_language,
                     binding_framework=binding,
                     inputs=inputs,
                     outputs=outputs,
@@ -1811,11 +1868,12 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             metadata=Metadata(
                 schema_version="3.0.0",
                 project_name=project,
+                architecture=architecture,
                 status="finalized",
                 generation_method="llm_synthesized",
                 llm_initialized=True,
                 auto_generated=True,
-                description=f"graph_polyglot blueprint for {project}",
+                description=f"{architecture} blueprint for {project}",
             ),
             llm_context=LLMContext(state=ContextState.synthesized),
             build_pipeline=build_pipeline,
@@ -1980,6 +2038,23 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                             }
                         )
 
+                if lang == "rust" and any(
+                    (c.get("boundary_type") or "").lower().replace("-", "_") == "pyo3_maturin"
+                    for c in contracts
+                ):
+                    rust_init = self._write_rust_pymodule_init(
+                        node_dir, node_id, node_spec
+                    )
+                    if rust_init:
+                        written_artifacts.append(
+                            {
+                                "node_id": node_id,
+                                "language": "python",
+                                "file": rust_init.file_path,
+                                "path": str(node_dir / rust_init.file_path),
+                            }
+                        )
+
                 if lang == "cpp" or node_spec.get("toolchain") == "cmake":
                     self._reconcile_cmake_sources(node_dir, node_id)
 
@@ -2009,9 +2084,12 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
 
         blueprint_path = self._write_blueprint_aero(hin_graph_spec, written_artifacts)
 
+        architecture = hin_graph_spec.get(
+            "architecture", hin_graph_spec.get("metadata", {}).get("architecture", "graph_polyglot")
+        )
         result: Dict[str, Any] = {
             "project": hin_graph_spec.get("project", "aero_forge_project"),
-            "architecture": "graph_polyglot",
+            "architecture": architecture,
             "workspace": str(self.workspace_root),
             "stages": stages,
             "bridges": bridges,
