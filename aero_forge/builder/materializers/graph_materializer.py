@@ -39,6 +39,8 @@ from aero_forge.blueprint.schema import (
     write_v3_blueprint,
 )
 from aero_forge.builder.emitters.base import (
+    AtomicSymbolAssembly,
+    AtomicSymbolAssemblyError,
     BoundaryContract,
     CodeArtifact,
     ContentDensityValidator,
@@ -1373,6 +1375,27 @@ else:
                     manifest_artifacts = [
                         a for a in baseline_artifacts if self._is_build_manifest(a)
                     ]
+
+        # Atomic Symbol Assembly gate: do not allow any file for this node to be
+        # written until every contracted symbol has a logic intent, is present in
+        # the source, and has a non-zero GoI execution matrix.
+        try:
+            AtomicSymbolAssembly.validate(
+                source_artifacts,
+                node_spec,
+                contracts,
+                compacted_context=self._compacted_context,
+                language=lang,
+                is_pure_python=self._is_pure_python,
+            )
+        except AtomicSymbolAssemblyError as exc:
+            _accel_log(
+                "error",
+                f"Atomic Symbol Assembly failed for {node_id}: {exc}",
+            )
+            raise MaterializationError(
+                f"Atomic Symbol Assembly failed for {node_id}: {exc}"
+            ) from exc
 
         # Keep the node's source_files in sync with the emitted artifacts so the
         # toolchain router compiles the files that the plugin actually wrote.

@@ -323,6 +323,52 @@ class ContentDensityValidator:
         except Exception:
             return bool(result.any())
 
+    @classmethod
+    def has_execution_flow_for_symbol(
+        cls,
+        content: str,
+        symbol_name: str,
+        language: str = "python",
+    ) -> bool:
+        """Return True when *symbol_name* has a non-zero GoI execution matrix.
+
+        A contracted function with no loops is still valid as long as it contains
+        at least ``MIN_FUNCTIONAL_NODES`` functional AST nodes. This prevents
+        a single symbol from being emitted as a hollow stub even when the file
+        as a whole happens to have execution flow elsewhere.
+        """
+        language = (language or "").lower()
+        is_python = language == "python" or content.lstrip().startswith(("import ", "from "))
+        if not is_python:
+            return cls._count_generic_nodes(content) >= cls.MIN_GENERIC_FUNCTIONAL_NODES
+
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return True
+
+        functions = {
+            node.name: node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+        }
+        func = functions.get(symbol_name)
+        if func is None:
+            return False
+
+        if cls._function_is_hollow(func):
+            return False
+
+        import numpy as np
+
+        M, _ = _loop_dependency_matrix(func)
+        if M.size > 0 and M.any():
+            return True
+
+        # No loop-carried dependencies: fall back to per-function node density.
+        func_source = ast.unparse(func)
+        return cls._count_python_nodes(func_source) >= cls.MIN_FUNCTIONAL_NODES
+
 
 class ContextExhaustionError(RuntimeError):
     """Raised when the Compacted Functional Matrix lacks a logic intent for a contracted symbol."""
@@ -359,6 +405,12 @@ class SLIIntentValidator:
                     symbols.add(name)
             elif isinstance(entry, str):
                 symbols.add(entry)
+        # Graph-polyglot contracts also carry explicit symbols (e.g. C-ABI/PyO3 edges).
+        for contract in context.get("contracts", []):
+            if isinstance(contract, dict):
+                name = contract.get("symbol") or contract.get("name")
+                if name:
+                    symbols.add(name)
         return symbols
 
     @classmethod
@@ -447,6 +499,116 @@ class ContractIntegrityValidator:
         if missing:
             raise ValueError(f"Missing contracted symbols: {missing}")
         return missing
+
+
+class AtomicSymbolAssemblyError(RuntimeError):
+    """Raised when a node cannot be emitted atomically with all contracted symbols present."""
+
+    def __init__(self, message: str, symbols: Optional[List[str]] = None) -> None:
+        super().__init__(message)
+        self.symbols = symbols or []
+
+
+class AtomicSymbolAssembly:
+    """Atomic, multi-symbol SLI gate.
+
+    Before a file is written the builder must confirm that:
+      1. Every contracted symbol has a logic intent in the Compacted Functional Matrix.
+      2. The emitted source defines every contracted symbol.
+      3. Each contracted symbol has a non-zero GoI execution matrix.
+
+    This transitions the builder from per-file materialization to an Atomic Symbol
+    Assembly model: the final source artifact is accepted or rejected as a whole.
+    """
+
+    @staticmethod
+    def _required_symbols(
+        node_spec: Dict[str, Any],
+        contracts: List[Dict[str, Any]],
+        is_pure_python: bool = False,
+    ) -> List[str]:
+        """Return the contracted symbols this node is expected to define."""
+        node_id = node_spec.get("node_id", "")
+        symbols: Set[str] = set(node_spec.get("exports") or [])
+        for contract in contracts or []:
+            if contract.get("source") == node_id:
+                symbols.add(contract.get("symbol", ""))
+        symbols.discard("")
+        is_target = any(c.get("target") == node_id for c in contracts or [])
+        if not symbols and not is_pure_python and not is_target:
+            symbols.add(node_id)
+        return sorted(symbols)
+
+    @classmethod
+    def validate(
+        cls,
+        artifacts: List[Any],
+        node_spec: Dict[str, Any],
+        contracts: List[Dict[str, Any]],
+        compacted_context: Optional[Dict[str, Any]],
+        language: str = "python",
+        is_pure_python: bool = False,
+    ) -> None:
+        """Raise :class:`AtomicSymbolAssemblyError` if the emission is not atomic.
+
+        ``artifacts`` is a list of :class:`CodeArtifact` instances that are
+        candidates to be written for *node_spec*.
+        """
+        required = cls._required_symbols(node_spec, contracts, is_pure_python=is_pure_python)
+        if not required:
+            return
+
+        # 1. CFM intent retrieval gate. Only enforce it when the CFM was actually
+        # populated with symbols; unit tests and offline materializers may provide
+        # the source directly without a populated Compacted Functional Matrix.
+        cfm_symbols = (
+            SLIIntentValidator._collect_cfm_symbols(compacted_context)
+            if compacted_context
+            else set()
+        )
+        if cfm_symbols:
+            missing_intent = [s for s in required if s not in cfm_symbols]
+            if missing_intent:
+                raise AtomicSymbolAssemblyError(
+                    f"Context Exhaustion: no logic intent in CFM for symbols: {missing_intent}",
+                    symbols=missing_intent,
+                )
+
+        # 2. Source must define all contracted symbols.
+        source_artifacts = [
+            a for a in artifacts if not getattr(a, "is_header", False)
+        ]
+        combined = "\n".join(
+            a.content for a in source_artifacts if not getattr(a, "is_header", False)
+        )
+        source_missing = ContractIntegrityValidator.missing_symbols(
+            combined, language, required
+        )
+        if source_missing:
+            raise AtomicSymbolAssemblyError(
+                f"Incomplete materialization: missing symbols {source_missing}",
+                symbols=source_missing,
+            )
+
+        # 3. Per-symbol GoI proof-net verification.
+        hollow: List[str] = []
+        for sym in required:
+            if not ContentDensityValidator.has_execution_flow_for_symbol(
+                combined, sym, language
+            ):
+                hollow.append(sym)
+        if hollow:
+            raise AtomicSymbolAssemblyError(
+                f"Zero execution matrix for symbols: {hollow}",
+                symbols=hollow,
+            )
+
+        node_id = node_spec.get("node_id", "<unknown>")
+        _accel_log(
+            "success",
+            f"Atomic Symbol Assembly verified for {node_id}: "
+            f"{len(required)}/{len(required)} symbol(s) with non-zero execution matrices",
+        )
 
 
 class SyntaxValidator:

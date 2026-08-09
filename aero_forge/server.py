@@ -320,6 +320,29 @@ async def _handle_build_async(request: web.Request) -> web.Response:
         max_retries=3,
     )
 
+    # Guard against fire-and-forget builds on a draft blueprint in the async path.
+    enrichment_status = _require_enriched_blueprint(output_dir)
+    if enrichment_status:
+        if body.get("force_enrich"):
+            try:
+                draft = BlueprintV3.load(output_dir / "blueprint.aero")
+                synthesizer = LLMBlueprintSynthesizer(
+                    provider=config.llm_provider,
+                    model=config.model,
+                    api_key=config.api_key,
+                )
+                finalized = synthesizer.synthesize(
+                    output_dir,
+                    draft=draft,
+                    output_path=output_dir / "blueprint.aero",
+                )
+                write_v3_blueprint(finalized, output_dir / "blueprint.aero")
+            except Exception as exc:
+                logger.warning("Auto-enrichment failed for %s: %s", output_dir, exc)
+                return web.json_response(enrichment_status, status=202)
+        else:
+            return web.json_response(enrichment_status, status=202)
+
     loop = asyncio.get_running_loop()
     last_phase = {"phase": "code_generation"}
 
@@ -423,6 +446,28 @@ def _send_json(handler: BaseHTTPRequestHandler, status: int, data: Any) -> None:
     )
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def _require_enriched_blueprint(workspace: Path) -> Optional[Dict[str, Any]]:
+    """Return a ``waiting_for_enrichment`` response if the workspace blueprint is a draft.
+
+    The ``/api/build`` endpoint must not fire-and-forget a build on an
+    un-enriched (draft) blueprint. When ``blueprint.aero`` is present but not
+    ready, callers should first run ``/api/blueprint/synthesize`` or supply
+    ``force_enrich`` to trigger enrichment automatically.
+    """
+    blueprint_path = workspace / "blueprint.aero"
+    if not blueprint_path.is_file():
+        return None
+    if not is_blueprint_ready(blueprint_path):
+        return {
+            "status": "waiting_for_enrichment",
+            "message": (
+                "Blueprint is a draft (llm_initialized is false). "
+                "Run /api/blueprint/synthesize to enrich it, or set force_enrich=true."
+            ),
+        }
+    return None
 
 
 def _send_bytes(
@@ -948,6 +993,30 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 model=body.get("model"),
                 max_retries=3,
             )
+
+            # Guard against fire-and-forget builds on a draft blueprint. If the
+            # workspace already contains a blueprint, it must be enriched first.
+            enrichment_status = _require_enriched_blueprint(output_dir)
+            if enrichment_status:
+                if body.get("force_enrich"):
+                    try:
+                        draft = BlueprintV3.load(output_dir / "blueprint.aero")
+                        synthesizer = LLMBlueprintSynthesizer(
+                            provider=config.llm_provider,
+                            model=config.model,
+                            api_key=config.api_key,
+                        )
+                        finalized = synthesizer.synthesize(
+                            output_dir,
+                            draft=draft,
+                            output_path=output_dir / "blueprint.aero",
+                        )
+                        write_v3_blueprint(finalized, output_dir / "blueprint.aero")
+                    except Exception as exc:
+                        logger.warning("Auto-enrichment failed for %s: %s", output_dir, exc)
+                        return _send_json(self, 202, enrichment_status)
+                else:
+                    return _send_json(self, 202, enrichment_status)
 
             classification = _classification_for_target(classify_stack(prompt), target_language)
             if classification.architecture in (
