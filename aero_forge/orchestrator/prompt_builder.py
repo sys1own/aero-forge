@@ -252,14 +252,14 @@ def extract_aero_logic(raw: str) -> str:
         # fence parser can still extract partial code.
         return text[start_match.end():].strip()
 
-    # Markdown fence fallback.
+    # Markdown fence fallback (first fenced block is the primary implementation).
     fenced = re.findall(
         r"```\s*(?:\w*)\s*(?::\s*[^\n\r]*?)?\s*\r?\n([\s\S]*?)\r?\n?\s*```",
         text,
         re.DOTALL | re.IGNORECASE,
     )
     if fenced:
-        return fenced[-1].strip()
+        return fenced[0].strip()
 
     return text
 

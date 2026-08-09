@@ -235,6 +235,7 @@ def format_builder_emitter_user_prompt(
     boundary_contracts: Optional[List[Dict[str, Any]]] = None,
     *,
     compacted_context: Optional[Dict[str, Any]] = None,
+    user_prompt: str = "",
 ) -> str:
     """Return a user prompt that feeds a node spec into the Builder Emission Agent."""
     import json
@@ -243,15 +244,16 @@ def format_builder_emitter_user_prompt(
     skeleton = _build_skeleton(node, contracts, compacted_context=compacted_context)
     context = compacted_context or {}
     payload = {
+        "user_prompt": user_prompt,
         "compacted_context": context,
         "skeleton": skeleton,
     }
     return (
         "Generate source and manifest files for the following graph node. "
-        "The Compacted Functional Matrix below is the exclusive context you need. "
-        "Use the `skeleton` field as the starting file: keep all imports, "
-        "signatures, and decorators, and replace every `__AERO_IN_FILL__` marker "
-        "with real implementation code. "
+        "The user request and the Compacted Functional Matrix below are the "
+        "exclusive context you need. Use the `skeleton` field as the starting "
+        "file: keep all imports, signatures, and decorators, and replace every "
+        "`__AERO_IN_FILL__` marker with real implementation code. "
         "Do not return prose, TODOs, or empty responses. "
         "Wrap the entire response between `__AERO_LOGIC_START__` and `__AERO_LOGIC_END__`.\n\n"
         f"```json\n{json.dumps(payload, indent=2, default=str)}\n```"
