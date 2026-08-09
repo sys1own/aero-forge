@@ -274,6 +274,37 @@ class ContentDensityValidator:
         return cls._count_python_nodes(content) >= cls.MIN_FUNCTIONAL_NODES
 
 
+class SyntaxValidator:
+    """Non-destructive syntax validation for generated source artifacts.
+
+    Catches truncated or malformed Python code before it is persisted. Other
+    languages are currently validated by the toolchain during compilation.
+    """
+
+    @classmethod
+    def validate(cls, content: str, language: str) -> None:
+        """Raise :class:`SyntaxError` when *content* is not valid Python syntax.
+
+        Only Python sources are checked; non-Python artifacts are accepted so
+        the normal build pipeline can report language-specific errors.
+        """
+        language = (language or "").lower()
+        is_python = (
+            language == "python"
+            or content.lstrip().startswith(("import ", "from "))
+            or "__AERO_IN_FILL__" in content
+        )
+        if not is_python:
+            return
+
+        try:
+            ast.parse(content)
+        except (SyntaxError, IndentationError) as exc:
+            raise SyntaxError(
+                f"Syntax verification failed: {exc.msg} at line {exc.lineno}"
+            ) from exc
+
+
 class PolyglotEmitterPlugin(ABC):
     """Plugin interface for language-specific source emitters."""
 
@@ -1433,9 +1464,15 @@ class EmitterRegistry:
         """
         if not raw:
             return ""
-        from aero_forge.orchestrator.prompt_builder import extract_aero_logic
+        from aero_forge.orchestrator.prompt_builder import (
+            TruncatedAeroLogicError,
+            extract_aero_logic,
+        )
 
-        text = extract_aero_logic(raw)
+        try:
+            text = extract_aero_logic(raw)
+        except TruncatedAeroLogicError:
+            return ""
 
         # Markdown fenced block fallback (legacy/chatty models).
         all_fenced = re.findall(

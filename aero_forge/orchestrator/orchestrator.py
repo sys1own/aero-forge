@@ -1377,9 +1377,17 @@ def _strip_markdown_fences(text: str) -> str:
     surrounding prose. Uses the SSP token delimiters first, then falls back to
     markdown fence removal.
     """
-    from aero_forge.orchestrator.prompt_builder import extract_aero_logic
+    from aero_forge.orchestrator.prompt_builder import (
+        TruncatedAeroLogicError,
+        extract_aero_logic,
+    )
 
-    text = extract_aero_logic(text)
+    try:
+        text = extract_aero_logic(text)
+    except TruncatedAeroLogicError:
+        # Truncated responses cannot be safely parsed; downstream callers will
+        # treat an empty string as a failed extraction and retry/fallback.
+        return ""
     text = re.sub(
         r"^```\s*(?:\w+)?\s*(?::\s*[^\n\r]*)?\s*\r?\n",
         "",
@@ -1765,6 +1773,10 @@ class CompactedContextGenerator:
             context["negative_constraints"] = (
                 "DO NOT import rust_core, cpp_core, or use any @accelerate decorators. "
                 "This is a pure CPython target."
+            )
+            context["compactness_constraint"] = (
+                "Strictly avoid manual loop unrolling or repetitive constant calculations. "
+                "Use concise algorithmic loops. Total file size must not exceed 8KB."
             )
 
         return context
