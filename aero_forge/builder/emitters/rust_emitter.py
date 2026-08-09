@@ -47,6 +47,7 @@ class RustEmitter(BaseEmitter):
         )
 
         self.is_pyo3 = self._is_pyo3_spec(spec)
+        self.is_c_abi = self._is_c_abi_spec(spec)
         self.uses_numpy = self._uses_numpy(spec)
         self.uses_rayon = self._uses_rayon(spec)
 
@@ -135,15 +136,29 @@ class RustEmitter(BaseEmitter):
             return_type = declared
         self._current_return_type = return_type
 
-        sig = f"fn {node.name}({', '.join(param_strs)})"
-        if not self._is_void(return_type):
-            sig += f" -> {return_type}"
-
-        self._write("")
         if self.is_pyo3:
+            sig = f"fn {node.name}({', '.join(param_strs)})"
+            if not self._is_void(return_type):
+                sig += f" -> {return_type}"
+            self._write("")
             self._write(f'#[pyfunction(name = "{node.name}")]')
-        self._write("#[allow(unused_variables)]", indent_level)
-        self._write(f"pub {sig} {{", indent_level)
+            self._write("#[allow(unused_variables)]", indent_level)
+            self._write(f"pub {sig} {{", indent_level)
+        elif self.is_c_abi:
+            sig = f'extern "C" fn {node.name}({", ".join(param_strs)})'
+            if not self._is_void(return_type):
+                sig += f" -> {return_type}"
+            self._write("")
+            self._write("#[no_mangle]", indent_level)
+            self._write("#[allow(unused_variables)]", indent_level)
+            self._write(f"pub {sig} {{", indent_level)
+        else:
+            sig = f"fn {node.name}({', '.join(param_strs)})"
+            if not self._is_void(return_type):
+                sig += f" -> {return_type}"
+            self._write("")
+            self._write("#[allow(unused_variables)]", indent_level)
+            self._write(f"pub {sig} {{", indent_level)
         body = node.body
         if body:
             self._emit_children(body, indent_level + 1)
@@ -406,12 +421,23 @@ class RustEmitter(BaseEmitter):
     def _is_pyo3_spec(self, spec: EngineSpec) -> bool:
         if spec.metadata.get("pyo3"):
             return True
+        binding = (spec.metadata.get("boundary_type") or "").lower().replace("-", "_")
+        if binding in ("pyo3", "pyo3_maturin", "maturin"):
+            return True
         for node in self._all_nodes(spec.root):
             if node.type_hint and any(
                 pat in node.type_hint
                 for pat in ("PyArray", "Python", "PyResult", "Py<", "&Py")
             ):
                 return True
+        return False
+
+    def _is_c_abi_spec(self, spec: EngineSpec) -> bool:
+        if spec.metadata.get("c_abi"):
+            return True
+        binding = (spec.metadata.get("boundary_type") or "").lower().replace("-", "_")
+        if binding in ("c_abi", "cabi", "c", "raw_c", "ctypes", "cffi"):
+            return True
         return False
 
     def _uses_numpy(self, spec: EngineSpec) -> bool:
@@ -521,7 +547,7 @@ class RustEmitterPlugin(PolyglotEmitterPlugin):
         node_spec: dict,
         boundary_contracts: List[dict],
     ) -> List[CodeArtifact]:
-        spec = _rust_engine_spec_from_node_spec(node_id, node_spec)
+        spec = _rust_engine_spec_from_node_spec(node_id, node_spec, boundary_contracts)
         emitter = RustEmitter()
         source = emitter.emit(spec)
         artifacts = [CodeArtifact(file_path="src/lib.rs", content=source, language="rust")]
@@ -533,6 +559,9 @@ class RustEmitterPlugin(PolyglotEmitterPlugin):
         artifacts.append(
             CodeArtifact(file_path="build.rs", content=BUILD_RS_TEMPLATE, language="rust")
         )
+        # Persist the PyO3/C-ABI decision so emit_build_manifest can add the right deps.
+        self._last_is_pyo3 = emitter.is_pyo3
+        self._last_is_c_abi = emitter.is_c_abi
         return artifacts
 
     def emit_build_manifest(
@@ -542,7 +571,13 @@ class RustEmitterPlugin(PolyglotEmitterPlugin):
         compiler_flags: List[str],
     ) -> CodeArtifact:
         crate = node_id or "rust_project"
-        deps = "\n".join(f'{d} = "0.1"' for d in dependencies)
+        extra_deps: List[str] = []
+        if getattr(self, "_last_is_pyo3", False):
+            extra_deps.append('pyo3 = { version = "0.20.3", features = ["extension-module"] }')
+        if getattr(self, "_last_is_c_abi", False):
+            extra_deps.append('rayon = "1.10"')
+        deps = "\n".join(extra_deps + [f'{d} = "0.1"' for d in dependencies])
+        crate_type = '["cdylib", "rlib"]' if getattr(self, "_last_is_pyo3", False) else '["cdylib"]'
         content = (
             "[package]\n"
             f'name = "{crate}"\n'
@@ -551,27 +586,55 @@ class RustEmitterPlugin(PolyglotEmitterPlugin):
             'build = "build.rs"\n\n'
             "[lib]\n"
             'name = "' + crate.replace("-", "_") + '"\n'
-            'crate-type = ["cdylib", "rlib"]\n\n'
+            f'crate-type = {crate_type}\n\n'
             "[dependencies]\n"
             f"{deps}\n"
         )
         return CodeArtifact(file_path="Cargo.toml", content=content, language="toml")
 
 
-def _rust_engine_spec_from_node_spec(node_id: str, node_spec: dict) -> EngineSpec:
+def _rust_engine_spec_from_node_spec(
+    node_id: str,
+    node_spec: dict,
+    boundary_contracts: Optional[List[dict]] = None,
+) -> EngineSpec:
     """Best-effort conversion of a plugin node spec to an EngineSpec."""
     spec = node_spec.get("spec")
     if isinstance(spec, EngineSpec):
+        if boundary_contracts:
+            _inject_boundary_metadata(spec.metadata, boundary_contracts)
         return spec
     if "source" in node_spec:
         name = node_spec.get("name") or node_id or "module"
-        return EngineSpec(name=name, root=module(children=[function(name, body=[])]))
+        spec = EngineSpec(name=name, root=module(children=[function(name, body=[])]))
+        if boundary_contracts:
+            _inject_boundary_metadata(spec.metadata, boundary_contracts)
+        return spec
     if "root" in node_spec:
-        return EngineSpec(
+        spec = EngineSpec(
             name=node_spec.get("name", node_id or "module"),
             root=node_spec["root"],
         )
-    return EngineSpec(name=node_id or "module", root=module(children=[]))
+        if boundary_contracts:
+            _inject_boundary_metadata(spec.metadata, boundary_contracts)
+        return spec
+    spec = EngineSpec(name=node_id or "module", root=module(children=[]))
+    if boundary_contracts:
+        _inject_boundary_metadata(spec.metadata, boundary_contracts)
+    return spec
+
+
+def _inject_boundary_metadata(
+    metadata: dict, boundary_contracts: List[dict]
+) -> None:
+    """Promote the dominant boundary contract into spec metadata for the emitter."""
+    for contract in boundary_contracts:
+        boundary = str(contract.get("boundary_type") or contract.get("boundary") or "c_abi").lower().replace("-", "_")
+        metadata["boundary_type"] = boundary
+        metadata["pyo3"] = boundary in ("pyo3", "pyo3_maturin", "maturin")
+        metadata["c_abi"] = boundary in ("c_abi", "cabi", "c", "raw_c", "ctypes", "cffi")
+        if boundary in ("pyo3", "pyo3_maturin", "maturin"):
+            break
 
 
 EmitterRegistry.get_instance().register(RustEmitterPlugin())

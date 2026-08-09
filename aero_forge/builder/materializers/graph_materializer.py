@@ -172,6 +172,30 @@ class GraphPolyglotMaterializer:
         return M, labels, order
 
     @staticmethod
+    def _normalize_rust_python_pyo3_boundary(
+        edges: List[Dict[str, Any]], node_map: Dict[str, Dict[str, Any]]
+    ) -> None:
+        """Normalize boundary naming and confirm PyO3/Maturin for Rust/Python edges.
+
+        When an edge connects a Rust node to a Python node and is explicitly
+        marked with a PyO3 binding (``pyo3``, ``maturin``, or ``pyo3_maturin``),
+        log that the PyO3 toolchain was selected. We do not silently downgrade
+        an explicit ``c_abi`` edge; callers that requested C-ABI/ctypes keep it.
+        """
+        pyo3_aliases = {"pyo3", "maturin", "pyo3_maturin"}
+        for edge in edges:
+            raw_boundary = str(edge.get("boundary_type", "c_abi")).lower().replace("-", "_")
+            if raw_boundary in pyo3_aliases:
+                edge["boundary_type"] = "pyo3_maturin"
+            src = node_map.get(edge.get("source", ""), {}).get("lang", "").lower()
+            tgt = node_map.get(edge.get("target", ""), {}).get("lang", "").lower()
+            if src in ("rust", "rs") and tgt in ("python", "py") and edge.get("boundary_type") == "pyo3_maturin":
+                _accel_log(
+                    "success",
+                    "Target: rust_hin (PyO3) selected",
+                )
+
+    @staticmethod
     def _maybe_simplify_python_c_abi_edge(
         edge: Dict[str, Any], node_map: Dict[str, Dict[str, Any]]
     ) -> None:
@@ -209,11 +233,25 @@ class GraphPolyglotMaterializer:
         self, node_id: str, edges: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
         """Collect all edges touching *node_id* as plugin contract dicts."""
+        boundary_aliases = {
+            "pyo3": "pyo3_maturin",
+            "maturin": "pyo3_maturin",
+            "pyo3_maturin": "pyo3_maturin",
+            "c": "c_abi",
+            "cabi": "c_abi",
+            "c_abi": "c_abi",
+            "raw_c": "c_abi",
+            "ctypes": "c_abi",
+            "cffi": "c_abi",
+            "cxx": "c_abi",
+        }
         contracts: List[Dict[str, Any]] = []
         for edge in edges:
             if edge.get("source") == node_id or edge.get("target") == node_id:
                 raw_boundary = edge.get("boundary_type", "c_abi")
-                boundary = str(raw_boundary).lower().replace("-", "_")
+                boundary = boundary_aliases.get(
+                    str(raw_boundary).lower().replace("-", "_"), "c_abi"
+                )
                 # Pure Python nodes are never cross-language boundaries.
                 if self._is_pure_python and boundary in ("c_abi", "cabi", "pyo3_maturin"):
                     boundary = "python_call"
@@ -896,7 +934,7 @@ else:
         skeleton = _build_skeleton(
             node_spec, contracts, compacted_context=self._compacted_context
         )
-        skeleton_dir = self.workspace_root / ".aero_skeletons"
+        skeleton_dir = self.workspace_root / ".aero_forge" / "skeletons"
         skeleton_dir.mkdir(parents=True, exist_ok=True)
         skeleton_path = skeleton_dir / f"{node_id}_skeleton.txt"
         skeleton_path.write_text(skeleton, encoding="utf-8")
@@ -1713,7 +1751,7 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                 else:
                     # Last resort: discover a runnable Python entrypoint, preferring
                     # one directly inside a node directory over nested duplicates.
-                    skip_prefixes = ("target/", "build/", ".aero_skeletons/", "tests/", "ffi_bridges/")
+                    skip_prefixes = ("target/", "build/", ".aero_forge/", ".aero_skeletons/", "tests/", "ffi_bridges/")
                     for node_id in node_map:
                         for candidate in (
                             self.workspace_root / node_id / "main.py",
@@ -1982,6 +2020,7 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
         self._compacted_context = self._parse_compacted_context(raw_compacted)
         self._smt_types = hin_graph_spec.get("metadata", {}).get("smt_types", {})
         node_map = {n["node_id"]: n for n in nodes}
+        self._normalize_rust_python_pyo3_boundary(edges, node_map)
         for edge in edges:
             self._maybe_simplify_python_c_abi_edge(edge, node_map)
 

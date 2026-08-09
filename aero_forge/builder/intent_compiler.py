@@ -796,26 +796,45 @@ class IntentCompiler:
             )
 
         edges: List[BoundaryEdgeSpec] = []
+        _BOUNDARY_SYNONYMS = {
+            "c": BoundaryContractType.C_ABI,
+            "c_abi": BoundaryContractType.C_ABI,
+            "cabi": BoundaryContractType.C_ABI,
+            "raw_c": BoundaryContractType.C_ABI,
+            "cffi": BoundaryContractType.C_ABI,
+            "cxx": BoundaryContractType.C_ABI,
+            "pyo3": BoundaryContractType.PYO3_MATURIN,
+            "maturin": BoundaryContractType.PYO3_MATURIN,
+            "ctypes": BoundaryContractType.C_ABI,
+        }
         for abi in v2.abi_contracts:
-            binding = str(abi.binding_framework or "c_abi")
-            try:
-                boundary_type = BoundaryContractType(binding)
-            except ValueError:
-                boundary_type = BoundaryContractType.C_ABI
+            binding = str(abi.binding_framework or "c_abi").lower().replace("-", "_")
+            boundary_type = _BOUNDARY_SYNONYMS.get(binding, BoundaryContractType.C_ABI)
 
             inputs = abi.signature.get("inputs", []) if abi.signature else []
             outputs = abi.signature.get("outputs", []) if abi.signature else []
 
-            source_lang = {
+            binding_to_source_lang = {
                 "pyo3": "rust",
+                "maturin": "rust",
                 "ctypes": "python",
                 "c_abi": "cpp",
                 "raw_c": "c",
                 "c": "c",
                 "cffi": "c",
                 "cxx": "cpp",
-            }.get(binding, "cpp")
-            target_lang = (abi.target_language or "rust").lower()
+            }
+            source_lang = binding_to_source_lang.get(binding, "cpp")
+            # The ABI contract v2 defaults target_language to "rust", but for PyO3
+            # the Rust side is the source and Python is the consumer. Infer the
+            # missing target from the binding when not explicitly provided.
+            target_lang = (abi.target_language or "").lower()
+            if not target_lang or target_lang == source_lang:
+                target_lang = (
+                    "python"
+                    if source_lang != "python"
+                    else "rust"
+                )
 
             for lang in (source_lang, target_lang):
                 if lang not in node_ids:

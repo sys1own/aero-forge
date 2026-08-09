@@ -50,6 +50,7 @@ def _zip_directory(src: Path, zip_path: Path, arc_root: Optional[str] = None) ->
     zip_path.parent.mkdir(parents=True, exist_ok=True)
     root = arc_root or src.name
     skip_parts = {
+        ".aero_forge",
         ".aero_skeletons",
         ".build_cache",
         ".overlays",
