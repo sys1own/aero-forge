@@ -383,6 +383,14 @@ class BlueprintV3(BaseModel):
             {k: self._resolve(v, workspace) for k, v in self.execution_strategy.env.items()}
         )
 
+        # Ensure the workspace root is on PYTHONPATH so absolute package imports
+        # resolve for both ``python main.py`` and ``python -m pkg.mod`` runs.
+        pythonpath = run_env.get("PYTHONPATH", "")
+        if str(workspace) not in pythonpath.split(os.pathsep):
+            run_env["PYTHONPATH"] = os.pathsep.join(
+                p for p in [str(workspace), pythonpath] if p
+            )
+
         # Build DAG order.
         order = self._artifact_order()
         built: Dict[str, Path] = {}
