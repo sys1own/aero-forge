@@ -70,6 +70,7 @@ SKIP_DIRS = {
     ".cargo",
     ".git",
     ".aero",
+    ".aero_forge",
     ".aero_skeletons",
     ".aero-forge-cache",
     ".build_cache",

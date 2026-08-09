@@ -185,14 +185,16 @@ class PythonEmitterPlugin(PolyglotEmitterPlugin):
     ) -> List[CodeArtifact]:
         source_files = node_spec.get("source_files") or [f"{node_id or 'module'}.py"]
         file_path = str(source_files[0])
-        # Ensure the file is scoped under the node directory so the root build
-        # script and node-level py_compile both resolve it correctly. The
-        # GraphPolyglotMaterializer strips a leading node_id/ prefix when it
-        # writes the artifact, leaving a workspace-relative entrypoint.
-        if not file_path.startswith(f"{node_id}/"):
-            file_path = f"{node_id}/{file_path}"
+        # GraphPolyglotMaterializer already writes artifacts under the node
+        # directory, so strip an explicit leading node_id/ prefix to avoid
+        # double-nested paths.
+        prefix = f"{node_id}/"
+        if file_path.startswith(prefix):
+            file_path = file_path[len(prefix):]
 
-        if _has_c_abi_consumer_contract(node_id, boundary_contracts):
+        if _has_pyo3_consumer_contract(node_id, boundary_contracts):
+            source = _pyo3_loader_source(node_id, boundary_contracts)
+        elif _has_c_abi_consumer_contract(node_id, boundary_contracts):
             source = _ctypes_loader_source(node_id, boundary_contracts)
         else:
             spec = _engine_spec_from_node_spec(node_id, node_spec)
@@ -221,6 +223,18 @@ class PythonEmitterPlugin(PolyglotEmitterPlugin):
         )
 
 
+def _has_pyo3_consumer_contract(node_id: str, boundary_contracts: List[dict]) -> bool:
+    """Return True when *node_id* is the Python consumer side of a PyO3 edge."""
+    for contract in boundary_contracts:
+        boundary = str(contract.get("boundary_type") or contract.get("boundary") or "c_abi").lower().replace("-", "_")
+        if (
+            boundary in ("pyo3", "pyo3_maturin", "maturin")
+            and contract.get("target") == node_id
+        ):
+            return True
+    return False
+
+
 def _has_c_abi_consumer_contract(node_id: str, boundary_contracts: List[dict]) -> bool:
     """Return True when *node_id* is the Python consumer side of a C-ABI edge."""
     for contract in boundary_contracts:
@@ -230,6 +244,54 @@ def _has_c_abi_consumer_contract(node_id: str, boundary_contracts: List[dict]) -
         ):
             return True
     return False
+
+
+def _demo_call_args(args: List[str]) -> str:
+    """Return a literal argument list for the CLI demo call."""
+    parts: List[str] = []
+    for a in args:
+        if a == "pointer":
+            parts.append("[1.0, 2.0, 3.0, 4.0]")
+        elif a in ("float32", "float64"):
+            parts.append("42.0")
+        elif a in ("int32", "int64"):
+            parts.append("42")
+        else:
+            parts.append("42")
+    return ", ".join(parts)
+
+
+def _pyo3_loader_source(node_id: str, boundary_contracts: List[dict]) -> str:
+    """Generate a Python CLI that imports a compiled PyO3/Maturin extension."""
+    contract = next(
+        (
+            c
+            for c in boundary_contracts
+            if str(c.get("boundary_type") or c.get("boundary") or "").lower().replace("-", "_") in ("pyo3", "pyo3_maturin", "maturin")
+            and c.get("target") == node_id
+        ),
+        {},
+    )
+    source_node = contract.get("source", "rust_core")
+    symbol = contract.get("symbol", source_node)
+    args = contract.get("args", ["int64"])
+    call_args = _demo_call_args(args)
+
+    return f'''"""Auto-generated Python CLI for the PyO3/Maturin bridge."""
+import sys
+from pathlib import Path
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+# The compiled Rust extension is a sibling package (e.g. rust_core/__init__.py).
+if str(_SCRIPT_DIR.parent) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR.parent))
+
+from {source_node} import {symbol}
+
+if __name__ == "__main__":
+    result = {symbol}({call_args})
+    print(f"{symbol}({call_args}) = {{result}}")
+'''
 
 
 def _ctypes_loader_source(node_id: str, boundary_contracts: List[dict]) -> str:
@@ -257,17 +319,8 @@ def _ctypes_loader_source(node_id: str, boundary_contracts: List[dict]) -> str:
     argtypes = ", ".join(ctype_for.get(a, "ctypes.c_int64") for a in args)
     restype = ctype_for.get(return_type, "ctypes.c_int64")
 
-    # Build a demo call that matches the C-ABI argument list.  Pointer arguments
-    # are given a scratch buffer so callers with vector signatures still run.
-    call_args: List[str] = []
-    for a in args:
-        if a == "pointer":
-            call_args.append("(ctypes.c_double * 1024)()")
-        elif a in ("float32", "float64"):
-            call_args.append("42.0")
-        else:
-            call_args.append("42")
-    call = f"{symbol}({', '.join(call_args)})"
+    call_args = _demo_call_args(args)
+    call = f"{symbol}({call_args})"
 
     return f'''"""Auto-generated Python CLI for the C-ABI bridge."""
 import ctypes
@@ -288,13 +341,21 @@ if _LIB_PATH is None:
 
 _LIB = ctypes.CDLL(str(_LIB_PATH))
 
-{symbol} = _LIB.{symbol}
+# Prefer the unmangled symbol; allow common prefix variations if the ABI
+# boundary used different naming conventions.
+{symbol} = getattr(_LIB, "{symbol}", None)
+if {symbol} is None:
+    {symbol} = getattr(_LIB, "_{symbol}", None)
+if {symbol} is None:
+    {symbol} = getattr(_LIB, "{symbol}_", None)
+if {symbol} is None:
+    raise AttributeError(f"Symbol {symbol!r} not found in {{_LIB_NAME}}")
 {symbol}.argtypes = [{argtypes}]
 {symbol}.restype = {restype}
 
 if __name__ == "__main__":
     result = {call}
-    print(f"{symbol}(42) = {{result}}")
+    print(f"{symbol}({call_args}) = {{result}}")
 '''
 
 

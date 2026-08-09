@@ -481,6 +481,7 @@ SKIP_DIRS = {
     "__pycache__",
     ".git",
     ".aero",
+    ".aero_forge",
     ".aero_skeletons",
     ".build_cache",
     ".overlays",

@@ -410,17 +410,23 @@ class DynamicContractSynthesizer:
             for i, t in enumerate(edge.argument_types)
         )
         rust_ret = FFI_TYPE_LAYOUTS.get(edge.return_type, {}).get("rust_type", "PyObject")
+        module_name = edge.source_node or "aero_forge_module"
         source = (
             "use pyo3::prelude::*;\n\n"
             f"#[pyfunction]\n"
             f"fn {edge.symbol_name}({rust_args}) -> {rust_ret} {{\n"
             "    // TODO: wire to implementation\n"
             f"    {'Default::default()' if rust_ret not in ('()', 'void') else ''}\n"
+            "}\n\n"
+            f"#[pymodule]\n"
+            f"fn {module_name}(_py: Python, m: &PyModule) -> PyResult<()> {{\n"
+            f"    m.add_wrapped(wrap_pyfunction!({edge.symbol_name}))?;\n"
+            "    Ok(())\n"
             "}\n"
         )
         header = f"// PyO3 bridge for {edge.symbol_name}\n"
         python_loader = (
-            f"from {edge.symbol_name} import {edge.symbol_name}\n"
+            f"from {module_name} import {edge.symbol_name}\n"
         )
         csharp_stub = ""
         return GeneratedFFIBridge(
