@@ -441,6 +441,7 @@ fn aero_forge_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<deterministic_healer::ASTRewritePatch>()?;
     m.add_class::<deterministic_healer::PreWriteHealer>()?;
     m.add_function(wrap_pyfunction!(goi_solver::enforce_repair_isolation_py, m)?)?;
+    m.add_function(wrap_pyfunction!(goi_solver::execution_matrix_nonzero, m)?)?;
     m.add_class::<goi_solver::GoIProofNet>()?;
     m.add_function(wrap_pyfunction!(goi_solver::verify_goi_proof_net, m)?)?;
     m.add_class::<goi_solver::GoIWavefrontSolverNative>()?;

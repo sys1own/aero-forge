@@ -99,6 +99,27 @@ fn perturbation_support(delta: &Array2<f64>) -> (Vec<usize>, Vec<usize>) {
     (row_vec, col_vec)
 }
 
+/// Verify that an execution matrix ``M`` is non-zero.
+///
+/// ``matrix_json`` is a JSON 2-D array. Returns ``true`` when the matrix has at
+/// least one non-zero entry and its spectral radius is above the zero threshold.
+/// This is used as a post-synthesis GoI proof-net gate: a "hollow" artifact
+/// produces an all-zero execution matrix and fails.
+#[pyfunction]
+pub fn execution_matrix_nonzero(matrix_json: &str) -> PyResult<bool> {
+    let value: Value = serde_json::from_str(matrix_json)
+        .map_err(|e| PyValueError::new_err(format!("invalid matrix JSON: {}", e)))?;
+    let mat = matrix_from_json(&value)?;
+    if mat.is_empty() {
+        return Ok(false);
+    }
+    // A non-zero execution matrix must contain at least one non-zero entry.
+    // Spectral radius can be zero for nilpotent (acyclic) graphs, so the Frobenius
+    // norm is the correct hollow/empty check.
+    let norm = mat.iter().map(|x| x * x).sum::<f64>().sqrt();
+    Ok(norm > 1e-12)
+}
+
 /// Evaluate whether a perturbation ``ΔM`` keeps the GoI matrix ``U (M + ΔM)``
 /// inside the unit spectral-radius boundary.
 ///

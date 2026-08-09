@@ -245,12 +245,12 @@ def extract_aero_logic(raw: str) -> str:
         text,
         re.IGNORECASE,
     )
-    if (
-        start_match
-        and end_match
-        and end_match.start() >= start_match.end()
-    ):
-        return text[start_match.end():end_match.start()].strip()
+    if start_match:
+        if end_match and end_match.start() >= start_match.end():
+            return text[start_match.end():end_match.start()].strip()
+        # Truncated response: keep everything after the start marker so the
+        # fence parser can still extract partial code.
+        return text[start_match.end():].strip()
 
     # Markdown fence fallback.
     fenced = re.findall(

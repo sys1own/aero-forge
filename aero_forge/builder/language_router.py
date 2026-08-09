@@ -257,6 +257,9 @@ class SystemToolchainRouter:
         compiler_flags: List[str],
         workspace_dir: Path,
     ) -> List[str]:
+        # Toolchains like Zig/Cargo interpret relative output paths against cwd,
+        # so ensure the workspace is absolute before constructing commands.
+        workspace_dir = Path(workspace_dir).resolve()
         if toolchain in ("gcc", "clang", "c"):
             out = workspace_dir / f"lib{node_id}.so"
             cmd = [
@@ -437,9 +440,25 @@ class SystemToolchainRouter:
                 ).strip()
             compiler_flags = cargo_flags
 
+        workspace_dir = Path(workspace_dir).resolve()
         cmd = cls._build_command(
-            toolchain, node_id, source_files, compiler_flags, Path(workspace_dir)
+            toolchain, node_id, source_files, compiler_flags, workspace_dir
         )
+
+        # Zig's -femit-bin= flag needs the parent directory to exist, and the
+        # Python ctypes loader conventionally looks in zig-out/lib/{node_id}.*
+        # for the shared object.
+        if toolchain == "zig":
+            expected_out = workspace_dir / "zig-out" / "lib" / f"lib{node_id}.so"
+            expected_out.parent.mkdir(parents=True, exist_ok=True)
+            cmd = [
+                (
+                    f"-femit-bin={expected_out}"
+                    if arg.startswith("-femit-bin=")
+                    else arg
+                )
+                for arg in cmd
+            ]
 
         try:
             result = subprocess.run(

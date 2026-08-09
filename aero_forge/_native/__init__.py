@@ -15,6 +15,7 @@ try:
         compile_aeroc,
         enforce_repair_isolation_py,
         evaluate_hin_energy,
+        execution_matrix_nonzero,
         hash_bytes,
         hash_file,
         reduce_hin_uast,
@@ -48,5 +49,6 @@ __all__ = [
     "evaluate_hin_energy",
     "repair_uast_expression",
     "enforce_repair_isolation_py",
+    "execution_matrix_nonzero",
     "verify_hin_boundary_layouts",
 ]
