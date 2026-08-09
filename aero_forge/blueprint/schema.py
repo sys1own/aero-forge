@@ -363,9 +363,19 @@ class BlueprintV3(BaseModel):
         args = self._resolve(self.execution_strategy.args, workspace)
         working_dir = self._resolve(self.execution_strategy.working_dir, workspace)
 
-        cmd = [runtime]
+        cmd: List[str] = [runtime]
         if entrypoint:
-            cmd.append(entrypoint)
+            if (
+                runtime.startswith(("python", "python3"))
+                and entrypoint.endswith(".py")
+                and "/" in entrypoint
+            ):
+                # Execute sub-package entrypoints as modules so relative imports
+                # inside e.g. ``python_cli/main.py`` work without ImportError.
+                module_path = entrypoint[:-3].replace("/", ".").replace("\\", ".").lstrip(".")
+                cmd.extend(["-m", module_path])
+            else:
+                cmd.append(entrypoint)
         cmd.extend(args)
 
         cwd = Path(working_dir)

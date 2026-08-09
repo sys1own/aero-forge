@@ -135,6 +135,68 @@ class SystemToolchainRouter:
         )
 
     @classmethod
+    def _cargo_target(cls, compiler_flags: Sequence[str]) -> Optional[str]:
+        """Return the Rust target triple if ``--target`` is present in *compiler_flags*.
+
+        The intent compiler sometimes emits ``--target <triple>`` as a single
+        string; tokenize it before parsing.
+        """
+        import shlex
+
+        tokens: List[str] = []
+        for flag in compiler_flags or []:
+            tokens.extend(shlex.split(str(flag)))
+        for i, token in enumerate(tokens):
+            if token == "--target" and i + 1 < len(tokens):
+                return tokens[i + 1]
+            if token.startswith("--target="):
+                return token.split("=", 1)[1]
+        return None
+
+    @classmethod
+    def _tokenized_cargo_flags(cls, compiler_flags: Sequence[str]) -> List[str]:
+        """Flatten and tokenize cargo ``compiler_flags`` so combined args split correctly."""
+        import shlex
+
+        tokens: List[str] = []
+        for flag in compiler_flags or []:
+            tokens.extend(shlex.split(str(flag)))
+        return tokens
+
+    @classmethod
+    def _ensure_cargo_target(cls, target: str) -> None:
+        """Ensure *target* is installed for cargo/rustup; auto-install if possible."""
+        installed: set[str] = set()
+        try:
+            result = subprocess.run(
+                ["rustup", "target", "list", "--installed"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                installed = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+        except FileNotFoundError:
+            pass
+
+        if target in installed:
+            return
+
+        try:
+            subprocess.run(
+                ["rustup", "target", "add", target],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+            raise ToolchainNotFoundError(
+                "rustup",
+                f"Rust target {target!r} is not installed and could not be added: {exc}",
+                f"rustup target add {target}",
+            ) from exc
+
+    @classmethod
     def preflight_nodes(
         cls,
         nodes: List[Dict[str, Any]],
@@ -162,6 +224,20 @@ class SystemToolchainRouter:
                     "warning",
                     f"Toolchain {toolchain!r} not available, but build=False; continuing: {exc}",
                 )
+                continue
+            # Cargo/Maturin nodes may reference a specific Rust target triple.
+            if toolchain in ("cargo", "maturin", "rust"):
+                target = cls._cargo_target(node.get("compiler_flags", []))
+                if target:
+                    try:
+                        cls._ensure_cargo_target(target)
+                    except ToolchainNotFoundError as exc:
+                        if build:
+                            raise
+                        _accel_log(
+                            "warning",
+                            f"Rust target {target!r} not available, but build=False; continuing: {exc}",
+                        )
 
     @classmethod
     def preflight_plugin(cls, descriptor: Any) -> None:
@@ -225,19 +301,21 @@ class SystemToolchainRouter:
                 [cls._exec_path("cmake") or "cmake", "-B", "build", "."]
             )
         if toolchain == "cargo":
+            cargo_flags = cls._tokenized_cargo_flags(compiler_flags)
             cmd = [
                 cls._exec_path("cargo") or "cargo",
                 "build",
                 "--release",
-                *compiler_flags,
+                *cargo_flags,
             ]
             return _deduplicate_command_args(cmd)
         if toolchain == "maturin":
+            cargo_flags = cls._tokenized_cargo_flags(compiler_flags)
             cmd = [
                 cls._exec_path("maturin") or "maturin",
                 "build",
                 "--release",
-                *compiler_flags,
+                *cargo_flags,
             ]
             return _deduplicate_command_args(cmd)
         if toolchain == "dotnet":

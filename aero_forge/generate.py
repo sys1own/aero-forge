@@ -79,6 +79,11 @@ def _is_universal_project_prompt(prompt: str) -> bool:
         "d language",
         "nim",
         "fortran",
+        "rust",
+        "c++",
+        "cpp",
+        "wasm",
+        "webassembly",
     ]
     has_non_python = any(lang in lower for lang in non_python_languages)
     # "go" is ambiguous (e.g. "go ahead"), so only treat it as a language when
@@ -97,6 +102,9 @@ def _is_universal_project_prompt(prompt: str) -> bool:
         "ctypes",
         "zero-copy",
         "jit-synthes",
+        "wasm",
+        "webassembly",
+        "compile",
     ]
     return has_non_python and any(m in lower for m in project_markers)
 
