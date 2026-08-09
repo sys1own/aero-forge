@@ -79,6 +79,7 @@ class Metadata(BaseModel):
     llm_initialized: bool = False
     auto_generated: bool = False
     description: str = ""
+    compacted_context: Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod

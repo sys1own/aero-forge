@@ -647,36 +647,56 @@ class Orchestrator:
             return value
         return str(value).strip().lower() in ("true", "1", "yes")
 
-    def _ensure_blueprint_enriched(self, blueprint: Blueprint) -> None:
-        """Raise ForgeError when the blueprint was not LLM-enriched.
+    @staticmethod
+    def _v11_enrichment_guidance() -> str:
+        """Return the v11_universal_architect guidance for an enrichment pass."""
+        from aero_forge.prompts import get_template
 
-        If the blueprint carries a prompt and an LLM client is configured, an
-        Intent Enrichment pass is attempted before failing.
+        try:
+            return get_template("v11_universal_architect").system_prompt
+        except Exception:
+            return (
+                "Use the v11_universal_architect template: design a strict, "
+                " compilable project blueprint with explicit function signatures, "
+                "toolchain manifests, and ABI contracts. Output only valid JSON."
+            )
+
+    def _ensure_blueprint_enriched(self, blueprint: Blueprint) -> Blueprint:
+        """Return an LLM-enriched blueprint, or raise ForgeError.
+
+        If the blueprint's ``llm_initialized`` flag is false and a prompt plus
+        an LLM client are available, this method invokes the v11 universal
+        architect for an enrichment pass before the build is allowed to proceed
+        to materialisation.
         """
-        if not isinstance(blueprint.metadata, dict):
-            return
-        if self._is_enriched(blueprint.metadata):
-            return
-        prompt = blueprint.prompt or blueprint.metadata.get("prompt", "")
-        if prompt and self.llm_client is not None:
-            try:
-                compiler = IntentCompiler(llm_client=self.llm_client)
-                enriched = compiler.compile_prompt(
-                    prompt, output_dir=blueprint.output_dir
-                )
-                blueprint.metadata["llm_initialized"] = "true"
-                blueprint.metadata["status"] = "finalized"
-                blueprint.metadata["generation_method"] = "llm_synthesized"
-                blueprint.metadata["auto_generated"] = "false"
-                return
-            except Exception as exc:
-                raise ForgeError(
-                    f"Blueprint Not Enriched: intent enrichment failed: {exc}"
-                ) from exc
-        raise ForgeError(
-            "Blueprint Not Enriched: llm_initialized is false and no prompt/LLM "
-            "is available to run intent enrichment."
-        )
+        metadata = blueprint.metadata if isinstance(blueprint.metadata, dict) else {}
+        if self._is_enriched(metadata):
+            return blueprint
+        prompt = blueprint.prompt or metadata.get("prompt", "")
+        if not prompt or self.llm_client is None:
+            raise ForgeError(
+                "Blueprint Not Enriched: llm_initialized is false and no prompt/LLM "
+                "is available to run intent enrichment."
+            )
+        try:
+            compiler = IntentCompiler(
+                llm_client=self.llm_client,
+                system_prompt_extra=self._v11_enrichment_guidance(),
+            )
+            enriched = compiler.compile_prompt(
+                prompt,
+                output_dir=blueprint.output_dir,
+                project_name=blueprint.project,
+            )
+            enriched.metadata["llm_initialized"] = "true"
+            enriched.metadata["status"] = "finalized"
+            enriched.metadata["generation_method"] = "llm_synthesized"
+            enriched.metadata["auto_generated"] = "false"
+            return enriched
+        except Exception as exc:
+            raise ForgeError(
+                f"Blueprint Not Enriched: v11 enrichment pass failed: {exc}"
+            ) from exc
 
     def build(
         self,
@@ -704,7 +724,7 @@ class Orchestrator:
                 llm=LLMConfig(provider="none"),
             )
 
-        self._ensure_blueprint_enriched(blueprint)
+        blueprint = self._ensure_blueprint_enriched(blueprint)
 
         from aero_forge.build_runner import BuildRunner
 
@@ -1421,6 +1441,7 @@ def _strip_markdown_fences(text: str) -> str:
     markdown fence removal.
     """
     from aero_forge.orchestrator.prompt_builder import (
+        ExtractionFailureError,
         TruncatedAeroLogicError,
         extract_aero_logic,
     )
@@ -1430,6 +1451,9 @@ def _strip_markdown_fences(text: str) -> str:
     except TruncatedAeroLogicError:
         # Truncated responses cannot be safely parsed; downstream callers will
         # treat an empty string as a failed extraction and retry/fallback.
+        return ""
+    except ExtractionFailureError as exc:
+        _accel_log("error", f"Extraction Failure diagnostic: {exc}")
         return ""
     text = re.sub(
         r"^```\s*(?:\w+)?\s*(?::\s*[^\n\r]*)?\s*\r?\n",
@@ -1951,6 +1975,16 @@ class CompactedContextGenerator:
                 functions.append(
                     {
                         "name": symbol,
+                        "node_id": node.get("node_id", ""),
+                        "lang": node.get("lang", ""),
+                    }
+                )
+            # Nodes with no explicit exports (e.g. a CLI entrypoint) still carry a
+            # logic intent named after the node itself.
+            if not exports and node.get("node_id"):
+                functions.append(
+                    {
+                        "name": node.get("node_id"),
                         "node_id": node.get("node_id", ""),
                         "lang": node.get("lang", ""),
                     }

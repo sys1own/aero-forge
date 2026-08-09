@@ -357,6 +357,46 @@ class SMTASTEngine:
                 )
                 scalar_case = z3.Or(both_i64, both_usize, both_f64, mixed_int)
 
+                # Addition may also be string concatenation in Python. Keep this
+                # option disabled for Rust/C++ transpilation so unannotated
+                # variables default to numeric rather than string types.
+                if isinstance(expr.op, ast.Add) and target_language == "python":
+                    string_case = z3.And(
+                        left_t == self.String,
+                        right_t == self.String,
+                        result_t == self.String,
+                    )
+                    if _may_be_vector(expr.left) or _may_be_vector(expr.right):
+                        vec_case = z3.Or(
+                            z3.And(
+                                _is_vec(left_t),
+                                left_t == right_t,
+                                result_t == left_t,
+                            ),
+                            z3.And(
+                                _is_vec(left_t),
+                                _is_scalar_numeric(right_t),
+                                _element_constraint(left_t, right_t),
+                                result_t == left_t,
+                            ),
+                            z3.And(
+                                _is_scalar_numeric(left_t),
+                                _is_vec(right_t),
+                                _element_constraint(right_t, left_t),
+                                result_t == right_t,
+                            ),
+                        )
+                        self._add(
+                            z3.Or(string_case, vec_case, scalar_case),
+                            name="binop_add_vec_or_string_or_scalar",
+                        )
+                    else:
+                        self._add(
+                            z3.Or(string_case, scalar_case),
+                            name="binop_add_string_or_scalar",
+                        )
+                    return result_t
+
                 if _may_be_vector(expr.left) or _may_be_vector(expr.right):
                     vec_case = z3.Or(
                         z3.And(
@@ -488,6 +528,12 @@ class SMTASTEngine:
                     return self.Bool
                 if name == "str":
                     return self.String
+                if name == "dumps" and base == "json":
+                    return self.String
+                if name == "loads" and base == "json":
+                    for a in expr.args:
+                        self._add(_collect_expr(a) == self.String, name="json_loads_arg")
+                    return self.Map
                 if name == "list" and expr.args:
                     arg_t = _collect_expr(expr.args[0])
                     result_t = _fresh()

@@ -9,7 +9,13 @@ from typing import Any, Dict, Optional
 
 from aero_forge.precision_shield.smt_solver import SMTASTEngine
 
-__all__ = ["SMTASTEngine", "SkeletonTypeInjector", "AttributeResolver"]
+__all__ = ["SMTASTEngine", "SkeletonTypeInjector", "AttributeResolver", "SMTSaturationError"]
+
+
+class SMTSaturationError(RuntimeError):
+    """Raised when the SMT solver returns UNSAT or an empty model for a function body."""
+
+    pass
 
 
 class SkeletonTypeInjector:
@@ -22,12 +28,15 @@ class SkeletonTypeInjector:
         cls,
         source: str,
         function_name: Optional[str] = None,
+        target_language: str = "rust",
     ) -> Dict[str, str]:
         """Return a mapping from variable name to a native type for *source*."""
         if not source or not source.strip():
             return {}
         try:
-            return SMTASTEngine().infer_native_types(source, function_name)
+            return SMTASTEngine().infer_native_types(
+                source, function_name, target_language=target_language
+            )
         except Exception:
             return {}
 
@@ -74,6 +83,7 @@ class SkeletonTypeInjector:
         cls,
         source: str,
         symbol: str,
+        target_language: str = "rust",
     ) -> Dict[str, str]:
         """Infer native types scoped to a single function ``symbol``.
 
@@ -81,9 +91,63 @@ class SkeletonTypeInjector:
         renames it to ``return`` so skeleton builders can look up return types
         with a single key.
         """
-        env = cls.infer_type_env(source, function_name=symbol)
+        env = cls.infer_type_env(
+            source, function_name=symbol, target_language=target_language
+        )
         if "__return__" in env:
             env["return"] = env.pop("__return__")
+        return env
+
+    @classmethod
+    def saturate(
+        cls,
+        source: str,
+        function_name: Optional[str] = None,
+        target_language: str = "rust",
+    ) -> Dict[str, str]:
+        """Infer and verify non-null SMT type assignments for every variable.
+
+        Parses *source*, collects every variable that is stored or used as a
+        parameter, and ensures the Z3-backed SMT solver returns a concrete native
+        type for each one. If the solver is UNSAT or leaves any variable without
+        a type assignment, ``SMTSaturationError`` is raised so the Proactive
+        Synthesis Healing core can rewrite the intent before emission.
+        """
+        if not source or not source.strip():
+            raise SMTSaturationError("Cannot saturate an empty logic sketch.")
+
+        try:
+            env = SMTASTEngine().infer_native_types(
+                source, function_name, target_language=target_language
+            )
+        except Exception as exc:
+            raise SMTSaturationError(
+                f"SMT solver failed to infer types for {function_name or '<module>'}: {exc}"
+            ) from exc
+
+        tree = ast.parse(source)
+        funcs = [
+            node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        if function_name:
+            funcs = [f for f in funcs if f.name == function_name]
+        target = funcs[0] if funcs else tree
+
+        required: set = set()
+        for node in ast.walk(target):
+            if isinstance(node, ast.arg):
+                required.add(node.arg)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                required.add(node.id)
+
+        missing = sorted(n for n in required if n not in env)
+        if missing:
+            raise SMTSaturationError(
+                f"SMT model is missing non-null type assignments for variables: {missing}"
+            )
+
         return env
 
 
