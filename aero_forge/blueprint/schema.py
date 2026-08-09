@@ -186,6 +186,30 @@ class ABIContractV3(BaseModel):
         }
         return synonyms.get(text, text) if text else "python"
 
+    @model_validator(mode="after")
+    def _validate_contract(self) -> "ABIContractV3":
+        """Ensure every contract has a valid symbol and language identifiers."""
+        if not self.symbol:
+            self.symbol = self.contract_id
+        allowed = {
+            "python",
+            "rust",
+            "cpp",
+            "c",
+            "go",
+            "zig",
+            "mojo",
+            "java",
+            "csharp",
+            "javascript",
+            "js",
+        }
+        for attr in ("source_language", "target_language"):
+            value = getattr(self, attr)
+            if value and value not in allowed:
+                raise ValueError(f"Invalid {attr!r}: {value!r}")
+        return self
+
 
 class ExecutionStrategyV3(BaseModel):
     primary_entrypoint: str = ""

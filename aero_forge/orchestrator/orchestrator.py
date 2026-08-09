@@ -21,7 +21,7 @@ import subprocess
 import tempfile
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 import yaml
 
@@ -1766,6 +1766,8 @@ class CompactedContextGenerator:
             "contracts": self._compact_contracts(data),
             "functions": self._compact_functions(data),
             "smt_types": self._compact_smt_types(data),
+            "required_symbols": self._compact_required_symbols(data),
+            "full_implementation_map": self._compact_implementation_map(data),
         }
 
         if architecture == "pure_python":
@@ -1948,6 +1950,39 @@ class CompactedContextGenerator:
             if isinstance(node, dict):
                 smt.update((node.get("extra") or {}).get("smt_types") or {})
         return smt
+
+    def _compact_required_symbols(self, data: Dict[str, Any]) -> List[str]:
+        """Return the complete set of symbols that must be implemented."""
+        symbols: Set[str] = set()
+        for fn in self._compact_functions(data):
+            name = fn.get("name") or fn.get("symbol")
+            if name:
+                symbols.add(name)
+        for contract in self._compact_contracts(data):
+            name = contract.get("symbol") or contract.get("name")
+            if name:
+                symbols.add(name)
+        return sorted(symbols)
+
+    def _compact_implementation_map(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Group every required symbol by source file/node for the LLM."""
+        functions = self._compact_functions(data)
+        return {
+            "description": (
+                "Full Implementation Map: implement every symbol listed "
+                "below. Do not omit, truncate, or skip any requested function."
+            ),
+            "symbols": [
+                {
+                    "name": f.get("name"),
+                    "file": f.get("file", ""),
+                    "node_id": f.get("node_id", ""),
+                    "lang": f.get("lang", ""),
+                }
+                for f in functions
+                if f.get("name")
+            ],
+        }
 
 
 __all__ = ["Orchestrator", "ForgeError", "plan_workspace", "CompactedContextGenerator"]
