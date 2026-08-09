@@ -401,6 +401,19 @@ class WavefrontScheduler:
                 )
                 continue
 
+            for t in wave_tasks:
+                if wave_idx == 0:
+                    task_env = t.env or os.environ.copy()
+                    pythonpath_parts = [str(t.cwd or os.getcwd())]
+                    src_dir = Path(t.cwd or os.getcwd()) / "src"
+                    if src_dir.is_dir():
+                        pythonpath_parts.append(str(src_dir))
+                    pythonpath_parts.append(task_env.get("PYTHONPATH", ""))
+                    task_env["PYTHONPATH"] = os.pathsep.join(
+                        p for p in pythonpath_parts if p
+                    ).strip(os.pathsep)
+                    t.env = task_env
+
             wave_results = await asyncio.gather(*[self._run_task(t) for t in wave_tasks])
             for _task, result in wave_results:
                 results.append(result)

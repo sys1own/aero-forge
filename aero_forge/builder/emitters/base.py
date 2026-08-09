@@ -97,6 +97,24 @@ class ContentDensityValidator:
         return count
 
     @classmethod
+    def validate_pure_python(cls, content: str) -> None:
+        """Fail fast if a supposedly pure-Python source imports native modules.
+
+        This enforces the negative constraint emitted in the Compacted
+        Functional Matrix: ``pure_python`` targets must not reference
+        ``rust_core``, ``cpp_core``, or ``@accelerate`` decorators.
+        """
+        if re.search(r"\brust_core\b|\bcpp_core\b", content, re.IGNORECASE):
+            raise ValueError(
+                "Forbidden native dependency in pure_python source: "
+                "rust_core/cpp_core imports are not allowed."
+            )
+        if re.search(r"@\s*accelerate\s*\(", content):
+            raise ValueError(
+                "Forbidden @accelerate decorator in pure_python source."
+            )
+
+    @classmethod
     def _count_python_nodes(cls, content: str) -> int:
         try:
             tree = ast.parse(content)
