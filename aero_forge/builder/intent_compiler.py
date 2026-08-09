@@ -671,6 +671,7 @@ class IntentCompiler:
         model returns a legacy v2 blueprint, it is lowered into the graph
         representation used by ``GraphPolyglotMaterializer``.
         """
+        _accel_log("info", "Enriching Blueprint...")
         client = self._llm_client
         if client is None:
             client = get_llm_client(
@@ -726,6 +727,10 @@ class IntentCompiler:
             try:
                 graph = PolyglotGraphBlueprint.model_validate(data)
                 graph.metadata["prompt"] = prompt_text
+                graph.metadata["llm_initialized"] = True
+                graph.metadata["status"] = "finalized"
+                graph.metadata["generation_method"] = "llm_synthesized"
+                _accel_log("success", "Blueprint enrichment complete")
                 return graph
             except Exception as graph_exc:
                 logger.debug("Graph blueprint validation failed (attempt %d): %s", attempt + 1, graph_exc)
@@ -754,12 +759,17 @@ class IntentCompiler:
                 )
                 continue
 
-            return self._v2_to_graph_blueprint(
+            graph = self._v2_to_graph_blueprint(
                 v2,
                 prompt_text,
                 output_dir,
                 project_name,
             )
+            graph.metadata["llm_initialized"] = True
+            graph.metadata["status"] = "finalized"
+            graph.metadata["generation_method"] = "llm_synthesized"
+            _accel_log("success", "Blueprint enrichment complete")
+            return graph
 
         raise IntentCompilerError(
             f"Failed to compile intent after {self.max_schema_retries} schema validation attempts: {last_error}"

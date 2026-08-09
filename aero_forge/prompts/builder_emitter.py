@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from aero_forge.builder.smt_engine import SkeletonTypeInjector
+
 
 BUILDER_EMITTER_SYSTEM_PROMPT = """\
 You are the Aero-Forge Builder Code Emission Agent. Your job is to generate
@@ -241,10 +243,23 @@ def _build_skeleton(
         lines = imports + [""]
         for symbol, args, return_type in specs:
             arg_names = [f"arg{i}" for i in range(len(args))]
-            arg_str = ", ".join(
-                f"{n}: {type_env.get(n, _py_type(a, symbol))}" for n, a in zip(arg_names, args)
+            # First, infer per-symbol SMT types from an annotated stub so each
+            # function's signature can be typed independently.
+            stub_arg_str = ", ".join(
+                f"{n}: {_py_type(a, symbol)}" for n, a in zip(arg_names, args)
             ) or "*args"
-            ret = f" -> {type_env.get('return', _py_type(return_type, symbol))}" if return_type else ""
+            stub_ret = f" -> {_py_type(return_type, symbol)}" if return_type else ""
+            stub = f"def {symbol}({stub_arg_str}){stub_ret}:\n    pass"
+            sym_env: Dict[str, str] = {}
+            try:
+                sym_env = SkeletonTypeInjector.infer_type_env_for_symbol(stub, symbol)
+            except Exception:
+                pass
+            sym_type_env = {**type_env, **sym_env}
+            arg_str = ", ".join(
+                f"{n}: {sym_type_env.get(n, _py_type(a, symbol))}" for n, a in zip(arg_names, args)
+            ) or "*args"
+            ret = f" -> {sym_type_env.get('return', _py_type(return_type, symbol))}" if return_type else ""
             if accel_decorator:
                 lines.append(accel_decorator.rstrip())
             lines.append(f"def {symbol}({arg_str}){ret}:")

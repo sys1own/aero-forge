@@ -62,6 +62,7 @@ from aero_forge.orchestrator.prompt_builder import (
 from aero_forge.prompts.builder_emitter import (
     BUILDER_EMITTER_SYSTEM_PROMPT,
     _build_skeleton,
+    _symbol_specs,
     format_builder_emitter_user_prompt,
 )
 from aero_forge.translator import uast_to_python_source
@@ -1132,6 +1133,11 @@ else:
             "info",
             f"Materialized source skeleton for {node_id} at {skeleton_path}",
         )
+
+        # Strict Enumerative Synthesis: emit one log line per contracted symbol so
+        # the accelerator log shows the per-function SLI progression.
+        for symbol, _args, _ret in _symbol_specs(node_spec, contracts):
+            _accel_log("info", f"Materializing Symbol: {symbol}")
 
         user_prompt = format_builder_emitter_user_prompt(
             node_spec,
@@ -2230,6 +2236,16 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
         write_v3_blueprint(blueprint, path)
         return path
 
+    def _is_enriched(self, hin_graph_spec: Dict[str, Any]) -> bool:
+        """Return True unless ``metadata.llm_initialized`` is explicitly false."""
+        metadata = hin_graph_spec.get("metadata") or {}
+        value = metadata.get("llm_initialized")
+        if value is None:
+            return True
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in ("true", "1", "yes")
+
     def materialize(
         self,
         hin_graph_spec: Dict[str, Any],
@@ -2246,6 +2262,11 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             5. Generate ``build.sh`` and ``blueprint.aero``.
             6. Optionally dispatch native builds.
         """
+        if not self._is_enriched(hin_graph_spec):
+            raise MaterializationError(
+                "Blueprint Not Enriched: llm_initialized is false. "
+                "Run a successful Intent Enrichment pass before materialization."
+            )
         self._hin_graph_spec = hin_graph_spec
         nodes: List[Dict[str, Any]] = hin_graph_spec.get("nodes", [])
         edges: List[Dict[str, Any]] = hin_graph_spec.get("edges", [])

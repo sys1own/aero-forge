@@ -69,6 +69,23 @@ class SkeletonTypeInjector:
                     }
         return annotations
 
+    @classmethod
+    def infer_type_env_for_symbol(
+        cls,
+        source: str,
+        symbol: str,
+    ) -> Dict[str, str]:
+        """Infer native types scoped to a single function ``symbol``.
+
+        The SMT engine exposes the return type under ``__return__``; this helper
+        renames it to ``return`` so skeleton builders can look up return types
+        with a single key.
+        """
+        env = cls.infer_type_env(source, function_name=symbol)
+        if "__return__" in env:
+            env["return"] = env.pop("__return__")
+        return env
+
 
 class AttributeResolver:
     """Rewrite incorrect attribute names in a UAST using SMT-inferred types.

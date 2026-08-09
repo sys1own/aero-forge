@@ -25,6 +25,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from aero_forge.builder.intent_compiler import IntentCompiler
 from aero_forge.builder.materializers.graph_materializer import (
     GraphPolyglotMaterializer,
 )
@@ -90,6 +91,37 @@ if __name__ == "__main__":
 '''
 
 
+class _GraphMockLLM:
+    """Return a valid graph_polyglot blueprint JSON for the security prompt."""
+
+    def generate(self, messages, **kwargs) -> str:
+        return json.dumps(
+            {
+                "project": "security_gateway",
+                "architecture": "pure_python",
+                "primary_entrypoint": "main.py",
+                "build_script": "build.sh",
+                "nodes": [
+                    {
+                        "node_id": "auth_lib",
+                        "lang": "python",
+                        "toolchain": "python",
+                        "source_files": ["auth_lib/core.py"],
+                        "exports": ["validate_token", "check_permissions"],
+                    },
+                    {
+                        "node_id": "main",
+                        "lang": "python",
+                        "toolchain": "python",
+                        "source_files": ["main.py"],
+                    },
+                ],
+                "edges": [],
+                "output_dir": "./dist",
+            }
+        )
+
+
 class _MockLLM:
     """Return the correct UAST sketch depending on which node is being synthesized."""
 
@@ -99,10 +131,9 @@ class _MockLLM:
     def generate(self, messages, **kwargs) -> str:
         content = messages[1]["content"]
         self.calls.append(content)
-        # The auth_lib skeleton exposes validate_token/check_permissions;
-        # the main skeleton exposes main.  Match by the function names in the
-        # prompt rather than the node id, which is not repeated in the prompt.
-        if "validate_token" in content or "check_permissions" in content:
+        # Match the synthesized skeleton: each node's prompt contains a skeleton
+        # with only the functions for that node.
+        if "def validate_token" in content:
             tree = ast.parse(_auth_lib_source())
             return _uast_response(_ast_to_uast(tree), "auth_lib/core.py")
         tree = ast.parse(_main_source())
@@ -119,37 +150,19 @@ def main() -> int:
         workspace = Path(tmp) / "auth_workspace"
         workspace.mkdir()
 
-        spec = {
-            "project": "security_gateway",
-            "metadata": {
-                "architecture": "pure_python",
-                "prompt": "Build a pure_python authentication and security utility.",
-            },
-            "architecture": "pure_python",
-            "primary_entrypoint": "main.py",
-            "build_script": "build.sh",
-            "nodes": [
-                {
-                    "node_id": "auth_lib",
-                    "lang": "python",
-                    "toolchain": "python",
-                    "source_files": ["auth_lib/core.py"],
-                    "exports": ["validate_token", "check_permissions"],
-                },
-                {
-                    "node_id": "main",
-                    "lang": "python",
-                    "toolchain": "python",
-                    "source_files": ["main.py"],
-                },
-            ],
-            "edges": [],
-        }
+        prompt = (
+            "Build a pure_python authentication and security utility. "
+            "It must implement validate_token and check_permissions in auth_lib/core.py "
+            "with a CLI entrypoint in main.py."
+        )
+
+        compiler = IntentCompiler(llm_client=_GraphMockLLM())
+        graph = compiler.compile_prompt_to_graph(prompt, output_dir=workspace)
 
         materializer = GraphPolyglotMaterializer(
             workspace, llm_client=_MockLLM()
         )
-        materializer.materialize(spec, build=False)
+        materializer.materialize(graph.model_dump(mode="json"), build=False)
 
         core_py = workspace / "auth_lib" / "core.py"
         main_py = workspace / "main.py"
@@ -173,12 +186,19 @@ def main() -> int:
             return 1
 
         log = log_path.read_text() if log_path.exists() else ""
-        if "Contract Integrity Verified: 2/2" not in log:
-            print("FAIL: accelerator log did not report contract integrity for auth_lib")
-            print("--- log ---")
-            print(log)
-            print("--- end log ---")
-            return 1
+        print("--- accelerator log ---")
+        print(log)
+        print("--- end accelerator log ---")
+
+        for expected in (
+            "Enriching Blueprint...",
+            "Materializing Symbol: validate_token",
+            "Materializing Symbol: check_permissions",
+            "Contract Integrity Verified: 2/2",
+        ):
+            if expected not in log:
+                print(f"FAIL: accelerator log missing '{expected}'")
+                return 1
 
         blueprint_text = blueprint.read_text()
         if "llm_initialized: true" not in blueprint_text:

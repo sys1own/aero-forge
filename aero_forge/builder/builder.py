@@ -176,6 +176,15 @@ class ProactivePolyglotBuilder:
         return bool(verify_goi_proof_net(dimension, m_data, sigma_data))
 
     @staticmethod
+    def _llm_initialized_truthy(value: Any) -> bool:
+        """Parse ``llm_initialized`` booleans encoded as bool/string."""
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        return str(value).strip().lower() in ("true", "1", "yes")
+
+    @staticmethod
     def _requires_synthesis(payload: Dict[str, Any]) -> bool:
         """Return True when the payload's blueprint is a draft that needs LLM synthesis."""
         blueprint = payload.get("blueprint") or {}
@@ -184,7 +193,9 @@ class ProactivePolyglotBuilder:
         metadata = blueprint.get("metadata") or {}
         status = str(metadata.get("status", "")).lower()
         auto_generated = bool(metadata.get("auto_generated"))
-        llm_initialized = bool(metadata.get("llm_initialized"))
+        llm_initialized = ProactivePolyglotBuilder._llm_initialized_truthy(
+            metadata.get("llm_initialized")
+        )
         llm_context = blueprint.get("llm_context") or {}
         if isinstance(llm_context, dict):
             state = str(llm_context.get("state", "")).lower()
@@ -363,6 +374,14 @@ class ProactivePolyglotBuilder:
             raise RuntimeError(
                 f"ProactivePolyglotBuilder could not compile prompt to graph: {last_error}"
             ) from last_error
+
+        if not ProactivePolyglotBuilder._llm_initialized_truthy(
+            graph.metadata.get("llm_initialized")
+        ):
+            raise RuntimeError(
+                "Blueprint Not Enriched: compile_prompt_to_graph did not produce an "
+                "llm_initialized blueprint. Run a successful Intent Enrichment pass first."
+            )
 
         # Build a compacted functional matrix so downstream synthesis is concise
         # and deterministic. The context is attached to the graph metadata so the
