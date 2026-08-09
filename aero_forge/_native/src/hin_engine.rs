@@ -344,6 +344,7 @@ impl HinEngine {
             "call" | "application" | "apply" | "call_expression" | "user_function_call" => {
                 self.build_call(node)
             }
+            "attribute" | "attr" => self.build_attribute(node),
             _ => Ok(None),
         }
     }
@@ -463,6 +464,31 @@ impl HinEngine {
             let v = self.add_node(NodeKind::Value, 0, Some(NodeValue::Null));
             Ok(Some(self.node_principal(v)))
         }
+    }
+
+    fn build_attribute(&mut self, node: &Value) -> Result<Option<usize>, String> {
+        // Attribute access (e.g. ``z.conjugate``) is modeled as a reference lookup
+        // whose name combines the receiver and the attribute.  The reducer will
+        // either resolve the name from an in-scope binding or create a fresh
+        // value node, allowing active-pair reductions to proceed on attribute
+        // lookups just like ordinary references.
+        let attr = node.get("attr").and_then(|v| v.as_str()).unwrap_or("");
+        let receiver_name = node
+            .get("value")
+            .and_then(|v| v.get("id").or_else(|| v.get("name")))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !receiver_name.is_empty() && !attr.is_empty() {
+            let synthetic = serde_json::json!({ "name": format!("{}.{}", receiver_name, attr) });
+            return self.build_reference(&synthetic);
+        }
+        if let Some(value) = node.get("value") {
+            if let Some(p) = self.build(value)? {
+                return Ok(Some(p));
+            }
+        }
+        let v = self.add_node(NodeKind::Value, 0, Some(NodeValue::Null));
+        Ok(Some(self.node_principal(v)))
     }
 
     fn build_literal(&mut self, node: &Value) -> Result<Option<usize>, String> {

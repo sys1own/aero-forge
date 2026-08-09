@@ -27,6 +27,8 @@ from aero_forge.builder.language_router import (
 )
 from aero_forge.builder.spec import ASTNode, EngineSpec
 from aero_forge.scheduler.goi_solver import _loop_dependency_matrix
+from aero_forge.translator import uast_to_python_source
+from aero_forge.builder.smt_engine import AttributeResolver
 
 
 class BoundaryContract(Enum):
@@ -62,6 +64,25 @@ class CodeArtifact:
     language: str
     is_header: bool = False
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_uast(
+        cls,
+        uast: Any,
+        file_path: str,
+        *,
+        attribute_resolver: Optional[Callable[[Any], Any]] = None,
+    ) -> "CodeArtifact":
+        """Materialize a UAST JSON logic sketch into a Python source artifact.
+
+        The engine (not the LLM) owns final attribute spelling, so incorrect
+        LLM-suggested attribute names such as ``conj`` are rewritten to the
+        intent-correct ``conjugate`` by the SMT attribute resolver before
+        unparsing.
+        """
+        resolver = attribute_resolver or AttributeResolver().resolve
+        source = uast_to_python_source(uast, attribute_resolver=resolver)
+        return cls(file_path=file_path, content=source, language="python")
 
 
 class ContentDensityValidator:
