@@ -63,6 +63,8 @@ from aero_forge.prompts.builder_emitter import (
     _build_skeleton,
     format_builder_emitter_user_prompt,
 )
+from aero_forge.translator import uast_to_python_source
+from aero_forge.builder.smt_engine import AttributeResolver
 from aero_forge.scheduler.goi_solver import (
     GoIWavefrontSolver,
     GoiSolverError,
@@ -613,7 +615,50 @@ else:
                     artifacts.append(
                         CodeArtifact(file_path="", content=stripped, language="")
                     )
-        return artifacts
+        # Convert any UAST/json sketches into deterministic Python source and drop
+        # the raw sketch so only compilable artifacts reach the file system.
+        materialized: List[CodeArtifact] = []
+        for artifact in artifacts:
+            converted = self._maybe_materialize_uast(artifact)
+            if converted is not None:
+                materialized.append(converted)
+            elif artifact.language in ("uast", "json"):
+                continue
+            else:
+                materialized.append(artifact)
+        return materialized
+
+    def _maybe_materialize_uast(
+        self, artifact: CodeArtifact
+    ) -> Optional[CodeArtifact]:
+        """Convert a UAST JSON artifact into a Python source artifact.
+
+        Supports fenced blocks with language ``uast`` or ``json`` and raw JSON
+        payloads. The SMT attribute resolver is applied before emission so the
+        engine (not the LLM) owns the final attribute spelling.
+        """
+        if artifact.language not in ("uast", "json") and not artifact.content.strip().startswith(("{", "[")):
+            return None
+        try:
+            data = json.loads(artifact.content)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if not isinstance(data, dict) or not any(k in data for k in ("type", "_type", "kind", "body")):
+            return None
+        if not isinstance(data.get("body", []), list) and not isinstance(data.get("children", []), list):
+            return None
+        try:
+            resolver = AttributeResolver()
+            source = uast_to_python_source(data, attribute_resolver=resolver.resolve)
+            _accel_log("info", f"UAST-to-Python emission succeeded for {artifact.file_path or '<unknown>'}")
+            return CodeArtifact(
+                file_path=artifact.file_path,
+                content=source,
+                language="python",
+            )
+        except Exception as exc:
+            _accel_log("warning", f"UAST-to-Python emission failed: {exc}")
+            return None
 
     @staticmethod
     def _coerce_artifact_types(artifacts: List[CodeArtifact]) -> List[CodeArtifact]:
@@ -794,7 +839,7 @@ else:
         artifact: CodeArtifact,
         node_spec: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """Return True when *artifact* is syntactically valid and dense enough."""
+        """Return True when *artifact* is syntactically valid and has non-trivial execution flow."""
         if artifact.is_header or self._is_build_manifest(artifact):
             return True
         try:
@@ -819,9 +864,52 @@ else:
             ContentDensityValidator.validate(
                 artifact.content, artifact.language or "text"
             )
-            return True
         except ValueError:
             return False
+        if not self._artifact_has_execution_flow(artifact):
+            return False
+        return True
+
+    def _artifact_has_execution_flow(self, artifact: CodeArtifact) -> bool:
+        """Return True when the artifact has HIN/GoI non-zero execution flow."""
+        if (artifact.language or "").lower() not in ("python", "py"):
+            return True
+        # GoI proof-net: non-zero execution matrix guarantees functional dependency flow.
+        try:
+            if not ContentDensityValidator.has_execution_flow(
+                artifact.content, artifact.language
+            ):
+                _accel_log(
+                    "warning",
+                    f"GoI proof-net verification failed for {artifact.file_path}: zero execution matrix",
+                )
+                return False
+        except Exception as exc:
+            _accel_log(
+                "warning",
+                f"GoI proof-net verification error for {artifact.file_path}: {exc}",
+            )
+            return False
+        # HIN active-pair reduction over the lowered UAST.
+        try:
+            from aero_forge.hin_engine import reduce_uast
+            from aero_forge.translator import python_source_to_uast
+
+            uast = python_source_to_uast(artifact.content)
+            hin = reduce_uast(uast)
+            if hin.get("steps", 0) == 0 and hin.get("graph"):
+                _accel_log(
+                    "warning",
+                    f"HIN verification produced no active-pair reductions for {artifact.file_path}",
+                )
+                return False
+            _accel_log("info", f"HIN verification passed for {artifact.file_path}: {hin.get('steps', 0)} active-pair steps")
+        except Exception as exc:
+            _accel_log(
+                "warning",
+                f"HIN verification skipped for {artifact.file_path}: {exc}",
+            )
+        return True
 
     def _is_llm_available(self) -> bool:
         """Return True when an LLM client/provider is configured."""

@@ -29,11 +29,13 @@ OUTPUT RULES
    on their own lines. No prose, markdown commentary, explanations, or apologies
    may appear outside these delimiters.
 2. Inside the delimiters, emit each file as a fenced Markdown block labeled with
-   the target file path:
-   ```<lang>:<relative/path>
-   ...
+   the target file path. For Python targets the preferred format is a UAST JSON
+   sketch; the engine will lower it to source and resolve attributes like
+   ``conj`` -> ``conjugate``. For all other languages emit the final source.
+   ```uast:main.py
+   {"type": "Module", "body": [{"type": "FunctionDef", "name": "fft", ...}]}
    ```
-   Example:
+   Other language example:
    ```cpp:cpp_engine/src/kernels.cpp
    // ...
    ```
@@ -50,6 +52,10 @@ OUTPUT RULES
    (e.g. `toml`, `xml`) and the exact manifest path (e.g. `Cargo.toml`).
 6. Respect the SMT-inferred native types in `compacted_context.smt_types` when
    choosing concrete types for variables and parameters.
+7. UAST sketches must use Python `ast` node names (`Module`, `FunctionDef`,
+   `Call`, `Attribute`, `BinOp`, `Compare`, etc.). Attribute names should follow
+   the intent (e.g. `conj` on a complex value); the engine will rewrite them to
+   the correct Python spelling (`conjugate`) via SMT verification.
 
 LANGUAGE-SPECIFIC FFI IDIOMS
 - C_ABI:
@@ -286,6 +292,10 @@ def format_builder_emitter_user_prompt(
         "exclusive context you need. Use the `skeleton` field as the starting "
         "file: keep all imports, signatures, and decorators, and replace every "
         "`__AERO_IN_FILL__` marker with real implementation code. "
+        "For Python targets, prefer emitting a UAST JSON sketch inside a "
+        "```uast:<path> fence instead of raw source; the engine will lower it, "
+        "run HIN verification, and resolve attribute names like `conj` to "
+        "`conjugate`. "
         "Do not return prose, TODOs, or empty responses. "
         "Wrap the entire response between `__AERO_LOGIC_START__` and `__AERO_LOGIC_END__`.\n\n"
         f"```json\n{json.dumps(payload, indent=2, default=str)}\n```"
