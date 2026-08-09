@@ -238,15 +238,31 @@ class ContentDensityValidator:
         return count
 
     @classmethod
+    def _function_is_hollow(cls, func: ast.FunctionDef) -> bool:
+        """Return True when *func* contains no real computational statements."""
+        for stmt in func.body:
+            if isinstance(stmt, (ast.Import, ast.ImportFrom, ast.Pass)):
+                continue
+            if isinstance(stmt, ast.Expr) and isinstance(
+                getattr(stmt, "value", None), ast.Constant
+            ):
+                if isinstance(stmt.value.value, str):
+                    continue
+            if isinstance(stmt, ast.AnnAssign) and stmt.value is None:
+                continue
+            return False
+        return True
+
+    @classmethod
     def has_execution_flow(cls, content: str, language: str) -> bool:
         """Return True when *content* has a non-zero GoI execution matrix.
 
         For Python we compute the block-diagonal union of per-function
-        loop-dependency matrices. Functions with no computational statements
-        (empty body or only `pass`) produce an empty matrix; in that case we
-        fall back to module-level functional density so that CLI/loader-style
-        Python files are not rejected. For non-Python sources we use the generic
-        functional-node count as a proxy.
+        loop-dependency matrices so that the execution matrix ``M`` accounts for
+        the dependency flow of every contracted function. Functions with no
+        computational statements (empty body or only `pass`) are rejected before
+        the GoI check. For non-Python sources we use the generic functional-node
+        count as a proxy.
         """
         language = (language or "").lower()
         is_python = language == "python" or content.lstrip().startswith(("import ", "from "))
@@ -264,35 +280,44 @@ class ContentDensityValidator:
         from aero_forge._native import execution_matrix_nonzero
         from aero_forge.scheduler.goi_solver import _loop_dependency_matrix
 
-        matrices = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef):
-                M, _ = _loop_dependency_matrix(node)
-                if M.size:
-                    matrices.append(M)
-        if matrices:
-            total = sum(M.shape[0] for M in matrices)
-            result = np.zeros((total, total), dtype=np.float64)
-            offset = 0
-            for M in matrices:
-                n = M.shape[0]
-                result[offset : offset + n, offset : offset + n] = M
-                offset += n
-            if result.size == 0 or not result.any():
-                # A pure entrypoint (e.g. ``main.py``) may have no loop-carried
-                # writes but still performs a real function call; fall back to
-                # module-level functional density so simple orchestrators are not
-                # rejected as hollow.
-                return cls._count_python_nodes(content) >= cls.MIN_FUNCTIONAL_NODES
-            # GoI Proof-Net verification: confirm the execution matrix is non-zero
-            # using the native Rust solver.
-            try:
-                return execution_matrix_nonzero(json.dumps(result.tolist()))
-            except Exception:
-                return bool(result.any())
+        functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+        if not functions:
+            # No functions: use module-level functional density.
+            return cls._count_python_nodes(content) >= cls.MIN_FUNCTIONAL_NODES
 
-        # No function bodies with loop-carried flow: use module-level density.
-        return cls._count_python_nodes(content) >= cls.MIN_FUNCTIONAL_NODES
+        # Every contracted function must contain real computational statements.
+        for func in functions:
+            if cls._function_is_hollow(func):
+                return False
+
+        matrices = []
+        for func in functions:
+            M, _ = _loop_dependency_matrix(func)
+            if M.size == 0:
+                # Represent symbol-free functions with a 1x1 zero block so the
+                # block-diagonal matrix still accounts for every contracted symbol.
+                M = np.zeros((1, 1), dtype=np.float64)
+            matrices.append(M)
+
+        total = sum(M.shape[0] for M in matrices)
+        result = np.zeros((total, total), dtype=np.float64)
+        offset = 0
+        for M in matrices:
+            n = M.shape[0]
+            result[offset : offset + n, offset : offset + n] = M
+            offset += n
+
+        if not result.any():
+            # A pure entrypoint may have no loop-carried writes but still calls
+            # other functions; fall back to module-level functional density.
+            return cls._count_python_nodes(content) >= cls.MIN_FUNCTIONAL_NODES
+
+        # GoI Proof-Net verification: confirm the execution matrix is non-zero
+        # using the native Rust solver.
+        try:
+            return execution_matrix_nonzero(json.dumps(result.tolist()))
+        except Exception:
+            return bool(result.any())
 
 
 class ContractIntegrityValidator:

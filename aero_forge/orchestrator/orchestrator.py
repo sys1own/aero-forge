@@ -637,6 +637,47 @@ class Orchestrator:
         logger.warning(warning)
         return self._partial_result(0, None, warning, "\n".join(reasons))
 
+    @staticmethod
+    def _is_enriched(metadata: Dict[str, Any]) -> bool:
+        """Return True unless ``llm_initialized`` is explicitly set to false."""
+        value = metadata.get("llm_initialized")
+        if value is None:
+            return True
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in ("true", "1", "yes")
+
+    def _ensure_blueprint_enriched(self, blueprint: Blueprint) -> None:
+        """Raise ForgeError when the blueprint was not LLM-enriched.
+
+        If the blueprint carries a prompt and an LLM client is configured, an
+        Intent Enrichment pass is attempted before failing.
+        """
+        if not isinstance(blueprint.metadata, dict):
+            return
+        if self._is_enriched(blueprint.metadata):
+            return
+        prompt = blueprint.prompt or blueprint.metadata.get("prompt", "")
+        if prompt and self.llm_client is not None:
+            try:
+                compiler = IntentCompiler(llm_client=self.llm_client)
+                enriched = compiler.compile_prompt(
+                    prompt, output_dir=blueprint.output_dir
+                )
+                blueprint.metadata["llm_initialized"] = "true"
+                blueprint.metadata["status"] = "finalized"
+                blueprint.metadata["generation_method"] = "llm_synthesized"
+                blueprint.metadata["auto_generated"] = "false"
+                return
+            except Exception as exc:
+                raise ForgeError(
+                    f"Blueprint Not Enriched: intent enrichment failed: {exc}"
+                ) from exc
+        raise ForgeError(
+            "Blueprint Not Enriched: llm_initialized is false and no prompt/LLM "
+            "is available to run intent enrichment."
+        )
+
     def build(
         self,
         blueprint: Optional[Blueprint] = None,
@@ -662,6 +703,8 @@ class Orchestrator:
                 output_dir=self.output_dir,
                 llm=LLMConfig(provider="none"),
             )
+
+        self._ensure_blueprint_enriched(blueprint)
 
         from aero_forge.build_runner import BuildRunner
 
