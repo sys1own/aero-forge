@@ -90,7 +90,7 @@ def test_tri_polyglot_dag_execution(tmp_path: Path) -> None:
     result = materializer.materialize(spec)
 
     assert result["project"] == "tri_polyglot_demo"
-    assert result["architecture"] == "graph_polyglot"
+    assert result["architecture"] == "tri_polyglot_rust_cpp_python"
     assert result["stages"] == [["rust_core"], ["cpp_engine"], ["py_client"]]
 
     # Rust node artifacts.

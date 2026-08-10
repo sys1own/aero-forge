@@ -317,6 +317,8 @@ class ContentDensityValidator:
         patterns = [
             # Function definitions (Zig/Go/Rust/C/Mojo/General).
             r'\b(?:export\s+)?(?:pub\s+)?(?:extern\s+(?:"C"\s+))?fn\s+',
+            # C/C++ function definitions with optional return type, qualifiers and extern "C".
+            r'\b(?:extern\s+"C"\s+)?(?:const\s+)?(?:[\w<>,:*&~]+\s+){1,4}\w+\s*\([^)]*\)\s*(?:const\s+)?\{',
             r"\bfunc\s+",
             r"\bdef\s+",
             # Control flow.
@@ -1390,6 +1392,13 @@ class SyntaxValidator:
 class PolyglotEmitterPlugin(ABC):
     """Plugin interface for language-specific source emitters."""
 
+    # Map canonical toolchains to the manifest file each node must carry.
+    REQUIRED_MANIFESTS: Dict[str, str] = {
+        "cmake": "CMakeLists.txt",
+        "cargo": "Cargo.toml",
+        "maturin": "Cargo.toml",
+    }
+
     @property
     @abstractmethod
     def descriptor(self) -> CapabilityDescriptor:
@@ -1412,6 +1421,109 @@ class PolyglotEmitterPlugin(ABC):
         compiler_flags: List[str],
     ) -> CodeArtifact:
         """Emit a build-system manifest for the node."""
+
+    @classmethod
+    def required_manifest(cls, node_spec: Dict[str, Any]) -> Optional[str]:
+        """Return the manifest file required by *node_spec*'s toolchain, if any."""
+        toolchain = (node_spec.get("toolchain") or node_spec.get("lang") or "").lower()
+        return cls.REQUIRED_MANIFESTS.get(toolchain)
+
+
+class ManifestRecoveryError(RuntimeError):
+    """Raised when a required build manifest cannot be synthesized."""
+
+
+class ManifestRecovery:
+    """Synthesize a missing build manifest for cmake/cargo/maturin nodes.
+
+    Plugins are required to emit a manifest, but JIT-synthesized or hollow
+    plugins may omit one. This recovery pass creates a deterministic, valid
+    manifest from the node spec and source files.
+    """
+
+    @classmethod
+    def synthesize(
+        cls,
+        node_id: str,
+        node_spec: Dict[str, Any],
+        source_artifacts: List[CodeArtifact],
+        language_id: str,
+    ) -> CodeArtifact:
+        """Return a manifest artifact for *node_id* based on its toolchain."""
+        toolchain = (node_spec.get("toolchain") or node_spec.get("lang") or language_id).lower()
+        if toolchain == "cmake":
+            return cls._cmake_manifest(node_id, node_spec, source_artifacts)
+        if toolchain in ("cargo", "maturin"):
+            return cls._cargo_manifest(node_id, node_spec, source_artifacts)
+        raise ManifestRecoveryError(
+            f"Cannot recover missing manifest for node {node_id}: unknown toolchain {toolchain!r}"
+        )
+
+    @classmethod
+    def _source_names(cls, source_artifacts: List[CodeArtifact]) -> List[str]:
+        srcs = [
+            Path(a.file_path).name
+            for a in source_artifacts
+            if not cls._is_build_manifest_static(a)
+            and Path(a.file_path).suffix in {".cpp", ".cc", ".cxx", ".rs"}
+        ]
+        return srcs or ["src/lib.rs"]
+
+    @classmethod
+    def _cmake_manifest(
+        cls, node_id: str, node_spec: Dict[str, Any], source_artifacts: List[CodeArtifact]
+    ) -> CodeArtifact:
+        srcs = cls._source_names(source_artifacts)
+        # If the plugin emitted a C++ source at the root of the node dir, the
+        # CMake source list should reference it without a phantom src/ prefix.
+        if len(srcs) == 1 and srcs[0].endswith(".cpp") and not srcs[0].startswith("src/"):
+            src_ref = srcs[0]
+        else:
+            src_ref = " ".join(srcs)
+        content = (
+            "cmake_minimum_required(VERSION 3.16)\n"
+            f"project({node_id or 'cpp_project'} LANGUAGES CXX)\n\n"
+            "set(CMAKE_CXX_STANDARD 17)\n"
+            "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
+            "set(CMAKE_POSITION_INDEPENDENT_CODE ON)\n\n"
+            f"add_library({node_id or 'cpp_project'} SHARED {src_ref})\n"
+            f"target_compile_options({node_id or 'cpp_project'} PRIVATE -fPIC -O3)\n"
+            f"target_link_options({node_id or 'cpp_project'} PRIVATE -shared)\n"
+            f"set_target_properties({node_id or 'cpp_project'} PROPERTIES OUTPUT_NAME {node_id or 'cpp_project'})\n"
+        )
+        return CodeArtifact(file_path="CMakeLists.txt", content=content, language="cmake")
+
+    @classmethod
+    def _cargo_manifest(
+        cls, node_id: str, node_spec: Dict[str, Any], source_artifacts: List[CodeArtifact]
+    ) -> CodeArtifact:
+        crate = node_id or "rust_project"
+        crate_safe = crate.replace("-", "_")
+        content = (
+            "[package]\n"
+            f'name = "{crate}"\n'
+            'version = "0.1.0"\n'
+            'edition = "2021"\n\n'
+            "[lib]\n"
+            f'name = "{crate_safe}"\n'
+            'crate-type = ["cdylib"]\n'
+        )
+        return CodeArtifact(file_path="Cargo.toml", content=content, language="toml")
+
+    @staticmethod
+    def _is_build_manifest_static(artifact: CodeArtifact) -> bool:
+        """Local copy of manifest detection used during recovery synthesis."""
+        return Path(artifact.file_path).name in {
+            "CMakeLists.txt",
+            "Cargo.toml",
+            "pyproject.toml",
+            "go.mod",
+            "build.gradle",
+            "pom.xml",
+            "build.rs",
+            "build.zig",
+            "Makefile",
+        }
 
 
 class EmitterError(Exception):

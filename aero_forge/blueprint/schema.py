@@ -51,6 +51,7 @@ class ArtifactType(str, Enum):
     cargo_cdylib = "cargo_cdylib"
     python_extension = "python_extension"
     custom_cmd = "custom_cmd"
+    build_manifest = "build_manifest"
 
 
 class MemoryModel(str, Enum):
@@ -334,6 +335,56 @@ class BlueprintV3(BaseModel):
             self.abi_contracts,
             key=lambda c: (c.source_node, c.target_node, c.contract_id),
         )
+        return self
+
+    @model_validator(mode="after")
+    def _enforce_toolchain_manifests(self) -> "BlueprintV3":
+        """Source artifacts using cmake/cargo/maturin must carry the matching manifest.
+
+        This rule is only enforced for finalized blueprints so drafts can still
+        be generated before the Manifest Recovery pass runs.
+        """
+        if self.metadata.status != "finalized":
+            return self
+
+        manifests_by_node: Dict[str, Set[str]] = {}
+        source_by_node: Dict[str, List[BuildArtifact]] = {}
+        for artifact in self.build_pipeline:
+            node_id = self._artifact_node_id(artifact)
+            if not node_id:
+                continue
+            if artifact.type == ArtifactType.build_manifest:
+                manifests_by_node.setdefault(node_id, set()).update(
+                    Path(f).name for f in artifact.source_files
+                )
+            elif artifact.type in {
+                ArtifactType.shared_library,
+                ArtifactType.static_library,
+                ArtifactType.cargo_cdylib,
+                ArtifactType.python_extension,
+                ArtifactType.binary,
+            }:
+                source_by_node.setdefault(node_id, []).append(artifact)
+
+        required = {
+            ArtifactType.shared_library: {"CMakeLists.txt"},
+            ArtifactType.static_library: {"CMakeLists.txt"},
+            ArtifactType.cargo_cdylib: {"Cargo.toml"},
+            ArtifactType.binary: {"CMakeLists.txt", "Cargo.toml"},
+        }
+        for node_id, artifacts in source_by_node.items():
+            node_manifests = manifests_by_node.get(node_id, set())
+            for artifact in artifacts:
+                expected = required.get(artifact.type, set())
+                if not expected:
+                    continue
+                files = {Path(f).name for f in artifact.source_files}
+                if not (expected & files) and not (expected & node_manifests):
+                    raise ValueError(
+                        f"Toolchain manifest missing for node {node_id!r}: "
+                        f"expected one of {sorted(expected)} in source_files or a "
+                        f"build_manifest artifact"
+                    )
         return self
 
     @staticmethod

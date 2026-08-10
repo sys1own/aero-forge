@@ -522,14 +522,20 @@ class CppEmitterPlugin(PolyglotEmitterPlugin):
         dependencies: List[str],
         compiler_flags: List[str],
     ) -> CodeArtifact:
-        flags = " ".join(compiler_flags)
+        project = node_id or "cpp_project"
+        # The source file emitted by ``emit_source_files`` lives next to this
+        # manifest in the node's working directory, so reference it directly.
+        src_file = f"{project}.cpp"
         content = (
             "cmake_minimum_required(VERSION 3.16)\n"
-            f"project({node_id or 'cpp_project'})\n\n"
+            f"project({project} LANGUAGES CXX)\n\n"
             "set(CMAKE_CXX_STANDARD 17)\n"
-            "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\n"
-            "add_library(${PROJECT_NAME}_cpp SHARED src/${PROJECT_NAME}.cpp)\n\n"
-            f"# Extra flags: {flags}\n"
+            "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
+            "set(CMAKE_POSITION_INDEPENDENT_CODE ON)\n\n"
+            f"add_library({project} SHARED {src_file})\n"
+            f"target_compile_options({project} PRIVATE -fPIC -O3)\n"
+            f"target_link_options({project} PRIVATE -shared)\n"
+            f"set_target_properties({project} PROPERTIES OUTPUT_NAME {project})\n"
         )
         return CodeArtifact(file_path="CMakeLists.txt", content=content, language="cmake")
 
