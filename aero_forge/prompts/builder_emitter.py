@@ -62,6 +62,10 @@ OUTPUT RULES
    `Call`, `Attribute`, `BinOp`, `Compare`, etc.). Attribute names should follow
    the intent (e.g. `conj` on a complex value); the engine will rewrite them to
    the correct Python spelling (`conjugate`) via SMT verification.
+9. TEST DENSITY CONSTRAINT: if the node is a `tests/` artifact, emit at least
+   five (5) distinct `def test_<symbol>_<case>():` functions for every contracted
+   symbol. Cover success paths, edge cases (empty inputs, large buffers), and
+   error handling. Do not group multiple scenarios under a single test name.
 
 LANGUAGE-SPECIFIC FFI IDIOMS
 - C_ABI:

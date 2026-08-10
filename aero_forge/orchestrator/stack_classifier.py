@@ -29,6 +29,12 @@ _LANGUAGE_MARKERS: Dict[str, List[str]] = {
     "cpp": ["c++", "cpp", "cplusplus", "cxx", "pybind11", "cffi", "cmake"],
     "go": ["go", "golang"],
     "javascript": ["javascript", "js", "node", "nodejs", "typescript", "ts"],
+    "java": ["java", "jni", "jvm"],
+    "csharp": ["csharp", "c#", "dotnet", "pinvoke", "mono"],
+    "zig": ["zig"],
+    "mojo": ["mojo"],
+    "nim": ["nim"],
+    "d": ["d lang", "d language"],
 }
 
 _TOOL_MARKERS: Dict[str, List[str]] = {
@@ -58,7 +64,17 @@ INTENT_HYBRID_RUST_PYTHON = "hybrid_rust_python"
 INTENT_HYBRID_CPP_PYTHON = "hybrid_cpp_python"
 INTENT_HYBRID_CPP_RUST = "hybrid_cpp_rust"
 INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON = "tri_polyglot_rust_cpp_python"
+INTENT_GRAPH_POLYGLOT = "graph_polyglot"
 INTENT_GENERIC = "generic"
+
+# Advanced cross-language boundaries that force the graph_polyglot path.
+_ADVANCED_BOUNDARY_MARKERS: Dict[str, List[str]] = {
+    "wasm_wasi": ["wasm", "webassembly", "wasm32", "wasi"],
+    "cgo": ["cgo", "go binding", "go ffi"],
+    "jni": ["jni", "java native", "jvm"],
+    "pinvoke": ["pinvoke", "p/invoke", "csharp", "dotnet", "mono"],
+    "cuda_hip_c": ["cuda", "hip", "gpu kernel"],
+}
 
 
 @dataclass(frozen=True)
@@ -157,6 +173,21 @@ def classify_stack(prompt: str) -> StackClassification:
         raw_toolchains = {"python"} | {t for t in raw_toolchains if t == "python"}
     if has_rust_only:
         architecture = INTENT_PURE_RUST
+
+    advanced_boundaries = sorted(
+        {b for b, markers in _ADVANCED_BOUNDARY_MARKERS.items() if _has_any(tokens, markers)}
+    )
+    # Any language outside the built-in {python, rust, cpp} trio (e.g. Go,
+    # JavaScript, Java, C#, Zig, Mojo, Nim, D) forces the generic graph_polyglot
+    # path so the engine can JIT-synthesize the required emitter plugin.
+    builtin_langs = {"python", "rust", "cpp"}
+    extra_languages = [lang for lang in languages if lang not in builtin_langs]
+    if not has_python_only and not has_rust_only:
+        if len(languages) > 2 or extra_languages or advanced_boundaries:
+            architecture = INTENT_GRAPH_POLYGLOT
+            raw_toolchains.update(languages)
+            if advanced_boundaries:
+                features = sorted(set(features) | set(advanced_boundaries))
 
     toolchains = sorted(raw_toolchains)
 
@@ -263,7 +294,7 @@ def default_manifest_for_architecture(
     rust_cargo = f"{rust_crate_dir}/Cargo.toml"
     rust_lib = f"{rust_crate_dir}/src/lib.rs"
 
-    if architecture == INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON:
+    if architecture in (INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON, INTENT_GRAPH_POLYGLOT):
         cpp_entry = cpp_source or "cpp_core/native.cpp"
         manifest = [
             {"path": "Cargo.toml", "lang": "toml", "purpose": "Rust workspace manifest"},
@@ -274,11 +305,16 @@ def default_manifest_for_architecture(
             {"path": f"{python_package}/__init__.py", "lang": "python", "purpose": "Python driver package"},
             {"path": f"{python_package}/main.py", "lang": "python", "purpose": "Python CLI / REPL entrypoint"},
             {"path": "run_shell.py", "lang": "python", "purpose": "Headless launcher"},
-            {"path": "tests/test_tri.py", "lang": "python", "purpose": "pytest tests"},
+            {"path": "tests/test_graph.py", "lang": "python", "purpose": "pytest tests"},
             {"path": "README.md", "lang": "markdown", "purpose": "Project README"},
         ]
         if dirs["cpp_header"]:
             manifest.insert(3, {"path": dirs["cpp_header"], "lang": "cpp", "purpose": "C-ABI header"})
+        if _has_any(_lower_tokens(prompt), ["go", "golang"]):
+            manifest.insert(
+                4,
+                {"path": "go_core/main.go", "lang": "go", "purpose": "Go module entrypoint"},
+            )
         return manifest
     if architecture == INTENT_HYBRID_CPP_RUST:
         cpp_entry = cpp_source or "src/cpp_core/native.cpp"
@@ -346,5 +382,6 @@ def suggested_blueprint_template(architecture: str) -> str:
         INTENT_HYBRID_CPP_PYTHON: "hybrid_cpp_python",
         INTENT_HYBRID_CPP_RUST: "hybrid_cpp_rust",
         INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON: "tri_polyglot_rust_cpp_python",
+        INTENT_GRAPH_POLYGLOT: "tri_polyglot_rust_cpp_python",
     }
     return mapping.get(architecture, "pure_python")

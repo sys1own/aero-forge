@@ -74,6 +74,7 @@ from aero_forge.orchestrator.prompt_builder import (
     build_blueprint_plan_prompt,
 )
 from aero_forge.orchestrator.router import (
+    BUILD_INTENT_GRAPH_POLYGLOT,
     BUILD_INTENT_HYBRID_CPP_PYTHON,
     BUILD_INTENT_HYBRID_CPP_RUST,
     BUILD_INTENT_HYBRID_RUST_PYTHON,
@@ -85,6 +86,7 @@ from aero_forge.orchestrator.router import (
     toolchains_for_intent,
 )
 from aero_forge.orchestrator.stack_classifier import (
+    INTENT_GRAPH_POLYGLOT,
     INTENT_HYBRID_CPP_PYTHON,
     INTENT_HYBRID_CPP_RUST,
     INTENT_HYBRID_RUST_PYTHON,
@@ -1586,6 +1588,7 @@ def _classification_for_architecture(
         INTENT_HYBRID_CPP_PYTHON: ["python", "cpp"],
         INTENT_HYBRID_CPP_RUST: ["rust", "cpp"],
         INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON: ["python", "rust", "cpp"],
+        INTENT_GRAPH_POLYGLOT: ["python", "rust", "cpp"],
     }
     return StackClassification(
         architecture=architecture,
