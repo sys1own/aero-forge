@@ -1889,14 +1889,16 @@ class CompactedContextGenerator:
             data = dict(self.blueprint)
 
         architecture = data.get("architecture", "pure_python")
+        functions = self._compact_functions(data)
         context: Dict[str, Any] = {
             "project": data.get("project") or data.get("metadata", {}).get("project_name", "aero_forge_project"),
             "architecture": architecture,
             "contracts": self._compact_contracts(data),
-            "functions": self._compact_functions(data),
+            "functions": functions,
             "smt_types": self._compact_smt_types(data),
             "required_symbols": self._compact_required_symbols(data),
             "full_implementation_map": self._compact_implementation_map(data),
+            "data_constants": [f for f in functions if f.get("data_payload")],
         }
 
         if architecture == "pure_python":
@@ -2007,25 +2009,86 @@ class CompactedContextGenerator:
 
         return contracts
 
+    def _data_payload_markers(self) -> List[str]:
+        return ["matrix", "table", "lookup", "dictionary", "dict", "constants", "data", "scoring", "payload", "blosum"]
+
+    def _prompt_text(self, data: Dict[str, Any]) -> str:
+        prompt = data.get("prompt") or data.get("metadata", {}).get("prompt") or ""
+        if not prompt and hasattr(self.blueprint, "prompt"):
+            prompt = getattr(self.blueprint, "prompt") or ""
+        return str(prompt).lower()
+
+    def _is_data_payload_symbol(
+        self, symbol: str, node: Optional[Dict[str, Any]], data: Dict[str, Any]
+    ) -> bool:
+        if not symbol:
+            return False
+        if node:
+            if node.get("data_payload") or (node.get("extra") or {}).get("data_payload"):
+                return True
+            if (node.get("extra") or {}).get("payload_kind"):
+                return True
+        prompt_lower = self._prompt_text(data)
+        sym_lower = symbol.lower()
+        if sym_lower in {"blosum62", "scoring_matrix", "lookup_table", "constants", "data_payload"}:
+            return True
+        if "blosum" in sym_lower:
+            return True
+        if any(m in sym_lower for m in self._data_payload_markers()):
+            return True
+        return False
+
+    def _payload_kind(
+        self, symbol: str, node: Optional[Dict[str, Any]], data: Dict[str, Any]
+    ) -> str:
+        if node:
+            kind = (node.get("extra") or {}).get("payload_kind") or node.get("payload_kind")
+            if kind:
+                return str(kind)
+        prompt_lower = self._prompt_text(data)
+        sym_lower = symbol.lower()
+        if any(k in sym_lower or k in prompt_lower for k in ("matrix", "scoring", "dict", "dictionary", "lookup", "table", "map")):
+            return "dict"
+        if any(k in sym_lower or k in prompt_lower for k in ("list", "sequence", "array", "vector")):
+            return "list"
+        if "set" in sym_lower:
+            return "set"
+        return "dict"
+
     def _compact_functions(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
         functions: List[Dict[str, Any]] = []
+
+        def _add_function(entry: Dict[str, Any], node: Optional[Dict[str, Any]]) -> None:
+            name = entry.get("name") or entry.get("symbol", "")
+            if not name:
+                return
+            if self._is_data_payload_symbol(name, node, data):
+                entry["data_payload"] = True
+                entry["payload_kind"] = self._payload_kind(name, node, data)
+                entry["logic_sketch"] = entry.get("logic_sketch") or (
+                    f"Static data payload ({entry['payload_kind']}) for {name}; "
+                    "must be fully populated before use."
+                )
+            functions.append(entry)
 
         # v2 Blueprint FunctionSpec entries.
         for fn in data.get("functions", []):
             if isinstance(fn, dict):
-                functions.append(
+                _add_function(
                     {
                         "name": fn.get("name") or fn.get("output_name", ""),
                         "file": str(fn.get("file", "")),
-                    }
+                    },
+                    fn,
                 )
             elif hasattr(fn, "model_dump"):
                 f = fn.model_dump(mode="json")
-                functions.append(
+                _add_function(
                     {
                         "name": f.get("name") or f.get("output_name", ""),
                         "file": str(f.get("file", "")),
-                    }
+                    },
+                    f,
                 )
 
         # Graph polyglot nodes annotated with exported functions.
@@ -2039,24 +2102,26 @@ class CompactedContextGenerator:
             source_files = node.get("source_files") or []
             node_file = source_files[0] if source_files else ""
             for symbol in exports:
-                functions.append(
+                _add_function(
                     {
                         "name": symbol,
                         "node_id": node.get("node_id", ""),
                         "file": node_file,
                         "lang": node.get("lang", ""),
-                    }
+                    },
+                    node,
                 )
             # Nodes with no explicit exports (e.g. a CLI entrypoint) still carry a
             # logic intent named after the node itself.
             if not exports and node.get("node_id"):
-                functions.append(
+                _add_function(
                     {
                         "name": node.get("node_id"),
                         "node_id": node.get("node_id", ""),
                         "file": node_file,
                         "lang": node.get("lang", ""),
-                    }
+                    },
+                    node,
                 )
 
         # Manifest entries with inferred function names from source files.
@@ -2064,23 +2129,25 @@ class CompactedContextGenerator:
             if isinstance(entry, dict):
                 path = entry.get("path", "")
                 if isinstance(path, str) and path.endswith(".py"):
-                    functions.append(
+                    _add_function(
                         {
                             "name": Path(path).stem,
                             "file": path,
                             "lang": entry.get("lang", "python"),
-                        }
+                        },
+                        entry,
                     )
             elif hasattr(entry, "model_dump"):
                 e = entry.model_dump(mode="json")
                 path = e.get("path", "")
                 if isinstance(path, str) and path.endswith(".py"):
-                    functions.append(
+                    _add_function(
                         {
                             "name": Path(path).stem,
                             "file": path,
                             "lang": e.get("lang", "python"),
-                        }
+                        },
+                        e,
                     )
 
         return functions
@@ -2116,7 +2183,8 @@ class CompactedContextGenerator:
         return {
             "description": (
                 "Full Implementation Map: implement every symbol listed "
-                "below. Do not omit, truncate, or skip any requested function."
+                "below. Do not omit, truncate, or skip any requested function or data constant. "
+                "Data constants must be emitted as fully populated top-level payloads, not stubs."
             ),
             "symbols": [
                 {
@@ -2125,6 +2193,8 @@ class CompactedContextGenerator:
                     "node_id": f.get("node_id", ""),
                     "lang": f.get("lang", ""),
                     "logic_sketch": f.get("logic_sketch") or f.get("uast") or f.get("steps"),
+                    "data_payload": f.get("data_payload", False),
+                    "payload_kind": f.get("payload_kind", ""),
                 }
                 for f in functions
                 if f.get("name")

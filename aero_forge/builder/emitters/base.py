@@ -329,6 +329,41 @@ class ContentDensityValidator:
         except Exception:
             return bool(result.any())
 
+    @staticmethod
+    def _has_data_payload(tree: ast.AST, symbol_name: str) -> bool:
+        """Return True when *symbol_name* is a non-trivial top-level data constant."""
+        for node in tree.body:
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = getattr(node, "targets", [getattr(node, "target", None)])
+                for target in targets:
+                    if isinstance(target, ast.Name) and target.id == symbol_name:
+                        value = getattr(node, "value", None)
+                        if value is None:
+                            return False
+                        if isinstance(value, ast.Constant) and value.value is None:
+                            return False
+                        if isinstance(value, ast.Name) and value.id == "__AERO_IN_FILL__":
+                            return False
+                        if isinstance(value, ast.Dict) and not value.keys:
+                            return False
+                        if isinstance(value, (ast.List, ast.Set, ast.Tuple)) and not value.elts:
+                            return False
+                        return True
+            if isinstance(node, ast.FunctionDef) and node.name == symbol_name:
+                for stmt in reversed(node.body):
+                    if isinstance(stmt, ast.Return) and stmt.value is not None:
+                        value = stmt.value
+                        if isinstance(value, ast.Constant) and value.value is None:
+                            return False
+                        if isinstance(value, ast.Name) and value.id == "__AERO_IN_FILL__":
+                            return False
+                        if isinstance(value, ast.Dict) and not value.keys:
+                            return False
+                        if isinstance(value, (ast.List, ast.Set, ast.Tuple)) and not value.elts:
+                            return False
+                        return True
+        return False
+
     @classmethod
     def has_execution_flow_for_symbol(
         cls,
@@ -353,6 +388,9 @@ class ContentDensityValidator:
         try:
             tree = ast.parse(content)
         except SyntaxError:
+            return True
+
+        if cls._has_data_payload(tree, symbol_name):
             return True
 
         functions = {
@@ -543,6 +581,28 @@ class HINSaturationValidator:
     that the symbol lacks real computational intent and must not be materialized.
     """
 
+    @staticmethod
+    def _symbol_is_data_constant(tree: "ast.AST", symbol: str) -> bool:
+        """Return True when *symbol* is defined as a non-trivial top-level data constant."""
+        for node in tree.body:
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = getattr(node, "targets", [getattr(node, "target", None)])
+                for target in targets:
+                    if isinstance(target, ast.Name) and target.id == symbol:
+                        value = getattr(node, "value", None)
+                        if value is None:
+                            return False
+                        if isinstance(value, ast.Constant) and value.value is None:
+                            return False
+                        if isinstance(value, ast.Name) and value.id == "__AERO_IN_FILL__":
+                            return False
+                        if isinstance(value, ast.Dict) and not value.keys:
+                            return False
+                        if isinstance(value, (ast.List, ast.Set, ast.Tuple)) and not value.elts:
+                            return False
+                        return True
+        return False
+
     @classmethod
     def verify_symbol(
         cls,
@@ -573,10 +633,15 @@ class HINSaturationValidator:
             ),
             None,
         )
-        if func is None:
+        is_data_constant = func is None and cls._symbol_is_data_constant(tree, symbol)
+        if func is None and not is_data_constant:
             raise HINSaturationError(
                 f"HIN saturation check for {symbol}: symbol not found in source"
             )
+
+        if is_data_constant:
+            _accel_log("info", f"HIN Node Saturation Verified: {symbol} (data constant)")
+            return True
 
         func_source = _ast.get_source_segment(content, func)
         if not func_source:
@@ -822,6 +887,60 @@ class AtomicSymbolAssembly:
             symbols.add(node_id)
         return sorted(symbols)
 
+    @staticmethod
+    def _is_data_payload_symbol(
+        symbol: str, compacted_context: Optional[Dict[str, Any]]
+    ) -> bool:
+        if not symbol or not compacted_context:
+            return False
+        for fn in compacted_context.get("functions", []):
+            if (fn.get("name") == symbol or fn.get("symbol") == symbol) and fn.get("data_payload"):
+                return True
+        for entry in compacted_context.get("data_constants", []):
+            if entry.get("name") == symbol or entry.get("symbol") == symbol:
+                return True
+        impl_map = compacted_context.get("full_implementation_map") or {}
+        for entry in impl_map.get("symbols", []):
+            if (entry.get("name") == symbol or entry.get("symbol") == symbol) and entry.get("data_payload"):
+                return True
+        return False
+
+    @staticmethod
+    def _data_payload_is_trivial(content: str, symbol: str) -> bool:
+        """Return True when a data constant is missing, empty, or still a placeholder."""
+        import ast as _ast
+
+        try:
+            tree = _ast.parse(content)
+        except SyntaxError:
+            return True
+
+        def _value_is_trivial(value: Optional[_ast.expr]) -> bool:
+            if value is None:
+                return True
+            if isinstance(value, _ast.Constant) and value.value is None:
+                return True
+            if isinstance(value, _ast.Name) and value.id == "__AERO_IN_FILL__":
+                return True
+            if isinstance(value, _ast.Dict) and not value.keys:
+                return True
+            if isinstance(value, (_ast.List, _ast.Set, _ast.Tuple)) and not value.elts:
+                return True
+            return False
+
+        for node in tree.body:
+            if isinstance(node, _ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, _ast.Name) and target.id == symbol:
+                        return _value_is_trivial(node.value)
+            if isinstance(node, _ast.AnnAssign) and isinstance(node.target, _ast.Name) and node.target.id == symbol:
+                return _value_is_trivial(node.value)
+            if isinstance(node, _ast.FunctionDef) and node.name == symbol:
+                for stmt in reversed(node.body):
+                    if isinstance(stmt, _ast.Return) and stmt.value is not None:
+                        return _value_is_trivial(stmt.value)
+        return True
+
     @classmethod
     def validate(
         cls,
@@ -871,6 +990,18 @@ class AtomicSymbolAssembly:
             raise AtomicSymbolAssemblyError(
                 f"Incomplete materialization: missing symbols {source_missing}",
                 symbols=source_missing,
+            )
+
+        # 2a. Data constants must be fully populated, not placeholders.
+        payload_missing: List[str] = []
+        for sym in required:
+            if cls._is_data_payload_symbol(sym, compacted_context):
+                if cls._data_payload_is_trivial(combined, sym):
+                    payload_missing.append(sym)
+        if payload_missing:
+            raise AtomicSymbolAssemblyError(
+                f"Data payload missing or trivial for symbols: {payload_missing}",
+                symbols=payload_missing,
             )
 
         # 3. Per-symbol HIN Node Saturation check. The constructed HIN graph
@@ -972,8 +1103,30 @@ class FocusedIntentRecovery:
         "Return a single JSON object with a top-level 'symbols' array. "
         "Each entry must contain: 'name', 'description', 'args' (list of strings), "
         "'return_type' (string), and 'steps' (list of algorithmic steps). "
+        "For data-constant symbols (e.g. scoring matrices, lookup tables, BLOSUM62), "
+        "set 'data_payload': true, 'payload_kind': 'dict'|'list'|'set', and provide "
+        "a compact literal or a clear algorithm for populating it. "
         "Do not include prose, markdown fences, or source code."
     )
+
+    @staticmethod
+    def _lookup_data_payload(symbol: str, compacted_context: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not compacted_context or not symbol:
+            return None
+        for source in (
+            compacted_context.get("functions", []),
+            compacted_context.get("data_constants", []),
+            (compacted_context.get("full_implementation_map") or {}).get("symbols", []),
+        ):
+            for entry in source:
+                if entry.get("name") == symbol or entry.get("symbol") == symbol:
+                    if entry.get("data_payload"):
+                        return {
+                            "data_payload": True,
+                            "payload_kind": entry.get("payload_kind", "dict"),
+                            "logic_sketch": entry.get("logic_sketch", ""),
+                        }
+        return None
 
     @classmethod
     def synthesize_missing_intents(
@@ -1045,15 +1198,22 @@ class FocusedIntentRecovery:
                 impl_symbols.append(entry)
                 existing_impl.add(name)
             if name not in existing_fn:
-                functions.append(
-                    {
-                        "name": name,
-                        "symbol": name,
-                        "args": entry.get("args", []),
-                        "return_type": entry.get("return_type", ""),
-                        "description": entry.get("description", ""),
-                    }
-                )
+                fn_entry: Dict[str, Any] = {
+                    "name": name,
+                    "symbol": name,
+                    "args": entry.get("args", []),
+                    "return_type": entry.get("return_type", ""),
+                    "description": entry.get("description", ""),
+                    "logic_sketch": entry.get("logic_sketch", "") or entry.get("steps", ""),
+                }
+                if entry.get("data_payload"):
+                    fn_entry["data_payload"] = True
+                    fn_entry["payload_kind"] = entry.get("payload_kind", "dict")
+                else:
+                    existing = cls._lookup_data_payload(name, compacted_context)
+                    if existing:
+                        fn_entry.update(existing)
+                functions.append(fn_entry)
                 existing_fn.add(name)
 
         _accel_log(

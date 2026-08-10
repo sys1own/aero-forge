@@ -23,6 +23,77 @@ class SkeletonTypeInjector:
 
     _PLACEHOLDER_RE = re.compile(r"__AERO_TYPE_(?P<name>\w+)__")
 
+    @staticmethod
+    def _annotation_to_native_type(ann: Optional[ast.expr]) -> Optional[str]:
+        if ann is None:
+            return None
+        text = ast.unparse(ann).strip().lower()
+        mapping = {
+            "int": "i64",
+            "float": "f64",
+            "bool": "bool",
+            "str": "string",
+            "string": "string",
+            "list": "vec_i64",
+            "list[int]": "vec_i64",
+            "list[float]": "vec_f64",
+            "dict": "map",
+            "set": "set",
+        }
+        return mapping.get(text)
+
+    @staticmethod
+    def _value_to_native_type(value: Optional[ast.expr]) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, ast.Dict):
+            return "map"
+        if isinstance(value, ast.List):
+            return "vec_i64"
+        if isinstance(value, ast.Set):
+            return "set"
+        if isinstance(value, ast.Tuple):
+            return "tuple"
+        if isinstance(value, ast.Constant):
+            if value.value is None:
+                return None
+            if isinstance(value.value, bool):
+                return "bool"
+            if isinstance(value.value, int):
+                return "i64"
+            if isinstance(value.value, float):
+                return "f64"
+            if isinstance(value.value, str):
+                return "string"
+        return None
+
+    @classmethod
+    def infer_type_env_for_data_constant(
+        cls,
+        source: str,
+        symbol: str,
+        target_language: str = "python",
+    ) -> Dict[str, str]:
+        """Return a native type for a top-level data constant named *symbol*."""
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return {}
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == symbol:
+                        native = cls._annotation_to_native_type(getattr(node, "annotation", None)) or cls._value_to_native_type(node.value)
+                        if native:
+                            return {symbol: native}
+                        return {}
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.target.id == symbol:
+                native = cls._annotation_to_native_type(node.annotation) or cls._value_to_native_type(node.value)
+                if native:
+                    return {symbol: native}
+                return {}
+        return {}
+
     @classmethod
     def infer_type_env(
         cls,
@@ -133,6 +204,15 @@ class SkeletonTypeInjector:
         ]
         if function_name:
             funcs = [f for f in funcs if f.name == function_name]
+
+        # Data constants are not functions; infer their types from annotations/value shape.
+        if function_name and not funcs:
+            data_env = cls.infer_type_env_for_data_constant(
+                source, function_name, target_language=target_language
+            )
+            if data_env:
+                return data_env
+
         target = funcs[0] if funcs else tree
 
         required: set = set()
@@ -144,9 +224,19 @@ class SkeletonTypeInjector:
 
         missing = sorted(n for n in required if n not in env)
         if missing:
-            raise SMTSaturationError(
-                f"SMT model is missing non-null type assignments for variables: {missing}"
-            )
+            recovered: Dict[str, str] = {}
+            for name in missing:
+                const_env = cls.infer_type_env_for_data_constant(
+                    source, name, target_language=target_language
+                )
+                if const_env:
+                    recovered.update(const_env)
+            still_missing = [n for n in missing if n not in recovered and n not in env]
+            if still_missing:
+                raise SMTSaturationError(
+                    f"SMT model is missing non-null type assignments for variables: {still_missing}"
+                )
+            env.update(recovered)
 
         return env
 
