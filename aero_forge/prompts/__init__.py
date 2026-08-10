@@ -393,6 +393,10 @@ TEST DENSITY CONSTRAINT:
 
 ARCHITECTURE ELEVATION RULE:
 - If the project contains more than two distinct language nodes (e.g. Python + Rust + Go) or uses advanced boundaries such as `wasm_wasi`, `cgo`, `jni`, `pinvoke`, or `cuda_hip_c`, set `architecture` to `graph_polyglot` and explicitly group nodes by their `node_id` and language in the blueprint.
+
+DATA PAYLOAD CONSTRAINT:
+- If the prompt references a static data constant, scoring matrix, lookup table, or named constant (e.g. `BLOSUM62`, `scoring_matrix`, `lookup_table`), you MUST emit it as a `data_payload` inside the relevant blueprint node or `module_graph` entry.
+- Set `data_payload: true`, `payload_kind: "dict"` (or `"list"` / `"set"`), and provide the full literal value or a compact generation algorithm in `logic_sketch` so the SMTASTEngine can lower it into the Holographic Interaction Net (HIN).
 """,
     "Universal polyglot architect: any toolchain, SMT/GoI-backed safety.",
 )

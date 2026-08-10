@@ -452,6 +452,30 @@ class Orchestrator:
             return current
         return inferred
 
+    @staticmethod
+    def _verify_manifest_presence(blueprint) -> Optional[str]:
+        """Return an error message if any manifest path is missing or empty."""
+        manifest = getattr(blueprint, "manifest", []) or []
+        if not manifest:
+            return None
+        output_dir = Path(getattr(blueprint, "output_dir", ".") or ".").resolve()
+        missing_or_empty: List[str] = []
+        for entry in manifest:
+            path_str = getattr(entry, "path", "")
+            if not path_str:
+                continue
+            path = Path(path_str)
+            if not path.is_absolute():
+                path = output_dir / path
+            if not path.is_file() or path.stat().st_size == 0:
+                missing_or_empty.append(str(path))
+        if missing_or_empty:
+            return (
+                "Manifest Presence Failure: the following manifest entries are "
+                "missing or empty: " + ", ".join(missing_or_empty)
+            )
+        return None
+
     def hard_reset(self) -> Dict[str, Any]:
         """Purge all persisted state for this workspace.
 
@@ -802,6 +826,17 @@ class Orchestrator:
         result = runner.build()
         if not result.get("success"):
             return result
+
+        # Manifest presence gate: every path listed in the blueprint must exist
+        # on disk and contain bytes before the build is declared successful.
+        presence_error = self._verify_manifest_presence(blueprint)
+        if presence_error:
+            _accel_log("error", presence_error)
+            return {
+                "success": False,
+                "error": presence_error,
+                "logs": presence_error,
+            }
 
         nodes = blueprint.verification_nodes
         if nodes:
