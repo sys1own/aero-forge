@@ -28,7 +28,7 @@ from aero_forge.builder.language_router import (
 from aero_forge.builder.spec import ASTNode, EngineSpec
 from aero_forge.scheduler.goi_solver import _loop_dependency_matrix
 from aero_forge.translator import uast_to_python_source
-from aero_forge.builder.smt_engine import AttributeResolver
+from aero_forge.builder.smt_engine import AttributeResolver, BuiltinAttributeGate
 
 
 class BoundaryContract(Enum):
@@ -83,6 +83,92 @@ class CodeArtifact:
         resolver = attribute_resolver or AttributeResolver().resolve
         source = uast_to_python_source(uast, attribute_resolver=resolver)
         return cls(file_path=file_path, content=source, language="python")
+
+
+class EntrypointBoilerplateNormalizer:
+    """Rewrite malformed entry-point boilerplate into canonical Python.
+
+    Common LLM hallucinations such as ``if __name__.eq == '__main__':`` are
+    converted to ``if __name__ == '__main__':`` so the emitted source is both
+    syntactically valid and HIN-friendly.
+    """
+
+    _ENTRYPOINT_ALIASES = {"eq", "equals", "equal"}
+    _MAIN_LITERALS = {"__main__", "'__main__'", '"__main__"'}
+
+    @classmethod
+    def normalize(cls, source: str) -> str:
+        """Return *source* with common entry-point idiom mistakes corrected."""
+        if not source or not source.strip():
+            return source
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return source
+        transformer = cls._Transformer()
+        new_tree = transformer.visit(tree)
+        ast.fix_missing_locations(new_tree)
+        try:
+            return ast.unparse(new_tree)
+        except Exception:
+            return source
+
+    class _Transformer(ast.NodeTransformer):
+        def visit_If(self, node: ast.If) -> ast.AST:
+            new_test = self._canonical_main_guard(node.test)
+            if new_test is not None:
+                node = ast.copy_location(
+                    ast.If(test=new_test, body=node.body, orelse=node.orelse),
+                    node,
+                )
+            return self.generic_visit(node)
+
+        def _canonical_main_guard(self, expr: ast.expr) -> Optional[ast.AST]:
+            # ``__name__.eq == '__main__'`` or ``__name__.eq('__main__')``
+            if isinstance(expr, ast.Compare) and len(expr.ops) == 1:
+                left, op, right = expr.left, expr.ops[0], expr.comparators[0]
+                if isinstance(op, ast.Eq) and self._is_main_literal(right):
+                    new_left = self._name_from_attr(left)
+                    if new_left is not None:
+                        return ast.Compare(
+                            left=new_left,
+                            ops=[ast.Eq()],
+                            comparators=[right],
+                        )
+            if isinstance(expr, ast.Call):
+                func = expr.func
+                if (
+                    isinstance(func, ast.Attribute)
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "__name__"
+                    and func.attr in EntrypointBoilerplateNormalizer._ENTRYPOINT_ALIASES
+                    and len(expr.args) == 1
+                    and self._is_main_literal(expr.args[0])
+                ):
+                    return ast.Compare(
+                        left=ast.Name(id="__name__", ctx=ast.Load()),
+                        ops=[ast.Eq()],
+                        comparators=[expr.args[0]],
+                    )
+            return None
+
+        @staticmethod
+        def _is_main_literal(node: ast.expr) -> bool:
+            return (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and node.value == "__main__"
+            )
+
+        def _name_from_attr(self, node: ast.expr) -> Optional[ast.Name]:
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "__name__"
+                and node.attr in EntrypointBoilerplateNormalizer._ENTRYPOINT_ALIASES
+            ):
+                return ast.Name(id="__name__", ctx=ast.Load())
+            return None
 
 
 class ContentDensityValidator:
@@ -980,9 +1066,32 @@ class AtomicSymbolAssembly:
 
         # 2. Source must define all contracted symbols.
         source_artifacts = [a for a in artifacts if not getattr(a, "is_header", False)]
+
+        # 2b. HIN AST normalization: heal malformed entry-point boilerplate before
+        # any HIN/SMT verification so comparison operators are wired to Value agents.
+        for artifact in source_artifacts:
+            artifact.content = EntrypointBoilerplateNormalizer.normalize(
+                artifact.content
+            )
         combined = "\n".join(
             a.content for a in source_artifacts if not getattr(a, "is_header", False)
         )
+
+        # Built-in attribute gate: reject hallucinated attributes on str/int/list/dict.
+        label = (
+            source_artifacts[0].file_path
+            if source_artifacts
+            else node_spec.get("node_id", "<unknown>")
+        )
+        try:
+            BuiltinAttributeGate.verify(combined, artifact_path=label)
+            _accel_log("info", f"Attribute Verification Passed for {label}")
+        except Exception as exc:
+            raise AtomicSymbolAssemblyError(
+                f"Attribute Verification Failed for {label}: {exc}",
+                symbols=required,
+            ) from exc
+
         source_missing = ContractIntegrityValidator.missing_symbols(
             combined, language, required
         )
