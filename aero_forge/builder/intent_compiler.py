@@ -435,6 +435,7 @@ def _contracts_from_abi(abi_contracts: List[ABIContract]) -> List[ContractEntry]
 def _infer_architecture(languages: set) -> str:
     """Map a set of language tags to the closest aero-forge architecture string."""
     from aero_forge.orchestrator.router import (
+        BUILD_INTENT_GRAPH_POLYGLOT,
         BUILD_INTENT_HYBRID_CPP_PYTHON,
         BUILD_INTENT_HYBRID_CPP_RUST,
         BUILD_INTENT_HYBRID_RUST_PYTHON,
@@ -446,6 +447,12 @@ def _infer_architecture(languages: set) -> str:
     has_python = "python" in languages
     has_rust = "rust" in languages
     has_cpp = "cpp" in languages or "c++" in languages
+
+    # Any language outside the built-in {python, rust, cpp} trio forces the
+    # generic graph_polyglot path so the engine can JIT-synthesize emitters.
+    builtin = {"python", "rust", "cpp", "c++"}
+    if any(lang not in builtin for lang in languages) or len(languages) > 3:
+        return BUILD_INTENT_GRAPH_POLYGLOT
 
     if has_python and has_rust and has_cpp:
         return BUILD_INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON

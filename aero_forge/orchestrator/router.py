@@ -667,6 +667,7 @@ def classify(source: str, function_names: Optional[List[str]] = None) -> Dict[st
 # ---- build architecture / intent classification ----
 
 from aero_forge.orchestrator.stack_classifier import (
+    INTENT_GRAPH_POLYGLOT,
     INTENT_HYBRID_CPP_PYTHON,
     INTENT_HYBRID_CPP_RUST,
     INTENT_HYBRID_RUST_PYTHON,
@@ -684,6 +685,7 @@ BUILD_INTENT_HYBRID_RUST_PYTHON = INTENT_HYBRID_RUST_PYTHON
 BUILD_INTENT_HYBRID_CPP_PYTHON = INTENT_HYBRID_CPP_PYTHON
 BUILD_INTENT_HYBRID_CPP_RUST = INTENT_HYBRID_CPP_RUST
 BUILD_INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON = INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON
+BUILD_INTENT_GRAPH_POLYGLOT = INTENT_GRAPH_POLYGLOT
 
 
 def classify_build_intent(prompt: str) -> str:
@@ -693,6 +695,10 @@ def classify_build_intent(prompt: str) -> str:
 
 def toolchains_for_intent(intent: str) -> List[str]:
     """Return the toolchains associated with a build intent."""
+    if intent == BUILD_INTENT_GRAPH_POLYGLOT:
+        # Generic polyglot path: keep the built-in trio plus Go so JIT plugins
+        # can be synthesized for any extra language the prompt introduces.
+        return ["python", "rust", "cpp", "go", "cargo", "cmake"]
     if intent == BUILD_INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON:
         return ["python", "rust", "cpp", "cargo"]
     if intent == BUILD_INTENT_HYBRID_CPP_RUST:
@@ -736,5 +742,6 @@ __all__ = [
     "BUILD_INTENT_HYBRID_CPP_PYTHON",
     "BUILD_INTENT_HYBRID_CPP_RUST",
     "BUILD_INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON",
+    "BUILD_INTENT_GRAPH_POLYGLOT",
     "CodeRouteClassifier",
 ]

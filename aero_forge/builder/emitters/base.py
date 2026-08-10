@@ -685,6 +685,111 @@ class HINNativeHealer:
         return None
 
 
+class TestDensityError(RuntimeError):
+    """Raised when the generated test suite does not satisfy the per-symbol density constraint."""
+
+
+class TestDensityValidator:
+    """Verify that every contracted symbol has a non-zero test-to-symbol ratio."""
+
+    @staticmethod
+    def _list_test_functions(tests_dir: Path) -> List[str]:
+        """Return all `def test_...` function names found under *tests_dir*."""
+        functions: List[str] = []
+        if not tests_dir.is_dir():
+            return functions
+        for test_file in tests_dir.glob("test_*.py"):
+            try:
+                tree = ast.parse(test_file.read_text(encoding="utf-8"))
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+                    functions.append(f"{test_file.name}::{node.name}")
+        return functions
+
+    @staticmethod
+    def _collect_contracted_symbols(
+        nodes: List[Dict[str, Any]],
+        edges: List[Dict[str, Any]],
+    ) -> Set[str]:
+        """Return the union of exported and edge-bound symbols, excluding test nodes."""
+
+        def _is_test_node(node: Dict[str, Any]) -> bool:
+            node_id = node.get("node_id", "")
+            if node_id == "tests" or node_id.startswith("test_"):
+                return True
+            source_files = node.get("source_files") or []
+            return any(
+                isinstance(p, str) and (p.startswith("tests/") or "/tests/" in p)
+                for p in source_files
+            )
+
+        symbols: Set[str] = set()
+        for node in nodes:
+            if _is_test_node(node):
+                continue
+            for sym in node.get("exports") or []:
+                if sym and not sym.startswith("test_"):
+                    symbols.add(sym)
+        for edge in edges:
+            sym = edge.get("symbol")
+            if sym and not sym.startswith("test_"):
+                symbols.add(sym)
+        return symbols
+
+    @classmethod
+    def verify(
+        cls,
+        workspace: Path,
+        nodes: List[Dict[str, Any]],
+        edges: List[Dict[str, Any]],
+        *,
+        min_tests_per_symbol: int = 5,
+    ) -> None:
+        """Raise `TestDensityError` if the test suite is too sparse for the contracted symbols."""
+        symbols = cls._collect_contracted_symbols(nodes, edges)
+        if not symbols:
+            return
+        tests_dir = Path(workspace) / "tests"
+
+        # Only enforce high-density tests when the blueprint actually contains a
+        # dedicated test node or an existing tests/ directory. This keeps existing
+        # low-level materializer unit tests valid while still gating real builds.
+        has_test_node = any(
+            (n.get("node_id") or "").startswith("test")
+            or any(
+                isinstance(p, str) and (p.startswith("tests/") or "/tests/" in p)
+                for p in n.get("source_files") or []
+            )
+            for n in nodes
+        )
+        if not has_test_node and not tests_dir.is_dir():
+            _accel_log(
+                "warning",
+                f"Test density skipped: no tests/ directory or test node for {len(symbols)} symbol(s).",
+            )
+            return
+
+        test_functions = cls._list_test_functions(tests_dir)
+        if not test_functions:
+            raise TestDensityError(
+                f"No tests found in {tests_dir} for {len(symbols)} contracted symbol(s). "
+                "The Test Density Constraint requires at least five distinct unit tests per symbol."
+            )
+        required = max(1, len(symbols) * min_tests_per_symbol)
+        if len(test_functions) < required:
+            raise TestDensityError(
+                f"Test density too low: {len(test_functions)} test(s) for {len(symbols)} symbol(s); "
+                f"required at least {required} (min {min_tests_per_symbol} per symbol)."
+            )
+        _accel_log(
+            "success",
+            f"Test density verified: {len(test_functions)} test(s) for {len(symbols)} symbol(s) "
+            f"(ratio {len(test_functions) / len(symbols):.2f})",
+        )
+
+
 class AtomicSymbolAssembly:
     """Atomic, multi-symbol SLI gate.
 

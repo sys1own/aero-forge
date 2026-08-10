@@ -320,6 +320,22 @@ class BlueprintV3(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _group_artifacts_by_node_id(self) -> "BlueprintV3":
+        """Sort build pipeline and ABI contracts by node so the dashboard groups them."""
+        self.build_pipeline = sorted(
+            self.build_pipeline,
+            key=lambda a: (
+                self._artifact_node_id(a) or a.id or "",
+                a.source_files[0] if a.source_files else "",
+            ),
+        )
+        self.abi_contracts = sorted(
+            self.abi_contracts,
+            key=lambda c: (c.source_node, c.target_node, c.contract_id),
+        )
+        return self
+
     @staticmethod
     def _artifact_node_id(artifact: BuildArtifact) -> Optional[str]:
         # Only trust explicit node_id annotations emitted by the materializer.

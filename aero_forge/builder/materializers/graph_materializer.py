@@ -52,6 +52,8 @@ from aero_forge.builder.emitters.base import (
     PolyglotEmitterPlugin,
     SLIIntentValidator,
     SyntaxValidator,
+    TestDensityError,
+    TestDensityValidator,
 )
 from aero_forge.builder.language_router import (
     SystemToolchainRouter,
@@ -2350,10 +2352,8 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
     ) -> Path:
         """Serialize a v3 ``blueprint.aero`` describing the materialized graph."""
         project = hin_graph_spec.get("project", "aero_forge_project")
-        architecture = hin_graph_spec.get(
-            "architecture",
-            hin_graph_spec.get("metadata", {}).get("architecture", "graph_polyglot"),
-        )
+        architecture = self._effective_architecture(hin_graph_spec)
+
         primary_entrypoint = hin_graph_spec.get("primary_entrypoint", "run_shell.py")
         build_script = hin_graph_spec.get("build_script")
 
@@ -2475,6 +2475,17 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             sort_keys=False,
         )
 
+        # Group the manifest and contract lists by their originating node id so
+        # the web dashboard and downstream validators can read them coherently.
+        build_pipeline = sorted(
+            build_pipeline,
+            key=lambda a: (a.id, a.source_files[0] if a.source_files else ""),
+        )
+        abi_contracts = sorted(
+            abi_contracts,
+            key=lambda c: (c.source_node, c.target_node, c.contract_id),
+        )
+
         blueprint = BlueprintV3(
             metadata=Metadata(
                 schema_version="3.0.0",
@@ -2499,6 +2510,32 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
         path = self.workspace_root / "blueprint.aero"
         write_v3_blueprint(blueprint, path)
         return path
+
+    @staticmethod
+    def _effective_architecture(hin_graph_spec: Dict[str, Any]) -> str:
+        """Return the architecture, elevating to graph_polyglot when warranted."""
+        architecture = hin_graph_spec.get(
+            "architecture",
+            hin_graph_spec.get("metadata", {}).get("architecture", "graph_polyglot"),
+        )
+        node_languages = {
+            (n.get("lang") or "").lower()
+            for n in hin_graph_spec.get("nodes", [])
+        } - {"", "toml", "yaml", "json", "bash"}
+        advanced_boundaries = {
+            "wasm_wasi",
+            "cgo",
+            "jni",
+            "pinvoke",
+            "cuda_hip_c",
+        }
+        edge_boundaries = {
+            str(e.get("boundary_type", "")).lower().replace("-", "_")
+            for e in hin_graph_spec.get("edges", [])
+        }
+        if len(node_languages) > 2 or (edge_boundaries & advanced_boundaries):
+            architecture = "graph_polyglot"
+        return architecture
 
     def _is_enriched(self, hin_graph_spec: Dict[str, Any]) -> bool:
         """Return True unless ``metadata.llm_initialized`` is explicitly false."""
@@ -2602,7 +2639,27 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
         written_artifacts: List[Dict[str, Any]] = []
         processed_node_ids: set = set()
 
-        for stage in stages:
+        for stage_index, stage in enumerate(stages, start=1):
+            stage_labels: List[str] = []
+            for node_id in stage:
+                node = node_map.get(node_id, {})
+                lang = (node.get("lang") or "").lower()
+                if lang == "rust":
+                    stage_labels.append("Rust Core Initialization")
+                elif lang in ("cpp", "c", "c++"):
+                    stage_labels.append("C/C++ Boundary Synthesis")
+                elif lang == "go":
+                    stage_labels.append("Go Boundary Synthesis")
+                elif lang in ("javascript", "js", "node", "ts", "typescript"):
+                    stage_labels.append("JavaScript/Node Boundary Synthesis")
+                elif lang == "python":
+                    stage_labels.append("Python Driver Synthesis")
+                elif lang:
+                    stage_labels.append(f"{lang.title()} Boundary Synthesis")
+                else:
+                    stage_labels.append("Generic Node Synthesis")
+            stage_label = " + ".join(sorted(set(stage_labels)))
+            _accel_log("info", f"Stage {stage_index}: {stage_label}")
             for node_id in stage:
                 _accel_log("info", f"Materializing Node: {node_id}")
                 node_spec = node_map.get(node_id)
@@ -2793,10 +2850,24 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
 
         blueprint_path = self._write_blueprint_aero(hin_graph_spec, written_artifacts)
 
-        architecture = hin_graph_spec.get(
-            "architecture",
-            hin_graph_spec.get("metadata", {}).get("architecture", "graph_polyglot"),
-        )
+        architecture = self._effective_architecture(hin_graph_spec)
+
+        # Test density gate: complex (non-pure_python) projects must include
+        # tests proportional to their contracted symbols.
+        if not self._is_pure_python:
+            min_tests = 5 if architecture == "graph_polyglot" else 1
+            try:
+                TestDensityValidator.verify(
+                    self.workspace_root,
+                    nodes,
+                    edges,
+                    min_tests_per_symbol=min_tests,
+                )
+            except TestDensityError as exc:
+                raise MaterializationError(
+                    f"Test density gate failed: {exc}"
+                ) from exc
+
         result: Dict[str, Any] = {
             "project": hin_graph_spec.get("project", "aero_forge_project"),
             "architecture": architecture,

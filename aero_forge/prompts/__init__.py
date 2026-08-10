@@ -387,6 +387,12 @@ STATIC ANALYSIS RULES (the pre-write validator will reject code that violates th
 - Dict values must be scalars (int/float/bool/str). Do NOT store `set`, `list`, or other collections inside a `dict`. Use separate top-level `set`/`list` variables instead.
 - `set.add()` is only supported on a top-level `set` variable, never on a value retrieved from a `dict`.
 - Dictionary metadata and set-based sparsity tracking must be local variables inside the function, never function parameters.
+
+TEST DENSITY CONSTRAINT:
+- For every contracted symbol exported by the project, you MUST generate at least five (5) distinct unit tests under a `tests/` directory. Cover success paths, edge cases (empty inputs, large buffers), and error handling. Emit each case as a separate `def test_<symbol>_<case>():` function; do not group multiple scenarios under a single test name.
+
+ARCHITECTURE ELEVATION RULE:
+- If the project contains more than two distinct language nodes (e.g. Python + Rust + Go) or uses advanced boundaries such as `wasm_wasi`, `cgo`, `jni`, `pinvoke`, or `cuda_hip_c`, set `architecture` to `graph_polyglot` and explicitly group nodes by their `node_id` and language in the blueprint.
 """,
     "Universal polyglot architect: any toolchain, SMT/GoI-backed safety.",
 )
