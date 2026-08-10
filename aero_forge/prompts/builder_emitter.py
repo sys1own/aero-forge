@@ -52,6 +52,11 @@ OUTPUT RULES
    `context.required_symbols`.  Do not omit, truncate, or skip any requested
    function.  If `context.missing_symbols` is non-empty, those functions were
    absent from a previous attempt and must be included now.
+5a. DATA CONSTANT RULE: Any symbol flagged with `data_payload: true` (e.g.
+   scoring matrices, lookup tables, or constants such as `blosum62`) must be
+   emitted as a fully populated top-level assignment or return value. Replace
+   the placeholder `__AERO_IN_FILL__` with a complete dict/list/set literal; do
+   not emit `pass`, `None`, or an empty container as the final payload.
 6. Generate every file listed in `node.source_files`, including headers and the
    build manifest (Cargo.toml, CMakeLists.txt, pyproject.toml, go.mod,
    .csproj, build.gradle, etc.). Manifest fences use their language label
@@ -201,6 +206,24 @@ def _symbol_specs(
     return specs
 
 
+def _lookup_payload_kind(
+    symbol: str, compacted_context: Optional[Dict[str, Any]]
+) -> Optional[str]:
+    if not compacted_context:
+        return None
+    for fn in compacted_context.get("functions", []):
+        if (fn.get("name") == symbol or fn.get("symbol") == symbol) and fn.get("data_payload"):
+            return fn.get("payload_kind") or "dict"
+    for entry in compacted_context.get("data_constants", []):
+        if entry.get("name") == symbol or entry.get("symbol") == symbol:
+            return entry.get("payload_kind") or "dict"
+    impl_map = compacted_context.get("full_implementation_map") or {}
+    for entry in impl_map.get("symbols", []):
+        if (entry.get("name") == symbol or entry.get("symbol") == symbol) and entry.get("data_payload"):
+            return entry.get("payload_kind") or "dict"
+    return None
+
+
 def _build_skeleton(
     node: Dict[str, Any],
     contracts: List[Dict[str, Any]],
@@ -212,6 +235,7 @@ def _build_skeleton(
     The skeleton contains only imports, signatures, decorators, and
     ``__AERO_IN_FILL__`` markers so the model only has to fill in the body.
     Every contracted/exported symbol gets its own signature block.
+    Data constants are emitted as top-level assignments rather than functions.
     """
     lang = (node.get("lang") or node.get("language") or "python").lower()
     node_id = node.get("node_id", "module")
@@ -246,6 +270,12 @@ def _build_skeleton(
         imports = [i for i in imports if i]
         lines = imports + [""]
         for symbol, args, return_type in specs:
+            payload_kind = _lookup_payload_kind(symbol, compacted_context)
+            if payload_kind and not accel_decorator:
+                py_type = {"dict": "dict", "list": "list", "set": "set"}.get(payload_kind, "Any")
+                lines.append(f"{symbol}: {py_type} = __AERO_IN_FILL__")
+                lines.append("")
+                continue
             arg_names = [f"arg{i}" for i in range(len(args))]
             # First, infer per-symbol SMT types from an annotated stub so each
             # function's signature can be typed independently.
