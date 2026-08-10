@@ -149,6 +149,8 @@ class ABIArgument(BaseModel):
 
 class ABIContractV3(BaseModel):
     contract_id: str
+    source_node: str = ""
+    target_node: str = ""
     symbol: str = ""
     source_language: str = "python"
     target_language: str = "rust"
@@ -265,6 +267,69 @@ class BlueprintV3(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def _enforce_manifest_symbol_binding(self) -> "BlueprintV3":
+        """Every source artifact in the manifest must have a corresponding symbol.
+
+        A blueprint that emits source files without any contracted or exported
+        symbol cannot be materialized deterministically. This rule is only
+        enforced for finalized blueprints so auto-generated drafts can still be
+        created before enrichment.
+        """
+        if self.metadata.status != "finalized" and not self.metadata.llm_initialized:
+            return self
+
+        source_types = {
+            ArtifactType.shared_library,
+            ArtifactType.static_library,
+            ArtifactType.binary,
+            ArtifactType.cargo_cdylib,
+            ArtifactType.python_extension,
+        }
+        contract_nodes = set()
+        for c in self.abi_contracts:
+            if c.source_node:
+                contract_nodes.add(c.source_node)
+            if c.target_node:
+                contract_nodes.add(c.target_node)
+        contract_symbols = {c.symbol for c in self.abi_contracts if c.symbol}
+        exported = self.llm_context.exported_api_signatures or {}
+
+        for artifact in self.build_pipeline:
+            if artifact.type not in source_types or not artifact.source_files:
+                continue
+            node_id = self._artifact_node_id(artifact)
+            if not node_id:
+                continue
+            node_symbols = set(exported.get(node_id) or [])
+            node_symbols.add(node_id)
+            if (
+                exported.get(node_id)
+                or (contract_symbols & node_symbols)
+                or (node_id in contract_nodes)
+                or (artifact.id and artifact.id.startswith(f"{node_id}_"))
+            ):
+                continue
+            # A primary entrypoint named after the node is acceptable binding.
+            if any(Path(f).stem == node_id for f in artifact.source_files):
+                continue
+            raise ValueError(
+                f"Manifest-to-contract binding failed: artifact {artifact.id!r} "
+                f"(node_id={node_id}) has source files {artifact.source_files!r} but "
+                "no corresponding symbol in contracts or exported_api_signatures"
+            )
+        return self
+
+    @staticmethod
+    def _artifact_node_id(artifact: BuildArtifact) -> Optional[str]:
+        # Only trust explicit node_id annotations emitted by the materializer.
+        # Older blueprints or hand-written tests may omit this annotation and
+        # should not be rejected by the binding rule.
+        match = re.search(r"node_id=([^;]+)", artifact.description or "")
+        if match:
+            return match.group(1).strip()
+        return None
+
     def _resolve(self, value: Any, workspace: Path) -> Any:
         """Replace ${WORKSPACE_ROOT} placeholders with *workspace*."""
         if isinstance(value, str):
@@ -288,7 +353,12 @@ class BlueprintV3(BaseModel):
         artifact types.
         """
         # Delayed import breaks the import cycle between schema.py and core.py.
-        from aero_forge.blueprint.core import Blueprint, FunctionSpec, LLMConfig, ManifestEntry
+        from aero_forge.blueprint.core import (
+            Blueprint,
+            FunctionSpec,
+            LLMConfig,
+            ManifestEntry,
+        )
 
         workspace = Path(workspace or ".").resolve()
 
@@ -305,15 +375,22 @@ class BlueprintV3(BaseModel):
                 crate_root = Path(artifact.id)
                 manifest.append(
                     ManifestEntry(
-                        path=str(crate_root / "Cargo.toml"), lang="toml", purpose="cargo cdylib"
+                        path=str(crate_root / "Cargo.toml"),
+                        lang="toml",
+                        purpose="cargo cdylib",
                     )
                 )
                 for src in artifact.source_files:
                     rel = str(crate_root / src)
                     if not (workspace / rel).is_file():
                         continue
-                    manifest.append(ManifestEntry(path=rel, lang="rust", purpose="rust source"))
-            elif any(Path(f).suffix in {".cpp", ".c", ".h", ".hpp"} for f in artifact.source_files):
+                    manifest.append(
+                        ManifestEntry(path=rel, lang="rust", purpose="rust source")
+                    )
+            elif any(
+                Path(f).suffix in {".cpp", ".c", ".h", ".hpp"}
+                for f in artifact.source_files
+            ):
                 if "rust" in architecture or architecture == "hybrid_rust_python":
                     architecture = "hybrid_cpp_rust"
                 elif architecture == "pure_python":
@@ -323,7 +400,9 @@ class BlueprintV3(BaseModel):
                         continue
                     manifest.append(
                         ManifestEntry(
-                            path=src, lang=Path(src).suffix.lstrip("."), purpose="c/c++ source"
+                            path=src,
+                            lang=Path(src).suffix.lstrip("."),
+                            purpose="c/c++ source",
                         )
                     )
             else:
@@ -331,9 +410,13 @@ class BlueprintV3(BaseModel):
                 for src in artifact.source_files:
                     if not (workspace / src).is_file():
                         continue
-                    manifest.append(ManifestEntry(path=src, lang="python", purpose="python source"))
+                    manifest.append(
+                        ManifestEntry(path=src, lang="python", purpose="python source")
+                    )
                     if self._looks_like_python_artifact(artifact):
-                        from aero_forge.blueprint.core import discover_functions as _discover
+                        from aero_forge.blueprint.core import (
+                            discover_functions as _discover,
+                        )
 
                         src_path = workspace / src
                         try:
@@ -350,7 +433,9 @@ class BlueprintV3(BaseModel):
                                     )
                                 )
                         except Exception as exc:
-                            logger.warning("Could not discover functions in %s: %s", src_path, exc)
+                            logger.warning(
+                                "Could not discover functions in %s: %s", src_path, exc
+                            )
 
         output_dir = (
             workspace / ".aero" / "sandbox" / "dist"
@@ -405,7 +490,10 @@ class BlueprintV3(BaseModel):
         if env:
             run_env.update(env)
         run_env.update(
-            {k: self._resolve(v, workspace) for k, v in self.execution_strategy.env.items()}
+            {
+                k: self._resolve(v, workspace)
+                for k, v in self.execution_strategy.env.items()
+            }
         )
 
         # Ensure the workspace root is on PYTHONPATH so absolute package imports
@@ -433,10 +521,14 @@ class BlueprintV3(BaseModel):
                     "build_results": build_results,
                 }
             if artifact.output_path:
-                built[art_id] = workspace / self._resolve(artifact.output_path, workspace)
+                built[art_id] = workspace / self._resolve(
+                    artifact.output_path, workspace
+                )
 
         # Run primary entrypoint.
-        entrypoint = self._resolve(self.execution_strategy.primary_entrypoint, workspace)
+        entrypoint = self._resolve(
+            self.execution_strategy.primary_entrypoint, workspace
+        )
         runtime = self.execution_strategy.runtime
         args = self._resolve(self.execution_strategy.args, workspace)
         working_dir = self._resolve(self.execution_strategy.working_dir, workspace)
@@ -450,7 +542,9 @@ class BlueprintV3(BaseModel):
             ):
                 # Execute sub-package entrypoints as modules so relative imports
                 # inside e.g. ``python_cli/main.py`` work without ImportError.
-                module_path = entrypoint[:-3].replace("/", ".").replace("\\", ".").lstrip(".")
+                module_path = (
+                    entrypoint[:-3].replace("/", ".").replace("\\", ".").lstrip(".")
+                )
                 cmd.extend(["-m", module_path])
             else:
                 cmd.append(entrypoint)
@@ -507,7 +601,9 @@ class BlueprintV3(BaseModel):
                 else:
                     vproc = None
             except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
-                verification.append({"node_id": node.node_id, "passed": False, "error": str(exc)})
+                verification.append(
+                    {"node_id": node.node_id, "passed": False, "error": str(exc)}
+                )
                 continue
 
             if vproc is None:
@@ -523,11 +619,13 @@ class BlueprintV3(BaseModel):
             passed = node_exit == node.expected_exit_code
             if passed and node.stdout_match_patterns:
                 passed = all(
-                    re.search(p, node_stdout) is not None for p in node.stdout_match_patterns
+                    re.search(p, node_stdout) is not None
+                    for p in node.stdout_match_patterns
                 )
             if passed and node.stderr_prohibited_patterns:
                 passed = all(
-                    re.search(p, node_stderr) is None for p in node.stderr_prohibited_patterns
+                    re.search(p, node_stderr) is None
+                    for p in node.stderr_prohibited_patterns
                 )
             verification.append(
                 {
@@ -614,7 +712,11 @@ class BlueprintV3(BaseModel):
                         text=True,
                     )
                 except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-                    return {"artifact": artifact.id, "success": False, "error": str(exc)}
+                    return {
+                        "artifact": artifact.id,
+                        "success": False,
+                        "error": str(exc),
+                    }
             return {"artifact": artifact.id, "success": True}
 
         if artifact.type in (
@@ -650,7 +752,9 @@ class BlueprintV3(BaseModel):
 
         if artifact.type in (ArtifactType.shared_library, ArtifactType.static_library):
             # Simple C/C++ build: use the first detected C/C++ compiler.
-            compiler = shutil.which("gcc") or shutil.which("clang") or shutil.which("cl")
+            compiler = (
+                shutil.which("gcc") or shutil.which("clang") or shutil.which("cl")
+            )
             if not compiler:
                 return {
                     "artifact": artifact.id,
@@ -680,7 +784,11 @@ class BlueprintV3(BaseModel):
                         text=True,
                     )
                 except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-                    return {"artifact": artifact.id, "success": False, "error": str(exc)}
+                    return {
+                        "artifact": artifact.id,
+                        "success": False,
+                        "error": str(exc),
+                    }
                 obj_files.append(obj)
             if resolved_output and obj_files:
                 if artifact.type == ArtifactType.shared_library:
@@ -690,7 +798,9 @@ class BlueprintV3(BaseModel):
                         + artifact.linker_flags
                     )
                 else:
-                    link_args = ["rcs", str(resolved_output)] + [str(o) for o in obj_files]
+                    link_args = ["rcs", str(resolved_output)] + [
+                        str(o) for o in obj_files
+                    ]
                 try:
                     subprocess.run(
                         (
@@ -705,7 +815,11 @@ class BlueprintV3(BaseModel):
                         text=True,
                     )
                 except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-                    return {"artifact": artifact.id, "success": False, "error": str(exc)}
+                    return {
+                        "artifact": artifact.id,
+                        "success": False,
+                        "error": str(exc),
+                    }
             return {"artifact": artifact.id, "success": True}
 
         # Unhandled types are treated as no-ops; the entrypoint execution still runs.
@@ -721,7 +835,8 @@ def write_v3_blueprint(blueprint: BlueprintV3, path: Path) -> None:
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     else:
         path.write_text(
-            yaml.safe_dump(data, sort_keys=False, default_flow_style=False), encoding="utf-8"
+            yaml.safe_dump(data, sort_keys=False, default_flow_style=False),
+            encoding="utf-8",
         )
 
 

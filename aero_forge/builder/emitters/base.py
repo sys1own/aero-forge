@@ -103,7 +103,9 @@ class ContentDensityValidator:
         Raises :class:`ValueError` when the file is too sparse.
         """
         language = (language or "").lower()
-        is_python = language == "python" or content.lstrip().startswith(("import ", "from "))
+        is_python = language == "python" or content.lstrip().startswith(
+            ("import ", "from ")
+        )
         if is_python:
             count = cls._count_python_nodes(content)
             threshold = cls.MIN_FUNCTIONAL_NODES
@@ -140,9 +142,7 @@ class ContentDensityValidator:
                 "rust_core/cpp_core/ctypes/cffi/pyo3/ffi_bridges are not allowed."
             )
         if re.search(r"@\s*accelerate\s*\(", content):
-            raise ValueError(
-                "Forbidden @accelerate decorator in pure_python source."
-            )
+            raise ValueError("Forbidden @accelerate decorator in pure_python source.")
 
     @classmethod
     def _count_python_nodes(cls, content: str) -> int:
@@ -221,7 +221,9 @@ class ContentDensityValidator:
         # hollow stubs produced by under-trained responses.
         cleaned = re.sub(r"_\s*=\s*arg_\d+\s*;", "", cleaned)
         cleaned = re.sub(r"\b(?:let|var|const)\s+_\s*=\s*[^;]+;", "", cleaned)
-        cleaned = re.sub(r"return\s+(?:0|arg_\d+|_)\s*;", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(
+            r"return\s+(?:0|arg_\d+|_)\s*;", "", cleaned, flags=re.IGNORECASE
+        )
 
         if not cleaned.strip():
             return 0
@@ -269,7 +271,9 @@ class ContentDensityValidator:
         count as a proxy.
         """
         language = (language or "").lower()
-        is_python = language == "python" or content.lstrip().startswith(("import ", "from "))
+        is_python = language == "python" or content.lstrip().startswith(
+            ("import ", "from ")
+        )
         if not is_python:
             return cls._count_generic_nodes(content) >= cls.MIN_GENERIC_FUNCTIONAL_NODES
 
@@ -284,7 +288,9 @@ class ContentDensityValidator:
         from aero_forge._native import execution_matrix_nonzero
         from aero_forge.scheduler.goi_solver import _loop_dependency_matrix
 
-        functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+        functions = [
+            node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+        ]
         if not functions:
             # No functions: use module-level functional density.
             return cls._count_python_nodes(content) >= cls.MIN_FUNCTIONAL_NODES
@@ -338,7 +344,9 @@ class ContentDensityValidator:
         as a whole happens to have execution flow elsewhere.
         """
         language = (language or "").lower()
-        is_python = language == "python" or content.lstrip().startswith(("import ", "from "))
+        is_python = language == "python" or content.lstrip().startswith(
+            ("import ", "from ")
+        )
         if not is_python:
             return cls._count_generic_nodes(content) >= cls.MIN_GENERIC_FUNCTIONAL_NODES
 
@@ -454,9 +462,8 @@ class ContractIntegrityValidator:
         if not symbols:
             return []
         language = (language or "").lower()
-        is_python = (
-            language in ("python", "py")
-            or content.lstrip().startswith(("import ", "from "))
+        is_python = language in ("python", "py") or content.lstrip().startswith(
+            ("import ", "from ")
         )
         if is_python:
             try:
@@ -491,9 +498,7 @@ class ContractIntegrityValidator:
         return [s for s in symbols if s not in defined]
 
     @classmethod
-    def validate(
-        cls, content: str, language: str, symbols: List[str]
-    ) -> List[str]:
+    def validate(cls, content: str, language: str, symbols: List[str]) -> List[str]:
         """Raise :class:`ValueError` if any required *symbols* are missing."""
         missing = cls.missing_symbols(content, language, symbols)
         if missing:
@@ -554,7 +559,9 @@ class AtomicSymbolAssembly:
         ``artifacts`` is a list of :class:`CodeArtifact` instances that are
         candidates to be written for *node_spec*.
         """
-        required = cls._required_symbols(node_spec, contracts, is_pure_python=is_pure_python)
+        required = cls._required_symbols(
+            node_spec, contracts, is_pure_python=is_pure_python
+        )
         if not required:
             return
 
@@ -575,9 +582,7 @@ class AtomicSymbolAssembly:
                 )
 
         # 2. Source must define all contracted symbols.
-        source_artifacts = [
-            a for a in artifacts if not getattr(a, "is_header", False)
-        ]
+        source_artifacts = [a for a in artifacts if not getattr(a, "is_header", False)]
         combined = "\n".join(
             a.content for a in source_artifacts if not getattr(a, "is_header", False)
         )
@@ -608,6 +613,136 @@ class AtomicSymbolAssembly:
             "success",
             f"Atomic Symbol Assembly verified for {node_id}: "
             f"{len(required)}/{len(required)} symbol(s) with non-zero execution matrices",
+        )
+
+
+class FocusedIntentRecovery:
+    """Synthesize missing logic intents and merge them into the CFM.
+
+    When Atomic Symbol Assembly fails because the CFM lacks intent for a
+    contracted symbol, this agent asks the LLM for a focused logic sketch for
+    exactly those symbols and patches the Compacted Functional Matrix so a
+    final materialization retry can succeed.
+    """
+
+    _SYSTEM_PROMPT = (
+        "You are the Intent Recovery Agent for the Proactive Formal Synthesis Engine. "
+        "The builder failed to materialize logic for the listed symbols. "
+        "Return a single JSON object with a top-level 'symbols' array. "
+        "Each entry must contain: 'name', 'description', 'args' (list of strings), "
+        "'return_type' (string), and 'steps' (list of algorithmic steps). "
+        "Do not include prose, markdown fences, or source code."
+    )
+
+    @classmethod
+    def synthesize_missing_intents(
+        cls,
+        missing_symbols: List[str],
+        node_spec: Dict[str, Any],
+        compacted_context: Optional[Dict[str, Any]],
+        llm_client: Any,
+    ) -> Dict[str, Any]:
+        """Return a copy of *compacted_context* with recovered intents for *missing_symbols*."""
+        context = dict(compacted_context) if compacted_context else {}
+        if not missing_symbols or not llm_client:
+            return context
+
+        user_prompt = (
+            f"Project context: {json.dumps(context.get('project') or context.get('user_prompt') or {}, default=str)}\n"
+            f"Node specification: {json.dumps(node_spec, default=str)}\n"
+            f"Missing contracted symbols: {missing_symbols}\n"
+            "Provide a focused logic intent for each missing symbol as a JSON object."
+        )
+        try:
+            raw = llm_client.generate(
+                [
+                    {"role": "system", "content": cls._SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.1,
+                max_tokens=2048,
+            )
+        except Exception as exc:
+            raise AtomicSymbolAssemblyError(
+                f"Focused Intent Synthesis failed for {missing_symbols}: {exc}"
+            ) from exc
+
+        if not raw:
+            raise AtomicSymbolAssemblyError(
+                f"Focused Intent Synthesis returned an empty response for {missing_symbols}"
+            )
+
+        parsed = cls._parse_json(raw)
+        symbols = parsed.get("symbols") or (
+            parsed if isinstance(parsed, list) else [parsed]
+        )
+
+        impl_map: Dict[str, Any] = context.setdefault("full_implementation_map", {})
+        if not isinstance(impl_map, dict):
+            impl_map = {"symbols": []}
+            context["full_implementation_map"] = impl_map
+        impl_symbols: List[Any] = impl_map.setdefault("symbols", [])
+        existing_impl: Set[str] = {
+            entry.get("name") if isinstance(entry, dict) else str(entry)
+            for entry in impl_symbols
+        }
+
+        functions: List[Dict[str, Any]] = context.setdefault("functions", [])
+        existing_fn: Set[str] = {
+            f.get("name") or f.get("symbol", "")
+            for f in functions
+            if isinstance(f, dict)
+        }
+
+        for entry in symbols:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name") or entry.get("symbol")
+            if not name or name not in missing_symbols:
+                continue
+            if name not in existing_impl:
+                impl_symbols.append(entry)
+                existing_impl.add(name)
+            if name not in existing_fn:
+                functions.append(
+                    {
+                        "name": name,
+                        "symbol": name,
+                        "args": entry.get("args", []),
+                        "return_type": entry.get("return_type", ""),
+                        "description": entry.get("description", ""),
+                    }
+                )
+                existing_fn.add(name)
+
+        _accel_log(
+            "info",
+            f"Focused Intent Recovery synthesized intents for {sorted(missing_symbols)}",
+        )
+        return context
+
+    @staticmethod
+    def _parse_json(raw: str) -> Dict[str, Any]:
+        """Best-effort JSON extraction from an LLM response."""
+        text = raw.strip()
+        if text.startswith("```"):
+            # Strip markdown fences if present.
+            parts = text.split("```", 2)
+            text = parts[2] if len(parts) >= 3 else text.lstrip("`")
+            text = text.strip()
+            if text.lower().startswith("json"):
+                text = text[4:].lstrip()
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            match = re.search(r"(\{.*\})", text, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group(1))
+                except json.JSONDecodeError:
+                    pass
+        raise AtomicSymbolAssemblyError(
+            f"Focused Intent Synthesis returned unparseable JSON: {raw[:200]!r}"
         )
 
 
@@ -714,7 +849,7 @@ def _function_signature_for_prompt(
         return f"export fn {symbol}({', '.join(arg_decls)}) {ret}".strip()
     if lang == "go":
         proto = f"func {symbol}({', '.join(arg_decls)}) {ret}".strip()
-        return f"//export {symbol}\nimport \"C\"\n{proto}"
+        return f'//export {symbol}\nimport "C"\n{proto}'
     if lang in ("c", "cpp", "c++"):
         c_arg_decls = [
             f"{_type_map_for_boundary('c', kind)} {name}"
@@ -996,7 +1131,7 @@ def _fallback_source(
         body.append(f"    (void){name};")
     if ret_expr:
         body.append(f"    return {ret_expr};")
-    body.extend(["}", "", "#ifdef __cplusplus", "} // extern \"C\"", "#endif"])
+    body.extend(["}", "", "#ifdef __cplusplus", '} // extern "C"', "#endif"])
     return "\n".join(body)
 
 
@@ -1434,7 +1569,10 @@ class EmitterRegistry:
         for label, sys, usr in attempts:
             try:
                 raw = client.generate(
-                    [{"role": "system", "content": sys}, {"role": "user", "content": usr}],
+                    [
+                        {"role": "system", "content": sys},
+                        {"role": "user", "content": usr},
+                    ],
                     temperature=0.2,
                     max_tokens=4096,
                 )
@@ -1443,14 +1581,21 @@ class EmitterRegistry:
                         f"LLM returned an empty response during {label} synthesis for {language_id}"
                     )
                 plugin = self._try_load_generated(
-                    raw, language_id, boundary_type, require_delimiters=(label == "direct")
+                    raw,
+                    language_id,
+                    boundary_type,
+                    require_delimiters=(label == "direct"),
                 )
                 self._verify_plugin_logic(plugin, language_id)
                 _accel_log("success", "Logic In-Fill Successful")
-                _accel_log("success", f"JIT-synthesized {language_id} emitter plugin ({label})")
+                _accel_log(
+                    "success", f"JIT-synthesized {language_id} emitter plugin ({label})"
+                )
                 return plugin
             except StructuralViolationError as exc:
-                _accel_log("error", f"JIT synthesis structural violation ({label}): {exc}")
+                _accel_log(
+                    "error", f"JIT synthesis structural violation ({label}): {exc}"
+                )
                 raw_preview = (raw or "")[:800]
                 _accel_log("error", f"Raw preview: {raw_preview!r}")
                 last_error = exc
@@ -1636,22 +1781,28 @@ class EmitterRegistry:
                 if isinstance(compacted, dict)
                 else str(compacted)
             )
-            parts.extend([
-                "",
-                "Compacted functional context (contracts, functions, SMT types):",
-                compacted_text,
-            ])
+            parts.extend(
+                [
+                    "",
+                    "Compacted functional context (contracts, functions, SMT types):",
+                    compacted_text,
+                ]
+            )
         if smt_types:
-            parts.extend([
+            parts.extend(
+                [
+                    "",
+                    "SMT-inferred native types for the generated function body:",
+                    json.dumps(smt_types, indent=2, sort_keys=True),
+                ]
+            )
+        parts.extend(
+            [
                 "",
-                "SMT-inferred native types for the generated function body:",
-                json.dumps(smt_types, indent=2, sort_keys=True),
-            ])
-        parts.extend([
-            "",
-            "Implement `descriptor`, `emit_source_files`, and `emit_build_manifest` using only the base classes imported in the skeleton. "
-            "Do not redeclare BoundaryContract, CapabilityDescriptor, CodeArtifact, or PolyglotEmitterPlugin.",
-        ])
+                "Implement `descriptor`, `emit_source_files`, and `emit_build_manifest` using only the base classes imported in the skeleton. "
+                "Do not redeclare BoundaryContract, CapabilityDescriptor, CodeArtifact, or PolyglotEmitterPlugin.",
+            ]
+        )
         return "\n".join(parts)
 
     @staticmethod
@@ -1713,7 +1864,9 @@ class EmitterRegistry:
             if candidate:
                 workspace = Path(candidate)
             else:
-                workspace = Path(tempfile.gettempdir()) / f"aero_jit_{language_id}_skeleton"
+                workspace = (
+                    Path(tempfile.gettempdir()) / f"aero_jit_{language_id}_skeleton"
+                )
         else:
             workspace = Path(tempfile.gettempdir()) / f"aero_jit_{language_id}_skeleton"
         workspace.mkdir(parents=True, exist_ok=True)
@@ -1736,9 +1889,7 @@ class EmitterRegistry:
             tree = ast.parse(source)
         except SyntaxError:
             return np.zeros((0, 0), dtype=np.float64)
-        funcs = [
-            node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
-        ]
+        funcs = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
         if not funcs:
             return np.zeros((0, 0), dtype=np.float64)
         matrices = []
