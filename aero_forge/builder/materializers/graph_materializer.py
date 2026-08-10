@@ -29,6 +29,7 @@ import numpy as np
 from aero_forge.blueprint.schema import (
     ABIArgument,
     ABIContractV3,
+    ArtifactType,
     BindingFramework,
     BlueprintV3,
     BuildArtifact,
@@ -47,6 +48,7 @@ from aero_forge.builder.emitters.base import (
     ContextExhaustionError,
     ContractIntegrityValidator,
     EmitterRegistry,
+    FocusedIntentRecovery,
     PolyglotEmitterPlugin,
     SLIIntentValidator,
     SyntaxValidator,
@@ -222,12 +224,18 @@ class GraphPolyglotMaterializer:
         """
         pyo3_aliases = {"pyo3", "maturin", "pyo3_maturin"}
         for edge in edges:
-            raw_boundary = str(edge.get("boundary_type", "c_abi")).lower().replace("-", "_")
+            raw_boundary = (
+                str(edge.get("boundary_type", "c_abi")).lower().replace("-", "_")
+            )
             if raw_boundary in pyo3_aliases:
                 edge["boundary_type"] = "pyo3_maturin"
             src = node_map.get(edge.get("source", ""), {}).get("lang", "").lower()
             tgt = node_map.get(edge.get("target", ""), {}).get("lang", "").lower()
-            if src in ("rust", "rs") and tgt in ("python", "py") and edge.get("boundary_type") == "pyo3_maturin":
+            if (
+                src in ("rust", "rs")
+                and tgt in ("python", "py")
+                and edge.get("boundary_type") == "pyo3_maturin"
+            ):
                 _accel_log(
                     "success",
                     "Target: rust_hin (PyO3) selected",
@@ -291,7 +299,11 @@ class GraphPolyglotMaterializer:
                     str(raw_boundary).lower().replace("-", "_"), "c_abi"
                 )
                 # Pure Python nodes are never cross-language boundaries.
-                if self._is_pure_python and boundary in ("c_abi", "cabi", "pyo3_maturin"):
+                if self._is_pure_python and boundary in (
+                    "c_abi",
+                    "cabi",
+                    "pyo3_maturin",
+                ):
                     boundary = "python_call"
                 contracts.append(
                     {
@@ -391,7 +403,9 @@ class GraphPolyglotMaterializer:
                 names = [
                     node.name
                     for node in tree.body
-                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                    if isinstance(
+                        node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                    )
                 ]
                 if not names:
                     continue
@@ -430,7 +444,7 @@ class GraphPolyglotMaterializer:
         so_name = f"lib{node_id}.so"
         exports = list(node_spec.get("exports") or [])
         exports_str = ", ".join(repr(e) for e in exports)
-        content = f'''import os
+        content = f"""import os
 import importlib.util
 import sys
 
@@ -452,7 +466,7 @@ if os.path.exists(_so_path):
         globals()[_sym] = getattr(_aero_rust_ext, _sym, None)
 else:
     __all__ = []
-'''
+"""
         init_artifact = CodeArtifact(
             file_path="__init__.py",
             content=content,
@@ -492,7 +506,7 @@ else:
         def _existing_source(match: "re.Match[str]") -> Optional[str]:
             inner = match.group(2)
             for token in re.split(r"[\s\"']+", inner):
-                token = token.strip().strip('"\'')
+                token = token.strip().strip("\"'")
                 if not token or token.startswith("$") or token.startswith("<"):
                     continue
                 candidate = node_dir / token
@@ -536,7 +550,7 @@ else:
                 # preserve everything after it.
                 first_source_match = re.search(r"[^\s\"']+", rest)
                 if first_source_match:
-                    after = rest[first_source_match.end():].strip()
+                    after = rest[first_source_match.end() :].strip()
                     if after:
                         extras = " " + after
             # Force the target name to the node id so the output artifact is
@@ -663,9 +677,7 @@ else:
                 materialized.append(artifact)
         return materialized
 
-    def _maybe_materialize_uast(
-        self, artifact: CodeArtifact
-    ) -> Optional[CodeArtifact]:
+    def _maybe_materialize_uast(self, artifact: CodeArtifact) -> Optional[CodeArtifact]:
         """Convert a UAST JSON artifact into a Python source artifact.
 
         Supports fenced blocks with language ``uast`` or ``json`` and raw JSON
@@ -675,15 +687,22 @@ else:
         body, the artifact is rejected so the proactive synthesis healer can
         rewrite the intent.
         """
-        if artifact.language not in ("uast", "json") and not artifact.content.strip().startswith(("{", "[")):
+        if artifact.language not in (
+            "uast",
+            "json",
+        ) and not artifact.content.strip().startswith(("{", "[")):
             return None
         try:
             data = json.loads(artifact.content)
         except (json.JSONDecodeError, ValueError):
             return None
-        if not isinstance(data, dict) or not any(k in data for k in ("type", "_type", "kind", "body")):
+        if not isinstance(data, dict) or not any(
+            k in data for k in ("type", "_type", "kind", "body")
+        ):
             return None
-        if not isinstance(data.get("body", []), list) and not isinstance(data.get("children", []), list):
+        if not isinstance(data.get("body", []), list) and not isinstance(
+            data.get("children", []), list
+        ):
             return None
         try:
             # First pass: emit source with the default resolver to obtain a
@@ -695,7 +714,9 @@ else:
                 if isinstance(node, ast.FunctionDef)
             ]
             for name in func_names or [None]:
-                SkeletonTypeInjector.saturate(raw_source, name, target_language="python")
+                SkeletonTypeInjector.saturate(
+                    raw_source, name, target_language="python"
+                )
 
             # Second pass: build an SMT-informed attribute resolver and emit the
             # final source with correct attribute names (e.g. conj -> conjugate).
@@ -712,7 +733,10 @@ else:
                 type_env.update(env)
             resolver = AttributeResolver(type_env=type_env)
             source = uast_to_python_source(data, attribute_resolver=resolver.resolve)
-            _accel_log("info", f"UAST-to-Python emission succeeded for {artifact.file_path or '<unknown>'}")
+            _accel_log(
+                "info",
+                f"UAST-to-Python emission succeeded for {artifact.file_path or '<unknown>'}",
+            )
             return CodeArtifact(
                 file_path=artifact.file_path,
                 content=source,
@@ -731,13 +755,18 @@ else:
             content = artifact.content.strip()
             lower = content.lower()
             first = content.splitlines()[0] if content else ""
-            if lower.startswith("cmake_minimum_required") or lower.startswith("project("):
+            if lower.startswith("cmake_minimum_required") or lower.startswith(
+                "project("
+            ):
                 artifact.file_path = "CMakeLists.txt"
                 artifact.language = "cmake"
             elif first.startswith("[package]") or "\n[package]" in content[:512]:
                 artifact.file_path = "Cargo.toml"
                 artifact.language = "toml"
-            elif first.startswith("; auto-generated") or "__MojoABIPackage" in content[:256]:
+            elif (
+                first.startswith("; auto-generated")
+                or "__MojoABIPackage" in content[:256]
+            ):
                 if artifact.language in ("", "text"):
                     artifact.language = "mojo"
         return artifacts
@@ -765,7 +794,9 @@ else:
         # extension from the fence language.
         for artifact in artifacts:
             if artifact.file_path:
-                if Path(artifact.file_path).suffix.lower() == ".txt" and artifact.language not in ("text", ""):
+                if Path(
+                    artifact.file_path
+                ).suffix.lower() == ".txt" and artifact.language not in ("text", ""):
                     artifact.file_path = ""
                 else:
                     used_paths.add(artifact.file_path)
@@ -967,7 +998,10 @@ else:
                     f"HIN verification produced no active-pair reductions for {artifact.file_path}",
                 )
                 return False
-            _accel_log("info", f"HIN verification passed for {artifact.file_path}: {hin.get('steps', 0)} active-pair steps")
+            _accel_log(
+                "info",
+                f"HIN verification passed for {artifact.file_path}: {hin.get('steps', 0)} active-pair steps",
+            )
         except Exception as exc:
             _accel_log(
                 "warning",
@@ -978,9 +1012,7 @@ else:
     def _is_llm_available(self) -> bool:
         """Return True when an LLM client/provider is configured."""
         return bool(
-            self._llm_client is not None
-            or self._llm_provider
-            or self._llm_api_key
+            self._llm_client is not None or self._llm_provider or self._llm_api_key
         )
 
     def _required_symbols(
@@ -1006,9 +1038,7 @@ else:
         # back to the node id so the baseline always has a defined symbol.  Leaf
         # target nodes import symbols through FFI and are not required to define
         # them.
-        is_target = any(
-            c.get("target") == node_id for c in contracts or []
-        )
+        is_target = any(c.get("target") == node_id for c in contracts or [])
         if (
             not symbols
             and not getattr(self, "_is_pure_python", False)
@@ -1071,12 +1101,15 @@ else:
             m = re.search(r'^\s*name\s*=\s*"([^"]+)"', content, re.MULTILINE)
             if m:
                 name = m.group(1)
-        if artifact.file_path == "CMakeLists.txt" or "cmake_minimum_required" in content:
-            m = re.search(r'project\s*\(\s*([^)\s]+)', content, re.IGNORECASE)
+        if (
+            artifact.file_path == "CMakeLists.txt"
+            or "cmake_minimum_required" in content
+        ):
+            m = re.search(r"project\s*\(\s*([^)\s]+)", content, re.IGNORECASE)
             if m:
                 name = m.group(1)
         if artifact.file_path == "go.mod" or artifact.file_path.endswith(".mod"):
-            m = re.search(r'^\s*module\s+(\S+)', content, re.MULTILINE)
+            m = re.search(r"^\s*module\s+(\S+)", content, re.MULTILINE)
             if m:
                 name = m.group(1).split("/")[-1]
         if artifact.file_path == "pyproject.toml":
@@ -1094,7 +1127,11 @@ else:
         """Drop artifacts that clearly belong to other nodes in the same response."""
         lang = (node_spec.get("lang") or node_spec.get("language") or "").lower()
         graph_spec = getattr(self, "_hin_graph_spec", None) or {}
-        other_nodes = {n["node_id"] for n in graph_spec.get("nodes", []) if n.get("node_id") != node_id}
+        other_nodes = {
+            n["node_id"]
+            for n in graph_spec.get("nodes", [])
+            if n.get("node_id") != node_id
+        }
 
         def _is_for_this_node(a: CodeArtifact) -> bool:
             path = Path(a.file_path)
@@ -1184,7 +1221,9 @@ else:
         # Harden SLI intent retrieval: every contracted symbol must have a logic
         # intent in the Compacted Functional Matrix. Missing intent triggers a
         # focused retry for that symbol.
-        required_symbols = [symbol for symbol, _args, _ret in _symbol_specs(node_spec, contracts)]
+        required_symbols = [
+            symbol for symbol, _args, _ret in _symbol_specs(node_spec, contracts)
+        ]
         try:
             SLIIntentValidator.validate(self._compacted_context, required_symbols)
         except ContextExhaustionError as exc:
@@ -1260,7 +1299,10 @@ else:
                 self._is_build_manifest(a) or self._artifact_is_valid(a, node_spec)
                 for a in assigned
             ):
-                _accel_log("success", f"Builder Code Emission for {node_id}: logic in-fill successful")
+                _accel_log(
+                    "success",
+                    f"Builder Code Emission for {node_id}: logic in-fill successful",
+                )
                 _accel_log("success", "Skeleton In-Fill Successful")
                 _accel_log("success", "Syntax Verification Passed")
                 return assigned
@@ -1347,10 +1389,16 @@ else:
                 except MaterializationError:
                     llm_artifacts = []
                 if llm_artifacts:
-                    llm_source = [a for a in llm_artifacts if not self._is_build_manifest(a)]
-                    llm_manifests = [a for a in llm_artifacts if self._is_build_manifest(a)]
+                    llm_source = [
+                        a for a in llm_artifacts if not self._is_build_manifest(a)
+                    ]
+                    llm_manifests = [
+                        a for a in llm_artifacts if self._is_build_manifest(a)
+                    ]
                     if llm_source:
-                        source_artifacts = self._postprocess_source_artifacts(llm_source)
+                        source_artifacts = self._postprocess_source_artifacts(
+                            llm_source
+                        )
                     if llm_manifests:
                         manifest_artifacts = llm_manifests
                     # Re-verify contract integrity after the LLM in-fill.
@@ -1370,7 +1418,11 @@ else:
                 )
                 if baseline_artifacts:
                     source_artifacts = self._postprocess_source_artifacts(
-                        [a for a in baseline_artifacts if not self._is_build_manifest(a)]
+                        [
+                            a
+                            for a in baseline_artifacts
+                            if not self._is_build_manifest(a)
+                        ]
                     )
                     manifest_artifacts = [
                         a for a in baseline_artifacts if self._is_build_manifest(a)
@@ -1379,23 +1431,67 @@ else:
         # Atomic Symbol Assembly gate: do not allow any file for this node to be
         # written until every contracted symbol has a logic intent, is present in
         # the source, and has a non-zero GoI execution matrix.
-        try:
-            AtomicSymbolAssembly.validate(
-                source_artifacts,
-                node_spec,
-                contracts,
-                compacted_context=self._compacted_context,
-                language=lang,
-                is_pure_python=self._is_pure_python,
-            )
-        except AtomicSymbolAssemblyError as exc:
-            _accel_log(
-                "error",
-                f"Atomic Symbol Assembly failed for {node_id}: {exc}",
-            )
-            raise MaterializationError(
-                f"Atomic Symbol Assembly failed for {node_id}: {exc}"
-            ) from exc
+        # If the gate fails, attempt a focused intent recovery pass and re-emit
+        # the node source before giving up.
+        max_recovery_attempts = 2
+        recovery_attempt = 0
+        while True:
+            try:
+                AtomicSymbolAssembly.validate(
+                    source_artifacts,
+                    node_spec,
+                    contracts,
+                    compacted_context=self._compacted_context,
+                    language=lang,
+                    is_pure_python=self._is_pure_python,
+                )
+                break
+            except AtomicSymbolAssemblyError as exc:
+                missing = list(getattr(exc, "symbols", []))
+                if (
+                    recovery_attempt < max_recovery_attempts
+                    and missing
+                    and self._is_llm_available()
+                ):
+                    _accel_log(
+                        "warning",
+                        f"Triggering Focused Intent Recovery for {node_id}: missing {missing}",
+                    )
+                    self._compacted_context = (
+                        FocusedIntentRecovery.synthesize_missing_intents(
+                            missing,
+                            node_spec,
+                            self._compacted_context,
+                            self._get_llm_client(),
+                        )
+                    )
+                    recovered = self._emit_with_llm(
+                        node_id,
+                        node_spec,
+                        contracts,
+                        missing_symbols=missing,
+                    )
+                    recovered = self._postprocess_source_artifacts(recovered)
+                    recovered_source = [
+                        a for a in recovered if not self._is_build_manifest(a)
+                    ]
+                    recovered_manifests = [
+                        a for a in recovered if self._is_build_manifest(a)
+                    ]
+                    if recovered_source:
+                        source_artifacts = recovered_source
+                    if recovered_manifests:
+                        manifest_artifacts = recovered_manifests
+                    recovery_attempt += 1
+                    continue
+
+                _accel_log(
+                    "error",
+                    f"Atomic Symbol Assembly failed for {node_id}: {exc}",
+                )
+                raise MaterializationError(
+                    f"Atomic Symbol Assembly failed for {node_id}: {exc}"
+                ) from exc
 
         # Keep the node's source_files in sync with the emitted artifacts so the
         # toolchain router compiles the files that the plugin actually wrote.
@@ -1430,13 +1526,13 @@ else:
             is_zig = artifact.language == "zig" or str(artifact.file_path).endswith(
                 ".zig"
             )
-            is_python = artifact.language == "python" or str(artifact.file_path).endswith(
-                ".py"
-            )
+            is_python = artifact.language == "python" or str(
+                artifact.file_path
+            ).endswith(".py")
             if is_zig:
                 content = artifact.content
-                if "std." in content and "const std = @import(\"std\");" not in content:
-                    content = "const std = @import(\"std\");\n\n" + content
+                if "std." in content and 'const std = @import("std");' not in content:
+                    content = 'const std = @import("std");\n\n' + content
                 # Remove pointless parameter-discard stubs before the parameter is
                 # actually used; Zig treats these as compile errors.
                 content = re.sub(
@@ -1448,7 +1544,10 @@ else:
                 artifact.content = content
             elif is_python:
                 content = artifact.content
-                if re.search(r"\bAny\b", content) and "from typing import Any" not in content:
+                if (
+                    re.search(r"\bAny\b", content)
+                    and "from typing import Any" not in content
+                ):
                     content = "from typing import Any\n" + content
                     artifact.content = content
         return artifacts
@@ -1592,7 +1691,11 @@ extern "C" {{
 }} // extern "C"
 """
                 for path in source_files:
-                    if path.endswith(".cpp") or path.endswith(".cc") or path.endswith(".cxx"):
+                    if (
+                        path.endswith(".cpp")
+                        or path.endswith(".cc")
+                        or path.endswith(".cxx")
+                    ):
                         if path not in files:
                             files[path] = body
                     elif path.endswith(".h") or path.endswith(".hpp"):
@@ -1605,7 +1708,11 @@ extern "C" {{
 """
                     elif path.endswith("CMakeLists.txt"):
                         # Infer the source file for add_library from the first cpp file.
-                        cpp_files = [p for p in source_files if p.endswith((".cpp", ".cc", ".cxx"))]
+                        cpp_files = [
+                            p
+                            for p in source_files
+                            if p.endswith((".cpp", ".cc", ".cxx"))
+                        ]
                         src_file = cpp_files[0] if cpp_files else "src/kernels.cpp"
                         files[path] = f"""cmake_minimum_required(VERSION 3.16)
 project({node_id} LANGUAGES CXX)
@@ -1626,7 +1733,12 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             if not contract:
                 # No explicit contract: emit a minimal C-ABI placeholder so the
                 # crate always passes the hollow-source density gate.
-                contract = {"symbol": symbol, "boundary_type": "c_abi", "args": [], "return_type": ""}
+                contract = {
+                    "symbol": symbol,
+                    "boundary_type": "c_abi",
+                    "args": [],
+                    "return_type": "",
+                }
             if contract:
                 symbol = contract.get("symbol", symbol)
                 boundary = contract.get("boundary_type", "pyo3_maturin")
@@ -1653,12 +1765,15 @@ fn rust_core(_py: Python, m: &PyModule) -> PyResult<()> {
                     args = contract.get("args", [])
                     return_type = contract.get("return_type", "")
                     rust_args = [
-                        f"arg_{i}: {self._rust_type_for_arg(a)}" for i, a in enumerate(args)
+                        f"arg_{i}: {self._rust_type_for_arg(a)}"
+                        for i, a in enumerate(args)
                     ]
                     if return_type and return_type.lower() not in ("", "void"):
                         ret_rust = self._rust_type_for_arg(return_type)
                         if return_type == "pointer":
-                            ret_stmt = "Box::into_raw(Box::new(0.0f64 + 0.0f64)) as *const f64"
+                            ret_stmt = (
+                                "Box::into_raw(Box::new(0.0f64 + 0.0f64)) as *const f64"
+                            )
                         else:
                             # Include an operator so the placeholder is not rejected
                             # by the generic functional-density gate.
@@ -1718,10 +1833,10 @@ rayon = "1.10"
                             f'    """Implement {sym}."""\n'
                             "    n = int(args[0]) if args else 8\n"
                             "    signal = [complex(i, 0) for i in range(n)]\n"
-                            "    metadata = {\"size\": n, \"algorithm\": \"recursive_fft\"}\n"
+                            '    metadata = {"size": n, "algorithm": "recursive_fft"}\n'
                             "    twiddles = {k for k in range(n // 2)}\n"
                             "    result = [signal[i] * (1 if i in twiddles else 1) for i in range(n)]\n"
-                            "    return {\"result\": result, \"metadata\": metadata, \"twiddles\": twiddles}\n"
+                            '    return {"result": result, "metadata": metadata, "twiddles": twiddles}\n'
                             "\n"
                             'if __name__ == "__main__":\n'
                             "    import sys\n"
@@ -1776,9 +1891,7 @@ rayon = "1.10"
                     return (
                         "from typing import Any, Dict, Set\n"
                         "import cmath\n"
-                        "import math\n\n"
-                        + "\n".join(body_lines)
-                        + "\n"
+                        "import math\n\n" + "\n".join(body_lines) + "\n"
                     )
 
                 for path in source_files:
@@ -1833,9 +1946,13 @@ print("rust out:", list(result))
                     elif path.endswith(".py"):
                         # Generic polyglot Python module/entrypoint fallback.
                         stub_symbol = node_id
-                        files[path] = f"""\"\"\"Auto-generated by aero-forge polyglot emitter.\"\"\"\nfrom typing import Any, List, Dict, Optional\n\ndef {stub_symbol}(*args: Any, **kwargs: Any) -> Any:\n    \"\"\"Placeholder entrypoint for {node_id}.\"\"\"\n    result = 1 + 1\n    return result\n"""
+                        files[path] = (
+                            f"""\"\"\"Auto-generated by aero-forge polyglot emitter.\"\"\"\nfrom typing import Any, List, Dict, Optional\n\ndef {stub_symbol}(*args: Any, **kwargs: Any) -> Any:\n    \"\"\"Placeholder entrypoint for {node_id}.\"\"\"\n    result = 1 + 1\n    return result\n"""
+                        )
                     elif path.endswith("pyproject.toml"):
-                        files[path] = f"""[project]\nname = \"{node_id}\"\nversion = \"0.1.0\"\n\n[build-system]\nrequires = [\"setuptools>=61\"]\nbuild-backend = \"setuptools.build_meta\"\n"""
+                        files[path] = (
+                            f"""[project]\nname = \"{node_id}\"\nversion = \"0.1.0\"\n\n[build-system]\nrequires = [\"setuptools>=61\"]\nbuild-backend = \"setuptools.build_meta\"\n"""
+                        )
 
         # Emit any requested files that did not get a baseline.
         for path in source_files:
@@ -2072,24 +2189,43 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                 else:
                     # Last resort: discover a runnable Python entrypoint, preferring
                     # one directly inside a node directory over nested duplicates.
-                    skip_prefixes = ("target/", "build/", ".aero_forge/", ".aero_skeletons/", "tests/", "ffi_bridges/")
+                    skip_prefixes = (
+                        "target/",
+                        "build/",
+                        ".aero_forge/",
+                        ".aero_skeletons/",
+                        "tests/",
+                        "ffi_bridges/",
+                    )
                     for node_id in node_map:
                         for candidate in (
                             self.workspace_root / node_id / "main.py",
-                            self.workspace_root / node_id / "python_interface" / "main.py",
+                            self.workspace_root
+                            / node_id
+                            / "python_interface"
+                            / "main.py",
                             self.workspace_root / node_id / "src" / "main.py",
                         ):
                             if candidate.is_file():
-                                primary_entrypoint = candidate.relative_to(self.workspace_root).as_posix()
+                                primary_entrypoint = candidate.relative_to(
+                                    self.workspace_root
+                                ).as_posix()
                                 break
-                        if primary_entrypoint != hin_graph_spec.get("primary_entrypoint", "run_shell.py"):
+                        if primary_entrypoint != hin_graph_spec.get(
+                            "primary_entrypoint", "run_shell.py"
+                        ):
                             break
                     else:
                         for py in sorted(self.workspace_root.rglob("*.py")):
                             rel = py.relative_to(self.workspace_root).as_posix()
                             if any(rel.startswith(p) for p in skip_prefixes):
                                 continue
-                            if py.name in ("main.py", "__main__.py") or "if __name__" in py.read_text(encoding="utf-8", errors="ignore"):
+                            if py.name in (
+                                "main.py",
+                                "__main__.py",
+                            ) or "if __name__" in py.read_text(
+                                encoding="utf-8", errors="ignore"
+                            ):
                                 primary_entrypoint = rel
                                 break
             # Update the graph spec so blueprint.aero and ExecutionStrategyV3 agree.
@@ -2215,23 +2351,39 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
         """Serialize a v3 ``blueprint.aero`` describing the materialized graph."""
         project = hin_graph_spec.get("project", "aero_forge_project")
         architecture = hin_graph_spec.get(
-            "architecture", hin_graph_spec.get("metadata", {}).get("architecture", "graph_polyglot")
+            "architecture",
+            hin_graph_spec.get("metadata", {}).get("architecture", "graph_polyglot"),
         )
         primary_entrypoint = hin_graph_spec.get("primary_entrypoint", "run_shell.py")
         build_script = hin_graph_spec.get("build_script")
 
         build_pipeline: List[BuildArtifact] = []
+        source_type_by_lang = {
+            "python": ArtifactType.python_extension,
+            "rust": ArtifactType.cargo_cdylib,
+            "cpp": ArtifactType.shared_library,
+            "c++": ArtifactType.shared_library,
+            "c": ArtifactType.shared_library,
+            "zig": ArtifactType.shared_library,
+            "go": ArtifactType.binary,
+        }
         for artifact in written_artifacts:
             path = artifact.get("file", "") or artifact.get("path", "")
             if not path:
                 continue
-            lang = artifact.get("language", "")
+            lang = (artifact.get("language") or "").lower()
+            artifact_type = source_type_by_lang.get(lang)
+            if artifact_type is None:
+                # Build manifests (toml, bash, cmake, markdown) are not source
+                # artifacts and do not require contract binding.
+                continue
+            node_id = artifact.get("node_id", "node")
             build_pipeline.append(
                 BuildArtifact(
-                    id=f"{artifact.get('node_id', 'node')}_{Path(path).name}",
-                    type="custom_cmd" if path.endswith(".sh") else "shared_library",
+                    id=f"{node_id}_{Path(path).name}",
+                    type=artifact_type,
                     source_files=[path],
-                    description=f"{lang} artifact for {artifact.get('node_id', '')}",
+                    description=f"node_id={node_id}; lang={lang}; file={path}",
                 )
             )
 
@@ -2248,7 +2400,9 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                 ]
                 outputs = []
                 if edge.get("return_type"):
-                    outputs.append(ABIArgument(name="return", type=edge.get("return_type")))
+                    outputs.append(
+                        ABIArgument(name="return", type=edge.get("return_type"))
+                    )
 
                 boundary = str(edge.get("boundary_type", "c_abi"))
                 binding_map = {
@@ -2264,12 +2418,18 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
 
                 source = edge.get("source", "")
                 target = edge.get("target", "")
-                source_language = edge.get("source_lang") or node_id_to_lang.get(source, source)
-                target_language = edge.get("target_lang") or node_id_to_lang.get(target, target)
+                source_language = edge.get("source_lang") or node_id_to_lang.get(
+                    source, source
+                )
+                target_language = edge.get("target_lang") or node_id_to_lang.get(
+                    target, target
+                )
 
                 abi_contracts.append(
                     ABIContractV3(
                         contract_id=f"{source}_{target}_{edge.get('symbol')}",
+                        source_node=source,
+                        target_node=target,
                         symbol=edge.get("symbol", ""),
                         source_language=source_language,
                         target_language=target_language,
@@ -2279,6 +2439,21 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                     )
                 )
 
+        # Export symbol map so downstream validators can bind every manifest file
+        # to at least one contracted/declared symbol.
+        exported_api_signatures: Dict[str, List[str]] = {}
+        for node in hin_graph_spec.get("nodes", []):
+            node_id = node.get("node_id")
+            if not node_id:
+                continue
+            node_exports = list(node.get("exports") or [])
+            for edge in hin_graph_spec.get("edges", []):
+                if edge.get("source") == node_id:
+                    sym = edge.get("symbol")
+                    if sym and sym not in node_exports:
+                        node_exports.append(sym)
+            exported_api_signatures[node_id] = node_exports
+
         env: Dict[str, str] = {}
         if self._is_pure_python:
             env["PYTHONPATH"] = "${WORKSPACE_ROOT}"
@@ -2286,7 +2461,9 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
         execution_strategy = ExecutionStrategyV3(
             primary_entrypoint=primary_entrypoint,
             runtime="python3" if primary_entrypoint.endswith(".py") else "bash",
-            args=[] if self._is_pure_python else ([build_script] if build_script else []),
+            args=(
+                [] if self._is_pure_python else ([build_script] if build_script else [])
+            ),
             working_dir="${WORKSPACE_ROOT}",
             env=env,
         )
@@ -2310,7 +2487,10 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                 description=f"{architecture} blueprint for {project}",
                 compacted_context=cfm_json,
             ),
-            llm_context=LLMContext(state=ContextState.synthesized),
+            llm_context=LLMContext(
+                state=ContextState.synthesized,
+                exported_api_signatures=exported_api_signatures,
+            ),
             build_pipeline=build_pipeline,
             abi_contracts=abi_contracts,
             execution_strategy=execution_strategy,
@@ -2391,7 +2571,9 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             SystemToolchainRouter.preflight_nodes(nodes, build=build)
         except ToolchainNotFoundError as exc:
             diagnostic = exc.install_command or ""
-            _accel_log("error", f"Toolchain pre-flight failed for {exc.toolchain}: {exc}")
+            _accel_log(
+                "error", f"Toolchain pre-flight failed for {exc.toolchain}: {exc}"
+            )
             raise MaterializationError(
                 f"Toolchain {exc.toolchain!r} is required but not available.\n{diagnostic}"
             ) from exc
@@ -2410,18 +2592,27 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
         # bridges would only confuse the LLM and generate unused scaffolding.
         bridges = []
         if self._is_pure_python:
-            _accel_log("info", "Skipping FFI bridge synthesis for pure_python architecture")
+            _accel_log(
+                "info", "Skipping FFI bridge synthesis for pure_python architecture"
+            )
         else:
             bridges = self._synthesize_ffi_bridges(edges)
 
         node_map = {n["node_id"]: n for n in nodes}
         written_artifacts: List[Dict[str, Any]] = []
+        processed_node_ids: set = set()
 
         for stage in stages:
             for node_id in stage:
+                _accel_log("info", f"Materializing Node: {node_id}")
                 node_spec = node_map.get(node_id)
                 if not node_spec:
+                    _accel_log(
+                        "warning",
+                        f"Wavefront Incompleteness: node {node_id!r} is missing from the graph",
+                    )
                     continue
+                processed_node_ids.add(node_id)
                 lang = node_spec.get("lang", "").lower()
                 contracts = self._boundary_contracts_for_node(node_id, edges)
                 # Capture the user's requested package paths before the plugin mutates
@@ -2446,12 +2637,13 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                                 isinstance(p, str) and p.startswith(prefix)
                                 for p in original_source_files
                             ):
-                                artifact.file_path = artifact.file_path[len(prefix):]
+                                artifact.file_path = artifact.file_path[len(prefix) :]
                         else:
-                            artifact.file_path = artifact.file_path[len(prefix):]
+                            artifact.file_path = artifact.file_path[len(prefix) :]
                     self._write_artifact(artifact, node_dir)
                     if (
-                        artifact.language not in {
+                        artifact.language
+                        not in {
                             "bash",
                             "json",
                             "yaml",
@@ -2485,7 +2677,9 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                             )
                         if self._is_pure_python:
                             try:
-                                ContentDensityValidator.validate_pure_python(artifact.content)
+                                ContentDensityValidator.validate_pure_python(
+                                    artifact.content
+                                )
                             except ValueError as exc:
                                 raise MaterializationError(
                                     f"Pure Python boundary violation for {artifact.file_path}: {exc}"
@@ -2494,7 +2688,7 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                     written_artifacts.append(
                         {
                             "node_id": node_id,
-                            "language": lang,
+                            "language": artifact.language or lang,
                             "file": artifact.file_path,
                             "path": str(node_dir / artifact.file_path),
                         }
@@ -2545,7 +2739,8 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                         )
 
                 if lang == "rust" and any(
-                    (c.get("boundary_type") or "").lower().replace("-", "_") == "pyo3_maturin"
+                    (c.get("boundary_type") or "").lower().replace("-", "_")
+                    == "pyo3_maturin"
                     for c in contracts
                 ):
                     rust_init = self._write_rust_pymodule_init(
@@ -2574,6 +2769,14 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                             f"toolchain dispatch failed for {node_id}: {exc}"
                         ) from exc
 
+        all_node_ids = {n["node_id"] for n in nodes}
+        unprocessed = all_node_ids - processed_node_ids
+        if unprocessed:
+            raise MaterializationError(
+                f"Wavefront Incompleteness: the following nodes were not materialized: "
+                f"{sorted(unprocessed)}"
+            )
+
         _accel_log("info", "HIN AST Normalization")
 
         build_artifact = self._generate_build_script(hin_graph_spec, stages)
@@ -2591,7 +2794,8 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
         blueprint_path = self._write_blueprint_aero(hin_graph_spec, written_artifacts)
 
         architecture = hin_graph_spec.get(
-            "architecture", hin_graph_spec.get("metadata", {}).get("architecture", "graph_polyglot")
+            "architecture",
+            hin_graph_spec.get("metadata", {}).get("architecture", "graph_polyglot"),
         )
         result: Dict[str, Any] = {
             "project": hin_graph_spec.get("project", "aero_forge_project"),
