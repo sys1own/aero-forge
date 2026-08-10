@@ -418,6 +418,40 @@ class Orchestrator:
                 self.use_llm = False
         self._cargo_target = Path.home() / ".cache" / "aero-forge" / "target"
 
+    @staticmethod
+    def _resolve_canonical_architecture(blueprint) -> str:
+        """Return the canonical architecture name for *blueprint*'s language set.
+
+        This ensures the ``architecture`` field in ``blueprint.aero`` matches
+        the polyglot target (e.g. ``tri_polyglot_rust_cpp_python``) instead of
+        staying stale after a language transition.
+        """
+        languages = {
+            (getattr(e, "lang", None) or "").lower()
+            for e in getattr(blueprint, "manifest", []) or []
+        } | {
+            (getattr(c, "language", None) or "").lower()
+            for c in getattr(blueprint, "contracts", []) or []
+        }
+        languages -= {"", "toml", "yaml", "json", "bash"}
+        canonical = {
+            frozenset({"python"}): "pure_python",
+            frozenset({"rust"}): "pure_rust",
+            frozenset({"python", "rust"}): "hybrid_rust_python",
+            frozenset({"python", "cpp"}): "hybrid_cpp_python",
+            frozenset({"python", "c++"}): "hybrid_cpp_python",
+            frozenset({"rust", "cpp"}): "hybrid_cpp_rust",
+            frozenset({"rust", "c++"}): "hybrid_cpp_rust",
+            frozenset({"python", "rust", "cpp"}): "tri_polyglot_rust_cpp_python",
+            frozenset({"python", "rust", "c++"}): "tri_polyglot_rust_cpp_python",
+        }
+        inferred = canonical.get(frozenset(languages), "graph_polyglot")
+        current = getattr(blueprint, "architecture", "") or ""
+        known = set(canonical.values()) | {"graph_polyglot"}
+        if current in known and current == inferred:
+            return current
+        return inferred
+
     def hard_reset(self) -> Dict[str, Any]:
         """Purge all persisted state for this workspace.
 
@@ -750,6 +784,11 @@ class Orchestrator:
                 "Enrichment Failure: build is blocked until the synchronous v11 "
                 "enrichment pass completes and llm_initialized is true."
             )
+
+        # Harden architecture state transitions: the blueprint architecture must
+        # reflect the canonical polyglot target for its language set before the
+        # BuildRunner materializes files.
+        blueprint.architecture = self._resolve_canonical_architecture(blueprint)
 
         from aero_forge.build_runner import BuildRunner
 

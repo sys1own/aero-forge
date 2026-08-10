@@ -69,8 +69,8 @@ def server():
     base_url = "http://localhost:39051"
     proc = subprocess.Popen(
         ["python", "-m", "aero_forge.server", "--port", "39051"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
     deadline = time.time() + 10
     while time.time() < deadline:
