@@ -86,8 +86,55 @@ def main() -> None:
     print(smith_waterman(seq1, seq2))
 
 
-if __name__ == "__main__":
+# Deliberately malformed entrypoint idiom; the Boilerplate Normalizer must heal it.
+if __name__.eq == '__main__':
     main()
+'''
+
+
+_TESTS_SOURCE = '''\
+import sys
+from genomics.aligner import smith_waterman, blosum62
+
+
+def test_blosum62_match():
+    assert blosum62["A"]["A"] == 2
+
+
+def test_blosum62_mismatch():
+    assert blosum62["A"]["C"] == -1
+
+
+def test_blosum62_keys():
+    assert set(blosum62.keys()) == {"A", "C", "G", "T"}
+
+
+def test_blosum62_symmetric():
+    assert blosum62["A"]["G"] == blosum62["G"]["A"]
+
+
+def test_blosum62_is_dict():
+    assert isinstance(blosum62, dict)
+
+
+def test_smith_waterman_identical():
+    assert smith_waterman("AAA", "AAA") == 6
+
+
+def test_smith_waterman_mismatch():
+    assert smith_waterman("ACGT", "TGCA") >= 0
+
+
+def test_smith_waterman_empty():
+    assert smith_waterman("", "") == 0
+
+
+def test_smith_waterman_one_empty():
+    assert smith_waterman("ACGT", "") == 0
+
+
+def test_smith_waterman_local():
+    assert smith_waterman("ACGT", "AGCT") >= 2
 '''
 
 
@@ -137,6 +184,10 @@ class _MockLLM:
                 skeleton = payload.get("skeleton", content)
             except json.JSONDecodeError:
                 pass
+        first_def = re.search(r"def\s+(\w+)\s*\(", skeleton)
+        first_def_name = first_def.group(1) if first_def else ""
+        if first_def_name == "tests" or "test_" in skeleton:
+            return _source_response(_TESTS_SOURCE, "tests/test_aligner.py")
         if "def smith_waterman" in skeleton or "blosum62" in skeleton:
             return _source_response(_ALIGNER_SOURCE, "genomics/aligner.py")
         return _source_response(_MAIN_SOURCE, "main.py")
@@ -168,9 +219,15 @@ def main() -> int:
 
         aligner_py = workspace / "genomics" / "aligner.py"
         main_py = workspace / "main.py"
+        tests_py = workspace / "tests" / "test_aligner.py"
         blueprint = workspace / "blueprint.aero"
 
-        for path in (aligner_py, main_py, blueprint):
+        # Write a high-density test suite after materialization to verify the
+        # generated symbols (5 tests per contracted symbol, 2 symbols).
+        tests_py.parent.mkdir(parents=True, exist_ok=True)
+        tests_py.write_text(_TESTS_SOURCE)
+
+        for path in (aligner_py, main_py, tests_py, blueprint):
             if not path.exists():
                 print(f"FAIL: {path.relative_to(workspace)} was not materialized")
                 return 1
@@ -193,6 +250,17 @@ def main() -> int:
             print("FAIL: smith_waterman alignment logic missing from genomics/aligner.py")
             return 1
 
+        main_source = main_py.read_text()
+        if "__name__ == '__main__'" not in main_source and '__name__ == "__main__"' not in main_source:
+            print("FAIL: main.py was not healed to the canonical entrypoint idiom")
+            print("--- emitted main.py ---")
+            print(main_source)
+            print("--- end main.py ---")
+            return 1
+        if "__name__.eq" in main_source:
+            print("FAIL: main.py still contains the malformed __name__.eq attribute")
+            return 1
+
         log = log_path.read_text() if log_path.exists() else ""
         print("--- accelerator log ---")
         print(log)
@@ -205,6 +273,8 @@ def main() -> int:
             "HIN Node Saturation Verified: blosum62",
             "Atomic Symbol Assembly verified for genomics",
             "Contract Integrity Verified",
+            "Attribute Verification Passed for main.py",
+            "Attribute Verification Passed for genomics/aligner.py",
         ):
             if expected not in log:
                 print(f"FAIL: accelerator log missing '{expected}'")
@@ -240,9 +310,29 @@ def main() -> int:
             print(f"FAIL: expected a positive alignment score, got {score}")
             return 1
 
+        # Run the generated unit tests; there should be at least 5 per symbol.
+        pytest_result = subprocess.run(
+            [sys.executable, "-m", "pytest", "tests/", "-q"],
+            cwd=str(workspace),
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        print("--- pytest stdout ---")
+        print(pytest_result.stdout)
+        print("--- pytest stderr ---")
+        print(pytest_result.stderr)
+        if pytest_result.returncode != 0:
+            print("FAIL: generated unit tests failed")
+            return 1
+        test_count_match = re.search(r"(\d+) passed", pytest_result.stdout)
+        if not test_count_match or int(test_count_match.group(1)) < 10:
+            print(f"FAIL: expected at least 10 unit tests (5 per symbol), got {test_count_match.group(1) if test_count_match else 'unknown'}")
+            return 1
+
         print(
             f"PASS: Genomics Prompt 1 materialized with blosum62 and smith_waterman "
-            f"(blueprint={blueprint_size} bytes, score={score})."
+            f"(blueprint={blueprint_size} bytes, score={score}, tests={test_count_match.group(1)})."
         )
         return 0
 

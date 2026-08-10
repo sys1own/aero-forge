@@ -5,17 +5,261 @@ from __future__ import annotations
 import ast
 import copy
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
+from aero_forge.builder.language_router import _accel_log
 from aero_forge.precision_shield.smt_solver import SMTASTEngine
 
-__all__ = ["SMTASTEngine", "SkeletonTypeInjector", "AttributeResolver", "SMTSaturationError"]
+__all__ = ["SMTASTEngine", "SkeletonTypeInjector", "AttributeResolver", "SMTSaturationError", "BuiltinAttributeGate"]
 
 
 class SMTSaturationError(RuntimeError):
     """Raised when the SMT solver returns UNSAT or an empty model for a function body."""
 
     pass
+
+
+class BuiltinAttributeGate:
+    """Static gate that validates attribute access on built-in Python types.
+
+    The gate mirrors the SMT solver's role for attribute holes: any attribute
+    accessed on ``str``, ``int``, ``list``, or ``dict`` that is not part of the
+    Python 3.10+ standard runtime is rejected as if the SMT query were UNSAT.
+    """
+
+    _BUILTIN_ATTRS: Dict[str, Set[str]] = {
+        "str": {
+            "capitalize",
+            "casefold",
+            "center",
+            "count",
+            "encode",
+            "endswith",
+            "expandtabs",
+            "find",
+            "format",
+            "format_map",
+            "index",
+            "isalnum",
+            "isalpha",
+            "isascii",
+            "isdecimal",
+            "isdigit",
+            "isidentifier",
+            "islower",
+            "isnumeric",
+            "isprintable",
+            "isspace",
+            "istitle",
+            "isupper",
+            "join",
+            "ljust",
+            "lower",
+            "lstrip",
+            "maketrans",
+            "partition",
+            "removeprefix",
+            "removesuffix",
+            "replace",
+            "rfind",
+            "rindex",
+            "rjust",
+            "rpartition",
+            "rsplit",
+            "rstrip",
+            "split",
+            "splitlines",
+            "startswith",
+            "strip",
+            "swapcase",
+            "title",
+            "translate",
+            "upper",
+            "zfill",
+            "__add__",
+            "__contains__",
+            "__eq__",
+            "__ge__",
+            "__getitem__",
+            "__gt__",
+            "__hash__",
+            "__iter__",
+            "__le__",
+            "__len__",
+            "__lt__",
+            "__ne__",
+            "__repr__",
+            "__str__",
+        },
+        "int": {
+            "bit_length",
+            "bit_count",
+            "to_bytes",
+            "from_bytes",
+            "as_integer_ratio",
+            "is_integer",
+            "__abs__",
+            "__add__",
+            "__and__",
+            "__bool__",
+            "__ceil__",
+            "__divmod__",
+            "__eq__",
+            "__float__",
+            "__floor__",
+            "__floordiv__",
+            "__ge__",
+            "__gt__",
+            "__index__",
+            "__int__",
+            "__invert__",
+            "__le__",
+            "__lshift__",
+            "__lt__",
+            "__mod__",
+            "__mul__",
+            "__ne__",
+            "__neg__",
+            "__or__",
+            "__pos__",
+            "__pow__",
+            "__rshift__",
+            "__sub__",
+            "__truediv__",
+            "__xor__",
+        },
+        "list": {
+            "append",
+            "clear",
+            "copy",
+            "count",
+            "extend",
+            "index",
+            "insert",
+            "pop",
+            "remove",
+            "reverse",
+            "sort",
+            "__add__",
+            "__contains__",
+            "__delitem__",
+            "__eq__",
+            "__ge__",
+            "__getitem__",
+            "__gt__",
+            "__iadd__",
+            "__imul__",
+            "__iter__",
+            "__le__",
+            "__len__",
+            "__lt__",
+            "__mul__",
+            "__ne__",
+            "__repr__",
+            "__reversed__",
+            "__setitem__",
+            "__str__",
+        },
+        "dict": {
+            "clear",
+            "copy",
+            "fromkeys",
+            "get",
+            "items",
+            "keys",
+            "pop",
+            "popitem",
+            "setdefault",
+            "update",
+            "values",
+            "__contains__",
+            "__delitem__",
+            "__eq__",
+            "__ge__",
+            "__getitem__",
+            "__gt__",
+            "__iter__",
+            "__le__",
+            "__len__",
+            "__lt__",
+            "__ne__",
+            "__repr__",
+            "__setitem__",
+            "__str__",
+        },
+    }
+
+    _BUILTIN_NAMES = {
+        "__name__": "str",
+    }
+
+    @classmethod
+    def _receiver_type(
+        cls,
+        value: ast.expr,
+        type_env: Optional[Dict[str, str]] = None,
+    ) -> Optional[str]:
+        """Best-effort type of an attribute access receiver."""
+        if isinstance(value, ast.Constant):
+            if isinstance(value.value, str):
+                return "str"
+            if isinstance(value.value, int):
+                return "int"
+            if isinstance(value.value, list):
+                return "list"
+            if isinstance(value.value, dict):
+                return "dict"
+            return None
+        if isinstance(value, ast.Name):
+            name = value.id
+            if name in cls._BUILTIN_NAMES:
+                return cls._BUILTIN_NAMES[name]
+            if type_env and name in type_env:
+                t = type_env[name]
+                mapping = {
+                    "string": "str",
+                    "i64": "int",
+                    "vec_i64": "list",
+                    "map": "dict",
+                    "dict": "dict",
+                    "list": "list",
+                    "set": "set",
+                }
+                return mapping.get(t, None)
+        if isinstance(value, ast.List):
+            return "list"
+        if isinstance(value, ast.Dict):
+            return "dict"
+        return None
+
+    @classmethod
+    def verify(
+        cls,
+        source: str,
+        type_env: Optional[Dict[str, str]] = None,
+        artifact_path: Optional[str] = None,
+    ) -> None:
+        """Raise SMTSaturationError if any built-in attribute is invalid."""
+        if not source or not source.strip():
+            return
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return
+        label = artifact_path or "<module>"
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Attribute):
+                continue
+            recv_type = cls._receiver_type(node.value, type_env=type_env)
+            if not recv_type:
+                continue
+            allowed = cls._BUILTIN_ATTRS.get(recv_type, set())
+            if node.attr in allowed:
+                continue
+            raise SMTSaturationError(
+                f"Attribute Verification Failed for {label}: "
+                f"'{recv_type}' object has no attribute '{node.attr}'"
+            )
 
 
 class SkeletonTypeInjector:
@@ -170,11 +414,47 @@ class SkeletonTypeInjector:
         return env
 
     @classmethod
+    def _verify_and_heal_attributes(
+        cls,
+        source: str,
+        function_name: Optional[str] = None,
+        artifact_path: Optional[str] = None,
+    ) -> str:
+        """Run the built-in attribute gate and apply deterministic boilerplate healing.
+
+        If the gate rejects an attribute (e.g. ``__name__.eq``) the
+        EntrypointBoilerplateNormalizer attempts to rewrite the malformed
+        entrypoint idiom before the SMT solver is invoked.
+        """
+        label = artifact_path or function_name or "<module>"
+        try:
+            BuiltinAttributeGate.verify(source, artifact_path=label)
+        except SMTSaturationError as exc:
+            try:
+                # Lazy import avoids a circular dependency with emitters/base.py.
+                from aero_forge.builder.emitters.base import EntrypointBoilerplateNormalizer
+
+                healed = EntrypointBoilerplateNormalizer.normalize(source)
+            except Exception:
+                raise exc
+            if healed == source:
+                raise exc
+            try:
+                BuiltinAttributeGate.verify(healed, artifact_path=label)
+            except SMTSaturationError:
+                raise exc
+            _accel_log("info", f"Attribute Verification Healed for {label}")
+            return healed
+        _accel_log("info", f"Attribute Verification Passed for {label}")
+        return source
+
+    @classmethod
     def saturate(
         cls,
         source: str,
         function_name: Optional[str] = None,
         target_language: str = "rust",
+        artifact_path: Optional[str] = None,
     ) -> Dict[str, str]:
         """Infer and verify non-null SMT type assignments for every variable.
 
@@ -186,6 +466,12 @@ class SkeletonTypeInjector:
         """
         if not source or not source.strip():
             raise SMTSaturationError("Cannot saturate an empty logic sketch.")
+
+        source = cls._verify_and_heal_attributes(
+            source,
+            function_name=function_name,
+            artifact_path=artifact_path,
+        )
 
         try:
             env = SMTASTEngine().infer_native_types(
@@ -312,10 +598,48 @@ class AttributeResolver:
                 if self._should_rewrite_attr(node.get("value")):
                     node["attr"] = self._NUMERIC_ATTR_ALIASES[node["attr"]]
 
+        # Heal malformed entry-point boilerplate such as ``if __name__.eq == '__main__':``.
+        if kind in ("compare", "Compare"):
+            left = node.get("left") or node.get("operands", [None])[0]
+            ops = node.get("ops") or node.get("op")
+            comparators = node.get("comparators") or node.get("operands", [None, None])[1:]
+            if (
+                left
+                and isinstance(ops, list)
+                and len(ops) == 1
+                and self._is_eq_op(ops[0])
+                and comparators
+                and self._is_str_literal(comparators[0], "__main__")
+                and self._is_name_attr(left, "__name__", {"eq", "equals", "equal"})
+            ):
+                node["left"] = {"type": "Name", "id": "__name__", "ctx": {"type": "Load"}}
+
         for key, value in list(node.items()):
             if isinstance(value, (dict, list)):
                 node[key] = self._resolve(value)
         return node
+
+    def _is_eq_op(self, node: Any) -> bool:
+        if not isinstance(node, dict):
+            return False
+        return node.get("type") in ("Eq", "eq", "==")
+
+    def _is_str_literal(self, node: Any, value: str) -> bool:
+        if not isinstance(node, dict):
+            return False
+        return (
+            node.get("type") in ("constant", "Constant", "literal", "Literal")
+            and node.get("value") == value
+        )
+
+    def _is_name_attr(self, node: Any, name: str, attrs: Set[str]) -> bool:
+        if not isinstance(node, dict):
+            return False
+        return (
+            node.get("type") in ("attribute", "Attribute")
+            and self._is_name(node.get("value"), name)
+            and node.get("attr") in attrs
+        )
 
     def _is_name(self, node: Any, name: str) -> bool:
         if not isinstance(node, dict):

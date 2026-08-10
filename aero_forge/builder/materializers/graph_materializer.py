@@ -48,6 +48,7 @@ from aero_forge.builder.emitters.base import (
     ContextExhaustionError,
     ContractIntegrityValidator,
     EmitterRegistry,
+    EntrypointBoilerplateNormalizer,
     FocusedIntentRecovery,
     PolyglotEmitterPlugin,
     SLIIntentValidator,
@@ -710,6 +711,7 @@ else:
             # First pass: emit source with the default resolver to obtain a
             # concrete Python sketch that the SMT engine can analyze.
             raw_source = uast_to_python_source(data)
+            raw_source = EntrypointBoilerplateNormalizer.normalize(raw_source)
             func_names = [
                 node.name
                 for node in ast.walk(ast.parse(raw_source))
@@ -717,7 +719,10 @@ else:
             ]
             for name in func_names or [None]:
                 SkeletonTypeInjector.saturate(
-                    raw_source, name, target_language="python"
+                    raw_source,
+                    name,
+                    target_language="python",
+                    artifact_path=artifact.file_path,
                 )
 
             # Second pass: build an SMT-informed attribute resolver and emit the
@@ -735,6 +740,7 @@ else:
                 type_env.update(env)
             resolver = AttributeResolver(type_env=type_env)
             source = uast_to_python_source(data, attribute_resolver=resolver.resolve)
+            source = EntrypointBoilerplateNormalizer.normalize(source)
             _accel_log(
                 "info",
                 f"UAST-to-Python emission succeeded for {artifact.file_path or '<unknown>'}",

@@ -217,18 +217,10 @@ def _lower_expr(expr: Optional[ast.expr]) -> Optional[dict]:
         }
     if isinstance(expr, ast.Compare) and len(expr.ops) == 1:
         return {
-            "type": "call",
-            "function": {
-                "type": "reference",
-                "name": f"__compare__{_cmp_op_name(expr.ops[0])}",
-            },
-            "argument": {
-                "type": "literal",
-                "value": [
-                    _lower_expr(expr.left),
-                    _lower_expr(expr.comparators[0]),
-                ],
-            },
+            "type": "compare",
+            "op": _cmp_op_name(expr.ops[0]),
+            "left": _lower_expr(expr.left),
+            "right": _lower_expr(expr.comparators[0]),
         }
     if isinstance(expr, ast.BoolOp):
         op_name = "and" if isinstance(expr.op, ast.And) else "or"

@@ -344,6 +344,7 @@ impl HinEngine {
             "call" | "application" | "apply" | "call_expression" | "user_function_call" => {
                 self.build_call(node)
             }
+            "compare" | "comparison" => self.build_compare(node),
             "attribute" | "attr" => self.build_attribute(node),
             _ => Ok(None),
         }
@@ -545,6 +546,46 @@ impl HinEngine {
         }
 
         Ok(Some(dtor_a2))
+    }
+
+    fn build_compare(&mut self, node: &Value) -> Result<Option<usize>, String> {
+        // Comparison operators are wired to the Value agents of their operands
+        // through a binary Constructor whose principal can reduce with the
+        // surrounding context (e.g. a Switch in an ``if`` test) instead of being
+        // treated as an attribute call like ``__name__.eq``.
+        let op = node.get("op").and_then(|v| v.as_str()).unwrap_or("==");
+        let ctor = self.add_node(
+            NodeKind::Constructor,
+            2,
+            Some(NodeValue::String(op.to_string())),
+        );
+        let ctor_p = self.node_principal(ctor);
+        let ctor_a1 = self.node_aux(ctor, 0);
+        let ctor_a2 = self.node_aux(ctor, 1);
+
+        let left_port = if let Some(left) = node.get("left") {
+            self.build(left)?
+        } else {
+            None
+        };
+        if let Some(p) = left_port {
+            self.connect(p, ctor_a1);
+        } else {
+            self.terminate(ctor_a1);
+        }
+
+        let right_port = if let Some(right) = node.get("right") {
+            self.build(right)?
+        } else {
+            None
+        };
+        if let Some(p) = right_port {
+            self.connect(p, ctor_a2);
+        } else {
+            self.terminate(ctor_a2);
+        }
+
+        Ok(Some(ctor_p))
     }
 
     fn build_if(&mut self, node: &Value) -> Result<Option<usize>, String> {
