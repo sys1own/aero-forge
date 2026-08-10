@@ -348,6 +348,18 @@ class ContentDensityValidator:
         return True
 
     @classmethod
+    def _symbol_is_pass_docstring_only(cls, content: str, symbol_name: str) -> bool:
+        """Return True when *symbol_name* is a Python function with only pass/docstring."""
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == symbol_name:
+                return cls._function_is_hollow(node)
+        return False
+
+    @classmethod
     def has_execution_flow(cls, content: str, language: str) -> bool:
         """Return True when *content* has a non-zero GoI execution matrix.
 
@@ -1149,6 +1161,19 @@ class AtomicSymbolAssembly:
             ):
                 hollow.append(sym)
         if hollow:
+            logic_density_failures = [
+                sym
+                for sym in hollow
+                if ContentDensityValidator._symbol_is_pass_docstring_only(
+                    combined, sym
+                )
+            ]
+            if logic_density_failures:
+                raise AtomicSymbolAssemblyError(
+                    f"Logic Density Failure: function(s) {logic_density_failures} "
+                    "contain only a pass statement or docstring",
+                    symbols=logic_density_failures,
+                )
             raise AtomicSymbolAssemblyError(
                 f"Zero execution matrix for symbols: {hollow}",
                 symbols=hollow,

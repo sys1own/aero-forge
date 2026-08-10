@@ -813,12 +813,16 @@ class IntentCompiler:
                     suffix += 1
                 node_id = f"{base}_{suffix}"
             node_ids.add(node_id)
+            extra: Dict[str, Any] = {"purpose": node.get("purpose", "")}
+            for key in ("data_payload", "payload_kind", "logic_sketch"):
+                if key in node:
+                    extra[key] = node[key]
             nodes.append(
                 PolyglotNodeSpec(
                     node_id=node_id,
                     lang=node.get("lang") or node.get("language") or "python",
                     source_files=[node.get("path", "")],
-                    extra={"purpose": node.get("purpose", "")},
+                    extra=extra,
                 )
             )
 
