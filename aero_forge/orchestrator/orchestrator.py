@@ -31,6 +31,7 @@ from aero_forge.blueprint import (
     FunctionSpec,
     LLMConfig,
     ManifestEntry,
+    is_blueprint_ready,
     write_blueprint,
 )
 from aero_forge.builder import build_engine, spec_from_python
@@ -639,10 +640,14 @@ class Orchestrator:
 
     @staticmethod
     def _is_enriched(metadata: Dict[str, Any]) -> bool:
-        """Return True unless ``llm_initialized`` is explicitly set to false."""
+        """Return True only when ``llm_initialized`` is explicitly true.
+
+        A missing ``llm_initialized`` key is treated as not enriched so the
+        synchronous v11 enrichment gate cannot be bypassed by a default blueprint.
+        """
         value = metadata.get("llm_initialized")
         if value is None:
-            return True
+            return False
         if isinstance(value, bool):
             return value
         return str(value).strip().lower() in ("true", "1", "yes")
@@ -674,8 +679,8 @@ class Orchestrator:
         prompt = blueprint.prompt or metadata.get("prompt", "")
         if not prompt or self.llm_client is None:
             raise ForgeError(
-                "Blueprint Not Enriched: llm_initialized is false and no prompt/LLM "
-                "is available to run intent enrichment."
+                "Enrichment Failure: llm_initialized is false and no prompt/LLM "
+                "is available to run a synchronous v11 enrichment pass."
             )
         try:
             _accel_log("info", "Enriching Blueprint (synchronous v11 pass)...")
@@ -696,7 +701,7 @@ class Orchestrator:
             return enriched
         except Exception as exc:
             raise ForgeError(
-                f"Blueprint Not Enriched: v11 enrichment pass failed: {exc}"
+                f"Enrichment Failure: synchronous v11 enrichment pass failed: {exc}"
             ) from exc
 
     def _ensure_blueprint_enriched(self, blueprint: Blueprint) -> Blueprint:
@@ -727,6 +732,12 @@ class Orchestrator:
                 ],
                 output_dir=self.output_dir,
                 llm=LLMConfig(provider="none"),
+                metadata={
+                    "schema_version": "2.0.0",
+                    "llm_initialized": "true",
+                    "status": "finalized",
+                    "generation_method": "manual",
+                },
             )
 
         # Synchronous enrichment gate: the ProjectBuilder/BuildRunner must not
@@ -734,7 +745,7 @@ class Orchestrator:
         blueprint = self.enrich_blueprint(blueprint)
         if not self._is_enriched(blueprint.metadata):
             raise ForgeError(
-                "Blueprint Not Enriched: build is blocked until the v11 "
+                "Enrichment Failure: build is blocked until the synchronous v11 "
                 "enrichment pass completes and llm_initialized is true."
             )
 
@@ -1596,6 +1607,7 @@ def plan_workspace(
     max_tokens: Optional[int] = None,
     config_override: Optional[ConfigOverride] = None,
     architecture: Optional[str] = None,
+    require_enrichment: bool = False,
 ) -> Blueprint:
     """Pass 1: plan the workspace and emit ``blueprint.aero``.
 
@@ -1604,8 +1616,18 @@ def plan_workspace(
     If the LLM returns a blueprint that conflicts with the detected user intent,
     the planner re-prompts with an explicit correction before falling back to a
     deterministic blueprint.
+
+    When *require_enrichment* is True, the planner refuses to emit a deterministic
+    fallback blueprint and raises :class:`UserError` with an ``Enrichment Failure``
+    diagnostic if the LLM cannot produce a finalized blueprint.
     """
     llm_provider = resolve_llm_provider(llm_provider)
+
+    if require_enrichment and not llm_provider:
+        raise UserError(
+            "Enrichment Failure: no LLM provider is configured and "
+            "require_enrichment=True prohibits a deterministic fallback."
+        )
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1644,6 +1666,10 @@ def plan_workspace(
         except UserError:
             raise
         except Exception as exc:
+            if require_enrichment:
+                raise UserError(
+                    f"Enrichment Failure: IntentCompiler could not enrich blueprint: {exc}"
+                ) from exc
             logger.warning(
                 "IntentCompiler failed, falling back to YAML planner: %s", exc
             )
@@ -1670,6 +1696,10 @@ def plan_workspace(
                 # not silently converted to a deterministic fallback.
                 raise
             except Exception as exc:
+                if require_enrichment:
+                    raise UserError(
+                        f"Enrichment Failure: LLM planning call failed: {exc}"
+                    ) from exc
                 logger.warning(
                     "LLM planning failed, using deterministic fallback: %s", exc
                 )
@@ -1677,6 +1707,10 @@ def plan_workspace(
 
             if blueprint is None:
                 # Parse failure; stop retrying and let the deterministic fallback run.
+                if require_enrichment:
+                    raise UserError(
+                        "Enrichment Failure: LLM response could not be parsed into a valid blueprint."
+                    )
                 break
 
             mismatch = _validate_blueprint_against_intent(prompt, blueprint)
@@ -1689,6 +1723,10 @@ def plan_workspace(
             correction_context = mismatch
             blueprint = None
         else:
+            if require_enrichment:
+                raise UserError(
+                    "Enrichment Failure: blueprint intent correction exhausted without a valid blueprint."
+                )
             logger.warning(
                 "Blueprint intent correction exhausted; using deterministic fallback."
             )
@@ -1715,6 +1753,10 @@ def plan_workspace(
     has_python = "python" in prompt_lower or "python" in classification.languages
     is_hybrid_cpp_rust = is_cpp and is_rust and not has_python
     if blueprint is None:
+        if require_enrichment:
+            raise UserError(
+                "Enrichment Failure: could not produce a finalized blueprint from the LLM."
+            )
         chosen_intent = (
             BUILD_INTENT_HYBRID_CPP_RUST
             if is_hybrid_cpp_rust
@@ -1797,6 +1839,11 @@ def plan_workspace(
                     )
                 ],
             }
+        )
+
+    if require_enrichment and not is_blueprint_ready(blueprint.model_dump(mode="json")):
+        raise UserError(
+            "Enrichment Failure: the finalized blueprint is not ready for materialization."
         )
 
     blueprint_path = output_dir / "blueprint.aero"
