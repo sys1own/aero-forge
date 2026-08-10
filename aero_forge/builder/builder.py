@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -382,6 +383,15 @@ class ProactivePolyglotBuilder:
                 "Blueprint Not Enriched: compile_prompt_to_graph did not produce an "
                 "llm_initialized blueprint. Run a successful Intent Enrichment pass first."
             )
+
+        # Persist the enriched graph blueprint before any source files are created
+        # so the workspace always reflects a finalized state during materialization.
+        (output_dir / "blueprint.aero").write_text(
+            yaml.safe_dump(
+                graph.model_dump(mode="json"), sort_keys=False, default_flow_style=False
+            ),
+            encoding="utf-8",
+        )
 
         # Build a compacted functional matrix so downstream synthesis is concise
         # and deterministic. The context is attached to the graph metadata so the

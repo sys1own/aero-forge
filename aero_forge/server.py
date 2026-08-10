@@ -68,7 +68,10 @@ from aero_forge.context_bundler import get_blueprint_status
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
 from aero_forge import runner as sandbox_runner
-from aero_forge.orchestrator.orchestrator import purge_workspace_state
+from aero_forge.orchestrator.orchestrator import (
+    plan_workspace,
+    purge_workspace_state,
+)
 from aero_forge.healing.evaluator import LogEvaluator
 from aero_forge.healing.healer import DeterministicHealer
 from aero_forge.healing.llm_healer import run_command
@@ -97,6 +100,7 @@ from aero_forge.ingestion.zip_parser import extract_zip_safely, generate_draft_v
 from aero_forge.scaffold.module_guard import reify_missing_modules
 from aero_forge.sandbox.manager import SandboxManager
 from aero_forge.blueprint import (
+    Blueprint,
     BlueprintV3,
     BlueprintV3Validator,
     LLMBlueprintSynthesizer,
@@ -320,28 +324,40 @@ async def _handle_build_async(request: web.Request) -> web.Response:
         max_retries=3,
     )
 
-    # Guard against fire-and-forget builds on a draft blueprint in the async path.
+    classification = _classification_for_target(classify_stack(prompt), target_language)
+    is_hybrid = classification.architecture in (
+        INTENT_HYBRID_RUST_PYTHON,
+        INTENT_HYBRID_CPP_PYTHON,
+        INTENT_HYBRID_CPP_RUST,
+        INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON,
+    )
+
+    # Synchronous enrichment gate: do not allow the build to touch disk from a
+    # draft blueprint. Hybrid workflows are enriched into a v2 Blueprint here and
+    # then passed to build_universal_project so it does not re-plan.
     enrichment_status = _require_enriched_blueprint(output_dir)
-    if enrichment_status:
-        if body.get("force_enrich"):
-            try:
-                draft = BlueprintV3.load(output_dir / "blueprint.aero")
-                synthesizer = LLMBlueprintSynthesizer(
-                    provider=config.llm_provider,
-                    model=config.model,
-                    api_key=config.api_key,
-                )
-                finalized = synthesizer.synthesize(
-                    output_dir,
-                    draft=draft,
-                    output_path=output_dir / "blueprint.aero",
-                )
-                write_v3_blueprint(finalized, output_dir / "blueprint.aero")
-            except Exception as exc:
-                logger.warning("Auto-enrichment failed for %s: %s", output_dir, exc)
-                return web.json_response(enrichment_status, status=202)
-        else:
-            return web.json_response(enrichment_status, status=202)
+    blueprint: Optional[Blueprint] = None
+    if (enrichment_status or body.get("force_enrich")) and is_hybrid:
+        try:
+            blueprint = await asyncio.to_thread(
+                _synchronously_enrich_workspace,
+                output_dir,
+                prompt,
+                config,
+                project_name="generated",
+                architecture=architecture or classification.architecture,
+                max_retries=3,
+            )
+        except Exception as exc:
+            logger.exception("Synchronous enrichment failed for %s", output_dir)
+            return web.json_response(
+                _build_web_response(
+                    session_id,
+                    session_dir,
+                    {"build": {"success": False, "error": f"Enrichment Failure: {exc}"}},
+                ),
+                headers=_CORS_HEADERS,
+            )
 
     loop = asyncio.get_running_loop()
     last_phase = {"phase": "code_generation"}
@@ -361,13 +377,7 @@ async def _handle_build_async(request: web.Request) -> web.Response:
 
     heartbeat_task: asyncio.Task = asyncio.create_task(heartbeat())
     try:
-        classification = _classification_for_target(classify_stack(prompt), target_language)
-        if classification.architecture in (
-            INTENT_HYBRID_RUST_PYTHON,
-            INTENT_HYBRID_CPP_PYTHON,
-            INTENT_HYBRID_CPP_RUST,
-            INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON,
-        ):
+        if is_hybrid:
             universal_result = await asyncio.to_thread(
                 build_universal_project,
                 prompt,
@@ -386,6 +396,8 @@ async def _handle_build_async(request: web.Request) -> web.Response:
                 precision_shield_mode=precision_shield_mode,
                 hin_jit_opt_level=hin_jit_opt_level,
                 workspace_path=output_dir,
+                blueprint=blueprint,
+                require_enrichment=True,
             )
             result: Dict[str, Any] = {
                 "build": universal_result,
@@ -468,6 +480,34 @@ def _require_enriched_blueprint(workspace: Path) -> Optional[Dict[str, Any]]:
             ),
         }
     return None
+
+
+def _synchronously_enrich_workspace(
+    output_dir: Path,
+    prompt: str,
+    config: ConfigOverride,
+    *,
+    project_name: str = "generated",
+    architecture: Optional[str] = None,
+    max_retries: int = 3,
+) -> Blueprint:
+    """Run a synchronous v11 enrichment pass and return a finalized Blueprint.
+
+    The existing ``blueprint.aero`` is overwritten. When the LLM cannot produce
+    a valid blueprint, :class:`UserError` is raised with an ``Enrichment Failure``
+    diagnostic instead of emitting a hollow draft.
+    """
+    return plan_workspace(
+        prompt,
+        output_dir,
+        project_name=project_name,
+        llm_provider=config.llm_provider,
+        model=config.model,
+        max_retries=max_retries,
+        config_override=config,
+        architecture=architecture,
+        require_enrichment=True,
+    )
 
 
 def _send_bytes(
@@ -994,36 +1034,42 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 max_retries=3,
             )
 
-            # Guard against fire-and-forget builds on a draft blueprint. If the
-            # workspace already contains a blueprint, it must be enriched first.
-            enrichment_status = _require_enriched_blueprint(output_dir)
-            if enrichment_status:
-                if body.get("force_enrich"):
-                    try:
-                        draft = BlueprintV3.load(output_dir / "blueprint.aero")
-                        synthesizer = LLMBlueprintSynthesizer(
-                            provider=config.llm_provider,
-                            model=config.model,
-                            api_key=config.api_key,
-                        )
-                        finalized = synthesizer.synthesize(
-                            output_dir,
-                            draft=draft,
-                            output_path=output_dir / "blueprint.aero",
-                        )
-                        write_v3_blueprint(finalized, output_dir / "blueprint.aero")
-                    except Exception as exc:
-                        logger.warning("Auto-enrichment failed for %s: %s", output_dir, exc)
-                        return _send_json(self, 202, enrichment_status)
-                else:
-                    return _send_json(self, 202, enrichment_status)
-
             classification = _classification_for_target(classify_stack(prompt), target_language)
-            if classification.architecture in (
+            is_hybrid = classification.architecture in (
                 INTENT_HYBRID_RUST_PYTHON,
                 INTENT_HYBRID_CPP_PYTHON,
                 INTENT_HYBRID_CPP_RUST,
-            ):
+                INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON,
+            )
+
+            # Synchronous enrichment gate: do not allow the build to touch disk
+            # from a draft blueprint. Hybrid workflows are enriched into a v2
+            # Blueprint; non-hybrid workflows enrich via the proactive graph builder.
+            enrichment_status = _require_enriched_blueprint(output_dir)
+            blueprint: Optional[Blueprint] = None
+            if (enrichment_status or body.get("force_enrich")) and is_hybrid:
+                try:
+                    blueprint = _synchronously_enrich_workspace(
+                        output_dir,
+                        prompt,
+                        config,
+                        project_name="generated",
+                        architecture=architecture or classification.architecture,
+                        max_retries=3,
+                    )
+                except Exception as exc:
+                    logger.exception("Synchronous enrichment failed for %s", output_dir)
+                    return _send_json(
+                        self,
+                        200,
+                        _build_web_response(
+                            session_id,
+                            session_dir,
+                            {"build": {"success": False, "error": f"Enrichment Failure: {exc}"}},
+                        ),
+                    )
+
+            if is_hybrid:
                 universal_result = build_universal_project(
                     prompt,
                     session_dir,
@@ -1040,6 +1086,8 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                     precision_shield_mode=precision_shield_mode,
                     hin_jit_opt_level=hin_jit_opt_level,
                     workspace_path=output_dir,
+                    blueprint=blueprint,
+                    require_enrichment=True,
                 )
                 result: Dict[str, Any] = {
                     "build": universal_result,

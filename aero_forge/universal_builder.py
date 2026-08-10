@@ -25,11 +25,12 @@ from aero_forge.blueprint import (
     Blueprint,
     ContractEntry,
     ManifestEntry,
+    is_blueprint_ready,
     parse_blueprint,
     write_blueprint,
 )
 from aero_forge.builder.aeroc_compiler import compile_directory_to_aeroc
-from aero_forge.errors import BuildStageError
+from aero_forge.errors import BuildStageError, UserError
 from aero_forge.builder.executor import ExecutionReport
 from aero_forge.config import ConfigOverride
 from aero_forge.generate import generate_and_build
@@ -670,6 +671,8 @@ def build_universal_project(
     precision_shield_mode: Optional[str] = None,
     hin_jit_opt_level: Optional[int] = None,
     workspace_path: Optional[Path | str] = None,
+    blueprint: Optional[Blueprint] = None,
+    require_enrichment: bool = False,
     **kwargs: Any,
 ) -> Dict[str, Any]:
     """Classify *prompt*, write ``blueprint.aero``, and build the workspace.
@@ -678,6 +681,10 @@ def build_universal_project(
     existing ``blueprint.aero`` are merged into the planned blueprint so the
     materializer has concrete functions to accelerate.
 
+    When *blueprint* is provided, Pass 1 (``plan_workspace``) is skipped and the
+    supplied blueprint is used directly.  *require_enrichment* blocks the build
+    when the LLM cannot produce a finalized blueprint.
+
     Returns a dictionary with ``success``, ``blueprint_path``, ``files``, and
     the underlying build result.
     """
@@ -685,9 +692,11 @@ def build_universal_project(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Seed the planner with contracts from an existing workspace blueprint.
+    # This is only needed when we run planning here; an externally supplied
+    # blueprint is assumed to already carry the authoritative contracts.
     existing_contracts: List[ContractEntry] = []
     existing_manifest: List[ManifestEntry] = []
-    if workspace_path:
+    if workspace_path and blueprint is None:
         existing_path = Path(workspace_path).resolve() / "blueprint.aero"
         if existing_path.is_file():
             try:
@@ -726,18 +735,25 @@ def build_universal_project(
         effective_constraints = (
             f"{effective_constraints}\n\n" + "\n".join(accel_parts)
         ).strip()
-    blueprint = plan_workspace(
-        prompt,
-        output_dir,
-        project_name=project_name,
-        constraints=effective_constraints or None,
-        llm_provider=llm_provider,
-        model=model,
-        max_retries=max_retries,
-        max_tokens=max_tokens,
-        config_override=config_override,
-        architecture=architecture,
-    )
+    if blueprint is None:
+        blueprint = plan_workspace(
+            prompt,
+            output_dir,
+            project_name=project_name,
+            constraints=effective_constraints or None,
+            llm_provider=llm_provider,
+            model=model,
+            max_retries=max_retries,
+            max_tokens=max_tokens,
+            config_override=config_override,
+            architecture=architecture,
+            require_enrichment=require_enrichment,
+        )
+
+    if require_enrichment and not is_blueprint_ready(blueprint.model_dump(mode="json")):
+        raise UserError(
+            "Enrichment Failure: the provided or planned blueprint is not ready for materialization."
+        )
 
     # If the planned blueprint has no concrete contracts/manifest but an
     # existing workspace blueprint does, merge them so the materializer has
