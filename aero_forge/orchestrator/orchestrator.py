@@ -1907,6 +1907,9 @@ class CompactedContextGenerator:
                 "Use concise algorithmic loops. Total file size must not exceed 8KB."
             )
 
+        context["pinned_symbols"] = self._compact_pinned_symbols(data)
+        self._validate_pinned_intents(context)
+
         return context
 
     def _compact_contracts(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -2030,11 +2033,14 @@ class CompactedContextGenerator:
                 else:
                     continue
             exports = node.get("exports") or []
+            source_files = node.get("source_files") or []
+            node_file = source_files[0] if source_files else ""
             for symbol in exports:
                 functions.append(
                     {
                         "name": symbol,
                         "node_id": node.get("node_id", ""),
+                        "file": node_file,
                         "lang": node.get("lang", ""),
                     }
                 )
@@ -2045,6 +2051,7 @@ class CompactedContextGenerator:
                     {
                         "name": node.get("node_id"),
                         "node_id": node.get("node_id", ""),
+                        "file": node_file,
                         "lang": node.get("lang", ""),
                     }
                 )
@@ -2114,11 +2121,69 @@ class CompactedContextGenerator:
                     "file": f.get("file", ""),
                     "node_id": f.get("node_id", ""),
                     "lang": f.get("lang", ""),
+                    "logic_sketch": f.get("logic_sketch") or f.get("uast") or f.get("steps"),
                 }
                 for f in functions
                 if f.get("name")
             ],
         }
 
+    def _compact_pinned_symbols(self, data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        """Pin every contracted symbol to a node_id and file path.
+
+        The pinned map is the authoritative bridge between declarative contracts
+        and physical manifest entries. Each symbol must resolve to a concrete
+        implementation location before materialization is allowed.
+        """
+        pinned: Dict[str, Dict[str, Any]] = {}
+
+        # Start from the implementation map (functions/manifest derived).
+        impl_map = self._compact_implementation_map(data)
+        for entry in impl_map.get("symbols", []):
+            name = entry.get("name")
+            if not name:
+                continue
+            pinned[name] = {
+                "node_id": entry.get("node_id", ""),
+                "file": entry.get("file", ""),
+                "lang": entry.get("lang", ""),
+            }
+
+        # Overlay explicit contract sources (graph edges / ABI contracts).
+        for contract in self._compact_contracts(data):
+            symbol = contract.get("symbol") or contract.get("name")
+            if not symbol:
+                continue
+            if symbol not in pinned:
+                pinned[symbol] = {}
+            if contract.get("source"):
+                pinned[symbol]["node_id"] = contract.get("source")
+            if contract.get("header_path"):
+                pinned[symbol]["file"] = contract.get("header_path")
+            if contract.get("language"):
+                pinned[symbol]["lang"] = contract.get("language")
+
+        return pinned
+
+    def _validate_pinned_intents(self, context: Dict[str, Any]) -> None:
+        """Ensure every pinned symbol has a node, file and a CFM logic sketch."""
+        pinned = context.get("pinned_symbols", {})
+        impl_map = context.get("full_implementation_map", {})
+        impl_symbols = {
+            e.get("name"): e
+            for e in impl_map.get("symbols", [])
+            if e.get("name")
+        }
+
+        for symbol, info in pinned.items():
+            if not info.get("node_id") or not info.get("file"):
+                raise ValueError(
+                    f"Pinned intent incomplete for symbol '{symbol}': "
+                    f"missing node_id or file ({info})"
+                )
+            if symbol not in impl_symbols:
+                raise ValueError(
+                    f"Pinned symbol '{symbol}' missing from Compacted Functional Matrix"
+                )
 
 __all__ = ["Orchestrator", "ForgeError", "plan_workspace", "CompactedContextGenerator"]

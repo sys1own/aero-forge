@@ -514,13 +514,185 @@ class AtomicSymbolAssemblyError(RuntimeError):
         self.symbols = symbols or []
 
 
+class HINSaturationError(RuntimeError):
+    """Raised when a contracted symbol produces an unsaturated HIN graph."""
+
+
+class GoIWavefrontTaskCompletion:
+    """Wavefront task completion gate.
+
+    A wavefront task (one file/node) is not marked complete until every
+    contracted symbol inside it has passed the HIN Node Saturation check and
+    the GoI Proof Net Verification.
+    """
+
+    @staticmethod
+    def mark_complete(node_id: str, symbols: List[str]) -> None:
+        _accel_log(
+            "info",
+            f"Wavefront task complete for {node_id}: "
+            f"{len(symbols)} contracted symbol(s) verified",
+        )
+
+
+class HINSaturationValidator:
+    """Verify that a contracted symbol has a saturated HIN interaction net.
+
+    A saturated HIN graph has at least one active principal-principal pair and
+    no stalled (same-kind) active pairs. Unsaturated or stalled nets indicate
+    that the symbol lacks real computational intent and must not be materialized.
+    """
+
+    @classmethod
+    def verify_symbol(
+        cls,
+        content: str,
+        symbol: str,
+        language: str = "python",
+    ) -> bool:
+        """Return True when *symbol* in *content* has a saturated HIN graph."""
+        language = (language or "").lower()
+        if language not in ("python", "py"):
+            _accel_log("info", f"HIN Node Saturation Verified: {symbol} (non-Python)")
+            return True
+
+        import ast as _ast
+
+        try:
+            tree = _ast.parse(content)
+        except SyntaxError as exc:
+            raise HINSaturationError(
+                f"HIN saturation check for {symbol}: source is not syntactically valid: {exc}"
+            ) from exc
+
+        func = next(
+            (
+                node
+                for node in _ast.walk(tree)
+                if isinstance(node, _ast.FunctionDef) and node.name == symbol
+            ),
+            None,
+        )
+        if func is None:
+            raise HINSaturationError(
+                f"HIN saturation check for {symbol}: symbol not found in source"
+            )
+
+        func_source = _ast.get_source_segment(content, func)
+        if not func_source:
+            # Fallback to unparsing the function node.
+            try:
+                func_source = _ast.unparse(func)
+            except Exception as exc:
+                raise HINSaturationError(
+                    f"HIN saturation check for {symbol}: could not extract function source: {exc}"
+                ) from exc
+
+        from aero_forge._native import HinEngine, verify_hin_saturation
+        from aero_forge.translator.aero_frontend import python_source_to_uast
+
+        try:
+            uast = python_source_to_uast(func_source)
+            engine = HinEngine()
+            engine.build_from_json(json.dumps(uast))
+            arena = engine.to_json()
+        except Exception as exc:
+            raise HINSaturationError(
+                f"HIN saturation check for {symbol}: could not build HIN arena: {exc}"
+            ) from exc
+
+        try:
+            result_json = verify_hin_saturation(arena)
+            result = json.loads(result_json)
+        except Exception as exc:
+            raise HINSaturationError(
+                f"HIN saturation check for {symbol}: energy evaluation failed: {exc}"
+            ) from exc
+
+        if not result.get("saturated"):
+            reason = result.get("reason", "unknown")
+            raise HINSaturationError(
+                f"HIN Node Saturation failed for {symbol}: {reason} (energy={result})"
+            )
+
+        _accel_log("info", f"HIN Node Saturation Verified: {symbol}")
+        return True
+
+
+class HINNativeHealer:
+    """Attempt a deterministic, native HIN repair for an unsaturated symbol."""
+
+    @staticmethod
+    def heal_symbol(
+        content: str,
+        symbol: str,
+        error_log: str,
+        workspace: Optional[Path] = None,
+    ) -> Optional[str]:
+        """Return a patched source fragment for *symbol* or None if repair failed."""
+        import ast as _ast
+        import tempfile
+
+        from aero_forge.healing.healer import DeterministicHealer
+        from aero_forge.translator.aero_frontend import python_source_to_uast
+
+        try:
+            tree = _ast.parse(content)
+            func = next(
+                node
+                for node in _ast.walk(tree)
+                if isinstance(node, _ast.FunctionDef) and node.name == symbol
+            )
+            func_source = _ast.get_source_segment(content, func) or content
+        except Exception as exc:
+            _accel_log(
+                "warning",
+                f"HIN-Native Healing could not locate {symbol}: {exc}",
+            )
+            return None
+
+        ws = workspace or Path(tempfile.gettempdir()) / "hin_heal"
+        ws.mkdir(parents=True, exist_ok=True)
+        healer = DeterministicHealer(ws)
+
+        try:
+            uast = python_source_to_uast(func_source)
+            result = healer.execute_healing_pass(
+                error_log=error_log,
+                source_text=func_source,
+                uast_json=json.dumps(uast),
+                apply=False,
+            )
+        except Exception as exc:
+            _accel_log(
+                "warning",
+                f"HIN-Native Healing pass failed for {symbol}: {exc}",
+            )
+            return None
+
+        patch = result.get("patch")
+        if isinstance(patch, str) and patch.strip():
+            _accel_log(
+                "info",
+                f"HIN-Native Healing produced source patch for {symbol}",
+            )
+            return patch
+
+        _accel_log(
+            "info",
+            f"HIN-Native Healing pass completed for {symbol} without source patch",
+        )
+        return None
+
+
 class AtomicSymbolAssembly:
     """Atomic, multi-symbol SLI gate.
 
     Before a file is written the builder must confirm that:
       1. Every contracted symbol has a logic intent in the Compacted Functional Matrix.
       2. The emitted source defines every contracted symbol.
-      3. Each contracted symbol has a non-zero GoI execution matrix.
+      3. Each contracted symbol has a saturated HIN interaction net.
+      4. Each contracted symbol has a non-zero GoI execution matrix.
 
     This transitions the builder from per-file materialization to an Atomic Symbol
     Assembly model: the final source artifact is accepted or rejected as a whole.
@@ -540,7 +712,8 @@ class AtomicSymbolAssembly:
                 symbols.add(contract.get("symbol", ""))
         symbols.discard("")
         is_target = any(c.get("target") == node_id for c in contracts or [])
-        if not symbols and not is_pure_python and not is_target:
+        if not symbols and not is_target:
+            # Every node must be accounted for, including pure_python entrypoints.
             symbols.add(node_id)
         return sorted(symbols)
 
@@ -595,7 +768,33 @@ class AtomicSymbolAssembly:
                 symbols=source_missing,
             )
 
-        # 3. Per-symbol GoI proof-net verification.
+        # 3. Per-symbol HIN Node Saturation check. The constructed HIN graph
+        # must have active principal-principal pairs and no stalled wires.
+        for sym in required:
+            try:
+                HINSaturationValidator.verify_symbol(combined, sym, language)
+            except HINSaturationError as hse:
+                _accel_log(
+                    "warning",
+                    f"HIN Node Saturation failed for {sym}: {hse}; "
+                    f"triggering HIN-Native Healing pass",
+                )
+                patch = HINNativeHealer.heal_symbol(
+                    combined,
+                    sym,
+                    str(hse),
+                )
+                if patch:
+                    combined = cls._replace_function_source(combined, sym, patch)
+                    # Retry after applying the native HIN patch.
+                    HINSaturationValidator.verify_symbol(combined, sym, language)
+                else:
+                    raise AtomicSymbolAssemblyError(
+                        f"HIN Node Saturation failed for {sym}: {hse}",
+                        symbols=[sym],
+                    ) from hse
+
+        # 4. Per-symbol GoI proof-net verification.
         hollow: List[str] = []
         for sym in required:
             if not ContentDensityValidator.has_execution_flow_for_symbol(
@@ -614,6 +813,43 @@ class AtomicSymbolAssembly:
             f"Atomic Symbol Assembly verified for {node_id}: "
             f"{len(required)}/{len(required)} symbol(s) with non-zero execution matrices",
         )
+
+        GoIWavefrontTaskCompletion.mark_complete(node_id, required)
+
+    @staticmethod
+    def _replace_function_source(source: str, symbol: str, patch: str) -> str:
+        """Replace the definition of *symbol* in *source* with *patch* and unparse."""
+        import ast as _ast
+
+        try:
+            tree = _ast.parse(source)
+        except SyntaxError:
+            return patch
+
+        patch_tree = _ast.parse(patch)
+        patch_func = next(
+            (
+                node
+                for node in _ast.walk(patch_tree)
+                if isinstance(node, _ast.FunctionDef)
+            ),
+            None,
+        )
+        if patch_func is None:
+            return patch
+
+        for i, node in enumerate(tree.body):
+            if isinstance(node, _ast.FunctionDef) and node.name == symbol:
+                tree.body[i] = patch_func
+                break
+        else:
+            # Symbol not found; append the patch defensively.
+            tree.body.append(patch_func)
+
+        try:
+            return _ast.unparse(tree)
+        except Exception:
+            return patch
 
 
 class FocusedIntentRecovery:

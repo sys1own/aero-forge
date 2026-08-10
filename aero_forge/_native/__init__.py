@@ -24,6 +24,7 @@ try:
         unpack_aeroc,
         verify_goi_proof_net,
         verify_hin_boundary_layouts,
+        verify_hin_saturation,
     )
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
@@ -51,4 +52,5 @@ __all__ = [
     "enforce_repair_isolation_py",
     "execution_matrix_nonzero",
     "verify_hin_boundary_layouts",
+    "verify_hin_saturation",
 ]
