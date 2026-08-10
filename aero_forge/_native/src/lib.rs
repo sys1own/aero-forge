@@ -436,6 +436,7 @@ fn aero_forge_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(unpack_aeroc, m)?)?;
     m.add_function(wrap_pyfunction!(hin_engine::reduce_hin_uast, m)?)?;
     m.add_function(wrap_pyfunction!(hin_engine::evaluate_hin_energy, m)?)?;
+    m.add_function(wrap_pyfunction!(hin_engine::verify_hin_saturation, m)?)?;
     m.add_function(wrap_pyfunction!(hin_engine::verify_hin_boundary_layouts, m)?)?;
     m.add_function(wrap_pyfunction!(deterministic_healer::repair_uast_expression, m)?)?;
     m.add_class::<deterministic_healer::ASTRewritePatch>()?;
