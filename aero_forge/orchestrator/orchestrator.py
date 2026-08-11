@@ -2109,6 +2109,30 @@ def _classification_for_architecture(
     )
 
 
+# Substrings that users may embed directly in the prompt to select a target
+# architecture. These take priority over heuristic classification.
+_ARCHITECTURE_PROMPT_MARKERS: Dict[str, List[str]] = {
+    INTENT_PURE_PYTHON: ["pure_python", "pure python", "python only"],
+    INTENT_PURE_RUST: ["pure_rust", "pure rust", "rust only"],
+    INTENT_HYBRID_RUST_PYTHON: ["hybrid_rust_python", "hybrid rust python"],
+    INTENT_HYBRID_CPP_PYTHON: ["hybrid_cpp_python", "hybrid cpp python"],
+    INTENT_HYBRID_CPP_RUST: ["hybrid_cpp_rust", "hybrid cpp rust"],
+    INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON: ["tri_polyglot_rust_cpp_python", "tri polyglot rust cpp python"],
+    INTENT_GRAPH_POLYGLOT: ["graph_polyglot", "graph polyglot"],
+}
+
+
+def _classification_from_prompt(
+    prompt: str, classification: StackClassification
+) -> StackClassification:
+    """Return an architecture-prompt override if the user explicitly names one."""
+    lower = (prompt or "").lower()
+    for intent, markers in _ARCHITECTURE_PROMPT_MARKERS.items():
+        if any(marker in lower for marker in markers):
+            return _classification_for_architecture(intent, classification.features)
+    return classification
+
+
 def plan_workspace(
     prompt: str,
     output_dir: Path | str,
@@ -2147,6 +2171,7 @@ def plan_workspace(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     classification = classify_build_stack(prompt)
+    classification = _classification_from_prompt(prompt, classification)
     if architecture:
         classification = _classification_for_architecture(
             architecture, classification.features

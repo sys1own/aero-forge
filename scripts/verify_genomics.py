@@ -354,6 +354,11 @@ def main() -> int:
             print("FAIL: blueprint.aero does not report llm_initialized: true")
             return 1
 
+        # Ensure the architecture matches the explicit prompt intent.
+        if "architecture: pure_python" not in blueprint_text and '"architecture": "pure_python"' not in blueprint_text:
+            print("FAIL: blueprint.aero architecture is not pure_python")
+            return 1
+
         # Ensure the architect did not hallucinate intra-language FFI boundaries.
         for forbidden in ("boundary_type: c_abi", "boundary_type:c_abi", "C_ABI"):
             if forbidden in blueprint_text:
