@@ -819,31 +819,27 @@ class HINSaturationValidator:
                     f"HIN saturation check for {symbol}: could not extract function source: {exc}"
                 ) from exc
 
-        from aero_forge._native import HinEngine, verify_hin_saturation
+        from aero_forge._native import detect_hin_stall
         from aero_forge.translator.aero_frontend import python_source_to_uast
 
         try:
             uast = python_source_to_uast(func_source)
-            engine = HinEngine()
-            engine.build_from_json(json.dumps(uast))
-            arena = engine.to_json()
-        except Exception as exc:
-            raise HINSaturationError(
-                f"HIN saturation check for {symbol}: could not build HIN arena: {exc}"
-            ) from exc
-
-        try:
-            result_json = verify_hin_saturation(arena)
+            result_json = detect_hin_stall(json.dumps(uast), max_steps=1_000_000, timeout_seconds=5.0)
             result = json.loads(result_json)
         except Exception as exc:
             raise HINSaturationError(
-                f"HIN saturation check for {symbol}: energy evaluation failed: {exc}"
+                f"HIN saturation check for {symbol}: could not build/reduce HIN arena: {exc}"
             ) from exc
+
+        if result.get("timed_out"):
+            raise HINSaturationError(
+                f"HIN saturation check for {symbol}: reduction timed out"
+            )
 
         if not result.get("saturated"):
             reason = result.get("reason", "unknown")
             raise HINSaturationError(
-                f"HIN Node Saturation failed for {symbol}: {reason} (energy={result})"
+                f"HIN Node Saturation failed for {symbol}: {reason} (energy={result.get('total')})"
             )
 
         _accel_log("info", f"HIN Node Saturation Verified: {symbol}")
@@ -916,7 +912,11 @@ class HINNativeHealer:
         return None
 
 
-class MaterializationParityError(RuntimeError):
+class NodeMaterializationError(RuntimeError):
+    """Raised when a node's declared files are not physically present and non-empty."""
+
+
+class MaterializationParityError(NodeMaterializationError):
     """Raised when a node's emitted files do not match its blueprint manifest."""
 
 
@@ -941,7 +941,7 @@ class MaterializationParityGate:
         node_spec: Dict[str, Any],
         node_dir: Path,
     ) -> None:
-        """Raise :class:`MaterializationParityError` if any expected file is missing or empty."""
+        """Raise :class:`NodeMaterializationError` if any expected file is missing or empty."""
         expected = cls._expected_files(node_spec)
         missing: List[str] = []
         empty: List[str] = []
@@ -953,12 +953,11 @@ class MaterializationParityGate:
             if path.stat().st_size == 0:
                 empty.append(rel)
         if missing or empty:
-            raise MaterializationParityError(
-                f"Node {node_id} materialization parity failed: "
+            raise NodeMaterializationError(
+                f"NodeMaterializationError: {node_id} parity failed: "
                 f"missing={missing}, empty={empty}"
             )
-        total = len(expected)
-        _accel_log("info", f"Node Materialization Verified: {node_id} ({total}/{total} file{'s' if total != 1 else ''})")
+        _accel_log("info", f"Node Materialization Verified: {node_id} (100% parity)")
 
 
 class LogicStarvationError(RuntimeError):

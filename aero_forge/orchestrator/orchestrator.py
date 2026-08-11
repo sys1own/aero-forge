@@ -35,6 +35,7 @@ from aero_forge.blueprint import (
     write_blueprint,
 )
 from aero_forge.builder import build_engine, spec_from_python
+from aero_forge.builder.emitters.base import NodeMaterializationError
 from aero_forge.builder.intent_compiler import IntentCompiler, IntentCompilerError
 from aero_forge.builder.language_router import _deduplicate_command_args
 from aero_forge.cache.build_cache import BuildCache
@@ -972,6 +973,10 @@ class Orchestrator:
         for attempt in range(2):
             try:
                 result = runner.build()
+            except NodeMaterializationError:
+                # Node-level parity failures are deterministic and must not be
+                # retried as generic wavefront starvation.
+                raise
             except Exception as exc:
                 error_text = str(exc)
                 if "starvation" not in error_text.lower() and "timeout" not in error_text.lower():

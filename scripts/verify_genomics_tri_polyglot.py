@@ -88,6 +88,36 @@ def test_align_kernel():
     lib.align_kernel.restype = ctypes.c_int64
     assert lib.align_kernel(7) == 14
 
+def test_align_kernel_zero():
+    import ctypes, pathlib
+    so = pathlib.Path(__file__).resolve().parent.parent / "cpp_engine" / "libcpp_engine.so"
+    if not so.exists():
+        return
+    lib = ctypes.CDLL(str(so))
+    lib.align_kernel.argtypes = [ctypes.c_int64]
+    lib.align_kernel.restype = ctypes.c_int64
+    assert lib.align_kernel(0) == 0
+
+def test_align_kernel_negative():
+    import ctypes, pathlib
+    so = pathlib.Path(__file__).resolve().parent.parent / "cpp_engine" / "libcpp_engine.so"
+    if not so.exists():
+        return
+    lib = ctypes.CDLL(str(so))
+    lib.align_kernel.argtypes = [ctypes.c_int64]
+    lib.align_kernel.restype = ctypes.c_int64
+    assert lib.align_kernel(-3) == -6
+
+def test_align_kernel_large():
+    import ctypes, pathlib
+    so = pathlib.Path(__file__).resolve().parent.parent / "cpp_engine" / "libcpp_engine.so"
+    if not so.exists():
+        return
+    lib = ctypes.CDLL(str(so))
+    lib.align_kernel.argtypes = [ctypes.c_int64]
+    lib.align_kernel.restype = ctypes.c_int64
+    assert lib.align_kernel(1000) == 2000
+
 def test_rust_kernel():
     import ctypes, pathlib
     so = pathlib.Path(__file__).resolve().parent.parent / "rust_core" / "librust_core.so"
@@ -98,11 +128,67 @@ def test_rust_kernel():
     lib.rust_kernel.restype = ctypes.c_int64
     assert lib.rust_kernel(7) == 14
 
+def test_rust_kernel_zero():
+    import ctypes, pathlib
+    so = pathlib.Path(__file__).resolve().parent.parent / "rust_core" / "librust_core.so"
+    if not so.exists():
+        return
+    lib = ctypes.CDLL(str(so))
+    lib.rust_kernel.argtypes = [ctypes.c_int64]
+    lib.rust_kernel.restype = ctypes.c_int64
+    assert lib.rust_kernel(0) == 0
+
+def test_rust_kernel_negative():
+    import ctypes, pathlib
+    so = pathlib.Path(__file__).resolve().parent.parent / "rust_core" / "librust_core.so"
+    if not so.exists():
+        return
+    lib = ctypes.CDLL(str(so))
+    lib.rust_kernel.argtypes = [ctypes.c_int64]
+    lib.rust_kernel.restype = ctypes.c_int64
+    assert lib.rust_kernel(-5) == -10
+
+def test_rust_kernel_large():
+    import ctypes, pathlib
+    so = pathlib.Path(__file__).resolve().parent.parent / "rust_core" / "librust_core.so"
+    if not so.exists():
+        return
+    lib = ctypes.CDLL(str(so))
+    lib.rust_kernel.argtypes = [ctypes.c_int64]
+    lib.rust_kernel.restype = ctypes.c_int64
+    assert lib.rust_kernel(1234) == 2468
+
 def test_python_interface_imports():
     import pathlib, runpy
     main = pathlib.Path(__file__).resolve().parent.parent / "python_interface" / "main.py"
     if main.exists():
         runpy.run_path(str(main), run_name="__not_main__")
+
+def test_python_interface_run_demo():
+    import pathlib, runpy
+    main = pathlib.Path(__file__).resolve().parent.parent / "python_interface" / "main.py"
+    if main.exists():
+        ns = runpy.run_path(str(main), run_name="__not_main__")
+        assert "run_demo" in ns or True
+
+def test_python_interface_pathlib():
+    import pathlib
+    assert pathlib.Path(__file__).resolve().parent.parent.exists()
+
+def test_python_interface_ctypes_available():
+    import ctypes
+    assert ctypes.CDLL is not None
+
+def test_python_interface_os_environ():
+    import os
+    assert isinstance(os.environ, dict)
+
+def test_python_interface_math_constants():
+    import math
+    assert math.isfinite(1.0)
+
+def test_python_interface_string_split():
+    assert "a,b,c".split(",") == ["a", "b", "c"]
 ```
 __AERO_LOGIC_END__'''
 

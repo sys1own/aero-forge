@@ -55,6 +55,7 @@ from aero_forge.builder.emitters.base import (
     ManifestRecovery,
     ManifestRecoveryError,
     MaterializationParityGate,
+    NodeMaterializationError,
     PolyglotEmitterPlugin,
     SLIIntentValidator,
     SyntaxValidator,
@@ -480,7 +481,7 @@ class GraphPolyglotMaterializer:
             "architecture",
             hin_graph_spec.get("metadata", {}).get("architecture", ""),
         ).lower()
-        if architecture == "pure_python":
+        if architecture in ("pure_python", "tri_polyglot_rust_cpp_python"):
             return True
         return False
 
@@ -1718,7 +1719,9 @@ else:
             for a in source_artifacts
             if not a.is_header
         ]
-        return source_artifacts + manifest_artifacts
+        # Manifests are Primary Execution Terminals: write them before source
+        # files so the native toolchain always has a non-empty build configuration.
+        return manifest_artifacts + source_artifacts
 
     @staticmethod
     def _postprocess_source_artifacts(
@@ -2838,6 +2841,13 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
 
         self._ensure_package_boundary(node_dir, node_id, node_spec)
 
+        required_manifest = PolyglotEmitterPlugin.required_manifest(node_spec)
+        if required_manifest:
+            _accel_log(
+                "info",
+                f"Primary Execution Terminal: {node_id} requires {required_manifest}",
+            )
+
         artifacts = self._emit_node_artifacts(node_id, node_spec, contracts)
         normalized_source_files: List[str] = []
         written: List[Dict[str, Any]] = []
@@ -2951,6 +2961,10 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
         if lang == "cpp" or node_spec.get("toolchain") == "cmake":
             self._reconcile_cmake_sources(node_dir, node_id)
 
+        # Strict materialization parity gate: every declared file must exist and
+        # be non-empty before any native toolchain is invoked.
+        MaterializationParityGate.verify(node_id, node_spec, node_dir)
+
         if build:
             try:
                 SystemToolchainRouter.dispatch_node_build(node_id, node_spec, node_dir)
@@ -2959,7 +2973,6 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                     f"toolchain dispatch failed for {node_id}: {exc}"
                 ) from exc
 
-        MaterializationParityGate.verify(node_id, node_spec, node_dir)
         return written
 
     def materialize(
@@ -3113,6 +3126,8 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                     )
                     written_artifacts.extend(node_artifacts)
                     processed_node_ids.add(node_id)
+                except NodeMaterializationError:
+                    raise
                 except Exception as exc:
                     _accel_log(
                         "error",
