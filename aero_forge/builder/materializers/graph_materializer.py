@@ -50,6 +50,8 @@ from aero_forge.builder.emitters.base import (
     EmitterRegistry,
     EntrypointBoilerplateNormalizer,
     FocusedIntentRecovery,
+    LogicStarvationError,
+    LogicStarvationValidator,
     ManifestRecovery,
     ManifestRecoveryError,
     MaterializationParityGate,
@@ -2962,6 +2964,12 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                     f"Could not generate Compacted Functional Matrix: {exc}",
                 )
                 self._compacted_context = {}
+
+        try:
+            LogicStarvationValidator.validate(self._compacted_context, self._synthesis_context or "")
+        except LogicStarvationError as exc:
+            raise MaterializationError(str(exc)) from exc
+
         self._smt_types = hin_graph_spec.get("metadata", {}).get("smt_types", {})
         node_map = {n["node_id"]: n for n in nodes}
         self._normalize_rust_python_pyo3_boundary(edges, node_map)

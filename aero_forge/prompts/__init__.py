@@ -394,6 +394,11 @@ TEST DENSITY CONSTRAINT:
 ARCHITECTURE ELEVATION RULE:
 - If the project contains more than two distinct language nodes (e.g. Python + Rust + Go) or uses advanced boundaries such as `wasm_wasi`, `cgo`, `jni`, `pinvoke`, or `cuda_hip_c`, set `architecture` to `graph_polyglot` and explicitly group nodes by their `node_id` and language in the blueprint.
 
+COMPONENT EXTRACTION CONSTRAINT:
+- You MUST extract every software component, library, and file path mentioned in the user prompt. Every named module must have a corresponding entry in the `manifest`/`module_graph` and at least one symbol in the `functions` or `contracts` list.
+- If the prompt names a specific file path (e.g. `genomics/aligner.py`, `main.py`), include that exact path in the blueprint `module_graph` and `manifest` and ensure it exports at least one symbol.
+- Do NOT produce a blueprint that contains only an entrypoint (`main.py`) when the prompt also describes a library or API module; such a blueprint will be rejected as Logic Starvation.
+
 DATA PAYLOAD CONSTRAINT:
 - If the prompt references a static data constant, scoring matrix, lookup table, or named constant (e.g. `BLOSUM62`, `scoring_matrix`, `lookup_table`), you MUST emit it as a `data_payload` inside the relevant blueprint node or `module_graph` entry.
 - Set `data_payload: true`, `payload_kind: "dict"` (or `"list"` / `"set"`), and provide the full literal value or a compact generation algorithm in `logic_sketch` so the SMTASTEngine can lower it into the Holographic Interaction Net (HIN).
