@@ -1200,6 +1200,10 @@ else:
         imports the symbol through an FFI bridge and is not expected to define
         it in its own source.
         """
+        # Test-only nodes are validated by TestDensityValidator, not symbol contracts.
+        if AtomicSymbolAssembly._is_test_node(node_spec):
+            return set()
+
         symbols: set = set(node_spec.get("exports") or [])
         for contract in contracts or []:
             if contract.get("source") == node_id:
@@ -2540,7 +2544,7 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                         f"(cd {package_dir} && mkdir -p zig-out/lib && "
                         f"zig build-lib -dynamic -O ReleaseFast -fPIC "
                         f"-femit-bin=zig-out/lib/lib{node_id}.so {src} && "
-                        f"cp zig-out/lib/lib{node_id}.so ../lib{node_id}.so)"
+                        f"cp zig-out/lib/lib{node_id}.so lib{node_id}.so)"
                     )
         if primary_entrypoint:
             # Make sure the workspace root is on PYTHONPATH so sibling packages
@@ -2587,7 +2591,15 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             "go": ArtifactType.binary,
             "bash": ArtifactType.custom_cmd,
         }
-        manifest_files = {"CMakeLists.txt", "Cargo.toml", "pyproject.toml"}
+        manifest_files = {
+            "CMakeLists.txt",
+            "Cargo.toml",
+            "pyproject.toml",
+            "go.mod",
+            "build.zig",
+            "pom.xml",
+            "build.gradle",
+        }
         for artifact in written_artifacts:
             path = artifact.get("file", "") or artifact.get("path", "")
             if not path:

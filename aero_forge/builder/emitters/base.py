@@ -570,17 +570,54 @@ class SLIIntentValidator:
         return [s for s in required_symbols if s not in cfm_symbols]
 
     @classmethod
+    def find_hollow_symbols(
+        cls,
+        compacted_context: Optional[Dict[str, Any]],
+        required_symbols: List[str],
+    ) -> List[str]:
+        """Return required symbols whose CFM entry has a zero-length logic sketch.
+
+        A logic sketch is considered non-zero when ``full_implementation_map`` contains
+        a non-empty ``logic_sketch``, ``steps``, or ``description``, or when the entry is
+        marked as a ``data_payload``.  Symbols with no CFM entry at all are reported by
+        :meth:`find_exhausted_symbols` rather than here.
+        """
+        hollow: List[str] = []
+        context = compacted_context or {}
+        impl_map = context.get("full_implementation_map") or {}
+        for entry in impl_map.get("symbols", []):
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name") or entry.get("symbol")
+            if name not in required_symbols:
+                continue
+            if entry.get("data_payload"):
+                continue
+            logic = (entry.get("logic_sketch") or "").strip()
+            steps = (entry.get("steps") or "").strip()
+            description = (entry.get("description") or "").strip()
+            if not logic and not steps and not description:
+                hollow.append(name)
+        return hollow
+
+    @classmethod
     def validate(
         cls,
         compacted_context: Optional[Dict[str, Any]],
         required_symbols: List[str],
     ) -> None:
-        """Raise ``ContextExhaustionError`` if any required symbol lacks intent."""
+        """Raise ``ContextExhaustionError`` if any required symbol lacks intent or has a hollow sketch."""
         exhausted = cls.find_exhausted_symbols(compacted_context, required_symbols)
         if exhausted:
             raise ContextExhaustionError(
                 f"Context Exhaustion: no logic intent in CFM for symbols: {exhausted}",
                 symbols=exhausted,
+            )
+        hollow = cls.find_hollow_symbols(compacted_context, required_symbols)
+        if hollow:
+            raise ContextExhaustionError(
+                f"Context Exhaustion: logic sketch is empty for symbols: {hollow}",
+                symbols=hollow,
             )
 
 
@@ -1263,6 +1300,14 @@ class AtomicSymbolAssembly:
                 raise AtomicSymbolAssemblyError(
                     f"Context Exhaustion: no logic intent in CFM for symbols: {missing_intent}",
                     symbols=missing_intent,
+                )
+            hollow_sketch = SLIIntentValidator.find_hollow_symbols(
+                compacted_context, required
+            )
+            if hollow_sketch:
+                raise AtomicSymbolAssemblyError(
+                    f"Logic sketch is empty or zero-length in full_implementation_map for symbols: {hollow_sketch}",
+                    symbols=hollow_sketch,
                 )
 
         # 2. Source must define all contracted symbols.

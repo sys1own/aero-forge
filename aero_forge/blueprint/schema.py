@@ -367,10 +367,10 @@ class BlueprintV3(BaseModel):
                 source_by_node.setdefault(node_id, []).append(artifact)
 
         required = {
-            ArtifactType.shared_library: {"CMakeLists.txt"},
-            ArtifactType.static_library: {"CMakeLists.txt"},
+            ArtifactType.shared_library: {"CMakeLists.txt", "build.zig"},
+            ArtifactType.static_library: {"CMakeLists.txt", "build.zig"},
             ArtifactType.cargo_cdylib: {"Cargo.toml"},
-            ArtifactType.binary: {"CMakeLists.txt", "Cargo.toml"},
+            ArtifactType.binary: {"CMakeLists.txt", "Cargo.toml", "go.mod", "build.zig"},
         }
         for node_id, artifacts in source_by_node.items():
             node_manifests = manifests_by_node.get(node_id, set())
