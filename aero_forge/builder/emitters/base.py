@@ -990,9 +990,17 @@ class MaterializationParityGate:
             if path.stat().st_size == 0:
                 empty.append(rel)
         if missing or empty:
+            diagnostics: List[str] = []
+            if missing:
+                diagnostics.append(f"missing file(s): {missing}")
+            if empty:
+                diagnostics.append(
+                    f"starved logic file(s): {empty}; HIN reduction produced an empty or "
+                    f"zero-byte artifact"
+                )
             raise NodeMaterializationError(
-                f"NodeMaterializationError: {node_id} parity failed: "
-                f"missing={missing}, empty={empty}"
+                f"NodeMaterializationError: {node_id} failed materialization parity: "
+                f"{'; '.join(diagnostics)}"
             )
         _accel_log("info", f"Node Materialization Verified: {node_id} (100% parity)")
 

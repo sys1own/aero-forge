@@ -354,6 +354,12 @@ def main() -> int:
             print("FAIL: blueprint.aero does not report llm_initialized: true")
             return 1
 
+        # Ensure the architect did not hallucinate intra-language FFI boundaries.
+        for forbidden in ("boundary_type: c_abi", "boundary_type:c_abi", "C_ABI"):
+            if forbidden in blueprint_text:
+                print(f"FAIL: blueprint.aero contains a c_abi edge for a Python-only project: {forbidden!r}")
+                return 1
+
         env = os.environ.copy()
         env["PYTHONPATH"] = str(workspace)
         result = subprocess.run(

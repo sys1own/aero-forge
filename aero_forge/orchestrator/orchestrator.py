@@ -837,6 +837,26 @@ class Orchestrator:
             _accel_log("warning", f"Logic starvation check: {exc}")
             return str(exc)
 
+    @staticmethod
+    def _derive_node_language(node: Dict[str, Any]) -> str:
+        """Infer the programming language of a module_graph node from its metadata."""
+        lang = (node.get("lang") or "").lower().strip()
+        if lang:
+            return lang
+        for path in (node.get("source_files") or []):
+            ext = Path(str(path)).suffix.lower()
+            if ext == ".py":
+                return "python"
+            if ext in {".rs", ".toml"}:
+                return "rust"
+            if ext in {".cpp", ".cc", ".cxx", ".hpp", ".h", ".c"}:
+                return "cpp"
+            if ext == ".go":
+                return "go"
+            if ext == ".zig":
+                return "zig"
+        return "python"
+
     def _validate_blueprint_integrity(
         self,
         blueprint: Blueprint,
@@ -861,6 +881,7 @@ class Orchestrator:
                 primary_entrypoint = primary_entrypoint.get("file", "")
 
         node_exports: Dict[str, Set[str]] = {}
+        node_langs: Dict[str, str] = {}
         all_exported_symbols: Set[str] = set()
         test_node_ids = {"tests"}
 
@@ -876,6 +897,7 @@ class Orchestrator:
                     exports.add(str(sym))
             node_exports[node_id] = exports
             all_exported_symbols.update(exports)
+            node_langs[node_id] = self._derive_node_language(node)
 
         # Also surface symbols declared in abi_contracts / functions / contracts.
         for abi in blueprint.abi_contracts or []:
@@ -918,7 +940,31 @@ class Orchestrator:
                     f"functional contract."
                 )
 
-        # 2. Edge/ABI symbols must be exported by their source node.
+        # 2a. Intra-language FFI boundaries are hallucinations; use internal imports.
+        ffi_bindings = {"ctypes", "c_abi", "raw_c", "c", "cffi", "pyo3", "cxx", "wasm_wasi", "cgo", "pinvoke", "jni", "cuda_hip_c"}
+        for abi in blueprint.abi_contracts or []:
+            sym = getattr(abi, "symbol", "") or ""
+            src = getattr(abi, "source_node", "") or ""
+            tgt = getattr(abi, "target_node", "") or ""
+            src_lang = (
+                getattr(abi, "source_language", "") or node_langs.get(src, "")
+            ).lower()
+            tgt_lang = (
+                getattr(abi, "target_language", "") or node_langs.get(tgt, "")
+            ).lower()
+            binding = str(getattr(abi, "binding_framework", "") or "").lower()
+            if (
+                src and tgt and src_lang and tgt_lang
+                and src_lang == tgt_lang
+                and binding in ffi_bindings
+            ):
+                errors.append(
+                    f"Semantically Incomplete: intra-language FFI boundary {src!r} -> {tgt!r} "
+                    f"both use {src_lang!r} with binding {binding!r}; use a standard internal "
+                    f"import for symbol {sym!r} instead."
+                )
+
+        # 2b. Edge/ABI symbols must be exported by their source node.
         for abi in blueprint.abi_contracts or []:
             sym = getattr(abi, "symbol", "") or ""
             src = getattr(abi, "source_node", "") or ""
