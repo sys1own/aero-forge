@@ -768,6 +768,65 @@ class Orchestrator:
         """Backward-compatible alias for :meth:`enrich_blueprint`."""
         return self.enrich_blueprint(blueprint)
 
+    def _run_build_with_starvation_recovery(
+        self,
+        runner: "BuildRunner",
+        blueprint: Blueprint,
+        max_workers: int = 1,
+    ) -> Dict[str, Any]:
+        """Run the BuildRunner and retry once on wavefront starvation.
+
+        If a node stalls waiting for a HIN reduction (reported as a
+        "Materialization Starvation" or timeout), force a synchronous v11
+        re-enrichment pass and re-run the build once.
+        """
+        for attempt in range(2):
+            try:
+                result = runner.build()
+            except Exception as exc:
+                error_text = str(exc)
+                if "starvation" not in error_text.lower() and "timeout" not in error_text.lower():
+                    raise
+                result = {
+                    "success": False,
+                    "error": error_text,
+                    "logs": traceback.format_exc(),
+                }
+
+            if result.get("success"):
+                return result
+
+            error_text = result.get("error", "")
+            if "starvation" not in error_text.lower() and "timeout" not in error_text.lower():
+                return result
+
+            _accel_log(
+                "warning",
+                f"Wavefront Starvation detected on attempt {attempt + 1}; "
+                "triggering Deterministic Re-Enrichment pass",
+            )
+            # Force a fresh v11 enrichment pass for the next attempt.
+            metadata = blueprint.metadata if isinstance(blueprint.metadata, dict) else {}
+            metadata["llm_initialized"] = "false"
+            blueprint.metadata = metadata
+            try:
+                blueprint = self.enrich_blueprint(blueprint)
+            except Exception as exc:
+                _accel_log("error", f"Deterministic Re-Enrichment failed: {exc}")
+                return result
+
+            from aero_forge.build_runner import BuildRunner
+
+            runner = BuildRunner(
+                blueprint,
+                max_workers=max_workers,
+                cache_enabled=False,
+                target=self.target,
+                target_mode=self.target_mode,
+            )
+
+        return result
+
     def build(
         self,
         blueprint: Optional[Blueprint] = None,
@@ -823,7 +882,9 @@ class Orchestrator:
             target=self.target,
             target_mode=self.target_mode,
         )
-        result = runner.build()
+        result = self._run_build_with_starvation_recovery(
+            runner, blueprint, max_workers=max_workers
+        )
         if not result.get("success"):
             return result
 
