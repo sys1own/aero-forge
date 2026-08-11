@@ -771,6 +771,58 @@ class Orchestrator:
         missing = [p for p in required if p not in manifest_paths]
         return missing
 
+    def _check_logic_starvation(
+        self,
+        blueprint: Blueprint,
+        prompt: str,
+    ) -> Optional[str]:
+        """Return a diagnostic string if the blueprint collapsed to an entrypoint.
+
+        Builds the Compacted Functional Matrix for the candidate blueprint and
+        runs the ``LogicStarvationValidator``. If only an entrypoint remains while
+        the prompt names additional modules, the diagnostic explains which
+        components are missing so the orchestrator can issue a Corrective
+        Enrichment pass.
+        """
+        if not prompt:
+            return None
+        try:
+            from aero_forge.builder.emitters.base import LogicStarvationValidator
+
+            data = blueprint.model_dump(mode="json")
+            cfm = CompactedContextGenerator(data).generate()
+            compacted = json.loads(cfm)
+            LogicStarvationValidator.validate(compacted, prompt)
+            return None
+        except Exception as exc:  # noqa: BLE001
+            _accel_log("warning", f"Logic starvation check: {exc}")
+            return str(exc)
+
+    def _missing_component_instruction(
+        self,
+        prompt: str,
+        missing_paths: List[str],
+        logic_starvation: Optional[str],
+    ) -> str:
+        """Return a corrective user prompt extension for re-enrichment."""
+        parts: List[str] = [prompt]
+        details: List[str] = []
+        if missing_paths:
+            details.append(
+                f"MISSING COMPONENT INSTRUCTION: The previous blueprint omitted these "
+                f"file paths: {missing_paths}. You are FORBIDDEN from collapsing the "
+                f"project into a single node. Every listed path MUST have a dedicated "
+                f"'node_id' and at least one exported symbol in the full_implementation_map."
+            )
+        if logic_starvation:
+            details.append(
+                f"LOGIC STARVATION CORRECTION: {logic_starvation} Add a valid node "
+                f"and contract for each missing module before returning the blueprint."
+            )
+        if details:
+            parts.append("\n\n".join(details))
+        return "\n\n".join(parts)
+
     def enrich_blueprint(self, blueprint: Blueprint) -> Blueprint:
         """Run a synchronous v11 enrichment pass and return the enriched blueprint.
 
@@ -780,9 +832,10 @@ class Orchestrator:
 
         After the LLM returns a candidate blueprint, a Semantic Intent Parity
         Gate checks that every file path explicitly mentioned in the prompt is
-        present in the manifest. Missing paths trigger one focused re-enrichment
-        attempt before the build is rejected with a ``Semantic Incompleteness``
-        diagnostic.
+        present in the manifest and that the blueprint has not collapsed into a
+        single entrypoint. Missing components trigger a Corrective Enrichment
+        pass (one retry) before the build is rejected with a
+        ``Semantic Incompleteness`` / ``Logic Starvation`` diagnostic.
         """
         metadata = blueprint.metadata if isinstance(blueprint.metadata, dict) else {}
         if self._is_enriched(metadata):
@@ -815,7 +868,8 @@ class Orchestrator:
                 ) from exc
 
             missing = self._verify_prompt_manifest_parity(enriched, current_prompt)
-            if not missing:
+            starvation = self._check_logic_starvation(enriched, current_prompt)
+            if not missing and not starvation:
                 enriched.metadata["llm_initialized"] = "true"
                 enriched.metadata["status"] = "finalized"
                 enriched.metadata["generation_method"] = "llm_synthesized"
@@ -823,22 +877,26 @@ class Orchestrator:
                 _accel_log("success", "Blueprint enrichment complete")
                 return enriched
 
+            diagnostics: List[str] = []
+            if missing:
+                diagnostics.append(f"missing manifest paths {missing}")
+            if starvation:
+                diagnostics.append(f"logic starvation: {starvation}")
             _accel_log(
                 "warning",
-                f"Semantic Incompleteness detected on attempt {attempt + 1}: "
-                f"missing manifest paths {missing}. Triggering re-enrichment.",
+                f"Semantic Incompleteness/Logic Starvation detected on attempt "
+                f"{attempt + 1}: {diagnostics}. Triggering Corrective Enrichment.",
             )
-            current_prompt = (
-                f"{prompt}\n\n"
-                f"CORRECTION: The previous blueprint manifest omitted these required "
-                f"file paths: {missing}. Ensure each path appears in the 'module_graph' "
-                f"and 'manifest' sections and is populated with the requested logic."
+            current_prompt = self._missing_component_instruction(
+                prompt,
+                missing,
+                starvation,
             )
 
         raise ForgeError(
-            f"Semantic Incompleteness: prompt requires file paths {missing} "
-            "but the enriched blueprint manifest does not contain them after "
-            "re-enrichment."
+            f"Semantic Incompleteness/Logic Starvation: prompt requires missing "
+            f"components (missing={missing}, starvation={starvation}) but the "
+            "enriched blueprint does not resolve them after Corrective Enrichment."
         )
 
     def _ensure_blueprint_enriched(self, blueprint: Blueprint) -> Blueprint:

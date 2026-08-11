@@ -2786,6 +2786,14 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             )
         lang = node_spec.get("lang", "").lower()
         contracts = self._boundary_contracts_for_node(node_id, edges)
+        try:
+            ContractIntegrityValidator.validate_library_node_exports(
+                node_id, node_spec, contracts
+            )
+        except ValueError as exc:
+            raise MaterializationError(
+                f"Contract Integrity Gate rejected {node_id}: {exc}"
+            ) from exc
         original_source_files = list(node_spec.get("source_files") or [])
         if self._is_pure_python and lang == "python":
             node_dir = self.workspace_root
