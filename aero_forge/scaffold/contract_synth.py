@@ -505,3 +505,36 @@ class DynamicContractSynthesizer:
             csharp_stub=csharp_stub,
             build_manifest={"aot": True, "allow_unsafe_blocks": True},
         )
+
+
+def synthesize_functional_intent_contract(
+    intent: Any,
+    language: str = "python",
+) -> ContractEntry:
+    """Generate a deterministic contract stub from a structured functional intent.
+
+    The resulting :class:`ContractEntry` provides a symbol name and a generic
+    signature. It is meant to be merged into the blueprint so the build logic can
+    resolve the required symbol without re-reading the original natural-language
+    prompt.
+    """
+    if isinstance(intent, dict):
+        symbol = str(intent.get("symbol_name") or intent.get("name") or "")
+        intent_type = str(intent.get("type") or "function")
+    else:
+        symbol = str(getattr(intent, "symbol_name", None) or getattr(intent, "name", "") or "")
+        intent_type = str(getattr(intent, "type", "function"))
+    if not symbol:
+        raise ValueError("functional_intent must provide symbol_name or name")
+
+    if intent_type == "data_payload" or intent_type == "data":
+        signature = f"{symbol}: dict"
+    else:
+        signature = f"{symbol}(arg0: str, arg1: str) -> int"
+
+    return ContractEntry(
+        name=symbol,
+        signature=signature,
+        language=language,
+        purpose=f"synthesized from functional_intent ({intent_type})",
+    )

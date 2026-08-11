@@ -64,6 +64,7 @@ STRICT OPERATIONAL RULES:
 The JSON must conform to BlueprintSchemaV2.0.0 with these top-level keys:
 - metadata: {schema_version: "2.0.0", project_name: "...", domain_target: "..."}
 - execution_strategy: {primary_entrypoint: {path, runtime, wrapper_generation}, cli_contract: {parser_type, flags}, run_spec: {working_dir, env_vars, timeout_seconds}}
+- functional_intent: list of {symbol_name, type, requirement_level}. Every functional requirement (functions, data constants, algorithms) from the prompt MUST be translated into this structured list. Do NOT rely on the engine to read the prompt.
 - abi_contracts: list of {contract_id, target_language, binding_framework, export_symbol, c_symbol_alias, header_path, memory_model, signature: {inputs: [{name, type}], outputs: [{name, type}]}}. For PyO3 bridge functions, use explicit Rust signatures such as "&PyArray2<f64>", "Python", "usize", and "PyResult<...>".
 - module_graph: list of {path, lang, purpose, rust_signature?}. When a hybrid Rust/Python extension is requested, list concrete submodule files under "src/" (e.g. "src/ops.rs", "src/array.rs"), the main "src/lib.rs", Python wrapper files, and test files under "tests/".
 - verification_nodes: list of {test_id, execution_cmd, expected_exit_code, stdout_match_patterns, stderr_prohibited_patterns, numerical_assertions}
@@ -94,6 +95,8 @@ STRICT OPERATIONAL RULES:
 10. FILE BOUNDARY CONSTRAINT: only list `source_files` explicitly required by the prompt. Include custom build files such as `build.sh` and `cpp_engine/CMakeLists.txt` exactly as requested.
 11. ARTIFACT HYGIENE: NEVER stage, commit, or list generated binary targets, virtual environments, distribution metadata, or package archives as deliverables.
 12. TOOLCHAIN FLAG HYGIENE: For `cargo` and `maturin` nodes, do NOT include `--release` in `compiler_flags`; the dispatcher always adds it. Only include extra Cargo flags (e.g. `--features <feature>`) when the feature is declared in the node's manifest. Do not include `-C` rustc flags in `compiler_flags`; pass those via the `RUSTFLAGS` environment if necessary.
+13. FUNCTIONAL INTENT COVERAGE: Add a top-level `functional_intent` array. Every functional requirement from the prompt (functions, data constants, algorithms) MUST be translated into `{symbol_name, type, requirement_level}`. Do NOT rely on the engine to read the prompt. Treat user-suggested paths as metadata; prioritize symbolic coverage. Ensure every `symbol_name` in `functional_intent` appears in a node's `exports` or in an edge's `symbol`.
+14. NO SKELETON LAZINESS: Do not return a JSON shape with empty values or markers. Generate the entire blueprint JSON from scratch with every `functional_intent`, `node`, `edge`, and `source_files` entry fully populated.
 
 Example JSON shape:
 {
@@ -107,6 +110,10 @@ Example JSON shape:
   ],
   "edges": [
     {"source": "cpp_core", "target": "go_server", "boundary_type": "CGO", "symbol": "synth_render", "args": ["pointer", "int64"], "return_type": "int64", "is_zero_copy": true}
+  ],
+  "functional_intent": [
+    {"symbol_name": "synth_render", "type": "function", "requirement_level": "required"},
+    {"symbol_name": "start_server", "type": "function", "requirement_level": "required"}
   ],
   "output_dir": "./dist",
   "metadata": {}
@@ -647,6 +654,7 @@ class IntentCompiler:
             features=[],
             execution_strategy=v2.execution_strategy,
             abi_contracts=v2.abi_contracts,
+            functional_intent=v2.functional_intent,
             verification_nodes=v2.verification_nodes,
             metadata=metadata,
             module_graph=v2.module_graph,

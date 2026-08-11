@@ -402,6 +402,12 @@ COMPONENT EXTRACTION CONSTRAINT:
 - You are FORBIDDEN from collapsing a modular project into a single node. Every file path provided in the prompt MUST have a dedicated `node_id` and a corresponding logic sketch in the `full_implementation_map`.
 - Do NOT produce a blueprint that contains only an entrypoint (`main.py`) when the prompt also describes a library or API module; such a blueprint will be rejected as Logic Starvation.
 
+FUNCTIONAL INTENT COVERAGE CONSTRAINT:
+- The engine does NOT read the natural-language prompt. You MUST translate every functional requirement from the prompt into a structured `functional_intent` list at the top level of the blueprint.
+- Each `functional_intent` entry MUST have `symbol_name`, `type` (e.g. `function`, `data_payload`, `contract`, `test`), and `requirement_level` (`required` or `optional`).
+- Treat user-suggested file paths as metadata; prioritize symbolic coverage. Every `symbol_name` in `functional_intent` MUST appear in a `node` `exports` list, an `edge` `symbol`, or a `contracts` entry.
+- Do not rely on the engine to infer requirements from the prompt text; all validation is performed against `functional_intent`.
+
 DOMAIN-DRIVEN BLUEPRINTING CONSTRAINT:
 - Identify all distinct functional domains in the prompt (e.g. a core library, a hardware abstraction package, an authentication module, a CLI/dashboard, or a tests suite).
 - You are FORBIDDEN from collapsing multiple domains into a single node. Every domain MUST have its own `node_id`, a manifest entry, and at least one functional contract or exported symbol.
@@ -426,6 +432,11 @@ Schema Example (for reference only — generate the full blueprint):
   "architecture": "pure_python",
   "primary_entrypoint": "main.py",
   "build_script": "build.sh",
+  "functional_intent": [
+    {"symbol_name": "compute", "type": "function", "requirement_level": "required"},
+    {"symbol_name": "main", "type": "function", "requirement_level": "required"},
+    {"symbol_name": "test_compute", "type": "test", "requirement_level": "required"}
+  ],
   "nodes": [
     {"node_id": "lib", "lang": "python", "toolchain": "python", "source_files": ["lib/core.py"], "exports": ["compute"]},
     {"node_id": "main", "lang": "python", "toolchain": "python", "source_files": ["main.py"], "exports": []},

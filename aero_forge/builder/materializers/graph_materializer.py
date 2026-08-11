@@ -35,6 +35,7 @@ from aero_forge.blueprint.schema import (
     BuildArtifact,
     ContextState,
     ExecutionStrategyV3,
+    FunctionalIntent,
     LLMContext,
     Metadata,
     write_v3_blueprint,
@@ -2731,6 +2732,12 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             key=lambda c: (c.source_node, c.target_node, c.contract_id),
         )
 
+        functional_intent = [
+            FunctionalIntent(**fi)
+            for fi in (hin_graph_spec.get("functional_intent") or [])
+            if isinstance(fi, dict) and fi.get("symbol_name")
+        ]
+
         blueprint = BlueprintV3(
             metadata=Metadata(
                 schema_version="3.0.0",
@@ -2749,6 +2756,7 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             ),
             build_pipeline=build_pipeline,
             abi_contracts=abi_contracts,
+            functional_intent=functional_intent,
             execution_strategy=execution_strategy,
         )
 
@@ -3035,7 +3043,9 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                 self._compacted_context = {}
 
         try:
-            LogicStarvationValidator.validate(self._compacted_context, self._synthesis_context or "")
+            LogicStarvationValidator.validate(
+                self._compacted_context, hin_graph_spec.get("functional_intent", [])
+            )
         except LogicStarvationError as exc:
             raise MaterializationError(str(exc)) from exc
 

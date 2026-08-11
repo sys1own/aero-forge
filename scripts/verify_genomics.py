@@ -23,6 +23,7 @@ from typing import Any, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from aero_forge.builder.intent_compiler import IntentCompiler
+from aero_forge.blueprint.schema import PolyglotGraphBlueprint
 from aero_forge.builder.materializers.graph_materializer import (
     GraphPolyglotMaterializer,
 )
@@ -210,6 +211,11 @@ class _GraphMockLLM:
                 "architecture": "pure_python",
                 "primary_entrypoint": "main.py",
                 "build_script": "build.sh",
+                "functional_intent": [
+                    {"symbol_name": "smith_waterman", "type": "function", "requirement_level": "required"},
+                    {"symbol_name": "blosum62", "type": "data_payload", "requirement_level": "required"},
+                    {"symbol_name": "main", "type": "function", "requirement_level": "required"},
+                ],
                 "nodes": [
                     {
                         "node_id": "genomics",
@@ -417,5 +423,41 @@ def main() -> int:
         return 0
 
 
+def test_missing_aligner_detected_without_prompt() -> int:
+    """Verify that a missing functional_intent symbol is detected without reading the prompt."""
+    blueprint = {
+        "project": "genomics_alignment",
+        "architecture": "pure_python",
+        "primary_entrypoint": "main.py",
+        "build_script": "build.sh",
+        "functional_intent": [
+            {"symbol_name": "aligner", "type": "function", "requirement_level": "required"},
+            {"symbol_name": "main", "type": "function", "requirement_level": "required"},
+        ],
+        "nodes": [
+            {
+                "node_id": "main",
+                "lang": "python",
+                "toolchain": "python",
+                "source_files": ["main.py"],
+                "exports": [],
+            }
+        ],
+        "edges": [],
+        "output_dir": "./dist",
+    }
+    # Set prompt to empty so the validator cannot rely on natural language.
+    blueprint["metadata"] = {"prompt": ""}
+    try:
+        PolyglotGraphBlueprint.model_validate(blueprint)
+    except Exception as exc:
+        message = str(exc)
+        if "aligner" in message:
+            print("PASS: functional_intent validator detected missing aligner symbol")
+            return 0
+    print("FAIL: functional_intent validator did not detect missing aligner symbol")
+    return 1
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main() or test_missing_aligner_detected_without_prompt())
