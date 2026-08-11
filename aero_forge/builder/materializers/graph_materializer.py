@@ -154,6 +154,42 @@ class GraphPolyglotMaterializer:
                 return {"context": raw}
         return {}
 
+    def _ensure_package_boundary(
+        self, node_dir: Path, node_id: str, node_spec: Dict[str, Any]
+    ) -> None:
+        """Create parent directories and empty ``__init__.py`` files before SLI.
+
+        For Python package nodes, the package directory and its ``__init__.py``
+        must exist before source emission so that later entrypoint nodes can
+        import from the package without raising ``ModuleNotFoundError``.
+        """
+        lang = (node_spec.get("lang") or "").lower()
+        if lang != "python":
+            return
+        source_files = list(node_spec.get("source_files") or [])
+        prefix = f"{node_id}/"
+        package_dirs: Set[str] = set()
+        for sf in source_files:
+            if not isinstance(sf, str) or not sf:
+                continue
+            if not self._is_pure_python and sf.startswith(prefix):
+                sf = sf[len(prefix) :]
+            parts = Path(sf).parts
+            if len(parts) > 1:
+                package_dirs.add(str(Path(*parts[:-1])))
+        if self._is_pure_python and not package_dirs and source_files:
+            # Top-level module; no package init required.
+            return
+        if not package_dirs and not self._is_pure_python:
+            package_dirs.add(node_id)
+        for pkg in sorted(package_dirs):
+            pkg_dir = node_dir / pkg
+            pkg_dir.mkdir(parents=True, exist_ok=True)
+            init_path = pkg_dir / "__init__.py"
+            if not init_path.exists():
+                init_path.write_text("", encoding="utf-8")
+                _accel_log("info", f"Directory Created: {pkg}/")
+
     def _get_llm_client(self) -> Any:
         """Return a lazily constructed LLM client."""
         if self._llm_client is None:
@@ -280,6 +316,79 @@ class GraphPolyglotMaterializer:
         if new_args:
             edge["args"] = new_args
 
+    @staticmethod
+    def _augment_pure_python_package_edges(
+        nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Infer package dependencies so entrypoints are materialized last.
+
+        In pure-Python projects an entrypoint such as ``main.py`` commonly
+        imports a sibling package (e.g. ``genomics/aligner.py``).  When the
+        blueprint does not declare that edge, the wavefront solver may emit
+        ``main.py`` before ``genomics/__init__.py`` exists, producing a
+        ``ModuleNotFoundError``.  Add implicit ``python_call`` edges from each
+        package node to any entrypoint node so packages are always built first.
+        """
+        if not nodes:
+            return edges
+        node_ids = {n["node_id"] for n in nodes}
+        existing = {
+            (e.get("source"), e.get("target")) for e in edges if e.get("source") and e.get("target")
+        }
+
+        def _package_dirs(node: Dict[str, Any]) -> Set[str]:
+            dirs: Set[str] = set()
+            for sf in node.get("source_files") or []:
+                parts = Path(sf).parts
+                if len(parts) > 1:
+                    dirs.add(parts[0])
+            return dirs
+
+        package_nodes = {n["node_id"] for n in nodes if _package_dirs(n)}
+        entrypoint_names = {"main", "cli", "entrypoint", "run"}
+        entrypoint_nodes: Set[str] = set()
+        for n in nodes:
+            nid = n.get("node_id", "").lower()
+            if nid in entrypoint_names:
+                entrypoint_nodes.add(n["node_id"])
+                continue
+            for sf in n.get("source_files") or []:
+                if Path(sf).name.lower() in ("main.py", "cli.py", "run.py", "entrypoint.py"):
+                    entrypoint_nodes.add(n["node_id"])
+                    break
+
+        for target in entrypoint_nodes:
+            for source in package_nodes:
+                if source == target:
+                    continue
+                if (source, target) in existing or (target, source) in existing:
+                    continue
+                edges.append(
+                    {
+                        "source": source,
+                        "target": target,
+                        "symbol": "",
+                        "boundary_type": "__aero_dependency__",
+                    }
+                )
+                existing.add((source, target))
+        return edges
+
+    @staticmethod
+    def _dependency_maps(
+        edges: List[Dict[str, Any]], labels: List[str]
+    ) -> Tuple[Dict[str, Set[str]], Dict[str, Set[str]]]:
+        """Return forward and reverse dependency maps for wavefront cancellation."""
+        deps: Dict[str, Set[str]] = {n: set() for n in labels}
+        rdeps: Dict[str, Set[str]] = {n: set() for n in labels}
+        for edge in edges:
+            src = edge.get("source", "")
+            tgt = edge.get("target", "")
+            if src in deps and tgt in deps:
+                deps[tgt].add(src)
+                rdeps[src].add(tgt)
+        return deps, rdeps
+
     def _boundary_contracts_for_node(
         self, node_id: str, edges: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
@@ -300,6 +409,8 @@ class GraphPolyglotMaterializer:
         for edge in edges:
             if edge.get("source") == node_id or edge.get("target") == node_id:
                 raw_boundary = edge.get("boundary_type", "c_abi")
+                if raw_boundary == "__aero_dependency__":
+                    continue
                 boundary = boundary_aliases.get(
                     str(raw_boundary).lower().replace("-", "_"), "c_abi"
                 )
@@ -2640,6 +2751,157 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             return value
         return str(value).strip().lower() in ("true", "1", "yes")
 
+    def _emit_and_write_node(
+        self,
+        node_id: str,
+        node_map: Dict[str, Dict[str, Any]],
+        edges: List[Dict[str, Any]],
+        build: bool,
+    ) -> List[Dict[str, Any]]:
+        """Emit, verify, and write all artifacts for a single node.
+
+        Returns a list of written-artifact metadata dicts.  Raises
+        :class:`MaterializationError` if the node cannot be materialized
+        atomically.
+        """
+        node_spec = node_map.get(node_id)
+        if not node_spec:
+            raise MaterializationError(
+                f"Wavefront Incompleteness: node {node_id!r} is missing from the graph"
+            )
+        lang = node_spec.get("lang", "").lower()
+        contracts = self._boundary_contracts_for_node(node_id, edges)
+        original_source_files = list(node_spec.get("source_files") or [])
+        if self._is_pure_python and lang == "python":
+            node_dir = self.workspace_root
+        else:
+            node_dir = self.workspace_root / node_id
+
+        self._ensure_package_boundary(node_dir, node_id, node_spec)
+
+        artifacts = self._emit_node_artifacts(node_id, node_spec, contracts)
+        normalized_source_files: List[str] = []
+        written: List[Dict[str, Any]] = []
+        for artifact in artifacts:
+            prefix = f"{node_id}/"
+            if artifact.file_path.startswith(prefix):
+                if self._is_pure_python and lang == "python":
+                    if not any(
+                        isinstance(p, str) and p.startswith(prefix)
+                        for p in original_source_files
+                    ):
+                        artifact.file_path = artifact.file_path[len(prefix) :]
+                else:
+                    artifact.file_path = artifact.file_path[len(prefix) :]
+            self._write_artifact(artifact, node_dir)
+            if (
+                artifact.language
+                not in {
+                    "bash",
+                    "json",
+                    "yaml",
+                    "toml",
+                    "markdown",
+                    "text",
+                    "cmake",
+                    "make",
+                    "makefile",
+                }
+                and not artifact.is_header
+                and not self._is_build_manifest(artifact)
+            ):
+                try:
+                    SyntaxValidator.validate(artifact.content, artifact.language)
+                    ContentDensityValidator.validate(artifact.content, artifact.language)
+                except (SyntaxError, ValueError) as exc:
+                    raise MaterializationError(
+                        f"Synthesis Incompleteness for {artifact.file_path}: {exc}"
+                    ) from exc
+                if not ContentDensityValidator.has_execution_flow(
+                    artifact.content, artifact.language
+                ):
+                    raise MaterializationError(
+                        f"GoI verification failed for {artifact.file_path}: "
+                        "zero execution matrix (hollow logic)"
+                    )
+                if self._is_pure_python:
+                    try:
+                        ContentDensityValidator.validate_pure_python(artifact.content)
+                    except ValueError as exc:
+                        raise MaterializationError(
+                            f"Pure Python boundary violation for {artifact.file_path}: {exc}"
+                        ) from exc
+                _accel_log("success", "Syntax Verification Passed")
+            written.append(
+                {
+                    "node_id": node_id,
+                    "language": artifact.language or lang,
+                    "file": artifact.file_path,
+                    "path": str(node_dir / artifact.file_path),
+                }
+            )
+            if not self._is_build_manifest(artifact) and not artifact.is_header:
+                normalized_source_files.append(artifact.file_path)
+        if self._is_pure_python and lang == "python" and normalized_source_files:
+            node_spec["source_files"] = normalized_source_files
+
+        missing_symbols = self._missing_symbols(
+            artifacts, node_id, node_spec, contracts, language=lang
+        )
+        required_symbols = self._required_symbols(node_id, node_spec, contracts)
+        if missing_symbols:
+            raise MaterializationError(
+                f"Incomplete Materialization for {node_id}: "
+                f"missing contracted symbols {missing_symbols}"
+            )
+        if required_symbols:
+            present = len(required_symbols) - len(missing_symbols)
+            _accel_log(
+                "success",
+                f"Contract Integrity Verified: {present}/{len(required_symbols)} "
+                f"functions present in {node_id}",
+            )
+
+        if lang == "python":
+            init_artifact = self._write_python_init(node_dir, node_id, node_spec, artifacts)
+            if init_artifact:
+                written.append(
+                    {
+                        "node_id": node_id,
+                        "language": "python",
+                        "file": init_artifact.file_path,
+                        "path": str(node_dir / init_artifact.file_path),
+                    }
+                )
+
+        if lang == "rust" and any(
+            (c.get("boundary_type") or "").lower().replace("-", "_") == "pyo3_maturin"
+            for c in contracts
+        ):
+            rust_init = self._write_rust_pymodule_init(node_dir, node_id, node_spec)
+            if rust_init:
+                written.append(
+                    {
+                        "node_id": node_id,
+                        "language": "python",
+                        "file": rust_init.file_path,
+                        "path": str(node_dir / rust_init.file_path),
+                    }
+                )
+
+        if lang == "cpp" or node_spec.get("toolchain") == "cmake":
+            self._reconcile_cmake_sources(node_dir, node_id)
+
+        if build:
+            try:
+                SystemToolchainRouter.dispatch_node_build(node_id, node_spec, node_dir)
+            except RuntimeError as exc:
+                raise MaterializationError(
+                    f"toolchain dispatch failed for {node_id}: {exc}"
+                ) from exc
+
+        return written
+
     def materialize(
         self,
         hin_graph_spec: Dict[str, Any],
@@ -2692,6 +2954,9 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
         for edge in edges:
             self._maybe_simplify_python_c_abi_edge(edge, node_map)
 
+        if self._is_pure_python:
+            edges = self._augment_pure_python_package_edges(nodes, edges)
+
         self._guard_requested_files(nodes)
         self._guard_requested_symbols(nodes, edges)
 
@@ -2717,6 +2982,10 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             raise MaterializationError(
                 f"GoI wavefront solver rejected the graph: {exc}"
             ) from exc
+
+        deps, rdeps = self._dependency_maps(edges, labels)
+        failed_nodes: Set[str] = set()
+        cancelled_nodes: Set[str] = set()
 
         # Pure Python projects have no cross-language edges; synthesizing FFI
         # bridges would only confuse the LLM and generate unused scaffolding.
@@ -2754,177 +3023,50 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             stage_label = " + ".join(sorted(set(stage_labels)))
             _accel_log("info", f"Stage {stage_index}: {stage_label}")
             for node_id in stage:
-                _accel_log("info", f"Materializing Node: {node_id}")
-                node_spec = node_map.get(node_id)
-                if not node_spec:
+                if node_id in failed_nodes or node_id in cancelled_nodes:
                     _accel_log(
                         "warning",
-                        f"Wavefront Incompleteness: node {node_id!r} is missing from the graph",
+                        f"Materialization Starvation: downstream node {node_id} cancelled "
+                        "due to upstream failure",
                     )
                     continue
-                processed_node_ids.add(node_id)
-                lang = node_spec.get("lang", "").lower()
+                node_spec = node_map.get(node_id, {})
                 contracts = self._boundary_contracts_for_node(node_id, edges)
-                # Capture the user's requested package paths before the plugin mutates
-                # source_files with the files it actually emitted.
-                original_source_files = list(node_spec.get("source_files") or [])
-                # Pure Python projects write files directly under the workspace root
-                # using the user's requested package paths (e.g. fft_lib/core.py).
-                # We only keep a leading ``node_id/`` prefix when the user explicitly
-                # listed a path starting with that prefix, preventing phantom node
-                # directories like ``main/main.py``.
-                if self._is_pure_python and lang == "python":
-                    node_dir = self.workspace_root
-                else:
-                    node_dir = self.workspace_root / node_id
-                artifacts = self._emit_node_artifacts(node_id, node_spec, contracts)
-                normalized_source_files: List[str] = []
-                for artifact in artifacts:
-                    prefix = f"{node_id}/"
-                    if artifact.file_path.startswith(prefix):
-                        if self._is_pure_python and lang == "python":
-                            if not any(
-                                isinstance(p, str) and p.startswith(prefix)
-                                for p in original_source_files
-                            ):
-                                artifact.file_path = artifact.file_path[len(prefix) :]
-                        else:
-                            artifact.file_path = artifact.file_path[len(prefix) :]
-                    self._write_artifact(artifact, node_dir)
-                    if (
-                        artifact.language
-                        not in {
-                            "bash",
-                            "json",
-                            "yaml",
-                            "toml",
-                            "markdown",
-                            "text",
-                            "cmake",
-                            "make",
-                            "makefile",
-                        }
-                        and not artifact.is_header
-                        and not self._is_build_manifest(artifact)
-                    ):
-                        try:
-                            SyntaxValidator.validate(
-                                artifact.content, artifact.language
-                            )
-                            ContentDensityValidator.validate(
-                                artifact.content, artifact.language
-                            )
-                        except (SyntaxError, ValueError) as exc:
-                            raise MaterializationError(
-                                f"Synthesis Incompleteness for {artifact.file_path}: {exc}"
-                            ) from exc
-                        if not ContentDensityValidator.has_execution_flow(
-                            artifact.content, artifact.language
-                        ):
-                            raise MaterializationError(
-                                f"GoI verification failed for {artifact.file_path}: "
-                                "zero execution matrix (hollow logic)"
-                            )
-                        if self._is_pure_python:
-                            try:
-                                ContentDensityValidator.validate_pure_python(
-                                    artifact.content
-                                )
-                            except ValueError as exc:
-                                raise MaterializationError(
-                                    f"Pure Python boundary violation for {artifact.file_path}: {exc}"
-                                ) from exc
-                        _accel_log("success", "Syntax Verification Passed")
-                    written_artifacts.append(
-                        {
-                            "node_id": node_id,
-                            "language": artifact.language or lang,
-                            "file": artifact.file_path,
-                            "path": str(node_dir / artifact.file_path),
-                        }
-                    )
-                    if not self._is_build_manifest(artifact) and not artifact.is_header:
-                        normalized_source_files.append(artifact.file_path)
-                if (
-                    self._is_pure_python
-                    and lang == "python"
-                    and normalized_source_files
-                ):
-                    # Align source_files with the workspace-relative paths actually
-                    # written so toolchain dispatch (e.g. python -m py_compile)
-                    # finds the files from the workspace root.
-                    node_spec["source_files"] = normalized_source_files
-
-                # Contract-to-source integrity gate: every function declared in
-                # the blueprint for this node must be present in the emitted source.
-                missing_symbols = self._missing_symbols(
-                    artifacts, node_id, node_spec, contracts, language=lang
+                required_symbols = self._required_symbols(
+                    node_id, node_spec, contracts
                 )
-                required_symbols = self._required_symbols(node_id, node_spec, contracts)
-                if missing_symbols:
-                    raise MaterializationError(
-                        f"Incomplete Materialization for {node_id}: "
-                        f"missing contracted symbols {missing_symbols}"
+                symbol_count = len(required_symbols)
+                _accel_log(
+                    "info",
+                    f"Materializing Node: {node_id} "
+                    f"({symbol_count} symbol{'s' if symbol_count != 1 else ''})",
+                )
+                try:
+                    node_artifacts = self._emit_and_write_node(
+                        node_id, node_map, edges, build
                     )
-                if required_symbols:
-                    present = len(required_symbols) - len(missing_symbols)
+                    written_artifacts.extend(node_artifacts)
+                    processed_node_ids.add(node_id)
+                except Exception as exc:
                     _accel_log(
-                        "success",
-                        f"Contract Integrity Verified: {present}/{len(required_symbols)} "
-                        f"functions present in {node_id}",
+                        "error",
+                        f"Materialization Starvation: node {node_id} failed to materialize: {exc}",
                     )
-
-                if lang == "python":
-                    init_artifact = self._write_python_init(
-                        node_dir, node_id, node_spec, artifacts
-                    )
-                    if init_artifact:
-                        written_artifacts.append(
-                            {
-                                "node_id": node_id,
-                                "language": "python",
-                                "file": init_artifact.file_path,
-                                "path": str(node_dir / init_artifact.file_path),
-                            }
-                        )
-
-                if lang == "rust" and any(
-                    (c.get("boundary_type") or "").lower().replace("-", "_")
-                    == "pyo3_maturin"
-                    for c in contracts
-                ):
-                    rust_init = self._write_rust_pymodule_init(
-                        node_dir, node_id, node_spec
-                    )
-                    if rust_init:
-                        written_artifacts.append(
-                            {
-                                "node_id": node_id,
-                                "language": "python",
-                                "file": rust_init.file_path,
-                                "path": str(node_dir / rust_init.file_path),
-                            }
-                        )
-
-                if lang == "cpp" or node_spec.get("toolchain") == "cmake":
-                    self._reconcile_cmake_sources(node_dir, node_id)
-
-                if build:
-                    try:
-                        SystemToolchainRouter.dispatch_node_build(
-                            node_id, node_spec, node_dir
-                        )
-                    except RuntimeError as exc:
-                        raise MaterializationError(
-                            f"toolchain dispatch failed for {node_id}: {exc}"
-                        ) from exc
+                    failed_nodes.add(node_id)
+                    stack = list(rdeps.get(node_id, []))
+                    while stack:
+                        dependent = stack.pop()
+                        if dependent not in cancelled_nodes:
+                            cancelled_nodes.add(dependent)
+                            stack.extend(rdeps.get(dependent, []))
 
         all_node_ids = {n["node_id"] for n in nodes}
-        unprocessed = all_node_ids - processed_node_ids
-        if unprocessed:
+        unprocessed = all_node_ids - processed_node_ids - cancelled_nodes
+        if failed_nodes or unprocessed:
             raise MaterializationError(
-                f"Wavefront Incompleteness: the following nodes were not materialized: "
-                f"{sorted(unprocessed)}"
+                f"Materialization Starvation: node(s) {sorted(failed_nodes)} failed; "
+                f"downstream node(s) {sorted(cancelled_nodes)} cancelled; "
+                f"unprocessed node(s) {sorted(unprocessed)}"
             )
 
         _accel_log("info", "HIN AST Normalization")

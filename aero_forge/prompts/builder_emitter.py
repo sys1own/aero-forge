@@ -196,7 +196,11 @@ def _symbol_specs(
     """
     specs: List[Tuple[str, List[str], str]] = []
     for c in contracts or []:
-        sym = c.get("symbol") or node.get("node_id", "module")
+        sym = c.get("symbol") or ""
+        if not sym:
+            # Edges with no exported symbol are dependency-only; they must not
+            # override the node's explicit exports list.
+            continue
         specs.append((sym, list(c.get("args") or []), c.get("return_type", "")))
     if not specs:
         for sym in node.get("exports") or []:

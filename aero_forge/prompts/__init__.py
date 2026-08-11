@@ -397,6 +397,7 @@ ARCHITECTURE ELEVATION RULE:
 DATA PAYLOAD CONSTRAINT:
 - If the prompt references a static data constant, scoring matrix, lookup table, or named constant (e.g. `BLOSUM62`, `scoring_matrix`, `lookup_table`), you MUST emit it as a `data_payload` inside the relevant blueprint node or `module_graph` entry.
 - Set `data_payload: true`, `payload_kind: "dict"` (or `"list"` / `"set"`), and provide the full literal value or a compact generation algorithm in `logic_sketch` so the SMTASTEngine can lower it into the Holographic Interaction Net (HIN).
+- For large matrices and lookup tables, you MUST also include the complete literal as a non-truncatable JSON string under `full_implementation_map` (keyed by symbol name) so enrichment cannot drop the data during compaction.
 """,
     "Universal polyglot architect: any toolchain, SMT/GoI-backed safety.",
 )
