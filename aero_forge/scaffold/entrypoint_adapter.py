@@ -100,6 +100,39 @@ class EntrypointAdapterEngine:
             return False
         return s.isidentifier()
 
+    @staticmethod
+    def _resolve_short_flags(flags: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Assign every flag a unique short option, avoiding argparse's ``-h`` help."""
+        reserved = {"h"}  # argparse reserves -h for --help
+        used: set[str] = set()
+        for flag in flags:
+            short = str(flag.get("short") or "").strip().lstrip("-")
+            if short and short not in used and short not in reserved:
+                used.add(short)
+            else:
+                flag["short"] = ""
+        # Greedily assign unused letters.
+        pool = [c for c in "abcdefghijklmnopqrstuvwxyz" if c not in used and c not in reserved]
+        idx = 0
+        for flag in flags:
+            short = str(flag.get("short") or "").strip()
+            if short:
+                continue
+            name = flag["name"].replace("_", "")
+            # Prefer the first letter of the flag name if available.
+            preferred = name[0] if name and name[0] not in used and name[0] not in reserved else ""
+            if preferred:
+                flag["short"] = preferred
+                used.add(preferred)
+            else:
+                if idx >= len(pool):
+                    flag["short"] = ""
+                    continue
+                flag["short"] = pool[idx]
+                used.add(pool[idx])
+                idx += 1
+        return flags
+
     # --------------------------------------------------------------------- #
     # Engine module discovery / emission
     # --------------------------------------------------------------------- #
@@ -175,7 +208,7 @@ class EntrypointAdapterEngine:
                 0,
                 {
                     "name": "cmd",
-                    "short": "c",
+                    "short": "",
                     "dest_var": "cmd",
                     "type": "string",
                     "required": False,
@@ -184,6 +217,8 @@ class EntrypointAdapterEngine:
                     "help": "Command to execute",
                 },
             )
+
+        flags = self._resolve_short_flags(flags)
 
         lines = [
             "# Auto-generated entrypoint wrapper produced by Aero-Forge Engine Core",

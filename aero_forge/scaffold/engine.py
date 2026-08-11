@@ -1848,8 +1848,13 @@ class RustGenerator:
             else:
                 sizes.add(1)
         if not return_values:
-            # No non-None return statements; the function is effect-only.
-            return self.return_type if self.annotated_return else "()"
+            # No non-None return statements. If the shield or an annotation gave
+            # us a concrete return type, honor it so the emitted signature matches
+            # any synthesized zero-return expression. Only fall back to unit when
+            # the expected type is genuinely void.
+            if not self.return_type or self.return_type in ("()", "None", "", "void"):
+                return "()"
+            return self.return_type
         if sizes == {1}:
             # Infer the scalar return type from the returned expressions and
             # reconcile it with any explicit annotation.  This prevents E0308

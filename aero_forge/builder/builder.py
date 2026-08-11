@@ -342,7 +342,9 @@ class ProactivePolyglotBuilder:
 
         last_error: Optional[Exception] = None
         graph = None
-        skeleton_note = self._graph_prompt_skeleton(prompt)
+        # The system prompt already provides a full example; do not inject a
+        # hard-coded skeleton that can leak placeholder symbols such as "butterfly".
+        skeleton_note = ""
         for attempt, extra in enumerate(
             [
                 "",

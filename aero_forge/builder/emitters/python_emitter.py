@@ -193,7 +193,7 @@ class PythonEmitterPlugin(PolyglotEmitterPlugin):
             file_path = file_path[len(prefix):]
 
         if _has_pyo3_consumer_contract(node_id, boundary_contracts):
-            source = _pyo3_loader_source(node_id, boundary_contracts)
+            source = _pyo3_loader_source(node_id, boundary_contracts, node_spec)
         elif _has_c_abi_consumer_contract(node_id, boundary_contracts):
             source = _ctypes_loader_source(node_id, boundary_contracts)
         else:
@@ -261,7 +261,11 @@ def _demo_call_args(args: List[str]) -> str:
     return ", ".join(parts)
 
 
-def _pyo3_loader_source(node_id: str, boundary_contracts: List[dict]) -> str:
+def _pyo3_loader_source(
+    node_id: str,
+    boundary_contracts: List[dict],
+    node_spec: Optional[dict] = None,
+) -> str:
     """Generate a Python CLI that imports a compiled PyO3/Maturin extension."""
     contract = next(
         (
@@ -277,20 +281,31 @@ def _pyo3_loader_source(node_id: str, boundary_contracts: List[dict]) -> str:
     args = contract.get("args", ["int64"])
     call_args = _demo_call_args(args)
 
+    exports = list((node_spec or {}).get("exports") or [symbol])
+    exports = [n for n in exports if n]
+    if not exports:
+        exports = [symbol]
+    primary = exports[0]
+
+    wrappers: List[str] = []
+    for export_name in exports:
+        wrappers.extend(
+            [
+                f"def {export_name}(*args, **kwargs):",
+                f"    from {source_node} import {symbol} as _impl",
+                "    return _impl(*args, **kwargs)",
+                "",
+            ]
+        )
+    wrapper_block = "\n".join(wrappers)
+
     return f'''"""Auto-generated Python CLI for the PyO3/Maturin bridge."""
-import sys
-from pathlib import Path
+from typing import Any
 
-_SCRIPT_DIR = Path(__file__).resolve().parent
-# The compiled Rust extension is a sibling package (e.g. rust_core/__init__.py).
-if str(_SCRIPT_DIR.parent) not in sys.path:
-    sys.path.insert(0, str(_SCRIPT_DIR.parent))
-
-from {source_node} import {symbol}
-
+{wrapper_block}
 if __name__ == "__main__":
-    result = {symbol}({call_args})
-    print(f"{symbol}({call_args}) = {{result}}")
+    result = {primary}({call_args})
+    print(f"{primary}({call_args}) = {{result}}")
 '''
 
 

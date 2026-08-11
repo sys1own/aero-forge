@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import math
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -466,8 +467,8 @@ def generate_smoke_tests(implementation: str, module_name: str = "generated") ->
 
 
 def _abi_type_to_py(abi_type: str) -> str:
-    """Map a supported ABI scalar/pointer type to a Python type hint."""
-    t = (abi_type or "").strip().lower()
+    """Map a supported ABI / PyO3 type to a Python type hint."""
+    t = (abi_type or "").strip().lower().replace(" ", "")
     if t in {"f64", "double", "float", "c_double", "c_float", "f32"}:
         return "float"
     if t in {
@@ -478,10 +479,42 @@ def _abi_type_to_py(abi_type: str) -> str:
         return "int"
     if t in {"bool"}:
         return "bool"
-    if t in {"const char*", "char*", "c_str", "c_char", "*const c_char", "*mut c_char"}:
+    if t in {"const char*", "char*", "c_str", "c_char", "*constc_char", "*mutc_char"}:
         return "str"
     if t in {"void"}:
         return "None"
+    if t in {"python", "pyo3::python"}:
+        return "__PYTHON__"
+    # PyO3 result wrappers.
+    m = re.match(r"pyresult<(.+)>", t)
+    if m:
+        inner = m.group(1)
+        if inner in {"f64", "double", "float", "f32"}:
+            return "float"
+        if inner in {
+            "i32", "i64", "int", "int32_t", "int64_t",
+            "usize", "size_t", "u32", "u64", "uint32_t", "uint64_t",
+            "c_int", "c_long", "c_ulong", "c_size_t",
+        }:
+            return "int"
+        if inner == "()":
+            return "None"
+        return "Any"
+    # PyO3 ndarray references become nested Python lists.
+    m = re.match(r"&?pyarray(\d)?<(.+)>", t)
+    if m:
+        ndim = m.group(1) or "1"
+        inner = m.group(2)
+        if inner in {"f64", "double", "float", "f32"}:
+            base = "list[float]"
+        elif inner in {
+            "i32", "i64", "int", "int32_t", "int64_t",
+            "usize", "size_t", "u32", "u64", "uint32_t", "uint64_t",
+        }:
+            base = "list[int]"
+        else:
+            base = "list[Any]"
+        return "list[" + base + "]" if ndim == "2" else base
     if "*" in t:
         # Pointer types are treated as a flat list of the underlying scalar.
         inner = t.replace("*", "").replace("mut", "").replace("const", "").strip()
@@ -496,8 +529,9 @@ def _abi_contract_to_signature(contract: Any) -> str:
     outputs = sig.get("outputs", [])
     name = contract.export_symbol or contract.contract_id
     args = ", ".join(
-        f"{entry.get('name', 'arg')}: {_abi_type_to_py(entry.get('type', ''))}"
+        f"{entry.get('name', 'arg')}: {py_type}"
         for entry in inputs
+        if (py_type := _abi_type_to_py(entry.get("type", ""))) != "__PYTHON__"
     )
     ret = "None"
     if outputs:

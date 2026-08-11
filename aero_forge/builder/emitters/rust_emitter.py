@@ -18,6 +18,84 @@ from aero_forge.builder.emitters.base import (
 from aero_forge.builder.spec import ASTNode, EngineSpec, function, module
 
 
+class SignatureBodyMatch:
+    """Validator that reconciles a function's declared Rust return type with
+    the type realized by its body."""
+
+    @staticmethod
+    def _is_void(t: Optional[str]) -> bool:
+        return (t or "").strip() in ("", "void", "None", "()")
+
+    @staticmethod
+    def _is_numeric(t: Optional[str]) -> bool:
+        return (t or "").strip() in {
+            "i8", "i16", "i32", "i64", "i128",
+            "u8", "u16", "u32", "u64", "u128",
+            "isize", "usize", "f32", "f64",
+        }
+
+    @staticmethod
+    def _is_pyoish(t: Optional[str]) -> bool:
+        t = (t or "").strip()
+        return t.startswith("PyResult<") or "Py" in t or "Python" in t
+
+    @staticmethod
+    def _is_complex(t: Optional[str]) -> bool:
+        """Return True for generic/container types we cannot reliably infer from a single expression."""
+        t = (t or "").strip()
+        return any(
+            s in t
+            for s in (
+                "Vec<", "HashMap<", "HashSet<", "BTreeMap<", "BTreeSet<",
+                "Option<", "Result<", "Box<", "Arc<", "Rc<", "RefCell<",
+                "String",
+            )
+        )
+
+    @classmethod
+    def unify(cls, declared: Optional[str], inferred: Optional[str]) -> Optional[str]:
+        """Return the return type that the signature should use.
+
+        * A non-void, PyO3/FFI return type is preserved exactly.
+        * If the two primitive numeric types differ, the declared type wins and
+          the final return expression is cast at emission time.
+        * If the declared type is void, the body's inferred type is used.
+        * Otherwise the body type wins so the signature matches the actual
+          returned value.
+        """
+        if cls._is_void(declared):
+            return inferred
+        if cls._is_void(inferred):
+            return declared
+        declared = declared.strip()
+        inferred = inferred.strip()
+        if declared == inferred:
+            return declared
+        if cls._is_pyoish(declared) or cls._is_complex(declared):
+            return declared
+        if cls._is_numeric(declared) and cls._is_numeric(inferred):
+            return declared
+        # Body type wins so the emitted code compiles without guessing a cast.
+        return inferred
+
+    @classmethod
+    def validate(cls, declared: Optional[str], inferred: Optional[str]) -> None:
+        """Raise a descriptive error when types are completely incompatible."""
+        if cls._is_void(declared) or cls._is_void(inferred):
+            return
+        if declared.strip() == inferred.strip():
+            return
+        if (
+            cls._is_pyoish(declared)
+            or cls._is_complex(declared)
+            or (cls._is_numeric(declared) and cls._is_numeric(inferred))
+        ):
+            return
+        raise ValueError(
+            f"Return-type mismatch: declared {declared!r} but body returns {inferred!r}"
+        )
+
+
 class RustEmitter(BaseEmitter):
     """Emit syntactically valid Rust source from an engine spec."""
 
@@ -128,12 +206,8 @@ class RustEmitter(BaseEmitter):
 
         declared = self._map_type(node.type_hint)
         inferred = self._infer_return_type_from_body(node.body) if node.body else None
-        if not self._is_void(declared):
-            return_type = declared
-        elif inferred:
-            return_type = inferred
-        else:
-            return_type = declared
+        SignatureBodyMatch.validate(declared, inferred)
+        return_type = SignatureBodyMatch.unify(declared, inferred)
         self._current_return_type = return_type
 
         if self.is_pyo3:
@@ -263,10 +337,25 @@ class RustEmitter(BaseEmitter):
             # Void functions must not return a value.
             self._write("return;", indent_level)
             return
-        value_str = (
-            self._expr(node.children[0]) if node.children else self._literal(node.value)
+        value_node = node.children[0] if node.children else ASTNode(
+            kind="literal", value=node.value
         )
+        value_str = self._expr(value_node)
+        from_type = self._expr_type(value_node)
+        value_str = self._cast_return_expression(value_str, from_type, self._current_return_type)
         self._write(f"return {value_str};", indent_level)
+
+    def _cast_return_expression(
+        self, value_str: str, from_type: Optional[str], to_type: Optional[str]
+    ) -> str:
+        """Cast a return expression to the declared return type when safe."""
+        if SignatureBodyMatch._is_void(to_type) or from_type == to_type:
+            return value_str
+        from_type = (from_type or "").strip()
+        to_type = (to_type or "").strip()
+        if SignatureBodyMatch._is_numeric(from_type) and SignatureBodyMatch._is_numeric(to_type):
+            return f"({value_str} as {to_type})"
+        return value_str
 
     def _emit_import(self, node: ASTNode, indent_level: int) -> None:
         self._write(f"use {node.value};", indent_level)

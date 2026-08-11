@@ -30,6 +30,8 @@ define_language! {
         "sqrt" = Sqrt([Id; 1]),
         "log" = Log([Id; 1]),
         "abs" = Abs([Id; 1]),
+        "to_f64" = ToF64([Id; 1]),
+        "to_i64" = ToI64([Id; 1]),
     }
 }
 
@@ -47,6 +49,11 @@ pub fn make_ast_rewrite_rules() -> Vec<Rewrite> {
         rewrite!("add-comm"; "(add ?x ?y)" => "(add ?y ?x)"),
         rewrite!("mul-comm"; "(mul ?x ?y)" => "(mul ?y ?x)"),
         rewrite!("neg-neg"; "(neg (neg ?x))" => "?x"),
+        // Signature alignment / type-cast rewrites: nested casts collapse to the outer cast.
+        rewrite!("to_f64-to_f64"; "(to_f64 (to_f64 ?x))" => "(to_f64 ?x)"),
+        rewrite!("to_i64-to_i64"; "(to_i64 (to_i64 ?x))" => "(to_i64 ?x)"),
+        rewrite!("to_f64-to_i64"; "(to_f64 (to_i64 ?x))" => "(to_f64 ?x)"),
+        rewrite!("to_i64-to_f64"; "(to_i64 (to_f64 ?x))" => "(to_i64 ?x)"),
     ]
 }
 
@@ -148,6 +155,8 @@ fn build_enode(
         "sqrt" => unary(expr, kids),
         "log" => unary(expr, kids),
         "abs" => unary(expr, kids),
+        "to_f64" => if kids.len() == 1 { Ok(expr.add(AeroAstLanguage::ToF64([kids[0]]))) } else { Err("to_f64 needs one argument".to_string()) },
+        "to_i64" => if kids.len() == 1 { Ok(expr.add(AeroAstLanguage::ToI64([kids[0]]))) } else { Err("to_i64 needs one argument".to_string()) },
         _ => {
             // If two children were provided but the operator name is unknown,
             // treat it as a generic add so the expression still rewrites.
@@ -181,6 +190,8 @@ fn rec_expr_to_value(expr: &RecExpr<AeroAstLanguage>, id: Id) -> Value {
         AeroAstLanguage::Sqrt([a]) => call_json("sqrt", &[a], expr),
         AeroAstLanguage::Log([a]) => call_json("log", &[a], expr),
         AeroAstLanguage::Abs([a]) => call_json("abs", &[a], expr),
+        AeroAstLanguage::ToF64([a]) => call_json("to_f64", &[a], expr),
+        AeroAstLanguage::ToI64([a]) => call_json("to_i64", &[a], expr),
     }
 }
 
@@ -221,6 +232,38 @@ pub fn repair_uast_expression(expr_json: &str) -> PyResult<String> {
     let out = rec_expr_to_value(&best, root_id);
     serde_json::to_string(&out)
         .map_err(|e| PyValueError::new_err(format!("output JSON serialization failed: {}", e)))
+}
+
+/// Wrap a UAST expression in a type-cast node, run equality saturation to
+/// collapse nested casts, and return the rewritten UAST as JSON.
+///
+/// This implements the native-speed ``TypeCast`` / ``SignatureAlignment``
+/// transformation requested for mismatched return types.
+#[pyfunction]
+pub fn align_return_type(expr_json: &str, source_type: &str, target_type: &str) -> PyResult<String> {
+    let value: Value = serde_json::from_str(expr_json)
+        .map_err(|e| PyValueError::new_err(format!("invalid expression JSON: {}", e)))?;
+
+    if source_type == target_type {
+        // No cast needed; still run equality saturation to normalize.
+        return repair_uast_expression(expr_json);
+    }
+
+    // Only emit a numeric cast for primitive scalar return types.
+    let valid = |t: &str| matches!(t, "i64" | "i32" | "i16" | "i8" | "u64" | "u32" | "u16" | "u8" | "f64" | "f32" | "isize" | "usize" | "bool");
+    if !valid(source_type) || !valid(target_type) {
+        return Ok(expr_json.to_string());
+    }
+
+    let cast_name = if target_type == "i64" { "to_i64" } else { "to_f64" };
+    let wrapped = serde_json::json!({
+        "type": "call",
+        "function": cast_name,
+        "arguments": [value],
+    });
+
+    repair_uast_expression(&serde_json::to_string(&wrapped)
+        .map_err(|e| PyValueError::new_err(format!("wrap serialization failed: {}", e)))?)
 }
 
 /// An in-memory AST rewrite patch produced before any source files are written.
