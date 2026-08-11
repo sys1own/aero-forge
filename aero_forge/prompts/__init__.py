@@ -390,6 +390,8 @@ STATIC ANALYSIS RULES (the pre-write validator will reject code that violates th
 
 TEST DENSITY CONSTRAINT:
 - For every contracted symbol exported by the project, you MUST generate at least five (5) distinct unit tests under a `tests/` directory. Cover success paths, edge cases (empty inputs, large buffers), and error handling. Emit each case as a separate `def test_<symbol>_<case>():` function; do not group multiple scenarios under a single test name.
+- The blueprint manifest MUST include a `tests/` directory and at least one test file (e.g. `tests/test_<module>.py`) for every non-entrypoint module. Omitting tests or emitting a hollow test suite causes an immediate TestDensityFailure and aborts the build.
+- Do NOT report a successful build if zero tests were executed; "No tests found" is a failure state, not a pass.
 
 ARCHITECTURE ELEVATION RULE:
 - If the project contains more than two distinct language nodes (e.g. Python + Rust + Go) or uses advanced boundaries such as `wasm_wasi`, `cgo`, `jni`, `pinvoke`, or `cuda_hip_c`, set `architecture` to `graph_polyglot` and explicitly group nodes by their `node_id` and language in the blueprint.

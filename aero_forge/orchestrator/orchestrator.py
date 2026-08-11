@@ -771,6 +771,44 @@ class Orchestrator:
         missing = [p for p in required if p not in manifest_paths]
         return missing
 
+    @staticmethod
+    def _tests_requested(prompt: str, system_prompt_extra: str = "") -> bool:
+        """Return True when the prompt or v11 template requires unit tests."""
+        if any(k in prompt.lower() for k in ("test", "tests", "pytest", "unit test")):
+            return True
+        return "TEST DENSITY CONSTRAINT" in system_prompt_extra
+
+    def _verify_test_manifest_parity(
+        self,
+        blueprint: Blueprint,
+        prompt: str,
+        system_prompt_extra: str = "",
+    ) -> List[str]:
+        """Return a test manifest diagnostic if tests are required but missing.
+
+        A non-empty result means the blueprint is missing a tests/ directory or
+        test node while the prompt or v11 template mandated test synthesis.
+        """
+        if not self._tests_requested(prompt, system_prompt_extra):
+            return []
+        has_tests = any(
+            (n.get("node_id") or "").startswith("test")
+            or any(
+                isinstance(p, str) and (p.startswith("tests/") or "/tests/" in p)
+                for p in n.get("source_files") or []
+            )
+            for n in (blueprint.module_graph or [])
+        )
+        has_tests = has_tests or any(
+            isinstance(entry, ManifestEntry)
+            and str(entry.path).startswith("tests/")
+            or (isinstance(entry, dict) and str(entry.get("path", "")).startswith("tests/"))
+            for entry in (blueprint.manifest or [])
+        )
+        if not has_tests:
+            return ["tests/"]
+        return []
+
     def _check_logic_starvation(
         self,
         blueprint: Blueprint,
@@ -802,6 +840,7 @@ class Orchestrator:
         self,
         prompt: str,
         missing_paths: List[str],
+        missing_tests: List[str],
         logic_starvation: Optional[str],
     ) -> str:
         """Return a corrective user prompt extension for re-enrichment."""
@@ -813,6 +852,13 @@ class Orchestrator:
                 f"file paths: {missing_paths}. You are FORBIDDEN from collapsing the "
                 f"project into a single node. Every listed path MUST have a dedicated "
                 f"'node_id' and at least one exported symbol in the full_implementation_map."
+            )
+        if missing_tests:
+            details.append(
+                f"TEST MANIFEST INSTRUCTION: The blueprint is missing a tests/ directory "
+                f"and test files. Every contracted symbol MUST have at least five distinct "
+                f"unit tests under tests/ (e.g. tests/test_<symbol>.py). Add the test "
+                f"node and files to the manifest before returning the blueprint."
             )
         if logic_starvation:
             details.append(
@@ -832,10 +878,11 @@ class Orchestrator:
 
         After the LLM returns a candidate blueprint, a Semantic Intent Parity
         Gate checks that every file path explicitly mentioned in the prompt is
-        present in the manifest and that the blueprint has not collapsed into a
-        single entrypoint. Missing components trigger a Corrective Enrichment
-        pass (one retry) before the build is rejected with a
-        ``Semantic Incompleteness`` / ``Logic Starvation`` diagnostic.
+        present in the manifest, that the blueprint has not collapsed into a
+        single entrypoint, and that a tests/ directory exists when tests are
+        required. Missing components trigger a Corrective Enrichment pass (one
+        retry) before the build is rejected with a
+        ``Semantic Incompleteness`` / ``Logic Starvation`` / ``TestDensityError`` diagnostic.
         """
         metadata = blueprint.metadata if isinstance(blueprint.metadata, dict) else {}
         if self._is_enriched(metadata):
@@ -846,9 +893,10 @@ class Orchestrator:
                 "Enrichment Failure: llm_initialized is false and no prompt/LLM "
                 "is available to run a synchronous v11 enrichment pass."
             )
+        system_prompt_extra = self._v11_enrichment_guidance()
         compiler = IntentCompiler(
             llm_client=self.llm_client,
-            system_prompt_extra=self._v11_enrichment_guidance(),
+            system_prompt_extra=system_prompt_extra,
         )
         current_prompt = prompt
         for attempt in range(2):
@@ -868,8 +916,11 @@ class Orchestrator:
                 ) from exc
 
             missing = self._verify_prompt_manifest_parity(enriched, current_prompt)
+            missing_tests = self._verify_test_manifest_parity(
+                enriched, current_prompt, system_prompt_extra
+            )
             starvation = self._check_logic_starvation(enriched, current_prompt)
-            if not missing and not starvation:
+            if not missing and not missing_tests and not starvation:
                 enriched.metadata["llm_initialized"] = "true"
                 enriched.metadata["status"] = "finalized"
                 enriched.metadata["generation_method"] = "llm_synthesized"
@@ -880,23 +931,26 @@ class Orchestrator:
             diagnostics: List[str] = []
             if missing:
                 diagnostics.append(f"missing manifest paths {missing}")
+            if missing_tests:
+                diagnostics.append(f"missing test manifest {missing_tests}")
             if starvation:
                 diagnostics.append(f"logic starvation: {starvation}")
             _accel_log(
                 "warning",
-                f"Semantic Incompleteness/Logic Starvation detected on attempt "
+                f"Semantic Incompleteness/Logic Starvation/TestDensity detected on attempt "
                 f"{attempt + 1}: {diagnostics}. Triggering Corrective Enrichment.",
             )
             current_prompt = self._missing_component_instruction(
                 prompt,
                 missing,
+                missing_tests,
                 starvation,
             )
 
         raise ForgeError(
-            f"Semantic Incompleteness/Logic Starvation: prompt requires missing "
-            f"components (missing={missing}, starvation={starvation}) but the "
-            "enriched blueprint does not resolve them after Corrective Enrichment."
+            f"Semantic Incompleteness/Logic Starvation/TestDensity: prompt requires missing "
+            f"components (missing={missing}, missing_tests={missing_tests}, starvation={starvation}) "
+            "but the enriched blueprint does not resolve them after Corrective Enrichment."
         )
 
     def _ensure_blueprint_enriched(self, blueprint: Blueprint) -> Blueprint:
