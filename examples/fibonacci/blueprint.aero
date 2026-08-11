@@ -1,14 +1,11 @@
 metadata:
   schema_version: 3.0.0
   project_name: fibonacci
-  architecture: pure_python
   status: finalized
   generation_method: static_heuristic
   transferable: true
   llm_initialized: false
-  auto_generated: true
   description: Auto-generated draft blueprint for hybrid_rust_python project
-  compacted_context: null
 llm_context:
   state: synthesized
   repository_summary: Auto-generated hybrid_rust_python draft; run synthesis to enrich
@@ -73,4 +70,3 @@ verification_nodes:
   stderr_prohibited_patterns: []
   metrics: []
   timeout: 60.0
-functional_intent: []
