@@ -70,6 +70,14 @@ class BindingFramework(str, Enum):
     cxx = "cxx"
 
 
+class FunctionalIntent(BaseModel):
+    """A structured functional requirement extracted from the user prompt."""
+
+    symbol_name: str
+    type: str = "function"
+    requirement_level: str = "required"
+
+
 class Metadata(BaseModel):
     schema_version: str = "3.0.0"
     project_name: str = "aero_forge_project"
@@ -227,6 +235,14 @@ class ExecutionStrategyV3(BaseModel):
     precision_shield_mode: str = ""
     hin_jit_opt_level: int = 0
 
+    @field_validator("primary_entrypoint", mode="before")
+    @classmethod
+    def _normalize_primary_entrypoint(cls, value: Any) -> str:
+        """Accept either a path string or a dict with a `path` key."""
+        if isinstance(value, dict):
+            return str(value.get("path") or value.get("file") or "")
+        return str(value) if value is not None else ""
+
 
 class VerificationMetric(BaseModel):
     name: str
@@ -257,8 +273,21 @@ class BlueprintV3(BaseModel):
     abi_contracts: List[ABIContractV3] = Field(default_factory=list)
     execution_strategy: ExecutionStrategyV3 = Field(default_factory=ExecutionStrategyV3)
     verification_nodes: List[VerificationNode] = Field(default_factory=list)
+    functional_intent: List[FunctionalIntent] = Field(default_factory=list)
 
     model_config = {"extra": "ignore"}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_build_pipeline(cls, data: Any) -> Any:
+        """Accept a legacy dict form of `build_pipeline` and flatten its artifacts list."""
+        if not isinstance(data, dict):
+            return data
+        bp = data.get("build_pipeline")
+        if isinstance(bp, dict) and "artifacts" in bp and isinstance(bp["artifacts"], list):
+            data = dict(data)
+            data["build_pipeline"] = bp["artifacts"]
+        return data
 
     @model_validator(mode="after")
     def _enforce_schema_version(self) -> "BlueprintV3":
@@ -986,6 +1015,7 @@ class PolyglotGraphBlueprint(BaseModel):
     architecture: str = "graph_polyglot"
     nodes: List[PolyglotNodeSpec] = Field(default_factory=list)
     edges: List[BoundaryEdgeSpec] = Field(default_factory=list)
+    functional_intent: List[FunctionalIntent] = Field(default_factory=list)
     output_dir: str = "./dist"
     primary_entrypoint: str = "run_shell.py"
     build_script: Optional[str] = None
@@ -1049,5 +1079,44 @@ class PolyglotGraphBlueprint(BaseModel):
             raise ValueError(
                 "Missing Nodes: the blueprint has an empty nodes list. "
                 f"Architecture {self.architecture!r} requires at least one node."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _enforce_functional_intent_coverage(self) -> "PolyglotGraphBlueprint":
+        """Every functional intent symbol must appear in nodes or contracts."""
+        if not self.functional_intent:
+            return self
+        node_exports = set()
+        for node in self.nodes:
+            node_id = node.node_id
+            node_exports.add(node_id)
+            for exported in node.exports or []:
+                node_exports.add(exported)
+            # Allow symbols declared in the node's extra data (e.g. data_payload).
+            extra = node.extra or {}
+            if isinstance(extra, dict):
+                for sym in extra.get("exports") or []:
+                    node_exports.add(sym)
+                for sym in extra.get("functions") or []:
+                    node_exports.add(sym)
+                for sym in extra.get("contracts") or []:
+                    node_exports.add(sym)
+                payload = extra.get("data_payload") or {}
+                if isinstance(payload, dict) and payload.get("symbol_name"):
+                    node_exports.add(str(payload["symbol_name"]))
+        for edge in self.edges:
+            sym = getattr(edge, "symbol", "")
+            if sym:
+                node_exports.add(sym)
+        missing = [
+            intent.symbol_name
+            for intent in self.functional_intent
+            if intent.symbol_name not in node_exports
+        ]
+        if missing:
+            raise ValueError(
+                f"Functional intent coverage failed: missing symbols {missing}. "
+                f"Add a node/contract for each required symbol."
             )
         return self

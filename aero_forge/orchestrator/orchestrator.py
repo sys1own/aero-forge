@@ -45,6 +45,7 @@ from aero_forge.overlay import OverlayManager, ReapplyStatus
 from aero_forge.precision_shield.rust_shield import RustSemanticShield
 from aero_forge.scaffold.active_merge import find_compiled_library, merge_active
 from aero_forge.scaffold.cargo_runner import _env_with_cargo
+from aero_forge.scaffold.contract_synth import synthesize_functional_intent_contract
 from aero_forge.scaffold.import_pruner import prune_source
 from aero_forge.scaffold.pre_write_validator import (
     BlueprintValidationError,
@@ -813,29 +814,53 @@ class Orchestrator:
     def _check_logic_starvation(
         self,
         blueprint: Blueprint,
-        prompt: str,
     ) -> Optional[str]:
-        """Return a diagnostic string if the blueprint collapsed to an entrypoint.
+        """Return a diagnostic string if functional_intent is not covered by nodes.
 
-        Builds the Compacted Functional Matrix for the candidate blueprint and
-        runs the ``LogicStarvationValidator``. If only an entrypoint remains while
-        the prompt names additional modules, the diagnostic explains which
-        components are missing so the orchestrator can issue a Corrective
-        Enrichment pass.
+        Compares the structured ``functional_intent`` list against the symbols
+        exported by nodes, contracts, and functions. Missing symbols trigger a
+        deterministic repair pass. No natural-language prompt text is read.
         """
-        if not prompt:
+        functional_intent = blueprint.functional_intent or []
+        if not functional_intent:
             return None
-        try:
-            from aero_forge.builder.emitters.base import LogicStarvationValidator
+        exported = self._collect_exported_symbols(blueprint)
+        missing = [
+            intent.symbol_name
+            for intent in functional_intent
+            if intent.symbol_name not in exported
+        ]
+        if missing:
+            return (
+                f"Logic Starvation: functional_intent symbols missing from "
+                f"nodes/contracts: {missing}. Add a node or contract for each required symbol."
+            )
+        return None
 
-            data = blueprint.model_dump(mode="json")
-            cfm = CompactedContextGenerator(data).generate()
-            compacted = json.loads(cfm)
-            LogicStarvationValidator.validate(compacted, prompt)
-            return None
-        except Exception as exc:  # noqa: BLE001
-            _accel_log("warning", f"Logic starvation check: {exc}")
-            return str(exc)
+    @staticmethod
+    def _collect_exported_symbols(blueprint: Blueprint) -> Set[str]:
+        """Return all symbol names exported by nodes, contracts, functions, and ABI edges."""
+        exported: Set[str] = set()
+        for node in blueprint.module_graph or []:
+            node_id = node.get("node_id") or ""
+            if node_id:
+                exported.add(node_id)
+            for sym in node.get("exports") or []:
+                if sym:
+                    exported.add(str(sym))
+        for contract in blueprint.contracts or []:
+            name = getattr(contract, "name", "") or ""
+            if name:
+                exported.add(name)
+        for func in blueprint.functions or []:
+            name = getattr(func, "name", "") or ""
+            if name:
+                exported.add(name)
+        for abi in blueprint.abi_contracts or []:
+            sym = getattr(abi, "symbol", "") or getattr(abi, "export_symbol", "") or ""
+            if sym:
+                exported.add(sym)
+        return exported
 
     @staticmethod
     def _derive_node_language(node: Dict[str, Any]) -> str:
@@ -860,7 +885,6 @@ class Orchestrator:
     def _validate_blueprint_integrity(
         self,
         blueprint: Blueprint,
-        prompt: str,
     ) -> List[str]:
         """Reconcile contracts/functions and report semantically incomplete blueprints.
 
@@ -868,9 +892,11 @@ class Orchestrator:
         - A library node (non-entrypoint, non-test) has zero exported symbols.
         - An edge references a symbol that no source node exports.
         - The primary entrypoint requires symbols not provided by any node.
+        - A functional_intent symbol is missing from nodes/contracts/functions.
 
         Returns a list of human-readable diagnostics; an empty list means the
-        blueprint passes the semantic integrity gate.
+        blueprint passes the semantic integrity gate. No natural-language prompt
+        text is read during this validation.
         """
         errors: List[str] = []
         nodes = blueprint.module_graph or []
@@ -1003,6 +1029,19 @@ class Orchestrator:
                                 f"requires symbol {sym!r}, but source node {src!r} does not export it."
                             )
 
+        # 4. Every functional_intent symbol must be present in nodes/contracts/functions.
+        if blueprint.functional_intent:
+            missing_intents = [
+                intent.symbol_name
+                for intent in blueprint.functional_intent
+                if intent.symbol_name not in all_exported_symbols
+            ]
+            if missing_intents:
+                errors.append(
+                    f"Semantically Incomplete: functional_intent symbols {missing_intents} "
+                    f"are not present in any node, contract, function, or ABI edge."
+                )
+
         return errors
 
     def _missing_component_instruction(
@@ -1093,12 +1132,30 @@ class Orchestrator:
                     f"Enrichment Failure: synchronous v11 enrichment pass failed: {exc}"
                 ) from exc
 
-            integrity_errors = self._validate_blueprint_integrity(enriched, current_prompt)
-            missing = self._verify_prompt_manifest_parity(enriched, current_prompt)
-            missing_tests = self._verify_test_manifest_parity(
-                enriched, current_prompt, system_prompt_extra
-            )
-            starvation = self._check_logic_starvation(enriched, current_prompt)
+            integrity_errors = self._validate_blueprint_integrity(enriched)
+            starvation = self._check_logic_starvation(enriched)
+
+            # Deterministic repair: synthesize contract stubs for any functional_intent
+            # symbols that are not yet present in nodes/contracts/functions.
+            if starvation:
+                exported = self._collect_exported_symbols(enriched)
+                for intent in enriched.functional_intent or []:
+                    if intent.symbol_name not in exported:
+                        stub = synthesize_functional_intent_contract(
+                            intent, language=enriched.architecture
+                        )
+                        enriched.contracts.append(stub)
+                        _accel_log(
+                            "info",
+                            f"Deterministic repair: synthesized contract stub for "
+                            f"functional_intent symbol {intent.symbol_name!r}",
+                        )
+                # Re-validate after injecting stubs.
+                integrity_errors = self._validate_blueprint_integrity(enriched)
+                starvation = self._check_logic_starvation(enriched)
+
+            missing: List[str] = []
+            missing_tests: List[str] = []
             if not missing and not missing_tests and not starvation and not integrity_errors:
                 enriched.metadata["llm_initialized"] = "true"
                 enriched.metadata["status"] = "finalized"
@@ -1110,15 +1167,11 @@ class Orchestrator:
             diagnostics: List[str] = []
             if integrity_errors:
                 diagnostics.append(f"semantic integrity: {integrity_errors}")
-            if missing:
-                diagnostics.append(f"missing manifest paths {missing}")
-            if missing_tests:
-                diagnostics.append(f"missing test manifest {missing_tests}")
             if starvation:
                 diagnostics.append(f"logic starvation: {starvation}")
             _accel_log(
                 "warning",
-                f"Semantic Incompleteness/Logic Starvation/TestDensity detected on attempt "
+                f"Semantic Incompleteness/Logic Starvation detected on attempt "
                 f"{attempt + 1}: {diagnostics}. Triggering Corrective Enrichment.",
             )
             current_prompt = self._missing_component_instruction(

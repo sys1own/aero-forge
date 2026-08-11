@@ -79,6 +79,14 @@ class ContractEntry(BaseModel):
     purpose: str = ""
 
 
+class FunctionalIntent(BaseModel):
+    """A structured functional requirement extracted from the user prompt."""
+
+    symbol_name: str
+    type: str = "function"
+    requirement_level: str = "required"
+
+
 class CLIContractFlag(BaseModel):
     """A single CLI flag in the executable contract."""
 
@@ -257,6 +265,7 @@ class BlueprintSchemaV2(BaseModel):
     metadata: Dict[str, str] = Field(default_factory=lambda: {"schema_version": "2.0.0"})
     execution_strategy: ExecutionStrategy = Field(default_factory=ExecutionStrategy)
     abi_contracts: List[ABIContract] = Field(default_factory=list)
+    functional_intent: List[FunctionalIntent] = Field(default_factory=list)
     module_graph: List[Dict[str, Any]] = Field(default_factory=list)
     verification_nodes: List[Dict[str, Any]] = Field(default_factory=list)
     cargo_dependencies: Dict[str, Any] = Field(default_factory=dict)
@@ -375,6 +384,7 @@ class Blueprint(BaseModel):
     features: List[str] = Field(default_factory=list)
     execution_strategy: Optional[ExecutionStrategy] = None
     abi_contracts: List[ABIContract] = Field(default_factory=list)
+    functional_intent: List[FunctionalIntent] = Field(default_factory=list)
     verification_nodes: List[Dict[str, Any]] = Field(default_factory=list)
     metadata: Dict[str, str] = Field(default_factory=lambda: {"schema_version": "2.0.0"})
     module_graph: List[Dict[str, Any]] = Field(default_factory=list)

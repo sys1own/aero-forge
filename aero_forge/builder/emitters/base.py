@@ -1012,23 +1012,39 @@ class LogicStarvationError(RuntimeError):
 
 class LogicStarvationValidator:
     """Detect hollow blueprints that only emit an entrypoint while omitting
-    library modules described in the prompt."""
+    functional intent symbols."""
 
     ENTRYPOINT_NAMES = {"main", "run", "cli", "__main__"}
+
+    @classmethod
+    def _intent_symbol_names(
+        cls, functional_intent: Any
+    ) -> List[str]:
+        """Normalize a list of FunctionalIntent-like objects to symbol names."""
+        names: List[str] = []
+        for entry in functional_intent or []:
+            if isinstance(entry, dict):
+                name = entry.get("symbol_name") or entry.get("name") or ""
+            else:
+                name = getattr(entry, "symbol_name", None) or getattr(entry, "name", "") or ""
+            if name:
+                names.append(str(name))
+        return names
 
     @classmethod
     def validate(
         cls,
         compacted_context: Dict[str, Any],
-        prompt: str,
+        functional_intent: Any,
     ) -> None:
         """Raise :class:`LogicStarvationError` if the implementation map is hollow.
 
         A blueprint is considered starved when the only symbol in the
-        ``full_implementation_map`` is an entrypoint while the prompt explicitly
-        names other source files (e.g. a library module).
+        ``full_implementation_map`` is an entrypoint while the structured
+        ``functional_intent`` requires additional library/API symbols.
         """
-        if not prompt:
+        intent_names = cls._intent_symbol_names(functional_intent)
+        if not intent_names:
             return
         impl_map = compacted_context.get("full_implementation_map") or {}
         symbols = [
@@ -1041,23 +1057,14 @@ class LogicStarvationValidator:
         only_name = str(symbols[0].get("name", "")).strip()
         if only_name not in cls.ENTRYPOINT_NAMES:
             return
-        # Check whether the prompt explicitly names source files other than the
-        # single entrypoint, which indicates the request describes a library.
-        pattern = re.compile(
-            r"\b[a-zA-Z_][\w/.-]*\.(?:py|rs|cpp|c|h|hpp|go|js|ts|toml|txt)\b"
-        )
-        required_files = [m.group(0) for m in pattern.finditer(prompt)]
-        if not required_files:
-            return
-        entrypoint_files = {f"{only_name}.py", "main.py", "run.py", "cli.py"}
-        library_files = [
-            f for f in required_files if Path(f).name not in entrypoint_files
+        library_symbols = [
+            n for n in intent_names if n not in cls.ENTRYPOINT_NAMES and n != only_name
         ]
-        if library_files:
+        if library_symbols:
             raise LogicStarvationError(
                 f"Logic Starvation: compacted context contains only the entrypoint "
-                f"'{only_name}' but the prompt requires additional modules: {library_files}. "
-                "The blueprint must include at least one symbol for each named module."
+                f"'{only_name}' but functional_intent requires additional symbols: {library_symbols}. "
+                "The blueprint must include at least one node/contract for each required symbol."
             )
 
 
