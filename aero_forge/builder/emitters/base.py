@@ -643,6 +643,61 @@ class ContractIntegrityValidator:
             raise ValueError(f"Missing contracted symbols: {missing}")
         return missing
 
+    @staticmethod
+    def _is_entrypoint_node(node_id: str, node_spec: Dict[str, Any]) -> bool:
+        """Return ``True`` if the node is clearly a CLI/entrypoint node."""
+        if node_id.lower() in {"main", "cli", "run", "app", "__main__"}:
+            return True
+        if node_spec.get("is_entrypoint") or node_spec.get("entrypoint"):
+            return True
+        purpose = str(node_spec.get("purpose", "")).lower()
+        if any(k in purpose for k in ("entry", "cli", "main", "driver", "app")):
+            return True
+        source_files = node_spec.get("source_files") or []
+        for path in source_files:
+            if isinstance(path, str) and Path(path).name.lower() in {
+                "main.py",
+                "cli.py",
+                "run.py",
+                "app.py",
+                "__main__.py",
+            }:
+                return True
+        return False
+
+    @classmethod
+    def validate_library_node_exports(
+        cls,
+        node_id: str,
+        node_spec: Dict[str, Any],
+        contracts: List[Dict[str, Any]],
+    ) -> None:
+        """Raise :class:`ValueError` if a Python library node has no exported symbols.
+
+        A non-entrypoint Python node must carry at least one functional contract
+        or exported symbol, otherwise the blueprint represents a hollow module.
+        Native compiled nodes (Rust/C++/Go) are allowed to materialize with no
+        explicit exports because their contracts may be ABI-level.
+        """
+        lang = (node_spec.get("lang") or "").lower()
+        source_files = node_spec.get("source_files") or []
+        is_python = lang in ("python", "py", "") or any(
+            isinstance(p, str) and p.endswith(".py") for p in source_files
+        )
+        if not is_python or cls._is_entrypoint_node(node_id, node_spec):
+            return
+        exports = set(node_spec.get("exports") or [])
+        contract_symbols = {
+            (c.get("symbol") or c.get("name", ""))
+            for c in contracts
+            if isinstance(c, dict)
+        }
+        if not exports and not contract_symbols:
+            raise ValueError(
+                f"Library node {node_id!r} has zero exported symbols; "
+                "at least one functional contract is required."
+            )
+
 
 class AtomicSymbolAssemblyError(RuntimeError):
     """Raised when a node cannot be emitted atomically with all contracted symbols present."""

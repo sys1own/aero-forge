@@ -397,6 +397,7 @@ ARCHITECTURE ELEVATION RULE:
 COMPONENT EXTRACTION CONSTRAINT:
 - You MUST extract every software component, library, and file path mentioned in the user prompt. Every named module must have a corresponding entry in the `manifest`/`module_graph` and at least one symbol in the `functions` or `contracts` list.
 - If the prompt names a specific file path (e.g. `genomics/aligner.py`, `main.py`), include that exact path in the blueprint `module_graph` and `manifest` and ensure it exports at least one symbol.
+- You are FORBIDDEN from collapsing a modular project into a single node. Every file path provided in the prompt MUST have a dedicated `node_id` and a corresponding logic sketch in the `full_implementation_map`.
 - Do NOT produce a blueprint that contains only an entrypoint (`main.py`) when the prompt also describes a library or API module; such a blueprint will be rejected as Logic Starvation.
 
 DATA PAYLOAD CONSTRAINT:
