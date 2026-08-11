@@ -726,12 +726,63 @@ class Orchestrator:
                 "toolchain manifests, and ABI contracts. Output only valid JSON."
             )
 
+    @staticmethod
+    def _extract_required_paths_from_prompt(prompt: str) -> List[str]:
+        """Return file paths explicitly named in the user prompt.
+
+        Matches source/config paths such as ``genomics/aligner.py``,
+        ``main.py`` or ``Cargo.toml`` so the blueprint manifest can be
+        validated against the user's actual request.
+        """
+        if not prompt:
+            return []
+        pattern = re.compile(
+            r"\b[a-zA-Z_][\w/.-]*\.(?:py|rs|cpp|c|h|hpp|go|js|ts|toml|txt)\b"
+        )
+        return [m.group(0) for m in pattern.finditer(prompt)]
+
+    def _verify_prompt_manifest_parity(
+        self,
+        blueprint: Blueprint,
+        prompt: str,
+    ) -> List[str]:
+        """Return the prompt-required file paths that are absent from the manifest.
+
+        An empty result means the blueprint manifest fully reflects the file
+        paths named in the original prompt.
+        """
+        required = self._extract_required_paths_from_prompt(prompt)
+        if not required:
+            return []
+        manifest_paths = set()
+        for entry in blueprint.manifest or []:
+            if isinstance(entry, ManifestEntry):
+                manifest_paths.add(str(entry.path))
+            elif isinstance(entry, dict):
+                manifest_paths.add(str(entry.get("path", "")))
+        for node in blueprint.module_graph or []:
+            if isinstance(node, dict):
+                path = node.get("path", "")
+                if path:
+                    manifest_paths.add(str(path))
+                for sf in node.get("source_files") or []:
+                    if sf:
+                        manifest_paths.add(str(sf))
+        missing = [p for p in required if p not in manifest_paths]
+        return missing
+
     def enrich_blueprint(self, blueprint: Blueprint) -> Blueprint:
         """Run a synchronous v11 enrichment pass and return the enriched blueprint.
 
         This is the single gate that must complete before any ProjectBuilder or
         materialization step is allowed to touch the workspace disk. If the
         blueprint is already marked ``llm_initialized`` the pass is a no-op.
+
+        After the LLM returns a candidate blueprint, a Semantic Intent Parity
+        Gate checks that every file path explicitly mentioned in the prompt is
+        present in the manifest. Missing paths trigger one focused re-enrichment
+        attempt before the build is rejected with a ``Semantic Incompleteness``
+        diagnostic.
         """
         metadata = blueprint.metadata if isinstance(blueprint.metadata, dict) else {}
         if self._is_enriched(metadata):
@@ -742,27 +793,53 @@ class Orchestrator:
                 "Enrichment Failure: llm_initialized is false and no prompt/LLM "
                 "is available to run a synchronous v11 enrichment pass."
             )
-        try:
-            _accel_log("info", "Enriching Blueprint (synchronous v11 pass)...")
-            compiler = IntentCompiler(
-                llm_client=self.llm_client,
-                system_prompt_extra=self._v11_enrichment_guidance(),
+        compiler = IntentCompiler(
+            llm_client=self.llm_client,
+            system_prompt_extra=self._v11_enrichment_guidance(),
+        )
+        current_prompt = prompt
+        for attempt in range(2):
+            try:
+                _accel_log(
+                    "info",
+                    f"Enriching Blueprint (synchronous v11 pass, attempt {attempt + 1})...",
+                )
+                enriched = compiler.compile_prompt(
+                    current_prompt,
+                    output_dir=blueprint.output_dir,
+                    project_name=blueprint.project,
+                )
+            except Exception as exc:
+                raise ForgeError(
+                    f"Enrichment Failure: synchronous v11 enrichment pass failed: {exc}"
+                ) from exc
+
+            missing = self._verify_prompt_manifest_parity(enriched, current_prompt)
+            if not missing:
+                enriched.metadata["llm_initialized"] = "true"
+                enriched.metadata["status"] = "finalized"
+                enriched.metadata["generation_method"] = "llm_synthesized"
+                enriched.metadata["auto_generated"] = "false"
+                _accel_log("success", "Blueprint enrichment complete")
+                return enriched
+
+            _accel_log(
+                "warning",
+                f"Semantic Incompleteness detected on attempt {attempt + 1}: "
+                f"missing manifest paths {missing}. Triggering re-enrichment.",
             )
-            enriched = compiler.compile_prompt(
-                prompt,
-                output_dir=blueprint.output_dir,
-                project_name=blueprint.project,
+            current_prompt = (
+                f"{prompt}\n\n"
+                f"CORRECTION: The previous blueprint manifest omitted these required "
+                f"file paths: {missing}. Ensure each path appears in the 'module_graph' "
+                f"and 'manifest' sections and is populated with the requested logic."
             )
-            enriched.metadata["llm_initialized"] = "true"
-            enriched.metadata["status"] = "finalized"
-            enriched.metadata["generation_method"] = "llm_synthesized"
-            enriched.metadata["auto_generated"] = "false"
-            _accel_log("success", "Blueprint enrichment complete")
-            return enriched
-        except Exception as exc:
-            raise ForgeError(
-                f"Enrichment Failure: synchronous v11 enrichment pass failed: {exc}"
-            ) from exc
+
+        raise ForgeError(
+            f"Semantic Incompleteness: prompt requires file paths {missing} "
+            "but the enriched blueprint manifest does not contain them after "
+            "re-enrichment."
+        )
 
     def _ensure_blueprint_enriched(self, blueprint: Blueprint) -> Blueprint:
         """Backward-compatible alias for :meth:`enrich_blueprint`."""

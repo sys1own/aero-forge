@@ -895,6 +895,62 @@ class MaterializationParityGate:
         _accel_log("info", f"Node Materialization Verified: {node_id} ({total}/{total} file{'s' if total != 1 else ''})")
 
 
+class LogicStarvationError(RuntimeError):
+    """Raised when the compacted implementation map collapses to a single entrypoint
+    despite the prompt requesting additional library/API modules."""
+
+
+class LogicStarvationValidator:
+    """Detect hollow blueprints that only emit an entrypoint while omitting
+    library modules described in the prompt."""
+
+    ENTRYPOINT_NAMES = {"main", "run", "cli", "__main__"}
+
+    @classmethod
+    def validate(
+        cls,
+        compacted_context: Dict[str, Any],
+        prompt: str,
+    ) -> None:
+        """Raise :class:`LogicStarvationError` if the implementation map is hollow.
+
+        A blueprint is considered starved when the only symbol in the
+        ``full_implementation_map`` is an entrypoint while the prompt explicitly
+        names other source files (e.g. a library module).
+        """
+        if not prompt:
+            return
+        impl_map = compacted_context.get("full_implementation_map") or {}
+        symbols = [
+            entry
+            for entry in impl_map.get("symbols", [])
+            if isinstance(entry, dict) and entry.get("name")
+        ]
+        if len(symbols) != 1:
+            return
+        only_name = str(symbols[0].get("name", "")).strip()
+        if only_name not in cls.ENTRYPOINT_NAMES:
+            return
+        # Check whether the prompt explicitly names source files other than the
+        # single entrypoint, which indicates the request describes a library.
+        pattern = re.compile(
+            r"\b[a-zA-Z_][\w/.-]*\.(?:py|rs|cpp|c|h|hpp|go|js|ts|toml|txt)\b"
+        )
+        required_files = [m.group(0) for m in pattern.finditer(prompt)]
+        if not required_files:
+            return
+        entrypoint_files = {f"{only_name}.py", "main.py", "run.py", "cli.py"}
+        library_files = [
+            f for f in required_files if Path(f).name not in entrypoint_files
+        ]
+        if library_files:
+            raise LogicStarvationError(
+                f"Logic Starvation: compacted context contains only the entrypoint "
+                f"'{only_name}' but the prompt requires additional modules: {library_files}. "
+                "The blueprint must include at least one symbol for each named module."
+            )
+
+
 class TestDensityError(RuntimeError):
     """Raised when the generated test suite does not satisfy the per-symbol density constraint."""
 
