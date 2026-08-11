@@ -1021,3 +1021,23 @@ class PolyglotGraphBlueprint(BaseModel):
                 visit(nid)
 
         return self
+
+    @model_validator(mode="after")
+    def _enforce_boundary_semantics(self) -> "PolyglotGraphBlueprint":
+        """Reject intra-language FFI boundaries; they must be internal imports."""
+        lang_by_id = {n.node_id: n.lang for n in self.nodes}
+        ffi_boundaries = set(BoundaryContractType)
+        for edge in self.edges:
+            src_lang = lang_by_id.get(edge.source, "")
+            tgt_lang = lang_by_id.get(edge.target, "")
+            if (
+                src_lang and tgt_lang
+                and src_lang == tgt_lang
+                and edge.boundary_type in ffi_boundaries
+            ):
+                raise ValueError(
+                    f"Intra-language FFI boundary {edge.source!r} -> {edge.target!r} "
+                    f"both use {src_lang!r} with {edge.boundary_type!r}; "
+                    f"use a standard internal import instead."
+                )
+        return self
