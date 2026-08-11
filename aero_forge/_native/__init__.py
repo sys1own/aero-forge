@@ -23,6 +23,7 @@ try:
         run_aeroc,
         unpack_aeroc,
         verify_goi_proof_net,
+        detect_hin_stall,
         verify_hin_boundary_layouts,
         verify_hin_saturation,
     )
@@ -51,6 +52,7 @@ __all__ = [
     "repair_uast_expression",
     "enforce_repair_isolation_py",
     "execution_matrix_nonzero",
+    "detect_hin_stall",
     "verify_hin_boundary_layouts",
     "verify_hin_saturation",
 ]

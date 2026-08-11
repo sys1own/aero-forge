@@ -844,6 +844,24 @@ impl HinEngine {
         stalled
     }
 
+    /// Count active principal-principal pairs in the current graph.
+    pub fn active_pairs(&self) -> usize {
+        let mut active = 0usize;
+        for node_idx in 0..self.nodes.len() {
+            if let Some(p) = self.nodes[node_idx].principal {
+                if let Some(target_idx) = self.ports[p].target {
+                    if self.ports[target_idx].is_principal {
+                        let target_owner = self.ports[target_idx].owner;
+                        if node_idx < target_owner {
+                            active += 1;
+                        }
+                    }
+                }
+            }
+        }
+        active
+    }
+
     fn reduce_step(&mut self) -> bool {
         while let Some((a, b)) = self.active.pop_front() {
             if self.nodes[a].retired || self.nodes[b].retired {
@@ -1502,7 +1520,7 @@ pub fn evaluate_hin_energy(arena_json: &str) -> PyResult<String> {
 }
 
 /// Result of a HIN saturation check.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HinSaturationResult {
     pub saturated: bool,
     pub reason: String,
@@ -1637,6 +1655,84 @@ pub fn verify_hin_saturation(arena_json: &str) -> PyResult<String> {
 
     serde_json::to_string(&result)
         .map_err(|e| PyValueError::new_err(format!("saturation serialization failed: {}", e)))
+}
+
+/// Result of a HIN reduction plus post-reduction saturation check.
+#[derive(Clone, Debug, Serialize)]
+pub struct HinStallResult {
+    pub saturated: bool,
+    pub reason: String,
+    pub steps: usize,
+    pub stalled: usize,
+    pub timed_out: bool,
+    pub active_pairs: usize,
+    pub wires: usize,
+    pub dangling: usize,
+    pub total: f64,
+}
+
+/// Detect whether a HIN interaction net has stalled during reduction.
+///
+/// Builds the HIN from a UAST JSON string, runs active-pair reductions, and then
+/// evaluates MELL energy invariants.  A net is saturated when it reduces without
+/// timing out and leaves no stalled (same-kind) active pairs.  A fully reduced
+/// normal form has zero active pairs, so saturation is based on the absence of
+/// stalled wires and reduction progress, not on post-reduction active-pair count.
+#[pyfunction]
+#[pyo3(signature = (json, max_steps=None, timeout_seconds=None))]
+pub fn detect_hin_stall(
+    json: &str,
+    max_steps: Option<usize>,
+    timeout_seconds: Option<f64>,
+) -> PyResult<String> {
+    let uast: Value = serde_json::from_str(json)
+        .map_err(|e| PyValueError::new_err(format!("invalid UAST JSON: {}", e)))?;
+    let mut engine = HinEngine::new();
+    engine
+        .build_uast(&uast)
+        .map_err(|e| PyValueError::new_err(e))?;
+
+    let initial_active = engine.active_pairs();
+    let (steps, timed_out) = if let Some(ms) = max_steps {
+        engine.reduce_to_completion_with_timeout(ms, timeout_seconds)
+    } else {
+        engine.reduce_to_completion_with_timeout(1_000_000, timeout_seconds)
+    };
+
+    let stalled = engine.stalled_pairs();
+    let arena = engine
+        .to_json()
+        .map_err(|e| PyValueError::new_err(format!("serialization failed: {}", e)))?;
+    let saturation_json = verify_hin_saturation(&arena)?;
+    let saturation: HinSaturationResult = serde_json::from_str(&saturation_json)
+        .map_err(|e| PyValueError::new_err(format!("saturation parse failed: {}", e)))?;
+
+    let saturated = !timed_out && stalled == 0 && (initial_active > 0 || steps > 0);
+    let reason = if timed_out {
+        "reduction timed out"
+    } else if stalled > 0 {
+        "stalled wires"
+    } else if initial_active == 0 && steps == 0 {
+        "zero active pairs and no reduction progress"
+    } else {
+        "reduction completed without stalled wires"
+    }
+    .to_string();
+
+    let result = HinStallResult {
+        saturated,
+        reason,
+        steps,
+        stalled,
+        timed_out,
+        active_pairs: saturation.active_pairs,
+        wires: saturation.wires,
+        dangling: saturation.dangling,
+        total: saturation.total,
+    };
+
+    serde_json::to_string(&result)
+        .map_err(|e| PyValueError::new_err(format!("stall detection serialization failed: {}", e)))
 }
 
 /// Layout descriptor attached to a HIN node for FFI boundary checking.
