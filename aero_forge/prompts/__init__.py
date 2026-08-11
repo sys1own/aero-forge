@@ -402,6 +402,12 @@ COMPONENT EXTRACTION CONSTRAINT:
 - You are FORBIDDEN from collapsing a modular project into a single node. Every file path provided in the prompt MUST have a dedicated `node_id` and a corresponding logic sketch in the `full_implementation_map`.
 - Do NOT produce a blueprint that contains only an entrypoint (`main.py`) when the prompt also describes a library or API module; such a blueprint will be rejected as Logic Starvation.
 
+DOMAIN-DRIVEN BLUEPRINTING CONSTRAINT:
+- Identify all distinct functional domains in the prompt (e.g. a core library, a hardware abstraction package, an authentication module, a CLI/dashboard, or a tests suite).
+- You are FORBIDDEN from collapsing multiple domains into a single node. Every domain MUST have its own `node_id`, a manifest entry, and at least one functional contract or exported symbol.
+- A library domain must declare the symbols it exports; a CLI/entrypoint domain must declare its entrypoint file path. Dependencies between domains must be modeled as `edges` in the blueprint graph.
+- If the prompt separates a library from its consumer (e.g. `hardware/` package and a Python CLI), the blueprint must contain at least two nodes, one for each domain, with an `edge` describing the contract between them.
+
 DATA PAYLOAD CONSTRAINT:
 - If the prompt references a static data constant, scoring matrix, lookup table, or named constant (e.g. `BLOSUM62`, `scoring_matrix`, `lookup_table`), you MUST emit it as a `data_payload` inside the relevant blueprint node or `module_graph` entry.
 - Set `data_payload: true`, `payload_kind: "dict"` (or `"list"` / `"set"`), and provide the full literal value or a compact generation algorithm in `logic_sketch` so the SMTASTEngine can lower it into the Holographic Interaction Net (HIN).

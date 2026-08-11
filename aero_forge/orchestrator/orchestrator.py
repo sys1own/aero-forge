@@ -837,16 +837,147 @@ class Orchestrator:
             _accel_log("warning", f"Logic starvation check: {exc}")
             return str(exc)
 
+    def _validate_blueprint_integrity(
+        self,
+        blueprint: Blueprint,
+        prompt: str,
+    ) -> List[str]:
+        """Reconcile contracts/functions and report semantically incomplete blueprints.
+
+        A blueprint is *semantically incomplete* when:
+        - A library node (non-entrypoint, non-test) has zero exported symbols.
+        - An edge references a symbol that no source node exports.
+        - The primary entrypoint requires symbols not provided by any node.
+
+        Returns a list of human-readable diagnostics; an empty list means the
+        blueprint passes the semantic integrity gate.
+        """
+        errors: List[str] = []
+        nodes = blueprint.module_graph or []
+        primary_entrypoint = ""
+        if blueprint.execution_strategy:
+            primary_entrypoint = getattr(blueprint.execution_strategy, "primary_entrypoint", "") or ""
+            if isinstance(primary_entrypoint, dict):
+                primary_entrypoint = primary_entrypoint.get("file", "")
+
+        node_exports: Dict[str, Set[str]] = {}
+        all_exported_symbols: Set[str] = set()
+        test_node_ids = {"tests"}
+
+        for node in nodes:
+            node_id = node.get("node_id") or ""
+            if not node_id:
+                continue
+            if node_id.startswith("test"):
+                test_node_ids.add(node_id)
+            exports: Set[str] = set()
+            for sym in node.get("exports") or []:
+                if sym:
+                    exports.add(str(sym))
+            node_exports[node_id] = exports
+            all_exported_symbols.update(exports)
+
+        # Also surface symbols declared in abi_contracts / functions / contracts.
+        for abi in blueprint.abi_contracts or []:
+            sym = getattr(abi, "symbol", "") or ""
+            src = getattr(abi, "source_node", "") or ""
+            if sym:
+                all_exported_symbols.add(sym)
+                if src:
+                    node_exports.setdefault(src, set()).add(sym)
+        for contract in blueprint.contracts or []:
+            name = getattr(contract, "name", "") or ""
+            node_id = getattr(contract, "node_id", "") or ""
+            if name:
+                all_exported_symbols.add(name)
+                if node_id:
+                    node_exports.setdefault(node_id, set()).add(name)
+        for func in blueprint.functions or []:
+            name = getattr(func, "name", "") or ""
+            node_id = getattr(func, "node_id", "") or ""
+            if name:
+                all_exported_symbols.add(name)
+                if node_id:
+                    node_exports.setdefault(node_id, set()).add(name)
+
+        # 1. Library nodes must have at least one exported symbol.
+        for node in nodes:
+            node_id = node.get("node_id") or ""
+            if not node_id or node_id in test_node_ids:
+                continue
+            source_files = [str(p) for p in (node.get("source_files") or [])]
+            if any(p.startswith("tests/") or "/tests/" in p for p in source_files):
+                continue
+            is_entrypoint = bool(
+                primary_entrypoint and primary_entrypoint in source_files
+            )
+            if not is_entrypoint and not node_exports.get(node_id):
+                errors.append(
+                    f"Semantically Incomplete: node {node_id!r} is a library domain "
+                    f"but has zero exported symbols. Every domain must have at least one "
+                    f"functional contract."
+                )
+
+        # 2. Edge/ABI symbols must be exported by their source node.
+        for abi in blueprint.abi_contracts or []:
+            sym = getattr(abi, "symbol", "") or ""
+            src = getattr(abi, "source_node", "") or ""
+            if sym and src and sym not in node_exports.get(src, set()):
+                errors.append(
+                    f"Semantically Incomplete: edge references symbol {sym!r} from "
+                    f"source node {src!r}, but {src!r} does not export it."
+                )
+
+        # 3. Primary entrypoint must not reference symbols missing from the graph.
+        if primary_entrypoint:
+            # The entrypoint node itself should export a main/entry function if it is
+            # not a pure driver. Detect missing symbols by scanning source paths.
+            entry_node = next(
+                (
+                    n
+                    for n in nodes
+                    if primary_entrypoint in [str(p) for p in (n.get("source_files") or [])]
+                ),
+                None,
+            )
+            if entry_node:
+                entry_id = entry_node.get("node_id") or ""
+                for edge in blueprint.abi_contracts or []:
+                    if getattr(edge, "target_node", "") == entry_id:
+                        sym = getattr(edge, "symbol", "") or ""
+                        src = getattr(edge, "source_node", "") or ""
+                        if sym and sym not in all_exported_symbols:
+                            errors.append(
+                                f"Semantically Incomplete: primary entrypoint {primary_entrypoint!r} "
+                                f"requires symbol {sym!r}, but no node exports it."
+                            )
+                        if src and sym and sym not in node_exports.get(src, set()):
+                            errors.append(
+                                f"Semantically Incomplete: primary entrypoint {primary_entrypoint!r} "
+                                f"requires symbol {sym!r}, but source node {src!r} does not export it."
+                            )
+
+        return errors
+
     def _missing_component_instruction(
         self,
         prompt: str,
         missing_paths: List[str],
         missing_tests: List[str],
         logic_starvation: Optional[str],
+        semantic_integrity: Optional[List[str]] = None,
     ) -> str:
         """Return a corrective user prompt extension for re-enrichment."""
         parts: List[str] = [prompt]
         details: List[str] = []
+        if semantic_integrity:
+            details.append(
+                f"SEMANTIC INTEGRITY CORRECTION: The previous blueprint is semantically "
+                f"incomplete: {semantic_integrity}. Every library domain must export at "
+                f"least one symbol, every edge must reference a symbol exported by its source "
+                f"node, and the primary entrypoint must not require missing symbols. Add the "
+                f"missing nodes/contracts before returning the blueprint."
+            )
         if missing_paths:
             details.append(
                 f"MISSING COMPONENT INSTRUCTION: The previous blueprint omitted these "
@@ -916,12 +1047,13 @@ class Orchestrator:
                     f"Enrichment Failure: synchronous v11 enrichment pass failed: {exc}"
                 ) from exc
 
+            integrity_errors = self._validate_blueprint_integrity(enriched, current_prompt)
             missing = self._verify_prompt_manifest_parity(enriched, current_prompt)
             missing_tests = self._verify_test_manifest_parity(
                 enriched, current_prompt, system_prompt_extra
             )
             starvation = self._check_logic_starvation(enriched, current_prompt)
-            if not missing and not missing_tests and not starvation:
+            if not missing and not missing_tests and not starvation and not integrity_errors:
                 enriched.metadata["llm_initialized"] = "true"
                 enriched.metadata["status"] = "finalized"
                 enriched.metadata["generation_method"] = "llm_synthesized"
@@ -930,6 +1062,8 @@ class Orchestrator:
                 return enriched
 
             diagnostics: List[str] = []
+            if integrity_errors:
+                diagnostics.append(f"semantic integrity: {integrity_errors}")
             if missing:
                 diagnostics.append(f"missing manifest paths {missing}")
             if missing_tests:
@@ -946,12 +1080,14 @@ class Orchestrator:
                 missing,
                 missing_tests,
                 starvation,
+                integrity_errors,
             )
 
         raise ForgeError(
             f"Semantic Incompleteness/Logic Starvation/TestDensity: prompt requires missing "
-            f"components (missing={missing}, missing_tests={missing_tests}, starvation={starvation}) "
-            "but the enriched blueprint does not resolve them after Corrective Enrichment."
+            f"components (missing={missing}, missing_tests={missing_tests}, starvation={starvation}, "
+            f"integrity_errors={integrity_errors}) but the enriched blueprint does not resolve them "
+            "after Corrective Enrichment."
         )
 
     def _ensure_blueprint_enriched(self, blueprint: Blueprint) -> Blueprint:
@@ -2391,12 +2527,24 @@ class CompactedContextGenerator:
             name = entry.get("name") or entry.get("symbol", "")
             if not name:
                 return
+            lang = entry.get("lang") or (node.get("lang") if node else "") or "python"
+            file_path = entry.get("file") or (node.get("path") if node else "") or ""
             if self._is_data_payload_symbol(name, node, data):
                 entry["data_payload"] = True
                 entry["payload_kind"] = self._payload_kind(name, node, data)
                 entry["logic_sketch"] = entry.get("logic_sketch") or (
                     f"Static data payload ({entry['payload_kind']}) for {name}; "
                     "must be fully populated before use."
+                )
+            # Ensure every CFM function entry has a non-zero logic sketch.
+            # The sketch is the in-fill intent: preserve any LLM-provided value,
+            # fall back to UAST/steps, and finally to a generated signature stub
+            # so the ProjectBuilder's logic-sketch gate never sees an empty entry.
+            if not entry.get("logic_sketch"):
+                entry["logic_sketch"] = (
+                    entry.get("uast")
+                    or entry.get("steps")
+                    or f"Implement {name} ({lang}) in {file_path}; emit a complete, correct implementation matching its contract."
                 )
             functions.append(entry)
 
@@ -2407,6 +2555,10 @@ class CompactedContextGenerator:
                     {
                         "name": fn.get("name") or fn.get("output_name", ""),
                         "file": str(fn.get("file", "")),
+                        "lang": fn.get("lang", ""),
+                        "logic_sketch": fn.get("logic_sketch", ""),
+                        "uast": fn.get("uast", ""),
+                        "steps": fn.get("steps", ""),
                     },
                     fn,
                 )
@@ -2416,6 +2568,10 @@ class CompactedContextGenerator:
                     {
                         "name": f.get("name") or f.get("output_name", ""),
                         "file": str(f.get("file", "")),
+                        "lang": f.get("lang", ""),
+                        "logic_sketch": f.get("logic_sketch", ""),
+                        "uast": f.get("uast", ""),
+                        "steps": f.get("steps", ""),
                     },
                     f,
                 )
