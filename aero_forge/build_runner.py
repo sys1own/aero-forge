@@ -636,6 +636,16 @@ class BuildRunner:
         source_stem = source.stem.lower()
         project_root = self.blueprint.output_dir.resolve()
         search_roots = {project_root, source.parent.resolve()}
+        # Include the workspace directory containing ``output_dir`` so sibling
+        # ``tests/`` directories (e.g. ``examples/fibonacci/tests``) are found.
+        workspace_candidate = project_root.parent.resolve()
+        if (
+            workspace_candidate not in search_roots
+            and len(workspace_candidate.parts) > 1
+            and (source.is_relative_to(workspace_candidate)
+                 or (workspace_candidate / "tests").is_dir())
+        ):
+            search_roots.add(workspace_candidate)
         excluded = {
             "target",
             "dist",

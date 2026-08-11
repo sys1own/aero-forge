@@ -686,6 +686,17 @@ class ContractIntegrityValidator:
         )
         if not is_python or cls._is_entrypoint_node(node_id, node_spec):
             return
+        # Test-only nodes are explicitly allowed to have no exports; they are
+        # validated later by the TestDensityValidator.
+        if (
+            node_id.startswith("test")
+            or str(node_spec.get("purpose", "")).lower() == "tests"
+            or any(
+                isinstance(p, str) and (p.startswith("tests/") or "/tests/" in p)
+                for p in source_files
+            )
+        ):
+            return
         exports = set(node_spec.get("exports") or [])
         contract_symbols = {
             (c.get("symbol") or c.get("name", ""))
@@ -1067,6 +1078,7 @@ class TestDensityValidator:
         edges: List[Dict[str, Any]],
         *,
         min_tests_per_symbol: int = 5,
+        require_tests: bool = False,
     ) -> None:
         """Raise `TestDensityError` if the test suite is too sparse for the contracted symbols."""
         symbols = cls._collect_contracted_symbols(nodes, edges)
@@ -1074,9 +1086,9 @@ class TestDensityValidator:
             return
         tests_dir = Path(workspace) / "tests"
 
-        # Only enforce high-density tests when the blueprint actually contains a
-        # dedicated test node or an existing tests/ directory. This keeps existing
-        # low-level materializer unit tests valid while still gating real builds.
+        # Enforce high-density tests when the blueprint contains a dedicated test
+        # node, an existing tests/ directory, or the prompt/template explicitly
+        # requires tests. The `require_tests` flag makes test synthesis mandatory.
         has_test_node = any(
             (n.get("node_id") or "").startswith("test")
             or any(
@@ -1086,11 +1098,16 @@ class TestDensityValidator:
             for n in nodes
         )
         if not has_test_node and not tests_dir.is_dir():
-            _accel_log(
-                "warning",
-                f"Test density skipped: no tests/ directory or test node for {len(symbols)} symbol(s).",
+            if not require_tests:
+                _accel_log(
+                    "warning",
+                    f"Test density skipped: no tests/ directory or test node for {len(symbols)} symbol(s).",
+                )
+                return
+            raise TestDensityError(
+                f"No tests/ directory or test node for {len(symbols)} contracted symbol(s). "
+                "Tests are mandatory: emit at least five distinct unit tests per symbol."
             )
-            return
 
         test_functions = cls._list_test_functions(tests_dir)
         if not test_functions:
@@ -1125,12 +1142,27 @@ class AtomicSymbolAssembly:
     """
 
     @staticmethod
+    def _is_test_node(node_spec: Dict[str, Any]) -> bool:
+        """Return True when *node_spec* represents a test-only directory/module."""
+        node_id = node_spec.get("node_id", "")
+        if node_id.startswith("test"):
+            return True
+        if str(node_spec.get("purpose", "")).lower() == "tests":
+            return True
+        return any(
+            isinstance(p, str) and (p.startswith("tests/") or "/tests/" in p)
+            for p in node_spec.get("source_files") or []
+        )
+
+    @staticmethod
     def _required_symbols(
         node_spec: Dict[str, Any],
         contracts: List[Dict[str, Any]],
         is_pure_python: bool = False,
     ) -> List[str]:
         """Return the contracted symbols this node is expected to define."""
+        if AtomicSymbolAssembly._is_test_node(node_spec):
+            return []
         node_id = node_spec.get("node_id", "")
         symbols: Set[str] = set(node_spec.get("exports") or [])
         for contract in contracts or []:

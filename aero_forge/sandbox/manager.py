@@ -303,9 +303,9 @@ class Sandbox:
         present_tests = [p for p in self.test_paths if p.is_file()]
         if not present_tests:
             return {
-                "passed": True,
-                "returncode": 0,
-                "logs": "No test file found; skipping.",
+                "passed": False,
+                "returncode": 1,
+                "logs": "No tests found; cannot report success.",
                 "test_total": 0,
                 "test_passed": 0,
                 "test_failed": 0,
@@ -343,9 +343,11 @@ class Sandbox:
         result = results[0]
         all_output = result["stdout"] + result["stderr"]
         total, passed, failed = _parse_pytest_counts(all_output)
+        # A pytest run that collected zero tests is not a success.
+        tests_passed = result["returncode"] == 0 and total > 0
         return {
-            "passed": result["returncode"] == 0,
-            "returncode": result["returncode"],
+            "passed": tests_passed,
+            "returncode": result["returncode"] if total > 0 else 1,
             "logs": all_output,
             "test_total": total,
             "test_passed": passed,
@@ -390,9 +392,11 @@ class Sandbox:
         result = results[0]
         all_output = result["stdout"] + result["stderr"]
         total, passed, failed = _parse_unittest_counts(all_output)
+        # A unittest run that discovered zero tests is not a success.
+        tests_passed = result["returncode"] == 0 and total > 0
         return {
-            "passed": result["returncode"] == 0,
-            "returncode": result["returncode"],
+            "passed": tests_passed,
+            "returncode": result["returncode"] if total > 0 else 1,
             "logs": all_output,
             "test_total": total,
             "test_passed": passed,

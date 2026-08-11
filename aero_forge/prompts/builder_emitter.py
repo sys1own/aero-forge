@@ -186,6 +186,18 @@ def _smt_type_env(node: Dict[str, Any], contracts: List[Dict[str, Any]]) -> Dict
     return types
 
 
+def _is_test_node(node: Dict[str, Any]) -> bool:
+    """Return True when *node* represents a test-only directory or module."""
+    if (node.get("node_id") or "").startswith("test"):
+        return True
+    if str(node.get("purpose", "")).lower() == "tests":
+        return True
+    return any(
+        isinstance(p, str) and (p.startswith("tests/") or "/tests/" in p)
+        for p in node.get("source_files") or []
+    )
+
+
 def _symbol_specs(
     node: Dict[str, Any], contracts: List[Dict[str, Any]]
 ) -> List[Tuple[str, List[str], str]]:
@@ -193,7 +205,11 @@ def _symbol_specs(
 
     The skeleton must expose every function the blueprint asks for so the LLM
     fills in a complete implementation map rather than a single symbol.
+    Test-only nodes are intentionally emitted as a collection of ``test_*``
+    functions; they do not carry a single required symbol.
     """
+    if _is_test_node(node):
+        return []
     specs: List[Tuple[str, List[str], str]] = []
     for c in contracts or []:
         sym = c.get("symbol") or ""
@@ -376,6 +392,7 @@ def format_builder_emitter_user_prompt(
         | set(node.get("exports") or [])
     )
     payload = {
+        "node_id": node.get("node_id", ""),
         "user_prompt": user_prompt,
         "compacted_context": context,
         "skeleton": skeleton,

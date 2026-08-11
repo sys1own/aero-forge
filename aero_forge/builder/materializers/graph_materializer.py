@@ -347,7 +347,17 @@ class GraphPolyglotMaterializer:
                     dirs.add(parts[0])
             return dirs
 
-        package_nodes = {n["node_id"] for n in nodes if _package_dirs(n)}
+        def _is_test_node(node: Dict[str, Any]) -> bool:
+            if (node.get("node_id") or "").startswith("test"):
+                return True
+            if str(node.get("purpose", "")).lower() == "tests":
+                return True
+            return any(
+                isinstance(p, str) and (p.startswith("tests/") or "/tests/" in p)
+                for p in node.get("source_files") or []
+            )
+
+        package_nodes = {n["node_id"] for n in nodes if _package_dirs(n) and not _is_test_node(n)}
         entrypoint_names = {"main", "cli", "entrypoint", "run"}
         entrypoint_nodes: Set[str] = set()
         for n in nodes:
@@ -461,6 +471,19 @@ class GraphPolyglotMaterializer:
             raise
         return target
 
+    def _requires_test_density(self, hin_graph_spec: Dict[str, Any]) -> bool:
+        """Return True when the prompt or architecture requires tests."""
+        prompt = (self._synthesis_context or "").lower()
+        if any(k in prompt for k in ("test", "tests", "pytest", "unit test")):
+            return True
+        architecture = hin_graph_spec.get(
+            "architecture",
+            hin_graph_spec.get("metadata", {}).get("architecture", ""),
+        ).lower()
+        if architecture == "pure_python":
+            return True
+        return False
+
     def _write_python_init(
         self,
         node_dir: Path,
@@ -484,6 +507,19 @@ class GraphPolyglotMaterializer:
             and not a.file_path.endswith("__init__.py")
         ]
         if not source_artifacts:
+            return None
+
+        # Do not rewrite tests/__init__.py to re-export test functions; pytest
+        # already discovers test modules and an auto-generated init would cause
+        # duplicate collection.
+        if (
+            node_id == "tests"
+            or str(node_spec.get("purpose", "")).lower() == "tests"
+            or any(
+                isinstance(p, str) and (p.startswith("tests/") or "/tests/" in p)
+                for p in node_spec.get("source_files") or []
+            )
+        ):
             return None
 
         exports = list(node_spec.get("exports") or [])
@@ -3117,21 +3153,22 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
 
         architecture = self._effective_architecture(hin_graph_spec)
 
-        # Test density gate: complex (non-pure_python) projects must include
-        # tests proportional to their contracted symbols.
-        if not self._is_pure_python:
-            min_tests = 5 if architecture == "graph_polyglot" else 1
-            try:
-                TestDensityValidator.verify(
-                    self.workspace_root,
-                    nodes,
-                    edges,
-                    min_tests_per_symbol=min_tests,
-                )
-            except TestDensityError as exc:
-                raise MaterializationError(
-                    f"Test density gate failed: {exc}"
-                ) from exc
+        # Test density gate: every project with contracted symbols must include
+        # high-density tests when the prompt/template mandates tests or when a
+        # test node/tests directory is present.
+        min_tests = 5 if self._requires_test_density(hin_graph_spec) else 1
+        try:
+            TestDensityValidator.verify(
+                self.workspace_root,
+                nodes,
+                edges,
+                min_tests_per_symbol=min_tests,
+                require_tests=self._requires_test_density(hin_graph_spec),
+            )
+        except TestDensityError as exc:
+            raise MaterializationError(
+                f"Test density gate failed: {exc}"
+            ) from exc
 
         result: Dict[str, Any] = {
             "project": hin_graph_spec.get("project", "aero_forge_project"),

@@ -18,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -36,6 +36,11 @@ def _source_response(source: str, path: str) -> str:
         "```\n"
         "__AERO_LOGIC_END__"
     )
+
+
+def _multi_source_response(*pairs: Tuple[str, str]) -> str:
+    blocks = [f"```python:{path}\n{source}\n```" for source, path in pairs]
+    return "__AERO_LOGIC_START__\n" + "\n".join(blocks) + "\n__AERO_LOGIC_END__"
 
 
 _ALIGNER_SOURCE = '''\
@@ -92,7 +97,7 @@ if __name__.eq == '__main__':
 '''
 
 
-_TESTS_SOURCE = '''\
+_TEST_ALIGNER_SOURCE = '''\
 import sys
 from genomics.aligner import smith_waterman, blosum62
 
@@ -138,6 +143,63 @@ def test_smith_waterman_local():
 '''
 
 
+_TEST_MAIN_SOURCE = '''\
+import io
+import sys
+import main
+
+
+def test_main_function_exists():
+    assert callable(main.main)
+
+
+def test_main_runs_with_defaults():
+    old_argv = list(sys.argv)
+    sys.argv = ["main"]
+    try:
+        main.main()
+    finally:
+        sys.argv = old_argv
+
+
+def test_main_runs_with_sequences():
+    old_argv = list(sys.argv)
+    sys.argv = ["main", "ACGT", "AGCT"]
+    try:
+        main.main()
+    finally:
+        sys.argv = old_argv
+
+
+def test_main_prints_positive_score():
+    old_stdout = sys.stdout
+    old_argv = list(sys.argv)
+    captured = io.StringIO()
+    sys.stdout = captured
+    sys.argv = ["main", "ACGT", "AGCT"]
+    try:
+        main.main()
+    finally:
+        sys.stdout = old_stdout
+        sys.argv = old_argv
+    assert int(captured.getvalue().strip()) > 0
+
+
+def test_main_prints_zero_for_empty():
+    old_stdout = sys.stdout
+    old_argv = list(sys.argv)
+    captured = io.StringIO()
+    sys.stdout = captured
+    sys.argv = ["main", "", ""]
+    try:
+        main.main()
+    finally:
+        sys.stdout = old_stdout
+        sys.argv = old_argv
+    assert int(captured.getvalue().strip()) == 0
+'''
+
+
 class _GraphMockLLM:
     """Return a valid graph_polyglot blueprint JSON for the genomics prompt."""
 
@@ -162,6 +224,12 @@ class _GraphMockLLM:
                         "toolchain": "python",
                         "source_files": ["main.py"],
                     },
+                    {
+                        "node_id": "tests",
+                        "lang": "python",
+                        "toolchain": "python",
+                        "source_files": ["tests/test_aligner.py", "tests/test_main.py"],
+                    },
                 ],
                 "edges": [],
                 "output_dir": "./dist",
@@ -177,17 +245,22 @@ class _MockLLM:
         # The compacted context contains every symbol; the skeleton isolates
         # the symbols that belong to the current node.
         skeleton = content
+        node_id = ""
         match = re.search(r"```json\s*([\s\S]*?)\s*```", content)
         if match:
             try:
                 payload = json.loads(match.group(1))
                 skeleton = payload.get("skeleton", content)
+                node_id = payload.get("node_id", "")
             except json.JSONDecodeError:
                 pass
         first_def = re.search(r"def\s+(\w+)\s*\(", skeleton)
         first_def_name = first_def.group(1) if first_def else ""
-        if first_def_name == "tests" or "test_" in skeleton:
-            return _source_response(_TESTS_SOURCE, "tests/test_aligner.py")
+        if node_id == "tests" or first_def_name == "tests" or "test_" in skeleton:
+            return _multi_source_response(
+                (_TEST_ALIGNER_SOURCE, "tests/test_aligner.py"),
+                (_TEST_MAIN_SOURCE, "tests/test_main.py"),
+            )
         if "def smith_waterman" in skeleton or "blosum62" in skeleton:
             return _source_response(_ALIGNER_SOURCE, "genomics/aligner.py")
         return _source_response(_MAIN_SOURCE, "main.py")
@@ -219,23 +292,19 @@ def main() -> int:
 
         aligner_py = workspace / "genomics" / "aligner.py"
         main_py = workspace / "main.py"
-        tests_py = workspace / "tests" / "test_aligner.py"
+        test_aligner_py = workspace / "tests" / "test_aligner.py"
+        test_main_py = workspace / "tests" / "test_main.py"
         blueprint = workspace / "blueprint.aero"
 
-        # Write a high-density test suite after materialization to verify the
-        # generated symbols (5 tests per contracted symbol, 2 symbols).
-        tests_py.parent.mkdir(parents=True, exist_ok=True)
-        tests_py.write_text(_TESTS_SOURCE)
-
-        for path in (aligner_py, main_py, tests_py, blueprint):
+        for path in (aligner_py, main_py, test_aligner_py, test_main_py, blueprint):
             if not path.exists():
                 print(f"FAIL: {path.relative_to(workspace)} was not materialized")
                 return 1
 
         blueprint_size = blueprint.stat().st_size
         print(f"blueprint.aero size: {blueprint_size} bytes")
-        if blueprint_size <= 3000:
-            print("FAIL: blueprint.aero did not grow beyond 3000 bytes")
+        if blueprint_size <= 4000:
+            print("FAIL: blueprint.aero did not grow beyond 4000 bytes")
             return 1
 
         aligner_source = aligner_py.read_text()
