@@ -1041,3 +1041,13 @@ class PolyglotGraphBlueprint(BaseModel):
                     f"use a standard internal import instead."
                 )
         return self
+
+    @model_validator(mode="after")
+    def _enforce_minimum_nodes(self) -> "PolyglotGraphBlueprint":
+        """Reject modular blueprints that have no nodes."""
+        if not self.nodes:
+            raise ValueError(
+                "Missing Nodes: the blueprint has an empty nodes list. "
+                f"Architecture {self.architecture!r} requires at least one node."
+            )
+        return self

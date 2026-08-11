@@ -413,6 +413,28 @@ DATA PAYLOAD CONSTRAINT:
 - Set `data_payload: true`, `payload_kind: "dict"` (or `"list"` / `"set"`), and provide the full literal value or a compact generation algorithm in `logic_sketch` so the SMTASTEngine can lower it into the Holographic Interaction Net (HIN).
 - For large matrices and lookup tables, you MUST also include the complete literal as a non-truncatable JSON string under `full_implementation_map` (keyed by symbol name) so enrichment cannot drop the data during compaction.
 - If the prompt requires a Smith-Waterman or sequence-alignment scoring matrix (e.g. `BLOSUM62`), you MUST emit the matrix as a `data_payload` with its full literal value in `logic_sketch`. Do not leave it as an SMT typed hole or assume it exists at runtime.
+
+JSON BLUEPRINT GENERATION CONSTRAINT:
+- Do NOT return a partial JSON skeleton or a blueprint with empty values, `__AERO_IN_FILL__` markers, or "TBD" placeholders. You MUST generate the entire blueprint JSON from scratch based on the prompt requirements.
+- Every `node_id`, `source_files` entry, `exports` list, `contract`, and `full_implementation_map` value must be fully populated before the response is returned.
+- A Schema Example is provided below for reference, but you are required to produce a complete, valid blueprint object rather than filling in missing values on a template.
+
+Schema Example (for reference only — generate the full blueprint):
+```json
+{
+  "project": "example_project",
+  "architecture": "pure_python",
+  "primary_entrypoint": "main.py",
+  "build_script": "build.sh",
+  "nodes": [
+    {"node_id": "lib", "lang": "python", "toolchain": "python", "source_files": ["lib/core.py"], "exports": ["compute"]},
+    {"node_id": "main", "lang": "python", "toolchain": "python", "source_files": ["main.py"], "exports": []},
+    {"node_id": "tests", "lang": "python", "toolchain": "python", "source_files": ["tests/test_core.py"], "exports": []}
+  ],
+  "edges": [],
+  "metadata": {"llm_initialized": true, "status": "finalized"}
+}
+```
 """,
     "Universal polyglot architect: any toolchain, SMT/GoI-backed safety.",
 )
