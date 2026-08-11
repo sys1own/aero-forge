@@ -52,6 +52,7 @@ from aero_forge.builder.emitters.base import (
     FocusedIntentRecovery,
     ManifestRecovery,
     ManifestRecoveryError,
+    MaterializationParityGate,
     PolyglotEmitterPlugin,
     SLIIntentValidator,
     SyntaxValidator,
@@ -1112,7 +1113,19 @@ else:
             from aero_forge.translator import python_source_to_uast
 
             uast = python_source_to_uast(artifact.content)
-            hin = reduce_uast(uast)
+            hin = reduce_uast(uast, timeout_seconds=5.0)
+            if hin.get("timed_out"):
+                _accel_log(
+                    "warning",
+                    f"HIN reduction timed out for {artifact.file_path}; "
+                    "treating as wavefront starvation",
+                )
+                return False
+            if hin.get("stalled", 0) > 0:
+                _accel_log(
+                    "warning",
+                    f"HIN reduction has {hin['stalled']} stalled active-pair(s) for {artifact.file_path}",
+                )
             if hin.get("steps", 0) == 0 and hin.get("graph"):
                 _accel_log(
                     "warning",
@@ -2900,6 +2913,7 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                     f"toolchain dispatch failed for {node_id}: {exc}"
                 ) from exc
 
+        MaterializationParityGate.verify(node_id, node_spec, node_dir)
         return written
 
     def materialize(

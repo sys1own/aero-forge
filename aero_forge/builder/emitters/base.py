@@ -850,6 +850,51 @@ class HINNativeHealer:
         return None
 
 
+class MaterializationParityError(RuntimeError):
+    """Raised when a node's emitted files do not match its blueprint manifest."""
+
+
+class MaterializationParityGate:
+    """Verify that every file declared for a node is physically present and non-empty."""
+
+    @staticmethod
+    def _expected_files(node_spec: Dict[str, Any]) -> List[str]:
+        files: Set[str] = set()
+        for sf in node_spec.get("source_files") or []:
+            if isinstance(sf, str) and sf:
+                files.add(sf)
+        manifest = PolyglotEmitterPlugin.required_manifest(node_spec)
+        if manifest:
+            files.add(manifest)
+        return sorted(files)
+
+    @classmethod
+    def verify(
+        cls,
+        node_id: str,
+        node_spec: Dict[str, Any],
+        node_dir: Path,
+    ) -> None:
+        """Raise :class:`MaterializationParityError` if any expected file is missing or empty."""
+        expected = cls._expected_files(node_spec)
+        missing: List[str] = []
+        empty: List[str] = []
+        for rel in expected:
+            path = node_dir / rel
+            if not path.is_file():
+                missing.append(rel)
+                continue
+            if path.stat().st_size == 0:
+                empty.append(rel)
+        if missing or empty:
+            raise MaterializationParityError(
+                f"Node {node_id} materialization parity failed: "
+                f"missing={missing}, empty={empty}"
+            )
+        total = len(expected)
+        _accel_log("info", f"Node Materialization Verified: {node_id} ({total}/{total} file{'s' if total != 1 else ''})")
+
+
 class TestDensityError(RuntimeError):
     """Raised when the generated test suite does not satisfy the per-symbol density constraint."""
 
@@ -2908,14 +2953,24 @@ class EmitterRegistry:
 
         def emit_source_files(self, *args: Any, **kwargs: Any) -> List[CodeArtifact]:
             result = orig_source(*args, **kwargs)
-            if not isinstance(result, list):
+            if result is None:
+                result = []
+            elif isinstance(result, CodeArtifact):
                 result = [result]
+            elif not isinstance(result, list):
+                # Generators, tuples, and other iterables must be fully consumed
+                # before the plugin method returns so no CodeArtifact is dropped.
+                result = list(result)
             return [_norm_artifact(a) for a in result]
 
         def emit_build_manifest(self, *args: Any, **kwargs: Any) -> List[CodeArtifact]:
             result = orig_manifest(*args, **kwargs)
-            if isinstance(result, CodeArtifact):
+            if result is None:
+                result = []
+            elif isinstance(result, CodeArtifact):
                 result = [result]
+            elif not isinstance(result, list):
+                result = list(result)
             return [_norm_artifact(a) for a in result]
 
         wrapper_cls = type(

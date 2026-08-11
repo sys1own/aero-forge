@@ -201,16 +201,19 @@ class HINEngine:
 
 
 def reduce_uast(
-    uast: Any, max_steps: int = 1_000_000, progress_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None
+    uast: Any,
+    max_steps: int = 1_000_000,
+    timeout_seconds: Optional[float] = None,
+    progress_callback: Optional[Callable[[str, Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """Build and reduce a HIN graph from a UAST value.
 
-    Returns ``{"steps": int, "graph": list}``.  Falls back to a no-op
-    dictionary when the native module is unavailable so the bridge can be
-    imported everywhere.
+    Returns ``{"steps": int, "stalled": int, "timed_out": bool, "graph": list}``.
+    Falls back to a no-op dictionary when the native module is unavailable so the
+    bridge can be imported everywhere.
     """
     if HinEngine is None:
-        return {"steps": 0, "graph": [], "native": False}
+        return {"steps": 0, "stalled": 0, "timed_out": False, "graph": [], "native": False}
 
     def _emit(event: str, payload: Dict[str, Any]) -> None:
         if progress_callback:
@@ -222,10 +225,20 @@ def reduce_uast(
     engine = HinEngine()
     engine.build_from_json(json.dumps(uast))
     _emit("hin_reduction_steps", {"phase": "build", "nodes": engine.node_count()})
-    steps = engine.reduce_to_completion(max_steps)
+    if timeout_seconds is not None:
+        steps, timed_out = engine.reduce_to_completion_with_timeout(
+            max_steps, timeout_seconds
+        )
+    else:
+        steps = engine.reduce_to_completion(max_steps)
+        timed_out = False
     graph = json.loads(engine.to_json())
-    _emit("hin_reduction_steps", {"phase": "complete", "steps": steps, "nodes": len(graph)})
-    return {"steps": steps, "graph": graph, "native": True}
+    stalled = engine.stalled_pairs()
+    _emit(
+        "hin_reduction_steps",
+        {"phase": "complete", "steps": steps, "stalled": stalled, "timed_out": timed_out, "nodes": len(graph)},
+    )
+    return {"steps": steps, "stalled": stalled, "timed_out": timed_out, "graph": graph, "native": True}
 
 
 def native_available() -> bool:

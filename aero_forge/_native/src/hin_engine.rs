@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::time::Instant;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -787,18 +788,60 @@ impl HinEngine {
         }
     }
 
-    /// Run active-pair reductions until the net is stable or ``max_steps`` is hit.
+    /// Run active-pair reductions until the net is stable or ``max_steps``/duration is hit.
     pub fn reduce_to_completion(&mut self, max_steps: usize) -> usize {
+        self.reduce_to_completion_with_timeout(max_steps, None).0
+    }
+
+    /// Run active-pair reductions with an optional wall-clock timeout.
+    ///
+    /// Returns the number of completed reduction steps and a flag indicating
+    /// whether the loop exited because the timeout was reached before the net
+    /// became stable.
+    pub fn reduce_to_completion_with_timeout(
+        &mut self,
+        max_steps: usize,
+        max_duration_seconds: Option<f64>,
+    ) -> (usize, bool) {
+        let start = Instant::now();
         let mut steps = 0usize;
         while steps < max_steps && self.reduce_step() {
+            if let Some(d) = max_duration_seconds {
+                if start.elapsed().as_secs_f64() > d {
+                    return (steps, true);
+                }
+            }
             steps += 1;
         }
-        steps
+        (steps, false)
     }
 
     /// Number of allocated nodes (including retired nodes).
     pub fn node_count(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// Count active principal-principal pairs whose node kinds are identical.
+    ///
+    /// Such "stalled" active pairs cannot reduce without further interaction and
+    /// indicate a potentially stuck or incomplete logic sketch.
+    pub fn stalled_pairs(&self) -> usize {
+        let mut stalled = 0usize;
+        for i in 0..self.active.len() {
+            let (a, b) = self.active[i];
+            if self.nodes[a].retired || self.nodes[b].retired {
+                continue;
+            }
+            let Some(pa) = self.nodes[a].principal else { continue };
+            let Some(pb) = self.nodes[b].principal else { continue };
+            if self.ports[pa].target != Some(pb) || self.ports[pb].target != Some(pa) {
+                continue;
+            }
+            if self.nodes[a].kind == self.nodes[b].kind {
+                stalled += 1;
+            }
+        }
+        stalled
     }
 
     fn reduce_step(&mut self) -> bool {
@@ -1146,7 +1189,18 @@ impl PyHinEngine {
 
     /// Reduce active pairs until the net is stable or ``max_steps`` is reached.
     fn reduce_to_completion(&mut self, max_steps: usize) -> PyResult<usize> {
-        Ok(self.engine.reduce_to_completion(max_steps))
+        Ok(self.engine.reduce_to_completion_with_timeout(max_steps, None).0)
+    }
+
+    /// Reduce active pairs with an optional wall-clock timeout (seconds).
+    fn reduce_to_completion_with_timeout(
+        &mut self,
+        max_steps: usize,
+        timeout_seconds: f64,
+    ) -> PyResult<(usize, bool)> {
+        Ok(self
+            .engine
+            .reduce_to_completion_with_timeout(max_steps, Some(timeout_seconds)))
     }
 
     /// Return the live graph as a JSON string.
@@ -1160,27 +1214,40 @@ impl PyHinEngine {
     fn node_count(&self) -> usize {
         self.engine.node_count()
     }
+
+    /// Count active principal-principal pairs whose node kinds are identical.
+    fn stalled_pairs(&self) -> usize {
+        self.engine.stalled_pairs()
+    }
 }
 
 /// Build and reduce a UAST JSON string in one call (GIL released during reduction).
 #[pyfunction]
-#[pyo3(signature = (json, max_steps=None))]
-pub fn reduce_hin_uast(json: &str, max_steps: Option<usize>) -> PyResult<String> {
+#[pyo3(signature = (json, max_steps=None, timeout_seconds=None))]
+pub fn reduce_hin_uast(
+    json: &str,
+    max_steps: Option<usize>,
+    timeout_seconds: Option<f64>,
+) -> PyResult<String> {
     let uast: Value = serde_json::from_str(json)
         .map_err(|e| PyValueError::new_err(format!("invalid UAST JSON: {}", e)))?;
     let mut engine = HinEngine::new();
     engine
         .build_uast(&uast)
         .map_err(|e| PyValueError::new_err(e))?;
-    let steps = if let Some(ms) = max_steps {
-        engine.reduce_to_completion(ms)
+    let (steps, timed_out) = if let Some(ms) = max_steps {
+        engine.reduce_to_completion_with_timeout(ms, timeout_seconds)
     } else {
-        engine.reduce_to_completion(1_000_000)
+        engine.reduce_to_completion_with_timeout(1_000_000, timeout_seconds)
     };
+    let stalled = engine.stalled_pairs();
     let out = engine
         .to_json()
         .map_err(|e| PyValueError::new_err(format!("serialization failed: {}", e)))?;
-    Ok(format!("{{\"steps\":{},\"graph\":{}}}", steps, out))
+    Ok(format!(
+        "{{\"steps\":{},\"stalled\":{},\"timed_out\":{},\"graph\":{}}}",
+        steps, stalled, timed_out, out
+    ))
 }
 
 // ---------------------------------------------------------------------------
