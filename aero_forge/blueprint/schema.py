@@ -284,7 +284,11 @@ class BlueprintV3(BaseModel):
         if not isinstance(data, dict):
             return data
         bp = data.get("build_pipeline")
-        if isinstance(bp, dict) and "artifacts" in bp and isinstance(bp["artifacts"], list):
+        if (
+            isinstance(bp, dict)
+            and "artifacts" in bp
+            and isinstance(bp["artifacts"], list)
+        ):
             data = dict(data)
             data["build_pipeline"] = bp["artifacts"]
         return data
@@ -399,7 +403,12 @@ class BlueprintV3(BaseModel):
             ArtifactType.shared_library: {"CMakeLists.txt", "build.zig"},
             ArtifactType.static_library: {"CMakeLists.txt", "build.zig"},
             ArtifactType.cargo_cdylib: {"Cargo.toml"},
-            ArtifactType.binary: {"CMakeLists.txt", "Cargo.toml", "go.mod", "build.zig"},
+            ArtifactType.binary: {
+                "CMakeLists.txt",
+                "Cargo.toml",
+                "go.mod",
+                "build.zig",
+            },
         }
         for node_id, artifacts in source_by_node.items():
             node_manifests = manifests_by_node.get(node_id, set())
@@ -451,7 +460,9 @@ class BlueprintV3(BaseModel):
         # Delayed import breaks the import cycle between schema.py and core.py.
         from aero_forge.blueprint.core import (
             Blueprint,
+            ContractEntry,
             FunctionSpec,
+            FunctionalIntent,
             LLMConfig,
             ManifestEntry,
         )
@@ -549,12 +560,38 @@ class BlueprintV3(BaseModel):
             "workspace_root": str(workspace),
         }
 
+        # Derive functional_intent and contracts from discovered functions/manifest
+        # so the legacy runner blueprint passes the structural integrity gate.
+        functional_intent: List[FunctionalIntent] = []
+        contracts: List[ContractEntry] = []
+        seen_symbols: set = set()
+        for func in functions:
+            name = func.name
+            if name and name not in seen_symbols:
+                functional_intent.append(
+                    FunctionalIntent(symbol_name=name, type="function")
+                )
+                contracts.append(ContractEntry(name=name, signature=""))
+                seen_symbols.add(name)
+        for entry in manifest:
+            symbol = Path(entry.path).stem
+            if symbol and symbol not in seen_symbols:
+                functional_intent.append(
+                    FunctionalIntent(symbol_name=symbol, type="function")
+                )
+                contracts.append(
+                    ContractEntry(name=symbol, signature="", language=entry.lang)
+                )
+                seen_symbols.add(symbol)
+
         return Blueprint(
             project=self.metadata.project_name,
             architecture=architecture,
             toolchains=[t.name for t in self.toolchains],
             manifest=manifest,
+            contracts=contracts,
             functions=functions,
+            functional_intent=functional_intent,
             metadata=metadata_v2,
             output_dir=output_dir,
             llm=LLMConfig(provider="none"),
@@ -967,6 +1004,43 @@ class PolyglotNodeSpec(BaseModel):
             self.toolchain = self.lang
         return self
 
+    @model_validator(mode="after")
+    def _enforce_toolchain_alignment(self) -> "PolyglotNodeSpec":
+        """Source file extensions must match the node toolchain."""
+        ext_toolchains: Dict[str, set] = {
+            ".rs": {"cargo", "rustc"},
+            ".cpp": {"clang", "gcc", "g++", "clang++", "cmake"},
+            ".cc": {"clang", "gcc", "g++", "clang++", "cmake"},
+            ".cxx": {"clang", "gcc", "g++", "clang++", "cmake"},
+            ".c": {"clang", "gcc", "cmake"},
+            ".py": {"python"},
+            ".go": {"go"},
+            ".java": {"javac"},
+            ".cs": {"dotnet", "csc"},
+            ".zig": {"zig"},
+            ".mojo": {"mojo"},
+            ".nim": {"nim", "nimble"},
+            ".d": {"dmd", "ldc", "gdc"},
+            ".f90": {"gfortran", "ifort"},
+        }
+        toolchain = self.toolchain.lower().strip()
+        effective: set = {toolchain}
+        if toolchain in {"cpp", "c++"}:
+            effective.update({"clang", "gcc", "g++", "clang++", "cmake"})
+        if toolchain == "rust":
+            effective.update({"cargo", "rustc"})
+        if toolchain == "c":
+            effective.update({"clang", "gcc", "cmake"})
+        for path in self.source_files:
+            ext = os.path.splitext(path)[1].lower()
+            allowed = ext_toolchains.get(ext)
+            if allowed and not effective.intersection(allowed):
+                raise ValueError(
+                    f"Node {self.node_id!r}: file {path!r} extension {ext!r} "
+                    f"requires one of toolchains {sorted(allowed)}, got {toolchain!r}."
+                )
+        return self
+
 
 class BoundaryEdgeSpec(BaseModel):
     """A directed FFI edge between two polyglot nodes."""
@@ -1061,7 +1135,8 @@ class PolyglotGraphBlueprint(BaseModel):
             src_lang = lang_by_id.get(edge.source, "")
             tgt_lang = lang_by_id.get(edge.target, "")
             if (
-                src_lang and tgt_lang
+                src_lang
+                and tgt_lang
                 and src_lang == tgt_lang
                 and edge.boundary_type in ffi_boundaries
             ):
@@ -1118,5 +1193,64 @@ class PolyglotGraphBlueprint(BaseModel):
             raise ValueError(
                 f"Functional intent coverage failed: missing symbols {missing}. "
                 f"Add a node/contract for each required symbol."
+            )
+        return self
+
+    def _derive_functional_intent(self) -> List[FunctionalIntent]:
+        """Infer a minimal functional_intent from nodes, edges, and contracts."""
+        derived: List[FunctionalIntent] = []
+        seen: set = set()
+        for node in self.nodes or []:
+            node_id = getattr(node, "node_id", None) or ""
+            if node_id and node_id not in seen:
+                derived.append(FunctionalIntent(symbol_name=node_id, type="function"))
+                seen.add(node_id)
+            for sym in getattr(node, "exports", []) or []:
+                if sym and sym not in seen:
+                    derived.append(
+                        FunctionalIntent(symbol_name=str(sym), type="function")
+                    )
+                    seen.add(sym)
+        for edge in self.edges or []:
+            sym = getattr(edge, "symbol", None) or ""
+            if sym and sym not in seen:
+                derived.append(FunctionalIntent(symbol_name=str(sym), type="function"))
+                seen.add(sym)
+        for extra in (
+            self.metadata.get("contracts", [])
+            if isinstance(self.metadata, dict)
+            else []
+        ):
+            sym = (
+                extra.get("name")
+                or extra.get("symbol")
+                or extra.get("symbol_name")
+                or ""
+            )
+            if sym and sym not in seen:
+                derived.append(FunctionalIntent(symbol_name=str(sym), type="function"))
+                seen.add(sym)
+        return derived
+
+    @model_validator(mode="after")
+    def _enforce_architecture_intent_and_contracts(self) -> "PolyglotGraphBlueprint":
+        """Non-pure-Python architectures require functional_intent and contracts."""
+        if self.architecture == "pure_python":
+            return self
+        if not self.functional_intent:
+            derived = self._derive_functional_intent()
+            if derived:
+                self.functional_intent = derived
+        if not self.functional_intent:
+            raise ValueError(
+                f"Architecture {self.architecture!r} requires non-empty 'functional_intent'. "
+                "Translate every functional requirement from the prompt into a structured list."
+            )
+        # Single-language non-Python blueprints (e.g. pure_rust) may be self-contained;
+        # hybrid/tri/graph architectures must expose cross-node contracts as edges.
+        if self.architecture not in {"pure_rust"} and not self.edges:
+            raise ValueError(
+                f"Architecture {self.architecture!r} requires at least one contract/edge. "
+                "Add an edge for every cross-language or exported symbol contract."
             )
         return self

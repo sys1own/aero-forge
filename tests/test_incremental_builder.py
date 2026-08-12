@@ -8,10 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from aero_forge.blueprint import Blueprint
+from aero_forge.blueprint import Blueprint, ContractEntry, FunctionalIntent
 from aero_forge.orchestrator.stack_classifier import INTENT_HYBRID_CPP_PYTHON
 from aero_forge.scaffold.cpp_materializer import CppPolyglotMaterializer
-
 
 PROMPT = (
     "Add a hybrid_cpp_python sliding window DTW module. "
@@ -55,6 +54,12 @@ def test_incremental_cpp_update_preserves_untouched_files(tmp_path: Path) -> Non
         toolchains=["python", "cpp"],
         prompt=PROMPT,
         metadata={"llm_initialized": "true"},
+        functional_intent=[
+            FunctionalIntent(symbol_name="sliding_window_dtw", type="function")
+        ],
+        contracts=[
+            ContractEntry(name="sliding_window_dtw", signature="", language="cpp")
+        ],
     )
 
     materializer = CppPolyglotMaterializer(workspace)
@@ -74,12 +79,12 @@ def test_incremental_cpp_update_preserves_untouched_files(tmp_path: Path) -> Non
     # pyproject.toml retains existing fields and gains native package data.
     pyproject_text = (workspace / "pyproject.toml").read_text()
     assert original_pyproject.strip() in pyproject_text.strip()
-    assert '[tool.setuptools.package-data]' in pyproject_text
+    assert "[tool.setuptools.package-data]" in pyproject_text
     assert '"*.so"' in pyproject_text
 
     # __init__.py keeps existing exports and adds the new native bridge import.
     init_text = (workspace / "src" / "accelerator" / "__init__.py").read_text()
-    assert 'from .native_bridge import sliding_window_dtw' in init_text
+    assert "from .native_bridge import sliding_window_dtw" in init_text
     assert "sliding_window_dtw" in init_text
 
     # A modification plan was recorded.
@@ -101,6 +106,12 @@ def test_incremental_cpp_update_builds_and_passes_tests(tmp_path: Path) -> None:
         toolchains=["python", "cpp"],
         prompt=PROMPT,
         metadata={"llm_initialized": "true"},
+        functional_intent=[
+            FunctionalIntent(symbol_name="sliding_window_dtw", type="function")
+        ],
+        contracts=[
+            ContractEntry(name="sliding_window_dtw", signature="", language="cpp")
+        ],
     )
 
     materializer = CppPolyglotMaterializer(workspace)
@@ -126,7 +137,9 @@ def test_incremental_cpp_update_builds_and_passes_tests(tmp_path: Path) -> None:
 AERO_ACCELERATOR_REPO = Path("/home/ubuntu/repos/aero-accelerator")
 
 
-@pytest.mark.skipif(not AERO_ACCELERATOR_REPO.is_dir(), reason="aero-accelerator repo not present")
+@pytest.mark.skipif(
+    not AERO_ACCELERATOR_REPO.is_dir(), reason="aero-accelerator repo not present"
+)
 def test_incremental_cpp_update_on_accelerator_repo(tmp_path: Path) -> None:
     """End-to-end: add a C++ sliding-window DTW extension to aero-accelerator."""
     if not shutil.which("g++"):

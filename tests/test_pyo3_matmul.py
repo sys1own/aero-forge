@@ -9,10 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from aero_forge.blueprint import Blueprint
+from aero_forge.blueprint import Blueprint, ContractEntry, FunctionalIntent
 from aero_forge.orchestrator.stack_classifier import INTENT_HYBRID_RUST_PYTHON
 from aero_forge.scaffold.polyglot_materializer import PolyglotMaterializer
-
 
 PROMPT = (
     "Add a Rust extension module src/matmul.rs. "
@@ -30,6 +29,8 @@ def test_pyo3_matmul_compiles_and_matches_numpy_dot(tmp_path: Path) -> None:
         toolchains=["python", "rust"],
         prompt=PROMPT,
         metadata={"llm_initialized": "true"},
+        functional_intent=[FunctionalIntent(symbol_name="matmul", type="function")],
+        contracts=[ContractEntry(name="matmul", signature="", language="rust")],
     )
 
     materializer = PolyglotMaterializer(workspace)
@@ -54,5 +55,7 @@ def test_pyo3_matmul_compiles_and_matches_numpy_dot(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 0, f"Generated tests failed:\n{result.stdout}\n{result.stderr}"
+    assert (
+        result.returncode == 0
+    ), f"Generated tests failed:\n{result.stdout}\n{result.stderr}"
     assert "passed" in result.stdout

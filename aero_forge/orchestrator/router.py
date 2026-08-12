@@ -204,7 +204,9 @@ def _is_homogeneous_numeric_list(node: ast.List) -> bool:
             elt.value, (int, float, bool, complex)
         ):
             constant_types.add(type(elt.value))
-        elif isinstance(elt, (ast.Name, ast.Subscript, ast.BinOp, ast.UnaryOp, ast.Call)):
+        elif isinstance(
+            elt, (ast.Name, ast.Subscript, ast.BinOp, ast.UnaryOp, ast.Call)
+        ):
             # Variable/expression elements are assumed homogeneous for the target type.
             pass
         elif isinstance(elt, ast.List):
@@ -252,7 +254,12 @@ class _FunctionClassifier(ast.NodeVisitor):
             base = name.split("[", 1)[0]
             if base in _TYPING_ALIASES:
                 base = _TYPING_ALIASES[base]
-            if base not in _SCALAR_TYPES and base not in {"list", "tuple", "dict", "set"}:
+            if base not in _SCALAR_TYPES and base not in {
+                "list",
+                "tuple",
+                "dict",
+                "set",
+            }:
                 self._reject(
                     f"Function '{self.function.name}' parameter '{arg.arg}' uses non-primitive type '{name}'"
                 )
@@ -267,7 +274,11 @@ class _FunctionClassifier(ast.NodeVisitor):
                 ret_base = ret_name.split("[", 1)[0]
                 if ret_base in _TYPING_ALIASES:
                     ret_base = _TYPING_ALIASES[ret_base]
-                if ret_base not in _SCALAR_TYPES and ret_base not in {"list", "tuple", "dict"}:
+                if ret_base not in _SCALAR_TYPES and ret_base not in {
+                    "list",
+                    "tuple",
+                    "dict",
+                }:
                     self._reject(
                         f"Function '{self.function.name}' return type '{ret_name}' is not primitive"
                     )
@@ -324,11 +335,15 @@ class _FunctionClassifier(ast.NodeVisitor):
 
     # ---- generic unsupported nodes ----
     def visit_Try(self, node: ast.Try) -> None:
-        self._reject(f"Function '{self.function.name}' uses try/except exception handling")
+        self._reject(
+            f"Function '{self.function.name}' uses try/except exception handling"
+        )
         self.generic_visit(node)
 
     def visit_With(self, node: ast.With) -> None:
-        self._reject(f"Function '{self.function.name}' uses with statements / context managers")
+        self._reject(
+            f"Function '{self.function.name}' uses with statements / context managers"
+        )
         self.generic_visit(node)
 
     def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
@@ -336,11 +351,15 @@ class _FunctionClassifier(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Match(self, node: ast.Match) -> None:
-        self._reject(f"Function '{self.function.name}' uses match/case pattern matching")
+        self._reject(
+            f"Function '{self.function.name}' uses match/case pattern matching"
+        )
         self.generic_visit(node)
 
     def visit_Yield(self, node: ast.Yield) -> None:
-        self._reject(f"Function '{self.function.name}' uses yield / generator expressions")
+        self._reject(
+            f"Function '{self.function.name}' uses yield / generator expressions"
+        )
         self.generic_visit(node)
 
     def visit_YieldFrom(self, node: ast.YieldFrom) -> None:
@@ -368,7 +387,9 @@ class _FunctionClassifier(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_JoinedStr(self, node: ast.JoinedStr) -> None:
-        self._reject(f"Function '{self.function.name}' uses f-string / string formatting")
+        self._reject(
+            f"Function '{self.function.name}' uses f-string / string formatting"
+        )
         self.generic_visit(node)
 
     def visit_Dict(self, node: ast.Dict) -> None:
@@ -514,9 +535,8 @@ def classify(source: str, function_names: Optional[List[str]] = None) -> Dict[st
         if node.bases:
             return False
         for stmt in node.body:
-            if (
-                isinstance(stmt, ast.Assign)
-                and any(isinstance(t, ast.Name) and t.id == "__slots__" for t in stmt.targets)
+            if isinstance(stmt, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "__slots__" for t in stmt.targets
             ):
                 return False
             if any(kw.arg == "__slots__" for kw in node.keywords):
@@ -526,7 +546,8 @@ def classify(source: str, function_names: Optional[List[str]] = None) -> Dict[st
     local_functions: Set[str] = {
         node.name
         for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and (isinstance(node, ast.FunctionDef) or _is_hin_class(node))
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef))
+        and (isinstance(node, ast.FunctionDef) or _is_hin_class(node))
     }
 
     # First pass: classify each top-level function and eligible class independently.
@@ -543,11 +564,7 @@ def classify(source: str, function_names: Optional[List[str]] = None) -> Dict[st
             }
 
     # Second pass: a HIN function may only call other HIN functions/classes.
-    hin_set: Set[str] = {
-        name
-        for name, data in per_function.items()
-        if data["is_hin"]
-    }
+    hin_set: Set[str] = {name for name, data in per_function.items() if data["is_hin"]}
     changed = True
     while changed:
         changed = False
@@ -556,7 +573,9 @@ def classify(source: str, function_names: Optional[List[str]] = None) -> Dict[st
                 continue
             for callee in data["callees"]:
                 callee_data = per_function.get(callee)
-                if callee not in local_functions or (callee_data and not callee_data["is_hin"]):
+                if callee not in local_functions or (
+                    callee_data and not callee_data["is_hin"]
+                ):
                     data["is_hin"] = False
                     data["reasons"].append(
                         f"Function '{name}' calls '{callee}', which is not suitable for HIN extraction"
@@ -596,9 +615,7 @@ def classify(source: str, function_names: Optional[List[str]] = None) -> Dict[st
             route = GENERAL_PURPOSE
             missing = sorted(requested - set(target_functions))
             if missing:
-                reasons.append(
-                    f"Requested function(s) not suitable for HIN: {missing}"
-                )
+                reasons.append(f"Requested function(s) not suitable for HIN: {missing}")
                 for name in missing:
                     data = per_function.get(name)
                     if data:
@@ -606,9 +623,7 @@ def classify(source: str, function_names: Optional[List[str]] = None) -> Dict[st
                     else:
                         node = _lookup_node(name)
                         if isinstance(node, ast.AsyncFunctionDef):
-                            reasons.append(
-                                f"Function '{name}' uses async/await syntax"
-                            )
+                            reasons.append(f"Function '{name}' uses async/await syntax")
                         elif isinstance(node, ast.ClassDef):
                             has_slots = any(
                                 isinstance(kw.value, (ast.List, ast.Tuple))
@@ -631,9 +646,7 @@ def classify(source: str, function_names: Optional[List[str]] = None) -> Dict[st
                                         has_slots = True
                                         break
                             if has_slots:
-                                reasons.append(
-                                    f"Class '{name}' uses __slots__"
-                                )
+                                reasons.append(f"Class '{name}' uses __slots__")
                             else:
                                 reasons.append(
                                     f"Class '{name}' is not a HIN-suitable function"
@@ -641,14 +654,17 @@ def classify(source: str, function_names: Optional[List[str]] = None) -> Dict[st
                         elif node is None:
                             reasons.append(f"Function or class {name!r} not found")
                         else:
-                            reasons.append(f"Function '{name}' is not suitable for HIN extraction")
+                            reasons.append(
+                                f"Function '{name}' is not suitable for HIN extraction"
+                            )
             else:
                 reasons.append("No HIN-suitable functions found in source")
     else:
         route = HIN_COMPUTE if target_functions else GENERAL_PURPOSE
         if route == HIN_COMPUTE:
             reasons.insert(
-                0, f"Functions suitable for zero-allocation extraction: {target_functions}"
+                0,
+                f"Functions suitable for zero-allocation extraction: {target_functions}",
             )
         else:
             reasons.append("No functions matched HIN compute criteria")
@@ -698,15 +714,15 @@ def toolchains_for_intent(intent: str) -> List[str]:
     if intent == BUILD_INTENT_GRAPH_POLYGLOT:
         # Generic polyglot path: keep the built-in trio plus Go so JIT plugins
         # can be synthesized for any extra language the prompt introduces.
-        return ["python", "rust", "cpp", "go", "cargo", "cmake"]
+        return ["python", "rust", "cpp", "go", "cargo", "cmake", "clang"]
     if intent == BUILD_INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON:
-        return ["python", "rust", "cpp", "cargo"]
+        return ["python", "rust", "cpp", "cargo", "cmake", "clang"]
     if intent == BUILD_INTENT_HYBRID_CPP_RUST:
-        return ["rust", "cpp", "cargo"]
+        return ["rust", "cpp", "cargo", "cmake", "clang"]
     if intent == BUILD_INTENT_HYBRID_RUST_PYTHON:
         return ["python", "rust", "cargo"]
     if intent == BUILD_INTENT_HYBRID_CPP_PYTHON:
-        return ["python", "cpp", "cmake", "setuptools"]
+        return ["python", "cpp", "cmake", "setuptools", "clang"]
     if intent == BUILD_INTENT_PURE_RUST:
         return ["rust", "cargo"]
     return ["python"]

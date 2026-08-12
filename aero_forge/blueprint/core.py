@@ -48,7 +48,9 @@ class FunctionSpec(BaseModel):
         if self.compile_all:
             self.name = self.name or "*"
         if not self.compile_all and not self.name:
-            raise ValueError("FunctionSpec requires 'name' unless 'compile_all' is true")
+            raise ValueError(
+                "FunctionSpec requires 'name' unless 'compile_all' is true"
+            )
         if self.output_name is None:
             self.output_name = self.name
         return self
@@ -104,7 +106,9 @@ class CLIContractFlag(BaseModel):
     def _valid_type(cls, value: str) -> str:
         allowed = {"string", "int", "bool", "float"}
         if value not in allowed:
-            raise ValueError(f"CLIContractFlag.type must be one of {allowed}, got {value!r}")
+            raise ValueError(
+                f"CLIContractFlag.type must be one of {allowed}, got {value!r}"
+            )
         return value
 
 
@@ -145,7 +149,13 @@ class ABIContract(BaseModel):
         if value is None:
             return "cpp"
         value = str(value).lower().strip()
-        synonyms = {"c++": "cpp", "cxx": "cpp", "c": "cpp", "c-abi": "cpp", "py": "python"}
+        synonyms = {
+            "c++": "cpp",
+            "cxx": "cpp",
+            "c": "cpp",
+            "c-abi": "cpp",
+            "py": "python",
+        }
         value = synonyms.get(value, value)
         allowed = {"cpp", "rust", "python"}
         if value not in allowed:
@@ -204,7 +214,9 @@ class ABIContract(BaseModel):
                 value = "c_abi"
         allowed = {"c_abi", "pyo3", "ctypes"}
         if value not in allowed:
-            raise ValueError(f"binding_framework must be one of {allowed}, got {value!r}")
+            raise ValueError(
+                f"binding_framework must be one of {allowed}, got {value!r}"
+            )
         return value
 
     @field_validator("memory_model", mode="before")
@@ -242,7 +254,15 @@ class ABIContract(BaseModel):
                 value = "callee_allocates"
             elif any(
                 k in value
-                for k in ("caller", "c_memory", "c_alloc", "pointer", "buffer", "array", "by_c")
+                for k in (
+                    "caller",
+                    "c_memory",
+                    "c_alloc",
+                    "pointer",
+                    "buffer",
+                    "array",
+                    "by_c",
+                )
             ):
                 value = "caller_allocates"
         allowed = {"callee_allocates", "caller_allocates", "shared_pyo3"}
@@ -262,7 +282,9 @@ class ABIContract(BaseModel):
 class BlueprintSchemaV2(BaseModel):
     """Schema v2.0.0 blueprint: an executable task and contract graph."""
 
-    metadata: Dict[str, str] = Field(default_factory=lambda: {"schema_version": "2.0.0"})
+    metadata: Dict[str, str] = Field(
+        default_factory=lambda: {"schema_version": "2.0.0"}
+    )
     execution_strategy: ExecutionStrategy = Field(default_factory=ExecutionStrategy)
     abi_contracts: List[ABIContract] = Field(default_factory=list)
     functional_intent: List[FunctionalIntent] = Field(default_factory=list)
@@ -316,8 +338,11 @@ class BlueprintValidator:
     @staticmethod
     def _is_v1_schema(data: Dict[str, Any]) -> bool:
         """Heuristic: v1 blueprints carry 'project' and 'architecture' without schema metadata."""
-        return ("project" in data or "architecture" in data or "functions" in data) and (
-            "metadata" not in data or data.get("metadata", {}).get("schema_version") is None
+        return (
+            "project" in data or "architecture" in data or "functions" in data
+        ) and (
+            "metadata" not in data
+            or data.get("metadata", {}).get("schema_version") is None
         )
 
     @staticmethod
@@ -360,9 +385,13 @@ class BlueprintValidator:
         """Ensure CLI flag names and dest_var values are valid Python identifiers."""
         for flag in self.blueprint.execution_strategy.cli_contract.flags:
             if not flag.name.isidentifier():
-                raise ValueError(f"CLI flag name {flag.name!r} is not a valid Python identifier")
+                raise ValueError(
+                    f"CLI flag name {flag.name!r} is not a valid Python identifier"
+                )
             if flag.dest_var and not flag.dest_var.isidentifier():
-                raise ValueError(f"CLI dest_var {flag.dest_var!r} is not a valid Python identifier")
+                raise ValueError(
+                    f"CLI dest_var {flag.dest_var!r} is not a valid Python identifier"
+                )
         return True
 
 
@@ -386,7 +415,9 @@ class Blueprint(BaseModel):
     abi_contracts: List[ABIContract] = Field(default_factory=list)
     functional_intent: List[FunctionalIntent] = Field(default_factory=list)
     verification_nodes: List[Dict[str, Any]] = Field(default_factory=list)
-    metadata: Dict[str, str] = Field(default_factory=lambda: {"schema_version": "2.0.0"})
+    metadata: Dict[str, str] = Field(
+        default_factory=lambda: {"schema_version": "2.0.0"}
+    )
     module_graph: List[Dict[str, Any]] = Field(default_factory=list)
     cargo_dependencies: Dict[str, Any] = Field(default_factory=dict)
     modification_plan: Dict[str, Any] = Field(default_factory=dict)
@@ -439,7 +470,105 @@ class Blueprint(BaseModel):
                 if not test.is_file():
                     missing.append(str(test))
         if missing:
-            raise ValueError(f"Blueprint references missing file(s): {', '.join(missing)}")
+            raise ValueError(
+                f"Blueprint references missing file(s): {', '.join(missing)}"
+            )
+        return self
+
+    def _derive_functional_intent(self) -> List[FunctionalIntent]:
+        """Derive a minimal functional_intent from contracts/functions/manifest."""
+        derived: List[FunctionalIntent] = []
+        seen: set = set()
+        for contract in self.contracts or []:
+            name = getattr(contract, "name", None) or ""
+            if name and name not in seen:
+                derived.append(FunctionalIntent(symbol_name=name, type="function"))
+                seen.add(name)
+        for func in self.functions or []:
+            name = getattr(func, "name", None) or ""
+            if name and name not in seen:
+                derived.append(FunctionalIntent(symbol_name=name, type="function"))
+                seen.add(name)
+        for entry in self.manifest or []:
+            symbol = Path(entry.path).stem
+            if symbol and symbol not in seen:
+                derived.append(FunctionalIntent(symbol_name=symbol, type="function"))
+                seen.add(symbol)
+        for node in self.module_graph or []:
+            if not isinstance(node, dict):
+                continue
+            node_id = node.get("node_id") or ""
+            if node_id and node_id not in seen:
+                derived.append(FunctionalIntent(symbol_name=node_id, type="function"))
+                seen.add(node_id)
+            for sym in node.get("exports") or []:
+                if sym and sym not in seen:
+                    derived.append(
+                        FunctionalIntent(symbol_name=str(sym), type="function")
+                    )
+                    seen.add(sym)
+        return derived
+
+    @model_validator(mode="after")
+    def _enforce_architecture_contracts(self) -> "Blueprint":
+        """Non-pure-Python architectures must declare contracts and functional_intent."""
+        if self.architecture == "pure_python":
+            return self
+        if not self.contracts:
+            raise ValueError(
+                f"Architecture {self.architecture!r} requires non-empty 'contracts'. "
+                "Add at least one cross-language or exported symbol contract."
+            )
+        if not self.functional_intent:
+            derived = self._derive_functional_intent()
+            if derived:
+                self.functional_intent = derived
+        if not self.functional_intent:
+            raise ValueError(
+                f"Architecture {self.architecture!r} requires non-empty 'functional_intent'. "
+                "Translate every functional requirement from the prompt into a structured list."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _enforce_toolchain_manifest_alignment(self) -> "Blueprint":
+        """Manifest file extensions must be supported by the declared toolchains."""
+        ext_toolchains: Dict[str, set] = {
+            ".rs": {"cargo", "rustc"},
+            ".cpp": {"clang", "gcc", "g++", "clang++", "cmake"},
+            ".cc": {"clang", "gcc", "g++", "clang++", "cmake"},
+            ".cxx": {"clang", "gcc", "g++", "clang++", "cmake"},
+            ".c": {"clang", "gcc", "cmake"},
+            ".py": {"python"},
+            ".go": {"go"},
+            ".java": {"javac"},
+            ".cs": {"dotnet", "csc"},
+            ".zig": {"zig"},
+            ".mojo": {"mojo"},
+            ".nim": {"nim", "nimble"},
+            ".d": {"dmd", "ldc", "gdc"},
+            ".f90": {"gfortran", "ifort"},
+        }
+        toolchains = {t.lower() for t in self.toolchains}
+        if "cpp" in toolchains or "c++" in toolchains:
+            toolchains.update({"cmake", "clang", "gcc", "g++", "clang++"})
+        if "rust" in toolchains:
+            toolchains.add("cargo")
+            toolchains.add("rustc")
+        if "c" in toolchains:
+            toolchains.update({"cmake", "clang", "gcc"})
+        if "cpython" in toolchains or "python3" in toolchains or "py" in toolchains:
+            toolchains.add("python")
+        for entry in self.manifest:
+            ext = Path(entry.path).suffix.lower()
+            allowed = ext_toolchains.get(ext)
+            if not allowed:
+                continue
+            if not toolchains.intersection(allowed):
+                raise ValueError(
+                    f"Manifest file {entry.path!r} (extension {ext!r}) requires "
+                    f"one of toolchains {sorted(allowed)}; toolchains={sorted(self.toolchains)}."
+                )
         return self
 
 
@@ -669,12 +798,18 @@ def generate_blueprint(
     elif intent == INTENT_HYBRID_CPP_RUST:
         cpp_entry = dirs["cpp_source"] or "src/cpp_core/native.cpp"
         manifest_entries = [
-            ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust package manifest"),
-            ManifestEntry(path="build.rs", lang="rust", purpose="C++ build and link script"),
+            ManifestEntry(
+                path="Cargo.toml", lang="toml", purpose="Rust package manifest"
+            ),
+            ManifestEntry(
+                path="build.rs", lang="rust", purpose="C++ build and link script"
+            ),
             ManifestEntry(path="src/main.rs", lang="rust", purpose="Rust CLI binary"),
             ManifestEntry(path=cpp_entry, lang="cpp", purpose="C-ABI math source"),
             ManifestEntry(
-                path="tests/test_hybrid_cpp_rust.rs", lang="rust", purpose="Rust integration test"
+                path="tests/test_hybrid_cpp_rust.rs",
+                lang="rust",
+                purpose="Rust integration test",
             ),
             ManifestEntry(path="README.md", lang="markdown", purpose="Project README"),
         ]
@@ -687,12 +822,30 @@ def generate_blueprint(
         ]
     else:
         manifest_entries = []
+
+    # Derive functional_intent and contracts from supplied function specs so that
+    # non-pure-Python blueprints pass the structural integrity gate.
+    functional_intent = [
+        FunctionalIntent(
+            symbol_name=f.name, type="function", requirement_level="required"
+        )
+        for f in functions
+        if f.name
+    ]
+    contracts = [
+        ContractEntry(name=f.name, signature="", language="python")
+        for f in functions
+        if f.name
+    ]
+
     return Blueprint(
         project=project,
         architecture=intent,
         toolchains=toolchains,
         manifest=manifest_entries,
+        contracts=contracts,
         functions=functions,
+        functional_intent=functional_intent,
         output_dir=output_dir,
         compiler_flags=compiler_flags or [],
         llm=LLMConfig(provider="none"),
@@ -832,7 +985,9 @@ def _contracts_to_abi_contracts(
 ) -> List[ABIContract]:
     """Synthesise ``ABIContract`` entries from legacy ``ContractEntry`` definitions."""
     abi_contracts: List[ABIContract] = []
-    header_candidates = [e.path for e in manifest if Path(e.path).suffix in (".h", ".hpp")]
+    header_candidates = [
+        e.path for e in manifest if Path(e.path).suffix in (".h", ".hpp")
+    ]
     for contract in contracts:
         if not contract.signature:
             continue
@@ -840,9 +995,9 @@ def _contracts_to_abi_contracts(
             name, args, return_type = _parse_signature_local(contract.signature)
         except Exception:
             continue
-        if not all(_is_c_abi_compatible(t) for _, t in args) or not _is_c_abi_compatible(
-            return_type
-        ):
+        if not all(
+            _is_c_abi_compatible(t) for _, t in args
+        ) or not _is_c_abi_compatible(return_type):
             continue
 
         lang = (contract.language or "").lower()
@@ -883,8 +1038,12 @@ def _contracts_to_abi_contracts(
                 header_path=header_path or None,
                 memory_model=memory_model,
                 signature={
-                    "inputs": [{"name": a, "type": _py_type_to_abi(t)} for a, t in args],
-                    "outputs": [{"name": "return", "type": _py_type_to_abi(return_type)}],
+                    "inputs": [
+                        {"name": a, "type": _py_type_to_abi(t)} for a, t in args
+                    ],
+                    "outputs": [
+                        {"name": "return", "type": _py_type_to_abi(return_type)}
+                    ],
                 },
             )
         )
@@ -904,7 +1063,11 @@ def _infer_primary_entrypoint(manifest: List[ManifestEntry]) -> Dict[str, Any]:
             return {"path": path, "runtime": runtime, "wrapper_generation": True}
     for entry in manifest:
         if entry.lang == "python" and entry.path.endswith(".py"):
-            return {"path": entry.path, "runtime": "python3", "wrapper_generation": True}
+            return {
+                "path": entry.path,
+                "runtime": "python3",
+                "wrapper_generation": True,
+            }
     return {"path": "main.py", "runtime": "python3", "wrapper_generation": True}
 
 
@@ -930,7 +1093,9 @@ def _default_verification_nodes(
         {
             "test_id": f"{project_name}_cli_parses",
             "execution_cmd": (
-                f"{runtime} {entry} --help" if runtime == "python3" else f"cargo run -- --help"
+                f"{runtime} {entry} --help"
+                if runtime == "python3"
+                else f"cargo run -- --help"
             ),
             "expected_exit_code": 0,
             "stdout_match_patterns": ["usage"],
@@ -938,7 +1103,9 @@ def _default_verification_nodes(
         },
         {
             "test_id": f"{project_name}_runs",
-            "execution_cmd": f"{runtime} {entry}" if runtime == "python3" else f"cargo run",
+            "execution_cmd": (
+                f"{runtime} {entry}" if runtime == "python3" else f"cargo run"
+            ),
             "expected_exit_code": 0,
             "stdout_match_patterns": ["ok", "success"],
             "stderr_prohibited_patterns": ["error", "Traceback"],
@@ -964,7 +1131,9 @@ def write_blueprint(blueprint: Blueprint, path: Path) -> None:
     execution_strategy = blueprint.execution_strategy
     if execution_strategy is None or not execution_strategy.primary_entrypoint:
         primary = _infer_primary_entrypoint(manifest)
-        cli_contract = execution_strategy.cli_contract if execution_strategy else CLIContract()
+        cli_contract = (
+            execution_strategy.cli_contract if execution_strategy else CLIContract()
+        )
         run_spec = execution_strategy.run_spec if execution_strategy else {}
         execution_strategy = ExecutionStrategy(
             primary_entrypoint=primary,
@@ -1058,8 +1227,12 @@ def generate_blueprint_from_uploaded_repo(repo_path: Path) -> Path:
     setup_py = repo_path / "setup.py"
 
     has_rust = cargo_toml.is_file()
-    has_python = pyproject.is_file() or setup_py.is_file() or bool(list(repo_path.rglob("*.py")))
-    cpp_sources = [p for p in repo_path.rglob("*") if p.suffix in {".cpp", ".c", ".h", ".hpp"}]
+    has_python = (
+        pyproject.is_file() or setup_py.is_file() or bool(list(repo_path.rglob("*.py")))
+    )
+    cpp_sources = [
+        p for p in repo_path.rglob("*") if p.suffix in {".cpp", ".c", ".h", ".hpp"}
+    ]
     has_cpp = bool(cpp_sources)
 
     members: List[str] = []
@@ -1089,34 +1262,48 @@ def generate_blueprint_from_uploaded_repo(repo_path: Path) -> Path:
     manifest: List[ManifestEntry] = []
     if has_rust:
         manifest.append(
-            ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust workspace manifest")
+            ManifestEntry(
+                path="Cargo.toml", lang="toml", purpose="Rust workspace manifest"
+            )
         )
         for member in members:
             manifest.append(
                 ManifestEntry(
-                    path=f"{member}/Cargo.toml", lang="toml", purpose="Workspace member crate"
+                    path=f"{member}/Cargo.toml",
+                    lang="toml",
+                    purpose="Workspace member crate",
                 )
             )
             manifest.append(
-                ManifestEntry(path=f"{member}/src/lib.rs", lang="rust", purpose="Rust crate source")
+                ManifestEntry(
+                    path=f"{member}/src/lib.rs",
+                    lang="rust",
+                    purpose="Rust crate source",
+                )
             )
     if pyproject.is_file():
         manifest.append(
-            ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python package metadata")
+            ManifestEntry(
+                path="pyproject.toml", lang="toml", purpose="Python package metadata"
+            )
         )
     elif setup_py.is_file():
         manifest.append(
-            ManifestEntry(path="setup.py", lang="python", purpose="Python package setup")
+            ManifestEntry(
+                path="setup.py", lang="python", purpose="Python package setup"
+            )
         )
     for src in sorted(repo_path.rglob("*.py")):
-        if src.name.startswith("test_") or "/tests/" in str(src.relative_to(repo_path)).replace(
-            "\\", "/"
-        ):
+        if src.name.startswith("test_") or "/tests/" in str(
+            src.relative_to(repo_path)
+        ).replace("\\", "/"):
             continue
         if _is_path_inside(src, repo_path):
             manifest.append(
                 ManifestEntry(
-                    path=str(src.relative_to(repo_path)), lang="python", purpose="Python source"
+                    path=str(src.relative_to(repo_path)),
+                    lang="python",
+                    purpose="Python source",
                 )
             )
     for hdr in sorted(cpp_sources):
@@ -1150,7 +1337,14 @@ def generate_blueprint_from_uploaded_repo(repo_path: Path) -> Path:
             )
 
     blueprint = _build_autodetected_blueprint(
-        repo_path, architecture, toolchains, languages, features, manifest, contracts, functions
+        repo_path,
+        architecture,
+        toolchains,
+        languages,
+        features,
+        manifest,
+        contracts,
+        functions,
     )
     write_blueprint(blueprint, blueprint_path)
     return blueprint_path
@@ -1260,7 +1454,9 @@ def ensure_workspace_blueprint(workspace_root: Path) -> Path:
         or (workspace_root / "setup.py").is_file()
         or bool(list(workspace_root.rglob("*.py")))
     )
-    cpp_sources = [p for p in workspace_root.rglob("*") if p.suffix in {".cpp", ".c", ".h", ".hpp"}]
+    cpp_sources = [
+        p for p in workspace_root.rglob("*") if p.suffix in {".cpp", ".c", ".h", ".hpp"}
+    ]
     has_cpp = bool(cpp_sources)
 
     if has_rust and has_python:
@@ -1279,14 +1475,18 @@ def ensure_workspace_blueprint(workspace_root: Path) -> Path:
     try:
         template_text = load_template(template_name)
     except KeyError:
-        logger.warning("No blueprint template found for %s; using defaults", architecture)
+        logger.warning(
+            "No blueprint template found for %s; using defaults", architecture
+        )
 
     project_name = _sanitize_project_name(workspace_root.name)
 
     # Pull the human-readable intent from the template to seed the LLM context.
     description = f"Auto-generated {architecture} blueprint for empty workspace."
     if template_text:
-        prompt_match = re.search(r'^prompt:\s*["\']?(.*?)["\']?$', template_text, re.MULTILINE)
+        prompt_match = re.search(
+            r'^prompt:\s*["\']?(.*?)["\']?$', template_text, re.MULTILINE
+        )
         constraints_match = re.search(
             r'^constraints:\s*["\']?(.*?)["\']?$', template_text, re.MULTILINE
         )
@@ -1299,7 +1499,9 @@ def ensure_workspace_blueprint(workspace_root: Path) -> Path:
             description = " ".join(parts)
 
     classification = classify_stack(architecture)
-    toolchains = [ToolchainSpec(name=t) for t in classification.toolchains or ["python"]]
+    toolchains = [
+        ToolchainSpec(name=t) for t in classification.toolchains or ["python"]
+    ]
 
     if architecture == INTENT_PURE_RUST:
         source_files = ["src/lib.rs"]
@@ -1308,9 +1510,9 @@ def ensure_workspace_blueprint(workspace_root: Path) -> Path:
         source_files = ["src/lib.rs"]
         artifact_type = ArtifactType.cargo_cdylib
     elif has_cpp:
-        source_files = [str(p.relative_to(workspace_root)) for p in cpp_sources[:1]] or [
-            "native/native.cpp"
-        ]
+        source_files = [
+            str(p.relative_to(workspace_root)) for p in cpp_sources[:1]
+        ] or ["native/native.cpp"]
         artifact_type = ArtifactType.shared_library
     else:
         source_files = [f"src/{project_name}/core.py"]
@@ -1352,7 +1554,9 @@ def ensure_workspace_blueprint(workspace_root: Path) -> Path:
     )
 
     write_v3_blueprint(blueprint, blueprint_path)
-    logger.info("Auto-generated minimal blueprint for empty workspace: %s", blueprint_path)
+    logger.info(
+        "Auto-generated minimal blueprint for empty workspace: %s", blueprint_path
+    )
     return blueprint_path
 
 
@@ -1381,7 +1585,9 @@ class BlueprintCore:
 
         has_rust = cargo_toml.is_file()
         has_python = (
-            pyproject.is_file() or setup_py.is_file() or bool(list(repo_path.rglob("*.py")))
+            pyproject.is_file()
+            or setup_py.is_file()
+            or bool(list(repo_path.rglob("*.py")))
         )
         cpp_sources = [
             p
@@ -1420,33 +1626,47 @@ class BlueprintCore:
         manifest: List[ManifestEntry] = []
         if has_rust:
             manifest.append(
-                ManifestEntry(path="Cargo.toml", lang="toml", purpose="Rust workspace manifest")
+                ManifestEntry(
+                    path="Cargo.toml", lang="toml", purpose="Rust workspace manifest"
+                )
             )
             for member in members:
                 manifest.append(
                     ManifestEntry(
-                        path=f"{member}/Cargo.toml", lang="toml", purpose="Workspace member crate"
+                        path=f"{member}/Cargo.toml",
+                        lang="toml",
+                        purpose="Workspace member crate",
                     )
                 )
                 manifest.append(
                     ManifestEntry(
-                        path=f"{member}/src/lib.rs", lang="rust", purpose="Rust crate source"
+                        path=f"{member}/src/lib.rs",
+                        lang="rust",
+                        purpose="Rust crate source",
                     )
                 )
         if pyproject.is_file():
             manifest.append(
-                ManifestEntry(path="pyproject.toml", lang="toml", purpose="Python package metadata")
+                ManifestEntry(
+                    path="pyproject.toml",
+                    lang="toml",
+                    purpose="Python package metadata",
+                )
             )
         elif setup_py.is_file():
             manifest.append(
-                ManifestEntry(path="setup.py", lang="python", purpose="Python package setup")
+                ManifestEntry(
+                    path="setup.py", lang="python", purpose="Python package setup"
+                )
             )
         for src in sorted(repo_path.rglob("*.py")):
             rel = str(src.relative_to(repo_path)).replace("\\", "/")
             if src.name.startswith("test_") or "/tests/" in rel:
                 continue
             if _is_path_inside(src, repo_path):
-                manifest.append(ManifestEntry(path=rel, lang="python", purpose="Python source"))
+                manifest.append(
+                    ManifestEntry(path=rel, lang="python", purpose="Python source")
+                )
         for hdr in sorted(cpp_sources):
             if _is_path_inside(hdr, repo_path):
                 manifest.append(
@@ -1461,7 +1681,9 @@ class BlueprintCore:
         try:
             functions = discover_project(repo_path)
         except Exception as exc:
-            logger.warning("Could not discover Python functions in %s: %s", repo_path, exc)
+            logger.warning(
+                "Could not discover Python functions in %s: %s", repo_path, exc
+            )
 
         contracts: List[ContractEntry] = []
         for func in functions:
@@ -1476,6 +1698,13 @@ class BlueprintCore:
                 )
 
         blueprint = _build_autodetected_blueprint(
-            repo_path, architecture, toolchains, languages, features, manifest, contracts, functions
+            repo_path,
+            architecture,
+            toolchains,
+            languages,
+            features,
+            manifest,
+            contracts,
+            functions,
         )
         return blueprint.model_dump(mode="json")

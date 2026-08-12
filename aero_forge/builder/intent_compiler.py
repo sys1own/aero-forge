@@ -6,7 +6,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 from jsonschema import Draft7Validator, ValidationError as JsonSchemaValidationError
@@ -16,6 +16,7 @@ from aero_forge.blueprint import (
     Blueprint,
     BlueprintSchemaV2,
     ContractEntry,
+    FunctionalIntent,
     LLMConfig,
     ManifestEntry,
     write_blueprint,
@@ -40,7 +41,7 @@ def _accel_log(level: str, message: str) -> None:
     try:
         timestamp = time.strftime("%Y-%m-%dT%H:%M:%S%z")
         with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f'{timestamp} [{level}] {message}\n')
+            f.write(f"{timestamp} [{level}] {message}\n")
     except Exception:
         pass
 
@@ -121,8 +122,19 @@ Example JSON shape:
 """
 
 
+_CLASSIFICATION_SYSTEM_PROMPT = """You are the Aero-Forge structural classifier.
+Your job is to read the user request and emit a compact JSON classification with exactly these keys:
+- `architecture`: one of `pure_python`, `pure_rust`, `hybrid_rust_python`, `hybrid_cpp_python`, `hybrid_cpp_rust`, `tri_polyglot_rust_cpp_python`, `graph_polyglot`.
+- `toolchains`: a list of required build toolchains, e.g. `["cargo", "python"]` or `["cmake", "cargo", "python"]`.
+- `functional_intent`: a list of `{symbol_name, type, requirement_level}` objects covering every functional requirement.
+- `nodes`: a list of `{node_id, lang, toolchain, source_files}` objects representing the physical files to materialize.
+
+Do NOT emit implementation code, edges, contracts, or explanations. Return ONLY the JSON classification object.
+"""
+
+
 class RobustJSONExtractor:
-    """Extract a valid JSON object from an LLM response that may contain prose,
+    r"""Extract a valid JSON object from an LLM response that may contain prose,
     markdown fences, or trailing content.
 
     The implementation mirrors the recursive brace-matching regex
@@ -154,7 +166,9 @@ class RobustJSONExtractor:
         return t.strip()
 
     @staticmethod
-    def _find_matching(text: str, start: int, opener: str, closer: str) -> Optional[int]:
+    def _find_matching(
+        text: str, start: int, opener: str, closer: str
+    ) -> Optional[int]:
         """Return the index of the closing delimiter matching *opener* at *start*."""
         depth = 0
         in_string = False
@@ -292,7 +306,15 @@ def _normalize_v2_data(data: Any) -> Any:
     metadata = data.get("metadata") or {}
     if isinstance(metadata, dict):
         if metadata.get("domain_target"):
-            metadata["domain_target"] = str(metadata["domain_target"]).lower().replace(" ", "_")
+            metadata["domain_target"] = (
+                str(metadata["domain_target"]).lower().replace(" ", "_")
+            )
+        # BlueprintSchemaV2 expects Dict[str, str]; coerce list/bool/dict metadata
+        # values to JSON strings so common LLM extras (test_files, llm_initialized)
+        # do not fail validation while still rejecting e.g. numeric project_name.
+        for key, value in list(metadata.items()):
+            if not isinstance(value, str) and isinstance(value, (list, dict, bool)):
+                metadata[key] = json.dumps(value)
         data["metadata"] = metadata
 
     # execution_strategy
@@ -303,7 +325,9 @@ def _normalize_v2_data(data: Any) -> Any:
             runtime = str(primary["runtime"]).lower()
             if "python" in runtime:
                 primary["runtime"] = "python3"
-            primary["wrapper_generation"] = bool(primary.get("wrapper_generation", True))
+            primary["wrapper_generation"] = bool(
+                primary.get("wrapper_generation", True)
+            )
             exec_strategy["primary_entrypoint"] = primary
 
         cli_contract = exec_strategy.get("cli_contract") or {}
@@ -315,13 +339,21 @@ def _normalize_v2_data(data: Any) -> Any:
                     continue
                 normalized: Dict[str, Any] = {
                     "name": _normalize_flag_name(
-                        flag.get("name") or flag.get("long") or flag.get("long_flag") or flag.get("dest") or flag.get("dest_var", "")
+                        flag.get("name")
+                        or flag.get("long")
+                        or flag.get("long_flag")
+                        or flag.get("dest")
+                        or flag.get("dest_var", "")
                     ),
-                    "short": str(flag.get("short") or flag.get("short_flag") or "").strip().lstrip("-"),
+                    "short": str(flag.get("short") or flag.get("short_flag") or "")
+                    .strip()
+                    .lstrip("-"),
                     "type": _normalize_cli_type(flag.get("type") or "string"),
                     "required": bool(flag.get("required", False)),
                     "default": flag.get("default", None),
-                    "choices": list(flag.get("choices", [])) if flag.get("choices") else [],
+                    "choices": (
+                        list(flag.get("choices", [])) if flag.get("choices") else []
+                    ),
                     "help": str(flag.get("help", "")),
                     "dest_var": str(flag.get("dest_var") or flag.get("dest") or ""),
                 }
@@ -350,7 +382,12 @@ def _normalize_v2_data(data: Any) -> Any:
         target_synonyms = {"c": "cpp", "c++": "cpp", "py": "python"}
         normalized_abi["target_language"] = target_synonyms.get(target, target) or "cpp"
 
-        binding = str(normalized_abi.get("binding_framework") or "").lower().strip().replace("-", "_")
+        binding = (
+            str(normalized_abi.get("binding_framework") or "")
+            .lower()
+            .strip()
+            .replace("-", "_")
+        )
         binding_synonyms = {
             "pyo3": "pyo3",
             "ctypes": "ctypes",
@@ -369,12 +406,18 @@ def _normalize_v2_data(data: Any) -> Any:
             "cython": "c_abi",
             "python_cython": "c_abi",
         }
-        normalized_abi["binding_framework"] = binding_synonyms.get(binding, binding) or "c_abi"
+        normalized_abi["binding_framework"] = (
+            binding_synonyms.get(binding, binding) or "c_abi"
+        )
         c_alias = normalized_abi.get("c_symbol_alias")
         if c_alias is None:
             normalized_abi["c_symbol_alias"] = ""
 
-        memory = re.sub(r"[^a-z0-9_]", "_", str(normalized_abi.get("memory_model") or "").lower().strip())
+        memory = re.sub(
+            r"[^a-z0-9_]",
+            "_",
+            str(normalized_abi.get("memory_model") or "").lower().strip(),
+        )
         memory_synonyms = {
             "owned": "callee_allocates",
             "owned_results": "callee_allocates",
@@ -410,7 +453,9 @@ def _normalize_v2_data(data: Any) -> Any:
         if not isinstance(node, dict):
             continue
         normalized_node = dict(node)
-        lang = str(normalized_node.get("lang") or normalized_node.get("language") or "python").lower()
+        lang = str(
+            normalized_node.get("lang") or normalized_node.get("language") or "python"
+        ).lower()
         if "python" in lang:
             lang = "python"
         elif lang in {"rust", "cpp", "c++"}:
@@ -596,27 +641,152 @@ class IntentCompiler:
         * Second and third retries: append the concrete ``JsonSchemaValidationError``
           message so the model can self-correct the structure.
         """
+        error_text = ""
+        if isinstance(exc, JsonSchemaValidationError):
+            error_text = "\n".join(e.message for e in exc.context) or str(exc)
+        elif exc is not None:
+            error_text = str(exc)
+
         if attempt == 0:
             compressed = _compress_skeletal_blueprint(raw)
             content = (
                 "The previous response was not valid. Return a corrected JSON blueprint. "
                 "To save tokens, the compressed skeleton below has the `constraints` and "
                 "`output_dir` fields removed; do not add them back unless the prompt "
-                "explicitly requires them.\n\n" + compressed
+                "explicitly requires them.\n\n"
+                f"Schema validation error:\n{error_text}\n\n"
+                f"{compressed}"
             )
         else:
-            error_text = ""
-            if isinstance(exc, JsonSchemaValidationError):
-                error_text = "\n".join(
-                    e.message for e in exc.context
-                ) or str(exc)
-            elif exc is not None:
-                error_text = str(exc)
             content = (
                 f"Schema validation still failed. Error details:\n{error_text}\n\n"
                 "Return corrected JSON only, with no markdown or explanatory text."
             )
         return {"role": "user", "content": content}
+
+    @staticmethod
+    def _verify_classification(data: Dict[str, Any]) -> List[str]:
+        """Validate an LLM classification using deterministic, prompt-blind checks.
+
+        Delegates architecture/toolchain/node consistency to the Orchestrator's
+        static verifier and adds intent-level checks for non-pure-Python builds.
+        """
+        errors: List[str] = []
+        architecture = (data.get("architecture") or "").lower()
+        toolchains = data.get("toolchains") or []
+        nodes = data.get("nodes") or []
+        functional_intent = data.get("functional_intent") or []
+
+        try:
+            from aero_forge.orchestrator.orchestrator import Orchestrator
+
+            errors.extend(
+                Orchestrator.verify_classification(architecture, toolchains, nodes)
+            )
+        except Exception as exc:
+            logger.debug("Orchestrator classification verification failed: %s", exc)
+
+        if architecture != "pure_python" and not functional_intent:
+            errors.append(
+                f"Architecture {architecture!r} requires a non-empty 'functional_intent' list."
+            )
+
+        return errors
+
+    def _classify_graph(
+        self,
+        client: Any,
+        system: str,
+        prompt_text: str,
+    ) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+        """Tier 0: ask the LLM for architecture/toolchains/functional_intent/nodes.
+
+        Returns the classification dict and a list of structural errors. If the LLM
+        returns a complete graph blueprint, it is validated and returned as the
+        full graph (errors empty and classification dict contains the graph).
+        """
+        classification_messages: List[Dict[str, str]] = [
+            {"role": "system", "content": _CLASSIFICATION_SYSTEM_PROMPT},
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt_text},
+        ]
+
+        last_error: Optional[Exception] = None
+        for attempt in range(self.max_schema_retries):
+            raw = client.generate(
+                classification_messages,
+                temperature=0.2,
+                max_tokens=4096,
+            )
+            if not raw:
+                _accel_log(
+                    "warning",
+                    f"intent_compiler.classify_graph attempt {attempt + 1}: empty response",
+                )
+                classification_messages.append({"role": "assistant", "content": ""})
+                classification_messages.append(
+                    {
+                        "role": "user",
+                        "content": f"Attempt {attempt + 1} returned empty. Return valid JSON classification.",
+                    }
+                )
+                continue
+
+            try:
+                data = _extract_json(raw)
+            except Exception as exc:
+                last_error = exc
+                _accel_log(
+                    "warning",
+                    f"intent_compiler.classify_graph attempt {attempt + 1}: JSON extraction failed; "
+                    f"raw preview: {raw[:800]!r}; error: {exc}",
+                )
+                classification_messages.append({"role": "assistant", "content": raw})
+                classification_messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Could not extract JSON: {exc}. "
+                            "Return a valid classification JSON object only."
+                        ),
+                    }
+                )
+                continue
+
+            # If the LLM already returned a complete graph blueprint, validate it.
+            try:
+                graph = PolyglotGraphBlueprint.model_validate(data)
+                graph.metadata["prompt"] = prompt_text
+                graph.metadata["llm_initialized"] = True
+                graph.metadata["status"] = "finalized"
+                graph.metadata["generation_method"] = "llm_synthesized"
+                return {"_full_graph": graph}, []
+            except Exception:
+                pass
+
+            errors = self._verify_classification(data)
+            if not errors:
+                return data, []
+
+            _accel_log(
+                "warning",
+                f"intent_compiler.classify_graph attempt {attempt + 1}: classification invalid; errors: {errors}",
+            )
+            classification_messages.append({"role": "assistant", "content": raw})
+            classification_messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "The classification was rejected by the structural verifier. "
+                        f"Correct these errors and return a new classification JSON:\n\n"
+                        + "\n".join(f"- {e}" for e in errors)
+                    ),
+                }
+            )
+
+        raise IntentCompilerError(
+            f"Failed to classify graph intent after {self.max_schema_retries} attempts: {last_error}"
+        )
 
     def compile_prompt(
         self,
@@ -658,11 +828,17 @@ class IntentCompiler:
         for attempt in range(self.max_schema_retries):
             raw = client.generate(messages, temperature=0.2, max_tokens=4096)
             if not raw:
-                _accel_log("warning", f"intent_compiler.compile_prompt attempt {attempt + 1}: LLM returned an empty response")
+                _accel_log(
+                    "warning",
+                    f"intent_compiler.compile_prompt attempt {attempt + 1}: LLM returned an empty response",
+                )
                 last_error = IntentCompilerError("LLM returned an empty response")
                 messages.append({"role": "assistant", "content": ""})
                 messages.append(
-                    {"role": "user", "content": f"Attempt {attempt + 1} returned empty. Please return valid JSON."}
+                    {
+                        "role": "user",
+                        "content": f"Attempt {attempt + 1} returned empty. Please return valid JSON.",
+                    }
                 )
                 continue
 
@@ -677,7 +853,11 @@ class IntentCompiler:
                     f"intent_compiler.compile_prompt attempt {attempt + 1}: schema validation failed; "
                     f"raw preview: {raw[:800]!r}; error: {exc}",
                 )
-                logger.warning("Intent JSON schema validation failed (attempt %d): %s", attempt + 1, exc)
+                logger.warning(
+                    "Intent JSON schema validation failed (attempt %d): %s",
+                    attempt + 1,
+                    exc,
+                )
                 messages.append({"role": "assistant", "content": raw})
                 messages.append(self._retry_user_message(attempt, raw, exc))
                 continue
@@ -698,6 +878,41 @@ class IntentCompiler:
             f"Failed to compile intent after {self.max_schema_retries} schema validation attempts: {last_error}"
         )
 
+    @staticmethod
+    def _derive_functional_intent(v2: BlueprintSchemaV2) -> List[FunctionalIntent]:
+        """Synthesize a non-empty functional_intent list from a v2 blueprint."""
+        if v2.functional_intent:
+            return list(v2.functional_intent)
+
+        intents: List[FunctionalIntent] = []
+        seen: set = set()
+        for node in v2.module_graph:
+            path = node.get("path", "")
+            symbol = Path(path).stem or node.get("node_id") or "unnamed"
+            if symbol and symbol not in seen:
+                intents.append(
+                    FunctionalIntent(
+                        symbol_name=symbol,
+                        type="function",
+                        requirement_level="required",
+                    )
+                )
+                seen.add(symbol)
+        for abi in v2.abi_contracts:
+            symbol = getattr(abi, "export_symbol", None) or getattr(
+                abi, "contract_id", None
+            )
+            if symbol and symbol not in seen:
+                intents.append(
+                    FunctionalIntent(
+                        symbol_name=symbol,
+                        type="function",
+                        requirement_level="required",
+                    )
+                )
+                seen.add(symbol)
+        return intents
+
     def _v2_to_blueprint(
         self,
         v2: BlueprintSchemaV2,
@@ -711,7 +926,9 @@ class IntentCompiler:
             toolchains_for_intent,
         )
 
-        project = project_name or v2.metadata.get("project_name") or "aero_forge_project"
+        project = (
+            project_name or v2.metadata.get("project_name") or "aero_forge_project"
+        )
         languages: set = set()
         manifest_entries: List[ManifestEntry] = []
 
@@ -742,7 +959,9 @@ class IntentCompiler:
                 for e in default_manifest_for_architecture(architecture, project)
             ]
 
-        resolved_output_dir = Path(output_dir) / "dist" if output_dir else Path("./dist")
+        resolved_output_dir = (
+            Path(output_dir) / "dist" if output_dir else Path("./dist")
+        )
 
         modification_plan = self._build_modification_plan(v2, output_dir)
 
@@ -767,7 +986,7 @@ class IntentCompiler:
             features=[],
             execution_strategy=v2.execution_strategy,
             abi_contracts=v2.abi_contracts,
-            functional_intent=v2.functional_intent,
+            functional_intent=self._derive_functional_intent(v2),
             verification_nodes=v2.verification_nodes,
             metadata=metadata,
             module_graph=v2.module_graph,
@@ -785,12 +1004,18 @@ class IntentCompiler:
         actions: List[Dict[str, str]] = []
         for node in v2.module_graph:
             path = node.get("path", "")
-            exists = workspace is not None and (workspace / path).is_file() if path else False
-            actions.append({
-                "path": path,
-                "action": "MODIFY" if exists else "CREATE",
-                "lang": node.get("lang") or node.get("language") or "python",
-            })
+            exists = (
+                workspace is not None and (workspace / path).is_file()
+                if path
+                else False
+            )
+            actions.append(
+                {
+                    "path": path,
+                    "action": "MODIFY" if exists else "CREATE",
+                    "lang": node.get("lang") or node.get("language") or "python",
+                }
+            )
         return {"intent": "incremental_update", "actions": actions}
 
     def compile_prompt_to_graph(
@@ -801,11 +1026,13 @@ class IntentCompiler:
     ) -> PolyglotGraphBlueprint:
         """Compile *prompt_text* into a validated ``PolyglotGraphBlueprint``.
 
-        The LLM is asked directly for a `graph_polyglot` JSON blueprint. If the
-        model returns a legacy v2 blueprint, it is lowered into the graph
-        representation used by ``GraphPolyglotMaterializer``.
+        Uses tiered enrichment: a classification call first establishes
+        ``architecture``, ``toolchains``, ``functional_intent``, and ``nodes``.
+        The Orchestrator verifies the classification deterministically (without
+        reading the prompt). If the classification is sound, a second call asks
+        for the complete graph blueprint populated with contracts/edges.
         """
-        _accel_log("info", "Enriching Blueprint...")
+        _accel_log("info", "Enriching Blueprint (tiered)...")
         client = self._llm_client
         if client is None:
             client = get_llm_client(
@@ -822,20 +1049,45 @@ class IntentCompiler:
         if self._system_prompt_extra:
             system = f"{system}\n\n{self._system_prompt_extra}"
 
+        # Tier 0: classify architecture, toolchains, nodes, and functional_intent.
+        classification, _class_errors = self._classify_graph(
+            client, system, prompt_text
+        )
+        if classification is not None and "_full_graph" in classification:
+            return classification["_full_graph"]
+
+        classification_text = (
+            json.dumps(classification, indent=2) if classification else "{}"
+        )
         messages: List[Dict[str, str]] = [
             {"role": "system", "content": system},
-            {"role": "user", "content": prompt_text},
+            {
+                "role": "user",
+                "content": (
+                    f"{prompt_text}\n\n"
+                    f"Verified classification:\n```json\n{classification_text}\n```\n\n"
+                    "Return the COMPLETE PolyglotGraphBlueprint JSON. "
+                    "It must include nodes (with exports), edges/contracts, functional_intent, source_files, and metadata. "
+                    "NO PREAMBLE. NO EXPLANATION. ONLY JSON."
+                ),
+            },
         ]
 
         last_error: Optional[Exception] = None
         for attempt in range(self.max_schema_retries):
             raw = client.generate(messages, temperature=0.2, max_tokens=4096)
             if not raw:
-                _accel_log("warning", f"intent_compiler.compile_prompt_to_graph attempt {attempt + 1}: LLM returned an empty response")
+                _accel_log(
+                    "warning",
+                    f"intent_compiler.compile_prompt_to_graph attempt {attempt + 1}: LLM returned an empty response",
+                )
                 last_error = IntentCompilerError("LLM returned an empty response")
                 messages.append({"role": "assistant", "content": ""})
                 messages.append(
-                    {"role": "user", "content": f"Attempt {attempt + 1} returned empty. Please return valid JSON."}
+                    {
+                        "role": "user",
+                        "content": f"Attempt {attempt + 1} returned empty. Please return valid JSON.",
+                    }
                 )
                 continue
 
@@ -848,7 +1100,9 @@ class IntentCompiler:
                     f"intent_compiler.compile_prompt_to_graph attempt {attempt + 1}: JSON extraction failed; "
                     f"raw preview: {raw[:800]!r}; error: {exc}",
                 )
-                logger.warning("Intent JSON extraction failed (attempt %d): %s", attempt + 1, exc)
+                logger.warning(
+                    "Intent JSON extraction failed (attempt %d): %s", attempt + 1, exc
+                )
                 messages.append({"role": "assistant", "content": raw})
                 messages.append(self._retry_user_message(attempt, raw, exc))
                 continue
@@ -863,7 +1117,11 @@ class IntentCompiler:
                 _accel_log("success", "Blueprint enrichment complete")
                 return graph
             except Exception as graph_exc:
-                logger.debug("Graph blueprint validation failed (attempt %d): %s", attempt + 1, graph_exc)
+                logger.debug(
+                    "Graph blueprint validation failed (attempt %d): %s",
+                    attempt + 1,
+                    graph_exc,
+                )
 
             # Fallback path: legacy v2 blueprint lowered to graph.
             try:
@@ -876,7 +1134,9 @@ class IntentCompiler:
                     f"intent_compiler.compile_prompt_to_graph attempt {attempt + 1}: schema validation failed; "
                     f"raw preview: {raw[:800]!r}; error: {exc}",
                 )
-                logger.warning("Intent schema validation failed (attempt %d): %s", attempt + 1, exc)
+                logger.warning(
+                    "Intent schema validation failed (attempt %d): %s", attempt + 1, exc
+                )
                 messages.append({"role": "assistant", "content": raw})
                 messages.append(self._retry_user_message(attempt, raw, exc))
                 continue
@@ -886,6 +1146,7 @@ class IntentCompiler:
                 prompt_text,
                 output_dir,
                 project_name,
+                classification=classification,
             )
             graph.metadata["llm_initialized"] = True
             graph.metadata["status"] = "finalized"
@@ -903,10 +1164,24 @@ class IntentCompiler:
         prompt_text: str,
         output_dir: Optional[str | Path],
         project_name: Optional[str],
+        classification: Optional[Dict[str, Any]] = None,
     ) -> PolyglotGraphBlueprint:
-        """Lower a validated ``BlueprintSchemaV2`` into a ``PolyglotGraphBlueprint``."""
-        project = project_name or v2.metadata.get("project_name") or "aero_forge_project"
+        """Lower a validated ``BlueprintSchemaV2`` into a ``PolyglotGraphBlueprint``.
 
+        If a verified classification is supplied, it seeds the graph architecture,
+        functional_intent, and nodes when the v2 blueprint is skeletal.
+        """
+        project = (
+            project_name or v2.metadata.get("project_name") or "aero_forge_project"
+        )
+
+        architecture = (
+            v2.metadata.get("domain_target")
+            or (classification or {}).get("architecture")
+            or "graph_polyglot"
+        )
+
+        # Seed nodes from the v2 module graph.
         nodes: List[PolyglotNodeSpec] = []
         node_ids: set = set()
         for node in v2.module_graph:
@@ -966,11 +1241,7 @@ class IntentCompiler:
             # missing target from the binding when not explicitly provided.
             target_lang = (abi.target_language or "").lower()
             if not target_lang or target_lang == source_lang:
-                target_lang = (
-                    "python"
-                    if source_lang != "python"
-                    else "rust"
-                )
+                target_lang = "python" if source_lang != "python" else "rust"
 
             for lang in (source_lang, target_lang):
                 if lang not in node_ids:
@@ -994,18 +1265,62 @@ class IntentCompiler:
                 )
             )
 
+        # If the v2 response was skeletal, seed nodes/toolchains from the
+        # verified classification so the graph blueprint does not collapse.
+        classification_nodes = (classification or {}).get("nodes") or []
+        for node in classification_nodes:
+            node_id = node.get("node_id")
+            if not node_id or node_id in node_ids:
+                continue
+            node_ids.add(node_id)
+            nodes.append(
+                PolyglotNodeSpec(
+                    node_id=node_id,
+                    lang=node.get("lang", "python"),
+                    toolchain=node.get("toolchain", ""),
+                    source_files=node.get("source_files", []),
+                    exports=node.get("exports", []),
+                )
+            )
+
+        # Ensure architecture reflects the verified classification / v2 intent.
+        if architecture == "graph_polyglot" and (classification or {}).get(
+            "architecture"
+        ):
+            architecture = classification["architecture"]
+
         resolved_output_dir = str(Path(output_dir) / "dist") if output_dir else "./dist"
 
         primary_entrypoint = ""
         if v2.execution_strategy:
-            primary_entrypoint = v2.execution_strategy.primary_entrypoint.get("path", "")
+            primary_entrypoint = v2.execution_strategy.primary_entrypoint.get(
+                "path", ""
+            )
 
-        build_script = v2.execution_strategy.run_spec.get("command", "") if v2.execution_strategy else ""
+        build_script = (
+            v2.execution_strategy.run_spec.get("command", "")
+            if v2.execution_strategy
+            else ""
+        )
+
+        # Build functional_intent from v2 or classification.
+        functional_intent = self._derive_functional_intent(v2)
+        if not functional_intent and classification:
+            functional_intent = [
+                FunctionalIntent(
+                    symbol_name=fi.get("symbol_name", ""),
+                    type=fi.get("type", "function"),
+                )
+                for fi in classification.get("functional_intent", [])
+                if fi.get("symbol_name")
+            ]
 
         return PolyglotGraphBlueprint(
             project=project,
+            architecture=architecture,
             nodes=nodes,
             edges=edges,
+            functional_intent=functional_intent,
             output_dir=resolved_output_dir,
             primary_entrypoint=primary_entrypoint or "run_shell.py",
             build_script=build_script or None,
