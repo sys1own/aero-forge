@@ -2617,14 +2617,13 @@ class CompactedContextGenerator:
                 return True
             if (node.get("extra") or {}).get("payload_kind"):
                 return True
-        prompt_lower = self._prompt_text(data)
         sym_lower = symbol.lower()
         if sym_lower in {"blosum62", "scoring_matrix", "lookup_table", "constants", "data_payload"}:
             return True
         if "blosum" in sym_lower:
             return True
-        if any(m in sym_lower for m in self._data_payload_markers()):
-            return True
+        # Do not infer a data payload from generic symbol-name substrings; that
+        # false-positives on functions such as weighted_decision_matrix.
         return False
 
     def _payload_kind(

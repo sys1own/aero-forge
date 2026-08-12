@@ -306,7 +306,9 @@ def _build_skeleton(
             stub = f"def {symbol}({stub_arg_str}){stub_ret}:\n    pass"
             sym_env: Dict[str, str] = {}
             try:
-                sym_env = SkeletonTypeInjector.infer_type_env_for_symbol(stub, symbol)
+                sym_env = SkeletonTypeInjector.infer_type_env_for_symbol(
+                    stub, symbol, target_language=lang
+                )
             except Exception:
                 pass
             sym_type_env = {**type_env, **sym_env}

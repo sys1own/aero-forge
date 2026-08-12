@@ -5,11 +5,23 @@ from __future__ import annotations
 import ast
 import copy
 import json
-from typing import Any, Dict, List, Tuple
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 from aero_forge.errors import HeuristicWarning
 
 __all__ = ["FallbackManager", "HeuristicWarning"]
+
+
+class _ReturnTypeRepairer:
+    """Rewrite Rust return statements so the body's realized type matches the signature."""
+
+    @staticmethod
+    def repair(source: str, symbol: str, declared: str) -> str:
+        """Cast every return expression in *symbol* to *declared*."""
+        from aero_forge.builder.proactive_synthesis import CoreVerificationPipeline
+
+        return CoreVerificationPipeline._rewrite_return_cast(source, symbol, declared)
 
 
 class _CollectionAstRepairer(ast.NodeTransformer):
@@ -283,6 +295,74 @@ class FallbackManager:
             "edges could be pruned."
         )
         return False, payload
+
+    def remediate_return_type_mismatch(
+        self,
+        source: str,
+        symbol: str,
+        declared: Optional[str],
+        realized: Optional[str],
+    ) -> str:
+        """Trigger a return-statement rewrite when SMT proves a numeric cast is sufficient.
+
+        Falls back to a signature rewrite (returning the body type as the new
+        declared type) when the two types are not unifiable via a cast.
+        """
+        from aero_forge.builder.proactive_synthesis import (
+            CoreVerificationPipeline,
+            ReturnTypeUnificationError,
+        )
+
+        if declared is None or realized is None:
+            return source
+        try:
+            if CoreVerificationPipeline.unifiable(declared, realized):
+                repaired = _ReturnTypeRepairer.repair(source, symbol, declared)
+                if repaired != source:
+                    self.patches.append(
+                        {
+                            "target_node_id": symbol,
+                            "replacement_type": "return_cast",
+                            "declared": declared,
+                            "realized": realized,
+                            "purpose": "cast return expression to declared return type",
+                        }
+                    )
+                return repaired
+        except ReturnTypeUnificationError:
+            pass
+        # Non-unifiable: rewrite the function signature to the realized type.
+        if CoreVerificationPipeline._rust_function_signature(source, symbol)[1] is not None:
+            return self._rewrite_signature_to_realized(source, symbol, realized)
+        return source
+
+    def _rewrite_signature_to_realized(self, source: str, symbol: str, realized: str) -> str:
+        """Replace a Rust function's declared return type with *realized*."""
+        from aero_forge.builder.proactive_synthesis import CoreVerificationPipeline
+
+        declared, body, start, end = CoreVerificationPipeline._rust_function_signature(source, symbol)
+        if body is None:
+            return source
+        # Find the return-type arrow in the header and overwrite it.
+        header = source[:start]
+        new_header = re.sub(
+            r"(fn\s+" + re.escape(symbol) + r"\s*\([^)]*\)\s*)->\s*[^\{\n]+",
+            r"\1-> " + realized,
+            header,
+            count=1,
+        )
+        if new_header != header:
+            self.patches.append(
+                {
+                    "target_node_id": symbol,
+                    "replacement_type": "signature_alignment",
+                    "declared": declared,
+                    "realized": realized,
+                    "purpose": "align function signature with realized return type",
+                }
+            )
+            return new_header + body + source[end:]
+        return source
 
     def diagnostic_report(self) -> str:
         """Return a formatted diagnostic report of the last remediation attempt."""

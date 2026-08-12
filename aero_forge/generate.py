@@ -1532,22 +1532,7 @@ def generate_and_build(
         except (TypeError, ValueError):
             hin_jit_opt_level = None
 
-    if (build_kwargs is not None or optimize) and _is_universal_project_prompt(prompt):
-        # Project-level prompts that name a non-Python language and an FFI
-        # bridge should be routed through the graph materializer, which can
-        # JIT-synthesize the required emitter plugin and validate boundaries.
-        output_dir.mkdir(parents=True, exist_ok=True)
-        override_key = getattr(config_override, "api_key", None) if config_override else None
-        return ProactivePolyglotBuilder().synthesize_and_build(
-            prompt,
-            output_dir,
-            llm_provider=llm_provider,
-            llm_model=model,
-            llm_api_key=override_key,
-            prompt_template=prompt_template,
-            max_retries=max_retries,
-            config_override=config_override,
-        )
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     if variants > 1:
         from aero_forge.variants import generate_variants, select_best_variant

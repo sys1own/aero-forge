@@ -77,6 +77,10 @@ from aero_forge.orchestrator.prompt_builder import (
     TruncatedAeroLogicError,
     extract_aero_logic,
 )
+from aero_forge.builder.proactive_synthesis import (
+    CoreVerificationPipeline,
+    ReturnTypeUnificationError,
+)
 from aero_forge.prompts.builder_emitter import (
     BUILDER_EMITTER_SYSTEM_PROMPT,
     _build_skeleton,
@@ -1620,6 +1624,29 @@ else:
                         a for a in baseline_artifacts if self._is_build_manifest(a)
                     ]
 
+        # Core Verification Pipeline: for Rust nodes, prove that the declared
+        # return type of every exported function is unifiable with the type
+        # realized by its body.  If not, rewrite the return expression or the
+        # signature before the Atomic Symbol Assembly gate runs.
+        if lang in ("rust", "rs"):
+            symbols = list(node_spec.get("exports") or [])
+            if symbols:
+                for artifact in source_artifacts:
+                    if not str(artifact.file_path).endswith(".rs"):
+                        continue
+                    try:
+                        repaired, diagnostics = CoreVerificationPipeline.verify_and_repair(
+                            artifact.content, symbols, language="rust"
+                        )
+                        artifact.content = repaired
+                        for diag in diagnostics:
+                            _accel_log("info", diag)
+                    except ReturnTypeUnificationError as exc:
+                        _accel_log(
+                            "warning",
+                            f"Return-type unification failed for {node_id}: {exc}",
+                        )
+
         # Manifest enforcement: cmake/cargo/maturin nodes must carry a valid
         # build manifest. If the plugin or LLM omitted it, run a deterministic
         # recovery pass before the Atomic Symbol Assembly gate.
@@ -3151,6 +3178,11 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                 except NodeMaterializationError:
                     raise
                 except Exception as exc:
+                    logger.exception(
+                        "Materialization Starvation: node %s failed to materialize: %s",
+                        node_id,
+                        exc,
+                    )
                     _accel_log(
                         "error",
                         f"Materialization Starvation: node {node_id} failed to materialize: {exc}",

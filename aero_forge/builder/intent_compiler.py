@@ -376,9 +376,9 @@ def _normalize_v2_data(data: Any) -> Any:
 
 
 def _abi_type_to_py(c_type: str) -> str:
-    """Map a C ABI type to a Python type annotation."""
+    """Map a C ABI / PyO3 type to a Python type annotation."""
     t = (c_type or "").strip()
-    lowered = t.lower()
+    lowered = t.lower().replace(" ", "")
     scalar_ints = {"u32", "i32", "usize", "int32_t", "i64", "u64", "int"}
     scalar_floats = {"f64", "f32", "double", "float"}
     if lowered in scalar_ints:
@@ -387,6 +387,31 @@ def _abi_type_to_py(c_type: str) -> str:
         return "float"
     if lowered in {"bool"}:
         return "bool"
+    if lowered in {"python", "pyo3::python"}:
+        return "__PYTHON__"
+    # Unwrap PyO3 result wrappers.
+    m = re.match(r"pyresult<(.+)>", lowered)
+    if m:
+        inner = m.group(1)
+        if inner in scalar_floats:
+            return "float"
+        if inner in scalar_ints:
+            return "int"
+        if inner == "()":
+            return "None"
+        return "Any"
+    # PyO3 ndarray references become nested Python lists.
+    m = re.match(r"&?pyarray(\d)?<(.+)>", lowered)
+    if m:
+        ndim = m.group(1) or "1"
+        inner = m.group(2)
+        if inner in scalar_floats:
+            base = "list[float]"
+        elif inner in scalar_ints:
+            base = "list[int]"
+        else:
+            base = "list[Any]"
+        return "list[" + base + "]" if ndim == "2" else base
     if lowered.endswith("*"):
         inner = lowered.rstrip("*").strip()
         if inner in {"float", "f32", "f64", "double"}:
@@ -411,7 +436,11 @@ def _abi_contract_to_contract_entry(abi: ABIContract) -> Optional[ContractEntry]
     outputs = sig.get("outputs", []) if isinstance(sig, dict) else []
     if not inputs:
         return None
-    args = [(entry["name"], _abi_type_to_py(entry["type"])) for entry in inputs]
+    args = [
+        (entry["name"], py_type)
+        for entry in inputs
+        if (py_type := _abi_type_to_py(entry["type"])) != "__PYTHON__"
+    ]
     if not outputs:
         return_type = "None"
     elif len(outputs) == 1:

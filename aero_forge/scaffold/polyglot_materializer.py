@@ -38,6 +38,10 @@ from aero_forge.builder.language_router import should_accelerate_with_native
 from aero_forge.scaffold.cargo_manifest import sanitize_crate_name
 from aero_forge.scaffold.cargo_runner import cargo_build, cargo_check_and_repair
 from aero_forge.scaffold.cli_normalizer import normalize_workspace
+from aero_forge.builder.proactive_synthesis import (
+    CoreVerificationPipeline,
+    ReturnTypeUnificationError,
+)
 from aero_forge.scaffold.engine import Engine
 from aero_forge.scaffold.python_repo_generator import _sanitize_module_name
 from aero_forge.translator import TargetMode, UASTToHINTranslator, python_source_to_uast
@@ -635,9 +639,9 @@ def _generate_stub_body(name: str, args: List[Tuple[str, str]], return_type: str
 
 
 def _abi_type_to_py(c_type: str) -> str:
-    """Map a C ABI type to a Python type annotation."""
+    """Map a C ABI / PyO3 type to a Python type annotation."""
     t = (c_type or "").strip()
-    lowered = t.lower()
+    lowered = t.lower().replace(" ", "")
     scalar_ints = {"u32", "i32", "usize", "int32_t", "i64", "u64", "int"}
     scalar_floats = {"f64", "f32", "double", "float"}
     if lowered in scalar_ints:
@@ -646,6 +650,31 @@ def _abi_type_to_py(c_type: str) -> str:
         return "float"
     if lowered in {"bool"}:
         return "bool"
+    if lowered in {"python", "pyo3::python"}:
+        return "__PYTHON__"
+    # Unwrap PyO3 result wrappers.
+    m = re.match(r"pyresult<(.+)>", lowered)
+    if m:
+        inner = m.group(1)
+        if inner in scalar_floats:
+            return "float"
+        if inner in scalar_ints:
+            return "int"
+        if inner == "()":
+            return "None"
+        return "Any"
+    # PyO3 ndarray references become nested Python lists.
+    m = re.match(r"&?pyarray(\d)?<(.+)>", lowered)
+    if m:
+        ndim = m.group(1) or "1"
+        inner = m.group(2)
+        if inner in scalar_floats:
+            base = "list[float]"
+        elif inner in scalar_ints:
+            base = "list[int]"
+        else:
+            base = "list[Any]"
+        return "list[" + base + "]" if ndim == "2" else base
     # Pointer types become lists of the pointed-to element type.
     if lowered.endswith("*"):
         inner = lowered.rstrip("*").strip()
@@ -665,7 +694,11 @@ def _abi_type_to_py(c_type: str) -> str:
 
 
 def _abi_io_to_py(io_list: List[Dict[str, str]]) -> List[Tuple[str, str]]:
-    return [(entry["name"], _abi_type_to_py(entry["type"])) for entry in io_list]
+    return [
+        (entry["name"], py_type)
+        for entry in io_list
+        if (py_type := _abi_type_to_py(entry["type"])) != "__PYTHON__"
+    ]
 
 
 def _abi_contract_to_contract_entry(abi: ABIContract) -> Optional[ContractEntry]:
@@ -1436,9 +1469,11 @@ class PolyglotMaterializer:
         contracts = list(blueprint.contracts) if blueprint.contracts else list(_DEFAULT_CONTRACTS)
         if blueprint.abi_contracts:
             abi_entries = _contracts_from_abi(blueprint.abi_contracts)
-            # Preserve explicit Python contracts while appending ABI-derived ones.
-            existing_names = {c.name for c in contracts}
-            contracts.extend(c for c in abi_entries if c.name not in existing_names)
+            # Prefer ABI-derived signatures; replace or append by name.
+            contract_by_name = {c.name: c for c in contracts}
+            for entry in abi_entries:
+                contract_by_name[entry.name] = entry
+            contracts = list(contract_by_name.values())
 
         # If the blueprint includes C++ files, delegate to the C++ materializer so
         # header inclusion and shared-library linking are handled consistently.
@@ -1485,6 +1520,23 @@ class PolyglotMaterializer:
             target_mode=TargetMode.PYO3,
         )
 
+        # 3b. In-memory return-type signature repair before the Rust compiler runs.
+        for lib_rs in self.workspace.rglob("src/lib.rs"):
+            if "target" in lib_rs.parts:
+                continue
+            try:
+                repaired, diagnostics = CoreVerificationPipeline.verify_and_repair(
+                    lib_rs.read_text(encoding="utf-8"),
+                    [c.name for c in contracts],
+                    language="rust",
+                )
+                for diag in diagnostics:
+                    self._accel_log("info", diag)
+                if diagnostics:
+                    lib_rs.write_text(repaired, encoding="utf-8")
+            except ReturnTypeUnificationError as exc:
+                self._accel_log("warning", f"Return-type unification failed: {exc}")
+
         # 4. Compile if requested.
         if build:
             self._build_crates()
@@ -1522,7 +1574,14 @@ class PolyglotMaterializer:
                     if primary.get("runtime") == "python3":
                         strategy["primary_entrypoint"]["path"] = str(rel)
                         rel_pkg = rel.parent
-                        function_module = ".".join(rel_pkg.parts) if rel_pkg.parts else ""
+                        # If the project has a synthesized package (e.g. portfolio_risk/__init__.py),
+                        # use it as the function module so engine.py can import the native wrapper.
+                        package_dir = self.workspace / pkg_name
+                        function_module = (
+                            pkg_name
+                            if (package_dir / "__init__.py").is_file()
+                            else ".".join(rel_pkg.parts)
+                        )
                         EntrypointAdapterEngine(
                             strategy,
                             str(self.workspace),
