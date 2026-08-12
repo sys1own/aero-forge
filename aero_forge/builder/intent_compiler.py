@@ -121,75 +121,131 @@ Example JSON shape:
 """
 
 
-def _strip_markdown_fences(text: str) -> str:
-    """Remove optional JSON/YAML code fences from an LLM response.
+class RobustJSONExtractor:
+    """Extract a valid JSON object from an LLM response that may contain prose,
+    markdown fences, or trailing content.
 
-    Tolerates language/path labels (e.g. `` ```json:plan.json ``) and surrounding
-    prose by only stripping the first and last fence tokens.
+    The implementation mirrors the recursive brace-matching regex
+    ``r'\{(?:[^{}]|(?R))*\}'`` using an explicit stack so it works with the
+    standard library ``re`` module.
     """
-    text = text.strip()
-    # Strip opening fence with optional language/path label.
-    text = re.sub(r"^```\s*(?:\w+)?\s*(?::\s*[^\n\r]*)?\s*\r?\n", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^```\s*(?:\w+)?\s*(?::\s*[^\n\r]*)?\s*$", "", text, flags=re.IGNORECASE)
-    # Strip trailing fence.
-    if text.endswith("```"):
-        text = text[:-3].strip()
-    return text.strip()
 
+    @staticmethod
+    def strip_markdown(text: str) -> str:
+        """Remove optional JSON/YAML code fences and leading/trailing prose."""
+        t = text.strip()
+        # Opening fence with optional language or path label, e.g. ```json:plan.json
+        t = re.sub(
+            r"^```\s*(?:json|yaml)?\s*(?::\s*[^\n\r]*)?\s*\r?\n",
+            "",
+            t,
+            flags=re.IGNORECASE,
+        )
+        t = re.sub(
+            r"^```\s*(?:json|yaml)?\s*(?::\s*[^\n\r]*)?$",
+            "",
+            t,
+            flags=re.IGNORECASE,
+        )
+        # Standalone opening fence label such as ``json`` on its own line.
+        t = re.sub(r"^(?:json|yaml)\s*\r?\n", "", t, flags=re.IGNORECASE)
+        if t.endswith("```"):
+            t = t[:-3].strip()
+        return t.strip()
 
-def _find_balanced_json(text: str) -> Optional[str]:
-    """Return the first balanced JSON object literal found in *text*."""
-    start = text.find("{")
-    while start != -1:
+    @staticmethod
+    def _find_matching(text: str, start: int, opener: str, closer: str) -> Optional[int]:
+        """Return the index of the closing delimiter matching *opener* at *start*."""
         depth = 0
         in_string = False
         escape = False
-        for i, ch in enumerate(text[start:], start=start):
+        for i in range(start, len(text)):
+            ch = text[i]
             if in_string:
                 if escape:
                     escape = False
                     continue
                 if ch == "\\":
                     escape = True
-                    continue
-                if ch == '"':
+                elif ch == '"':
                     in_string = False
                 continue
             if ch == '"':
                 in_string = True
                 continue
-            if ch == "{":
+            if ch == opener:
                 depth += 1
-            elif ch == "}":
+            elif ch == closer:
                 depth -= 1
                 if depth == 0:
-                    return text[start : i + 1]
-        break
-    return None
+                    return i
+        return None
+
+    @classmethod
+    def largest_json_block(cls, text: str) -> Optional[str]:
+        """Return the largest valid JSON object or array literal found in *text*."""
+        best: Optional[str] = None
+        for m in re.finditer(r"[\{\[]", text):
+            start = m.start()
+            opener = text[start]
+            closer = "}" if opener == "{" else "]"
+            end = cls._find_matching(text, start, opener, closer)
+            if end is None:
+                continue
+            candidate = text[start : end + 1]
+            try:
+                json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if best is None or len(candidate) > len(best):
+                best = candidate
+        return best
+
+    @classmethod
+    def extract(cls, raw: str) -> Any:
+        """Parse a JSON object from a raw LLM response, tolerating surrounding text."""
+        cleaned = cls.strip_markdown(raw)
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            pass
+        balanced = cls.largest_json_block(cleaned)
+        if balanced:
+            try:
+                return json.loads(balanced)
+            except json.JSONDecodeError:
+                pass
+        # YAML is more tolerant of trailing commas and unquoted strings.
+        try:
+            data = yaml.safe_load(cleaned)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+        raise IntentCompilerError("No JSON object found in LLM response")
 
 
 def _extract_json(raw: str) -> Any:
-    """Parse a JSON object from a raw LLM response, tolerating surrounding text."""
-    cleaned = _strip_markdown_fences(raw)
+    """Backward-compatible wrapper around :class:`RobustJSONExtractor`."""
+    return RobustJSONExtractor.extract(raw)
+
+
+def _compress_skeletal_blueprint(raw: str) -> str:
+    """Return a compact JSON skeleton with token-heavy fields removed.
+
+    Removes ``constraints`` and ``output_dir`` from the largest JSON block in
+    the raw response so retries consume fewer tokens while still preserving the
+    structural blueprint.
+    """
     try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        pass
-    # Try to locate the first balanced JSON object.
-    balanced = _find_balanced_json(cleaned)
-    if balanced:
-        try:
-            return json.loads(balanced)
-        except json.JSONDecodeError:
-            pass
-    # YAML is more tolerant of trailing commas and unquoted strings.
-    try:
-        data = yaml.safe_load(cleaned)
-        if isinstance(data, dict):
-            return data
+        data = RobustJSONExtractor.extract(raw)
     except Exception:
-        pass
-    raise IntentCompilerError("No JSON object found in LLM response")
+        return raw
+    if isinstance(data, dict):
+        data.pop("constraints", None)
+        data.pop("output_dir", None)
+        return json.dumps(data, indent=2)
+    return raw
 
 
 def _normalize_cli_type(value: Any) -> str:
@@ -526,6 +582,42 @@ class IntentCompiler:
         self.config_override = config_override
         self._system_prompt_extra = system_prompt_extra or ""
 
+    @staticmethod
+    def _retry_user_message(
+        attempt: int,
+        raw: str,
+        exc: Optional[Exception] = None,
+    ) -> Dict[str, str]:
+        """Return the user correction message for schema-retry *attempt*.
+
+        * First retry (``attempt == 0`` after a failure): compress the previous
+          raw response by dropping ``constraints`` and ``output_dir`` to save
+          tokens, then ask the model to complete the corrected blueprint.
+        * Second and third retries: append the concrete ``JsonSchemaValidationError``
+          message so the model can self-correct the structure.
+        """
+        if attempt == 0:
+            compressed = _compress_skeletal_blueprint(raw)
+            content = (
+                "The previous response was not valid. Return a corrected JSON blueprint. "
+                "To save tokens, the compressed skeleton below has the `constraints` and "
+                "`output_dir` fields removed; do not add them back unless the prompt "
+                "explicitly requires them.\n\n" + compressed
+            )
+        else:
+            error_text = ""
+            if isinstance(exc, JsonSchemaValidationError):
+                error_text = "\n".join(
+                    e.message for e in exc.context
+                ) or str(exc)
+            elif exc is not None:
+                error_text = str(exc)
+            content = (
+                f"Schema validation still failed. Error details:\n{error_text}\n\n"
+                "Return corrected JSON only, with no markdown or explanatory text."
+            )
+        return {"role": "user", "content": content}
+
     def compile_prompt(
         self,
         prompt_text: str,
@@ -578,7 +670,7 @@ class IntentCompiler:
                 data = _normalize_v2_data(_extract_json(raw))
                 validator.validate(data)
                 v2 = BlueprintSchemaV2.model_validate(data)
-            except (JsonSchemaValidationError, Exception) as exc:
+            except Exception as exc:
                 last_error = exc
                 _accel_log(
                     "warning",
@@ -587,15 +679,7 @@ class IntentCompiler:
                 )
                 logger.warning("Intent JSON schema validation failed (attempt %d): %s", attempt + 1, exc)
                 messages.append({"role": "assistant", "content": raw})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Schema validation failed: {exc}. "
-                            "Return corrected JSON only, with no markdown or explanatory text."
-                        ),
-                    }
-                )
+                messages.append(self._retry_user_message(attempt, raw, exc))
                 continue
 
             blueprint = self._v2_to_blueprint(
@@ -766,15 +850,7 @@ class IntentCompiler:
                 )
                 logger.warning("Intent JSON extraction failed (attempt %d): %s", attempt + 1, exc)
                 messages.append({"role": "assistant", "content": raw})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Could not extract JSON: {exc}. "
-                            "Return corrected JSON only, with no markdown or explanatory text."
-                        ),
-                    }
-                )
+                messages.append(self._retry_user_message(attempt, raw, exc))
                 continue
 
             # Primary path: a native `graph_polyglot` blueprint.
@@ -802,15 +878,7 @@ class IntentCompiler:
                 )
                 logger.warning("Intent schema validation failed (attempt %d): %s", attempt + 1, exc)
                 messages.append({"role": "assistant", "content": raw})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            f"Schema validation failed: {exc}. "
-                            "Return corrected JSON only, with no markdown or explanatory text."
-                        ),
-                    }
-                )
+                messages.append(self._retry_user_message(attempt, raw, exc))
                 continue
 
             graph = self._v2_to_graph_blueprint(

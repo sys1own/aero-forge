@@ -420,10 +420,41 @@ DATA PAYLOAD CONSTRAINT:
 - For large matrices and lookup tables, you MUST also include the complete literal as a non-truncatable JSON string under `full_implementation_map` (keyed by symbol name) so enrichment cannot drop the data during compaction.
 - If the prompt requires a Smith-Waterman or sequence-alignment scoring matrix (e.g. `BLOSUM62`), you MUST emit the matrix as a `data_payload` with its full literal value in `logic_sketch`. Do not leave it as an SMT typed hole or assume it exists at runtime.
 
+STRICT FORMATTING DIRECTIVE:
+RESPONSE MUST BE A SINGLE VALID JSON OBJECT. NO PREAMBLE. NO EXPLANATION. NO MARKDOWN FENCES. ONLY JSON.
+
 JSON BLUEPRINT GENERATION CONSTRAINT:
 - Do NOT return a partial JSON skeleton or a blueprint with empty values, `__AERO_IN_FILL__` markers, or "TBD" placeholders. You MUST generate the entire blueprint JSON from scratch based on the prompt requirements.
 - Every `node_id`, `source_files` entry, `exports` list, `contract`, and `full_implementation_map` value must be fully populated before the response is returned.
 - A Schema Example is provided below for reference, but you are required to produce a complete, valid blueprint object rather than filling in missing values on a template.
+
+
+ONE-SHOT EXAMPLE (enriched manifest + contracts):
+A tri-polyglot genomics request should produce a JSON like this:
+```json
+{
+  "project": "genomics_aligner",
+  "architecture": "tri_polyglot_rust_cpp_python",
+  "primary_entrypoint": "python_interface/main.py",
+  "build_script": "build.sh",
+  "functional_intent": [
+    {"symbol_name": "smith_waterman", "type": "function", "requirement_level": "required"},
+    {"symbol_name": "validate_sequence", "type": "function", "requirement_level": "required"},
+    {"symbol_name": "load_blosum62", "type": "data_payload", "requirement_level": "required"},
+    {"symbol_name": "run_demo", "type": "function", "requirement_level": "required"}
+  ],
+  "nodes": [
+    {"node_id": "rust_core", "lang": "rust", "toolchain": "cargo", "source_files": ["rust_core/Cargo.toml", "rust_core/src/lib.rs"], "exports": ["validate_sequence"]},
+    {"node_id": "cpp_engine", "lang": "cpp", "toolchain": "cmake", "source_files": ["cpp_engine/src/align.cpp", "cpp_engine/CMakeLists.txt"], "exports": ["smith_waterman"]},
+    {"node_id": "python_interface", "lang": "python", "toolchain": "python", "source_files": ["python_interface/main.py"], "exports": ["run_demo"]}
+  ],
+  "edges": [
+    {"source": "rust_core", "target": "python_interface", "boundary_type": "PYO3_MATURIN", "symbol": "validate_sequence", "args": ["pointer", "int64"], "return_type": "int64", "is_zero_copy": true},
+    {"source": "cpp_engine", "target": "python_interface", "boundary_type": "C_ABI", "symbol": "smith_waterman", "args": ["pointer", "pointer", "int64"], "return_type": "int64", "is_zero_copy": true}
+  ],
+  "metadata": {"llm_initialized": true, "status": "finalized"}
+}
+```
 
 Schema Example (for reference only — generate the full blueprint):
 ```json
