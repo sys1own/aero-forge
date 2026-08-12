@@ -2196,6 +2196,67 @@ def _strip_markdown_fences(text: str) -> str:
     return text.strip()
 
 
+def _repair_llm_blueprint_data(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Patch common LLM blueprint mistakes so ``Blueprint`` validation passes."""
+    data = dict(data)
+    architecture = data.get("architecture", "pure_python")
+
+    manifest = data.get("manifest") or []
+    if manifest and not isinstance(manifest[0], dict):
+        # The LLM sometimes returns a flat list of paths; normalize it.
+        manifest = [
+            {"path": str(p), "lang": "python", "purpose": ""}
+            for p in manifest
+        ]
+    data["manifest"] = manifest
+
+    # Ensure toolchains cover every manifest file extension.
+    toolchains = set(data.get("toolchains") or toolchains_for_intent(architecture))
+    ext_toolchain = {
+        ".py": "python",
+        ".rs": "cargo",
+        ".cpp": "cpp",
+        ".cc": "cpp",
+        ".cxx": "cpp",
+        ".c": "gcc",
+        ".go": "go",
+        ".zig": "zig",
+        ".java": "javac",
+        ".cs": "dotnet",
+        ".mojo": "mojo",
+    }
+    for entry in manifest:
+        path = entry.get("path", "") if isinstance(entry, dict) else str(entry)
+        ext = Path(path).suffix.lower()
+        if ext in ext_toolchain:
+            toolchains.add(ext_toolchain[ext])
+    data["toolchains"] = sorted(toolchains)
+
+    # Non-pure architectures must declare at least one contract.
+    if architecture != "pure_python" and not (data.get("contracts") or data.get("abi_contracts") or data.get("functional_intent")):
+        contracts: List[Dict[str, str]] = []
+        seen: set = set()
+        for entry in manifest:
+            path = entry.get("path", "") if isinstance(entry, dict) else str(entry)
+            name = Path(path).stem
+            if name and name not in seen:
+                seen.add(name)
+                lang = entry.get("lang", "python") if isinstance(entry, dict) else "python"
+                contracts.append(
+                    {
+                        "name": name,
+                        "signature": f"def {name}() -> None",
+                        "language": lang,
+                        "python_name": name,
+                        "purpose": f"synthesized contract for {path}",
+                    }
+                )
+        if contracts:
+            data["contracts"] = contracts
+
+    return data
+
+
 def _parse_llm_blueprint(
     raw: str,
     llm_provider: str,
@@ -2217,6 +2278,7 @@ def _parse_llm_blueprint(
                 f"orchestrator._llm_plan_blueprint: parsed YAML did not produce a dict; raw preview: {raw[:800]!r}",
             )
             return None
+        data = _repair_llm_blueprint_data(data)
         if "llm" in data and isinstance(data["llm"], dict):
             data["llm"] = LLMConfig.model_validate(data["llm"])
         else:
@@ -2314,6 +2376,30 @@ _ARCHITECTURE_PROMPT_MARKERS: Dict[str, List[str]] = {
     ],
     INTENT_GRAPH_POLYGLOT: ["graph_polyglot", "graph polyglot"],
 }
+
+
+def _contracts_from_manifest(manifest: List[ManifestEntry]) -> List[ContractEntry]:
+    """Synthesize a minimal contract list from non-Python manifest entries.
+
+    Deterministic fallback blueprints need at least one ``ContractEntry`` for
+    hybrid/polyglot architectures.  We derive the symbol from the first Rust or
+    C/C++ source file, falling back to the project name.
+    """
+    contracts: List[ContractEntry] = []
+    for entry in manifest:
+        if entry.lang in ("rust", "cpp", "c", "c++"):
+            symbol = Path(entry.path).stem or entry.lang
+            contracts.append(
+                ContractEntry(
+                    name=symbol,
+                    signature=f"{symbol}(...)",
+                    language=entry.lang,
+                    purpose="fallback ABI contract",
+                )
+            )
+    return contracts or [
+        ContractEntry(name="main", signature="main(...)", language="cpp")
+    ]
 
 
 def _classification_from_prompt(
@@ -2495,15 +2581,16 @@ def plan_workspace(
             if is_hybrid_cpp_rust
             else BUILD_INTENT_HYBRID_CPP_PYTHON if is_cpp else intent
         )
+        fallback_manifest = [
+            ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
+            for e in default_manifest_for_architecture(chosen_intent, project_name)
+        ]
         blueprint = Blueprint(
             project=project_name,
             architecture=chosen_intent,
             toolchains=toolchains_for_intent(chosen_intent),
-            manifest=[
-                ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
-                for e in default_manifest_for_architecture(chosen_intent, project_name)
-            ],
-            contracts=[],
+            manifest=fallback_manifest,
+            contracts=_contracts_from_manifest(fallback_manifest),
             output_dir=output_dir / "dist",
             llm=LLMConfig(provider=llm_provider or "none", model=model),
             prompt=prompt,

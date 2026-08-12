@@ -38,6 +38,7 @@ from aero_forge.monorepo import generate_monorepo
 from aero_forge.orchestrator.orchestrator import plan_workspace
 from aero_forge.orchestrator.router import toolchains_for_intent
 from aero_forge.orchestrator.stack_classifier import (
+    INTENT_GRAPH_POLYGLOT,
     INTENT_HYBRID_CPP_PYTHON,
     INTENT_HYBRID_CPP_RUST,
     INTENT_HYBRID_RUST_PYTHON,
@@ -652,6 +653,69 @@ def _classification_for_architecture(
     )
 
 
+def _run_proactive_polyglot(
+    prompt: str,
+    output_dir: Path,
+    *,
+    project_name: str = "aero_forge_project",
+    llm_provider: Optional[str] = None,
+    model: Optional[str] = None,
+    max_retries: int = 3,
+    config_override: Optional[ConfigOverride] = None,
+    progress_callback: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Route a graph-polyglot prompt through the proactive graph builder.
+
+    The proactive pipeline compiles the prompt to a HIN graph, verifies it, and
+    materializes it with the graph materializer.  This avoids the v2 Blueprint
+    path which does not support arbitrary languages such as Zig/Mojo/Go.
+    """
+    from aero_forge.builder.builder import ProactivePolyglotBuilder
+
+    if progress_callback:
+        progress_callback("Planning graph-polyglot workspace...")
+
+    api_key = None
+    if config_override is not None:
+        api_key = getattr(config_override, "api_key", None)
+
+    builder = ProactivePolyglotBuilder()
+    result = builder.synthesize_and_build(
+        prompt,
+        output_dir,
+        llm_provider=llm_provider,
+        llm_model=model,
+        llm_api_key=api_key,
+        max_retries=max_retries,
+        config_override=config_override,
+    )
+
+    if progress_callback:
+        progress_callback("Graph-polyglot materialization complete.")
+
+    result.setdefault("success", result.get("build", {}).get("success", False))
+    result.setdefault("project_name", project_name)
+    result.setdefault("materializer", "ProactivePolyglotBuilder")
+    result["blueprint_path"] = str(output_dir / "blueprint.aero")
+
+    if not result.get("files"):
+        result["files"] = ExecutionReport(output_dir).filter_paths(
+            sorted(
+                str(p.relative_to(output_dir))
+                for p in output_dir.rglob("*")
+                if p.is_file()
+            )
+        )
+
+    try:
+        compile_directory_to_aeroc(output_dir, output_dir / "workspace.aeroc")
+        result["aeroc_path"] = str(output_dir / "workspace.aeroc")
+    except Exception as exc:
+        logger.warning("Failed to compile workspace.aeroc: %s", exc)
+
+    return result
+
+
 def build_universal_project(
     prompt: str,
     output_dir: Path | str,
@@ -719,6 +783,25 @@ def build_universal_project(
         classification = _classification_for_architecture(
             architecture, classification.features
         )
+
+    # Graph and tri-polyglot builds require the graph materializer and support
+    # arbitrary languages (Zig, Go, Mojo, etc.). Route them through the proactive
+    # graph builder instead of the v2 Blueprint path.
+    if classification.architecture in (
+        INTENT_GRAPH_POLYGLOT,
+        INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON,
+    ):
+        return _run_proactive_polyglot(
+            prompt,
+            output_dir,
+            project_name=project_name,
+            llm_provider=llm_provider,
+            model=model,
+            max_retries=max_retries,
+            config_override=config_override,
+            progress_callback=progress_callback,
+        )
+
     effective_constraints = constraints or ""
     accel_parts = []
     if acceleration_policy and acceleration_policy != "selective":

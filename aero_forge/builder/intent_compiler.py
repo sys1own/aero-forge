@@ -580,6 +580,81 @@ def _contracts_from_abi(abi_contracts: List[ABIContract]) -> List[ContractEntry]
     return entries
 
 
+def _derive_toolchains(
+    architecture: str,
+    manifest_entries: List[ManifestEntry],
+    abi_contracts: List[ABIContract],
+) -> List[str]:
+    """Return toolchains that cover the requested architecture and every manifest file."""
+    from aero_forge.orchestrator.router import toolchains_for_intent
+
+    toolchains = set(toolchains_for_intent(architecture))
+    lang_toolchain: Dict[str, str] = {
+        "python": "python",
+        "rust": "cargo",
+        "cpp": "cpp",
+        "c++": "cpp",
+        "c": "gcc",
+        "go": "go",
+        "zig": "zig",
+        "java": "javac",
+        "csharp": "dotnet",
+        "mojo": "mojo",
+        "nim": "nim",
+        "d": "dmd",
+        "fortran": "gfortran",
+        "javascript": "node",
+        "typescript": "node",
+    }
+    for entry in manifest_entries:
+        lang = (entry.lang or "").lower()
+        if lang in lang_toolchain:
+            toolchains.add(lang_toolchain[lang])
+        ext = Path(entry.path).suffix.lower()
+        if ext == ".zig":
+            toolchains.add("zig")
+        elif ext in (".cpp", ".cc", ".cxx", ".c"):
+            toolchains.update({"cpp", "cmake", "clang"})
+        elif ext == ".go":
+            toolchains.add("go")
+        elif ext == ".java":
+            toolchains.add("javac")
+        elif ext == ".cs":
+            toolchains.add("dotnet")
+    for abi in abi_contracts:
+        target = (abi.target_language or "").lower()
+        if target in lang_toolchain:
+            toolchains.add(lang_toolchain[target])
+        if abi.binding_framework == "pyo3":
+            toolchains.update({"python", "rust", "cargo"})
+        elif abi.binding_framework == "c_abi":
+            toolchains.update({"cpp", "cmake", "clang"})
+    return sorted(toolchains)
+
+
+def _synthesize_contracts_from_manifest(
+    manifest_entries: List[ManifestEntry],
+) -> List[ContractEntry]:
+    """Create a contract entry for every manifest file that defines an export."""
+    contracts: List[ContractEntry] = []
+    seen: set = set()
+    for entry in manifest_entries:
+        name = Path(entry.path).stem
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        contracts.append(
+            ContractEntry(
+                name=name,
+                signature=f"def {name}() -> None",
+                language=entry.lang or "python",
+                python_name=name,
+                purpose=entry.purpose or f"synthesized contract for {entry.path}",
+            )
+        )
+    return contracts
+
+
 def _infer_architecture(languages: set) -> str:
     """Map a set of language tags to the closest aero-forge architecture string."""
     from aero_forge.orchestrator.router import (
@@ -982,12 +1057,17 @@ class IntentCompiler:
         metadata["auto_generated"] = "true"
         metadata["generation_method"] = "llm_synthesized"
 
+        toolchains = _derive_toolchains(architecture, manifest_entries, v2.abi_contracts)
+        contracts = _contracts_from_abi(v2.abi_contracts)
+        if architecture != "pure_python" and not contracts:
+            contracts = _synthesize_contracts_from_manifest(manifest_entries)
+
         return Blueprint(
             project=project,
             architecture=architecture,
-            toolchains=toolchains_for_intent(architecture),
+            toolchains=toolchains,
             manifest=manifest_entries,
-            contracts=_contracts_from_abi(v2.abi_contracts),
+            contracts=contracts,
             functions=[],
             output_dir=resolved_output_dir,
             llm=LLMConfig(provider=self.provider, model=self.model or ""),

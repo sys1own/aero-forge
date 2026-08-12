@@ -148,18 +148,33 @@ class ABIContract(BaseModel):
     def _normalize_target_language(cls, value: Any) -> str:
         if value is None:
             return "cpp"
-        value = str(value).lower().strip()
+        value = str(value).lower().strip().replace(" ", "_").replace("-", "_")
         synonyms = {
             "c++": "cpp",
             "cxx": "cpp",
             "c": "cpp",
-            "c-abi": "cpp",
+            "c_abi": "cpp",
+            "cabi": "cpp",
             "py": "python",
+            "py3": "python",
+            "zig": "zig",
+            "go": "go",
+            "golang": "go",
+            "java": "java",
+            "csharp": "csharp",
+            "c#": "csharp",
+            "cs": "csharp",
+            "mojo": "mojo",
+            "nim": "nim",
+            "d": "d",
+            "f90": "fortran",
+            "fortran": "fortran",
+            "js": "javascript",
+            "javascript": "javascript",
+            "ts": "typescript",
+            "typescript": "typescript",
         }
         value = synonyms.get(value, value)
-        allowed = {"cpp", "rust", "python"}
-        if value not in allowed:
-            raise ValueError(f"target_language must be one of {allowed}, got {value!r}")
         return value
 
     @field_validator("binding_framework", mode="before")
@@ -167,7 +182,7 @@ class ABIContract(BaseModel):
     def _normalize_binding_framework(cls, value: Any) -> str:
         if value is None:
             return "c_abi"
-        value = str(value).lower().strip().replace("-", "_")
+        value = str(value).lower().strip().replace("-", "_").replace(" ", "_")
         synonyms = {
             "pyo3": "pyo3",
             "ctypes": "ctypes",
@@ -190,6 +205,12 @@ class ABIContract(BaseModel):
             "wasm32": "c_abi",
             "pybind11": "c_abi",
             "pybind": "c_abi",
+            "numpy": "c_abi",
+            "cython": "c_abi",
+            "cffi": "ctypes",
+            "swig": "c_abi",
+            "boost": "c_abi",
+            "boost_python": "c_abi",
         }
         value = synonyms.get(value, value)
         if value not in {"c_abi", "pyo3", "ctypes"}:
@@ -214,9 +235,10 @@ class ABIContract(BaseModel):
                 value = "c_abi"
         allowed = {"c_abi", "pyo3", "ctypes"}
         if value not in allowed:
-            raise ValueError(
-                f"binding_framework must be one of {allowed}, got {value!r}"
-            )
+            # Unknown binding frameworks are treated as C-ABI rather than
+            # failing schema validation; the materializer can later reject
+            # unsupported combinations with a clear diagnostic.
+            value = "c_abi"
         return value
 
     @field_validator("memory_model", mode="before")
