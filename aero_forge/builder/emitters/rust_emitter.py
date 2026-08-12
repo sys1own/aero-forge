@@ -233,6 +233,14 @@ class RustEmitter(BaseEmitter):
             self._write("")
             self._write("#[allow(unused_variables)]", indent_level)
             self._write(f"pub {sig} {{", indent_level)
+        # Generated bodies often mix i64 (from Python int) with usize (from .len()).
+        # Shadow i64 count parameters as usize to avoid E0277/E0308 mismatches.
+        for p in params:
+            if p.name in ("self", "cls"):
+                continue
+            if p.type_hint and self._map_type(p.type_hint) == "i64":
+                self._write(f"let {p.name} = {p.name} as usize;", indent_level + 1)
+
         body = node.body
         if body:
             self._emit_children(body, indent_level + 1)

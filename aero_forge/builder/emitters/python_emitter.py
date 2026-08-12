@@ -267,28 +267,35 @@ def _pyo3_loader_source(
     node_spec: Optional[dict] = None,
 ) -> str:
     """Generate a Python CLI that imports a compiled PyO3/Maturin extension."""
-    contract = next(
-        (
-            c
-            for c in boundary_contracts
-            if str(c.get("boundary_type") or c.get("boundary") or "").lower().replace("-", "_") in ("pyo3", "pyo3_maturin", "maturin")
-            and c.get("target") == node_id
-        ),
-        {},
-    )
-    source_node = contract.get("source", "rust_core")
-    symbol = contract.get("symbol", source_node)
-    args = contract.get("args", ["int64"])
-    call_args = _demo_call_args(args)
+    pyo3_contracts = [
+        c
+        for c in boundary_contracts
+        if str(c.get("boundary_type") or c.get("boundary") or "").lower().replace("-", "_") in ("pyo3", "pyo3_maturin", "maturin")
+        and c.get("target") == node_id
+    ]
+    default_contract = pyo3_contracts[0] if pyo3_contracts else {}
 
-    exports = list((node_spec or {}).get("exports") or [symbol])
+    exports = list((node_spec or {}).get("exports") or [default_contract.get("symbol", "rust_core")])
     exports = [n for n in exports if n]
     if not exports:
-        exports = [symbol]
+        exports = [default_contract.get("symbol", "rust_core")]
     primary = exports[0]
 
+    def _contract_for_export(index: int, name: str) -> dict:
+        # Pair exported Python wrappers with PyO3 contracts in declaration order;
+        # fall back to a symbol-name match or the first contract.
+        if index < len(pyo3_contracts):
+            return pyo3_contracts[index]
+        for c in pyo3_contracts:
+            if c.get("symbol") == name:
+                return c
+        return default_contract
+
     wrappers: List[str] = []
-    for export_name in exports:
+    for idx, export_name in enumerate(exports):
+        contract = _contract_for_export(idx, export_name)
+        source_node = contract.get("source", default_contract.get("source", "rust_core"))
+        symbol = contract.get("symbol", export_name)
         wrappers.extend(
             [
                 f"def {export_name}(*args, **kwargs):",
@@ -298,6 +305,9 @@ def _pyo3_loader_source(
             ]
         )
     wrapper_block = "\n".join(wrappers)
+
+    primary_contract = _contract_for_export(0, primary)
+    call_args = _demo_call_args(primary_contract.get("args", ["int64"]))
 
     return f'''"""Auto-generated Python CLI for the PyO3/Maturin bridge."""
 from typing import Any
