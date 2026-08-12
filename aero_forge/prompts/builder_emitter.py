@@ -8,7 +8,7 @@ corresponding toolchain manifest. It is the runtime companion of
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from aero_forge.builder.smt_engine import SkeletonTypeInjector
 
@@ -211,18 +211,23 @@ def _symbol_specs(
     if _is_test_node(node):
         return []
     specs: List[Tuple[str, List[str], str]] = []
+    seen: Set[str] = set()
     for c in contracts or []:
         sym = c.get("symbol") or ""
         if not sym:
             # Edges with no exported symbol are dependency-only; they must not
             # override the node's explicit exports list.
             continue
-        specs.append((sym, list(c.get("args") or []), c.get("return_type", "")))
-    if not specs:
-        for sym in node.get("exports") or []:
+        if sym not in seen:
+            seen.add(sym)
+            specs.append((sym, list(c.get("args") or []), c.get("return_type", "")))
+    for sym in node.get("exports") or []:
+        if sym and sym not in seen:
+            seen.add(sym)
             specs.append((sym, [], ""))
     if not specs:
-        specs.append((node.get("node_id", "module"), [], ""))
+        node_id = node.get("node_id", "module")
+        specs.append((node_id, [], ""))
     return specs
 
 

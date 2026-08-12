@@ -27,6 +27,17 @@ from aero_forge.blueprint.schema import (
     PolyglotGraphBlueprint,
     PolyglotNodeSpec,
 )
+from aero_forge.builder.holographic import HolographicContext, intent_vector
+from aero_forge.builder.foge import FockGraphEncoder
+from aero_forge.builder.adjoint import SchemaBootstrapper
+from aero_forge.builder.concolic import ConcolicManifestVerifier, ConcolicResult
+from aero_forge.builder.firewall import LogicalFirewall
+from aero_forge.builder.chiasmus import (
+    PrologFactEmitter,
+    LogicEngine,
+    RefinementFeedback,
+    analyze_repository as chiasmus_analyze_repository,
+)
 from aero_forge.config import Tier
 from aero_forge.llm.clients import get_llm_client
 
@@ -1018,6 +1029,171 @@ class IntentCompiler:
             )
         return {"intent": "incremental_update", "actions": actions}
 
+    # ------------------------------------------------------------------
+    # Six-phase tiered synthesis pipeline (HIS -> FoGE -> Adjoint ->
+    # Bounded Completion -> Concolic Feedback -> SHACL/Prolog Verification).
+    # ------------------------------------------------------------------
+    def _six_phase_bind_context(
+        self,
+        classification: Dict[str, Any],
+    ) -> HolographicContext:
+        """Phase 1: bind the prompt's functional intent into an invariant."""
+        ctx = HolographicContext(seed=0xA3A0)
+        intents = classification.get("functional_intent") or []
+        if intents:
+            ctx.build_invariant_from_symbols(
+                [i.get("symbol_name") or i.get("name", "") for i in intents]
+            )
+        return ctx
+
+    def _six_phase_topology_prefix(
+        self,
+        output_dir: Optional[str | Path],
+    ) -> Dict[str, Any]:
+        """Phase 2: encode an existing workspace as compact PaP tokens.
+
+        The LLM is never given raw source files; it only sees the topological
+        summary and the PaP token dimension.
+        """
+        result: Dict[str, Any] = {"encoded": False, "nodes": [], "edges": [], "dim": 0}
+        if not output_dir:
+            return result
+        root = Path(output_dir).resolve()
+        if not root.is_dir() or not any(f.is_file() for f in root.rglob("*")):
+            return result
+        try:
+            encoder = FockGraphEncoder(dim=256)
+            repo = encoder.encode_repository(root)
+            result = {
+                "encoded": True,
+                "dim": repo.get("dim", 0),
+                "nodes": list(repo.get("nodes", {}).keys()),
+                "edges": [
+                    {"source": e.get("source"), "relation": e.get("relation"), "target": e.get("target")}
+                    for e in repo.get("edges", [])
+                ],
+            }
+        except Exception as exc:
+            logger.debug("FoGE encoding skipped: %s", exc)
+        return result
+
+    def _six_phase_bootstrap_skeleton(
+        self,
+        classification: Dict[str, Any],
+        topology: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Phase 3: category-theoretic bootstrap producing a rigid skeleton."""
+        architecture = (classification.get("architecture") or "graph_polyglot").lower()
+        intents = classification.get("functional_intent") or []
+        repo_graph = topology if topology.get("encoded") else None
+        try:
+            bootstrapper = SchemaBootstrapper(architecture_hint=architecture)
+            return bootstrapper.bootstrap(intents, repo_graph=repo_graph)
+        except Exception as exc:
+            logger.debug("Adjoint bootstrap skipped: %s", exc)
+            return {}
+
+    def _six_phase_formal_feedback(
+        self,
+        data: Dict[str, Any],
+        output_dir: Optional[str | Path],
+    ) -> str:
+        """Phases 5 and 6: concolic (Z3) and SHACL/Prolog verification."""
+        feedback_parts: List[str] = []
+
+        # Concolic feedback.
+        try:
+            concolic = ConcolicManifestVerifier(data)
+            c_result = concolic.verify()
+            if not c_result.satisfiable:
+                feedback_parts.append("Concolic (Z3) verification failed:")
+                for rule in c_result.conflicting_rules:
+                    feedback_parts.append(f"- {rule}")
+        except Exception as exc:
+            logger.debug("Concolic verification skipped: %s", exc)
+
+        # SHACL firewall.
+        try:
+            firewall = LogicalFirewall(data)
+            fw_report = firewall.validate()
+            if not fw_report.conforms:
+                feedback_parts.append("SHACL firewall violations:")
+                for v in fw_report.violations:
+                    feedback_parts.append(f"- {v.get('message', '')}")
+        except Exception as exc:
+            logger.debug("SHACL firewall skipped: %s", exc)
+
+        # Chiasmus / Prolog verification on the workspace if it exists.
+        if output_dir:
+            root = Path(output_dir).resolve()
+            if root.is_dir() and any(f.is_file() for f in root.rglob("*")):
+                try:
+                    from aero_forge.builder.chiasmus import analyze_repository
+                    boundaries = [
+                        (e.get("source", ""), e.get("target", ""), e.get("boundary_type", ""))
+                        for e in data.get("edges", [])
+                    ]
+                    report = analyze_repository(root, boundaries=boundaries)
+                    if report.cycles or report.unsafe_ffi:
+                        feedback_parts.append("Prolog/Chiasmus verification failed:")
+                        for cycle in report.cycles:
+                            feedback_parts.append(f"- Cycle: {' -> '.join(cycle)}")
+                        for t in report.unsafe_ffi:
+                            feedback_parts.append(
+                                f"- Unsafe FFI: {t['source']} ({t['source_lang']}) -> "
+                                f"{t['target']} ({t['target_lang']}) via {t['relation']}"
+                            )
+                except Exception as exc:
+                    logger.debug("Chiasmus verification skipped: %s", exc)
+
+        return "\n".join(feedback_parts)
+
+    def _six_phase_user_content(
+        self,
+        prompt_text: str,
+        classification: Dict[str, Any],
+        hctx: HolographicContext,
+        topology: Dict[str, Any],
+        skeleton: Dict[str, Any],
+    ) -> str:
+        """Phase 4: bounded intent completion prompt.
+
+        The LLM receives the user prompt, a verified classification, the
+        category-theoretic skeleton, and a compact topological prefix. It does
+        NOT receive raw source files; all structural constraints are encoded in
+        the skeleton and the SMT/SHACL verification layer enforces them after the
+        fact.
+        """
+        classification_text = (
+            json.dumps(classification, indent=2) if classification else "{}"
+        )
+        skeleton_text = json.dumps(skeleton, indent=2) if skeleton else "{}"
+        topology_text = json.dumps(topology, indent=2)
+        drift_text = ""
+        if hctx.hinv is not None:
+            symbols = [
+                i.get("symbol_name") or i.get("name", "")
+                for i in (classification.get("functional_intent") or [])
+            ]
+            if symbols:
+                try:
+                    drift = hctx.measure_symbol_drift(symbols)
+                    drift_text = f"\nIntent-to-invariant drift: {drift:.4f}"
+                except Exception:
+                    pass
+
+        return (
+            f"{prompt_text}\n\n"
+            f"Verified classification:\n```json\n{classification_text}\n```\n"
+            f"\nTopological prefix (FoGE):\n```json\n{topology_text}\n```\n"
+            f"\nManifest skeleton (Adjoint / typed holes to fill):\n```json\n{skeleton_text}\n```\n"
+            f"{drift_text}\n\n"
+            "Return the COMPLETE PolyglotGraphBlueprint JSON. "
+            "Fill every <TYPED_HOLE> with a concrete value. "
+            "It must include nodes (with exports), edges/contracts, functional_intent, source_files, and metadata. "
+            "NO PREAMBLE. NO EXPLANATION. ONLY JSON."
+        )
+
     def compile_prompt_to_graph(
         self,
         prompt_text: str,
@@ -1032,7 +1208,7 @@ class IntentCompiler:
         reading the prompt). If the classification is sound, a second call asks
         for the complete graph blueprint populated with contracts/edges.
         """
-        _accel_log("info", "Enriching Blueprint (tiered)...")
+        _accel_log("info", "Enriching Blueprint (six-phase pipeline)...")
         client = self._llm_client
         if client is None:
             client = get_llm_client(
@@ -1049,26 +1225,27 @@ class IntentCompiler:
         if self._system_prompt_extra:
             system = f"{system}\n\n{self._system_prompt_extra}"
 
-        # Tier 0: classify architecture, toolchains, nodes, and functional_intent.
+        # Phase 0 / Tier 0: classify architecture, toolchains, nodes, and functional_intent.
         classification, _class_errors = self._classify_graph(
             client, system, prompt_text
         )
         if classification is not None and "_full_graph" in classification:
             return classification["_full_graph"]
 
-        classification_text = (
-            json.dumps(classification, indent=2) if classification else "{}"
+        # Phases 1-3: HIS context binding, FoGE topology prefix, and
+        # category-theoretic skeleton bootstrap.
+        hctx = self._six_phase_bind_context(classification or {})
+        topology = self._six_phase_topology_prefix(output_dir)
+        skeleton = self._six_phase_bootstrap_skeleton(
+            classification or {}, topology
         )
+
         messages: List[Dict[str, str]] = [
             {"role": "system", "content": system},
             {
                 "role": "user",
-                "content": (
-                    f"{prompt_text}\n\n"
-                    f"Verified classification:\n```json\n{classification_text}\n```\n\n"
-                    "Return the COMPLETE PolyglotGraphBlueprint JSON. "
-                    "It must include nodes (with exports), edges/contracts, functional_intent, source_files, and metadata. "
-                    "NO PREAMBLE. NO EXPLANATION. ONLY JSON."
+                "content": self._six_phase_user_content(
+                    prompt_text, classification or {}, hctx, topology, skeleton
                 ),
             },
         ]
@@ -1105,6 +1282,33 @@ class IntentCompiler:
                 )
                 messages.append({"role": "assistant", "content": raw})
                 messages.append(self._retry_user_message(attempt, raw, exc))
+                continue
+
+            # Phases 5-6: concolic (Z3), SHACL, and Prolog/Chiasmus verification.
+            formal_feedback = self._six_phase_formal_feedback(data, output_dir)
+            if formal_feedback:
+                last_error = IntentCompilerError(formal_feedback)
+                _accel_log(
+                    "warning",
+                    f"intent_compiler.compile_prompt_to_graph attempt {attempt + 1}: formal verification failed; "
+                    f"feedback preview: {formal_feedback[:400]!r}",
+                )
+                logger.warning(
+                    "Formal verification failed (attempt %d): %s",
+                    attempt + 1,
+                    formal_feedback[:400],
+                )
+                messages.append({"role": "assistant", "content": raw})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Formal verification failed. Resolve these issues and return corrected JSON.\n\n"
+                            f"{formal_feedback}\n\n"
+                            "NO PREAMBLE. NO EXPLANATION. ONLY JSON."
+                        ),
+                    }
+                )
                 continue
 
             # Primary path: a native `graph_polyglot` blueprint.

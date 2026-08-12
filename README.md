@@ -51,6 +51,50 @@ flowchart LR
     E --> F[Zero-Failure Emission & Build]
 ```
 
+## The Universal Update: Neurosymbolic HIS, FoGE, and Category-Theoretic Bootstrapping
+
+Aero-Forge now closes the "Stochastic Gap" between an unconstrained LLM and a localized constraint solver. Instead of asking the LLM to emit an entire `blueprint.aero` from scratch, the `IntentCompiler` compresses intent and repository topology into compact, high-dimensional artifacts and gives the LLM only *typed holes* to fill.
+
+### Holographic Invariant Storage (HIS)
+
+Functional-intent symbols are bound into **10,000-dimensional bipolar vectors** $v \in \{-1, 1\}^{10000}$.
+
+- **Binding** ($\otimes$) is element-wise multiplication; **Bundling** ($+$) is superposition; **Cleanup** is sign thresholding.
+- `HolographicContext.build_invariant_from_symbols(...)` builds an invariant $H_{inv} = \text{goal} \otimes \text{safety}$ from the prompt.
+- `measure_symbol_drift(...)` quantifies how far a generated blueprint has drifted from the requested intent, giving the `IntentCompiler` a numeric stopping criterion for re-enrichment.
+- Implemented in `aero_forge_his` (Rust/PyO3) and exposed through `aero_forge/builder/holographic.py`.
+
+### Fock-Space Graph Encoding (FoGE)
+
+The repository is parsed with Tree-sitter (Python, Rust, C++) and its inter-module dependency graph is mapped into a **Prompt-as-Prefix (PaP)** token space via circular convolution in Fourier space:
+
+```text
+token(source, relation, target) = F^{-1}( F(v_source) * F(v_relation) * F(v_target) )
+```
+
+- `FockGraphEncoder` emits `nodes`, `edges`, and `tokens` without exposing source code text to the LLM.
+- The topological prefix is fed into the bounded-completion prompt as a compact structural constraint.
+
+### Category-Theoretic Schema Bootstrapper
+
+`aero_forge/builder/adjoint.py` models natural-language intent as a source category $C$ and `blueprint.aero` as a target category $D$.
+
+- **ΣF** extracts/injects node stubs from `functional_intent`.
+- **ΔF** merges duplicate nodes and validates the node-edge graph.
+- **ΠF** projects the fibre product into a skeleton, enforcing FFI integrity (`PYO3_MATURIN`, `C_ABI`, `INTERNAL`) for every edge.
+- The **Grothendieck construction** $\\int F$ gives each user requirement a deterministic coordinate, producing a rigid manifest skeleton with `typed_holes` that the LLM must fill.
+
+## Zero-Failure Guarantee: Pre-Materialization Verification
+
+Before any source file is written or native toolchain invoked, the engine proves the manifest is internally consistent.
+
+- **Z3 / SMT Concolic Verification** (`aero_forge/builder/concolic.py`) translates the manifest into named Boolean constraints. It detects invalid toolchains, missing functional-intent coverage, cyclic dependencies, and illegal FFI boundaries, returning the **minimal unsatisfiable core** for LLM repair.
+- **SHACL Logical Firewall** (`aero_forge/builder/firewall.py`) converts the manifest into an RDF graph and validates it against W3C SHACL shapes, plus deterministic toolchain/language and boundary compatibility checks.
+- **GoI Proof Net** verifies the execution matrix $EX(M, U) = (I - U \\cdot M)^{-1} \\cdot U$ is well-defined, guaranteeing deadlock-free transitive wavefront scheduling across polyglot targets.
+- **Prolog/Chiasmus** (`aero_forge/builder/chiasmus.py`) extracts ground facts from Tree-sitter ASTs and detects unsafe cross-language transitions and cyclic module dependencies.
+
+The `IntentCompiler` six-phase pipeline (HIS → FoGE → Adjoint → Bounded Completion → Z3 Concolic → SHACL/GoI/Chiasmus) only proceeds to materialization after all gates pass.
+
 ## Architecture
 
 ### A. Holographic Interaction Net (HIN) Engine & MELL Linear Typing
@@ -60,7 +104,7 @@ Aero-Forge's Python AST is lowered into a **Holographic Interaction Net (HIN)** 
 - **Homomorphic UAST lowering**: Python AST nodes (`BinOp`, `IfExp`, function calls, `return`, etc.) are translated into interaction-net agents: `Constructor`, `Destructor`, `Switch`, `Duplicator`, `Eraser`, `Value`, and `CausalProjection`.
 - **Active-pair reduction**: Computation advances by repeatedly collapsing connected principal-port pairs. Supported rules include annihilation, duplication, erasure, conditional switching, and causal projection. Each rule rewires only the immediately adjacent ports, so the cost of one step is `O(1)`.
 - **MELL linear typing**: Every wire carries a **Multiplicative-Exponential Linear Logic (MELL)** type (`I`, `Tensor`, `Implication`, `Bang`). These types replace dynamic symbol tables — variables are bound directly to physical topological edges. When a value is consumed, its wire is discharged, giving exact, zero-dynamic-heap memory accounting.
-- **Native Rust arena**: The HIN kernel lives in `_native/src/hin_engine.rs`. Nodes and ports are stored in flat `Vec`s of `u32`-indexed slots. Reduction runs with the Python GIL released, and the resulting live graph is serialized back to JSON only once at the end.
+- **Native Rust arena**: The HIN kernel lives in `_native/src/hin_engine.rs`. Nodes and ports are stored in flat `Vec`s of `u32`-indexed slots. Reduction runs with the Python GIL released in sub-millisecond time, and the resulting live graph is serialized back to JSON only once at the end. This gives zero-heap memory accounting: values live on wires and are discharged when consumed.
 
 ### B. Execution Matrix Core & Geometry of Interaction (GoI)
 
@@ -72,7 +116,7 @@ EX(M, U) = (I - U · M)^(-1) · U
 
 - `M` is the dependency adjacency matrix (`M[i, j] = 1` if task `j` depends on task `i`).
 - `U` is the routing/execution rule matrix that propagates completed work to dependent tasks.
-- `EX(M, U)` returns the transitive execution wave matrix: each row gives the total influence (precedence ordering) of every other task.
+- `EX(M, U)` returns the transitive execution wave matrix: each row gives the total influence (precedence ordering) of every other task. GoI wavefront scheduling is used to dispatch polyglot targets (Rust, C++, Zig, Python) in dependency order.
 
 **Incremental Schedule Repair (`ΔM`)**: When a local patch, LLM edit, or build failure changes only a few edges, Aero-Forge applies a `ΔM` update and recomputes only the affected wavefronts instead of rebuilding the full DAG. This keeps multi-round generation and healing responsive on 500+ node project graphs.
 

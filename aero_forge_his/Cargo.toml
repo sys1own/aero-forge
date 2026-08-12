@@ -1,0 +1,17 @@
+[package]
+name = "aero_forge_his"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "aero_forge_his"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py310"] }
+rayon = "1"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = "thin"

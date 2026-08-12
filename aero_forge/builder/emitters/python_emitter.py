@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from typing import List, Optional
 
 from aero_forge.builder.emitters.base import (
@@ -195,7 +196,7 @@ class PythonEmitterPlugin(PolyglotEmitterPlugin):
         if _has_pyo3_consumer_contract(node_id, boundary_contracts):
             source = _pyo3_loader_source(node_id, boundary_contracts, node_spec)
         elif _has_c_abi_consumer_contract(node_id, boundary_contracts):
-            source = _ctypes_loader_source(node_id, boundary_contracts)
+            source = _ctypes_loader_source(node_id, boundary_contracts, node_spec)
         else:
             spec = _engine_spec_from_node_spec(node_id, node_spec)
             source = PythonEmitter().emit(spec)
@@ -319,20 +320,53 @@ if __name__ == "__main__":
 '''
 
 
-def _ctypes_loader_source(node_id: str, boundary_contracts: List[dict]) -> str:
+def _ctypes_loader_source(
+    node_id: str,
+    boundary_contracts: List[dict],
+    node_spec: Optional[dict] = None,
+) -> str:
     """Generate a Python CLI that loads the source node's C-ABI shared library."""
-    contract = next(
-        (
-            c
-            for c in boundary_contracts
-            if c.get("boundary_type") == "c_abi" and c.get("target") == node_id
-        ),
-        {},
-    )
-    source_node = contract.get("source", "native_kernel")
-    symbol = contract.get("symbol", "fast_math_kernel")
-    args = contract.get("args", ["int64"])
-    return_type = contract.get("return_type", "int64") or "int64"
+    contracts = [
+        c
+        for c in boundary_contracts
+        if c.get("boundary_type") == "c_abi" and c.get("target") == node_id
+    ]
+    if not contracts:
+        contracts = [
+            next(
+                (
+                    c
+                    for c in boundary_contracts
+                    if c.get("boundary_type") == "c_abi"
+                ),
+                {},
+            )
+        ]
+    source_node = contracts[0].get("source", "native_kernel")
+
+    # The boundary contracts may be simplified by the orchestrator; prefer the
+    # richer signatures stored in the Compacted Functional Matrix when available.
+    compacted = (node_spec or {}).get("_compacted_context") or {}
+    if isinstance(compacted, str):
+        try:
+            compacted = json.loads(compacted)
+        except Exception:
+            compacted = {}
+    compacted_contracts = (compacted or {}).get("contracts") or []
+    for contract in contracts:
+        for cc in compacted_contracts:
+            if (
+                cc.get("symbol") == contract.get("symbol")
+                and cc.get("source", contract.get("source"))
+                == contract.get("source")
+                and cc.get("target", contract.get("target"))
+                == contract.get("target")
+            ):
+                if cc.get("args") and len(cc["args"]) >= len(contract.get("args") or []):
+                    contract["args"] = list(cc["args"])
+                if cc.get("return_type"):
+                    contract["return_type"] = cc["return_type"]
+                break
 
     ctype_for = {
         "int32": "ctypes.c_int32",
@@ -341,46 +375,119 @@ def _ctypes_loader_source(node_id: str, boundary_contracts: List[dict]) -> str:
         "float64": "ctypes.c_double",
         "pointer": "ctypes.POINTER(ctypes.c_double)",
     }
-    argtypes = ", ".join(ctype_for.get(a, "ctypes.c_int64") for a in args)
-    restype = ctype_for.get(return_type, "ctypes.c_int64")
+    py_type_for = {
+        "int32": "int",
+        "int64": "int",
+        "float32": "float",
+        "float64": "float",
+        "pointer": "List[float]",
+    }
 
-    call_args = _demo_call_args(args)
-    call = f"{symbol}({call_args})"
+    def _arg_name(i: int) -> str:
+        return f"arg{i}"
+
+    wrappers: List[str] = []
+    main_calls: List[str] = []
+    demo_limit = 100
+    for contract in contracts:
+        symbol = contract.get("symbol", "fast_math_kernel")
+        args = list(contract.get("args") or ["int64"])
+        return_type = contract.get("return_type", "int64") or "int64"
+        argtypes = ", ".join(ctype_for.get(a, "ctypes.c_int64") for a in args)
+        restype = ctype_for.get(return_type, "ctypes.c_int64")
+
+        wrappers.append(f'_c_{symbol} = getattr(_LIB, "{symbol}", None)')
+        wrappers.append(f'if _c_{symbol} is None:')
+        wrappers.append(f'    _c_{symbol} = getattr(_LIB, "_{symbol}", None)')
+        wrappers.append(f'if _c_{symbol} is None:')
+        wrappers.append(f'    _c_{symbol} = getattr(_LIB, "{symbol}_", None)')
+        wrappers.append(f'if _c_{symbol} is None:')
+        wrappers.append(f'    raise AttributeError(f"Symbol {symbol!r} not found in {{_LIB_NAME}}")')
+        wrappers.append(f"_c_{symbol}.argtypes = [{argtypes}]")
+        wrappers.append(f"_c_{symbol}.restype = {restype}")
+
+        arg_names = [_arg_name(i) for i in range(len(args))]
+        sig_args = ", ".join(
+            f"{n}: {py_type_for.get(a, 'int')}" for n, a in zip(arg_names, args)
+        ) or "*args"
+
+        # Generic pointer handling: every `pointer` argument is marshalled through a
+        # ctypes c_double array whose size is derived from the Python list length.
+        # After the native call, changed values are copied back into the Python lists
+        # so out-parameters and output buffers both work.
+        wrapper_body: List[str] = ["    _bufs: dict = {}"]
+        c_call_args: List[str] = []
+        for n, a in zip(arg_names, args):
+            if a == "pointer":
+                wrapper_body.append(f"    _bufs[{n!r}] = (ctypes.c_double * max(len({n}), 1))()")
+                wrapper_body.append(f"    for _j, _v in enumerate({n}):")
+                wrapper_body.append(f"        if _j < len(_bufs[{n!r}]):")
+                wrapper_body.append(f"            _bufs[{n!r}][_j] = _v")
+                c_call_args.append(f"_bufs[{n!r}]")
+            else:
+                c_call_args.append(n)
+        wrapper_body.append(f"    _res = _c_{symbol}({', '.join(c_call_args)})")
+        for n, a in zip(arg_names, args):
+            if a == "pointer":
+                wrapper_body.append(f"    for _j in range(min(_res, len({n}))):")
+                wrapper_body.append(f"        if _j < len({n}):")
+                wrapper_body.append(f"            {n}[_j] = _bufs[{n!r}][_j]")
+        wrapper_body.append("    return int(_res)")
+        if return_type in ("float32", "float64") and not any(a == "pointer" for a in args):
+            wrapper_body[-1] = f"    return float(_res)"
+
+        wrappers.append(f"def {symbol}({sig_args}) -> {py_type_for.get(return_type, 'int')}:")
+        wrappers.append(f'    """Python wrapper for the C-ABI symbol `{symbol}`."""')
+        wrappers.extend(wrapper_body)
+        wrappers.append("")
+
+        # Build a simple main() demo call for this contract.
+        call_args: List[str] = []
+        pointer_count = 0
+        for i, a in enumerate(args):
+            if a == "pointer":
+                # The first pointer is treated as the output buffer (larger);
+                # subsequent pointers are out-parameter slots.
+                buf_size = demo_limit if pointer_count == 0 else 1
+                buf_var = f"_{symbol}_buf_{pointer_count}"
+                main_calls.append(f"    {buf_var} = [0.0] * {buf_size}")
+                call_args.append(buf_var)
+                pointer_count += 1
+            elif a in ("float32", "float64"):
+                call_args.append("42.0")
+            else:
+                call_args.append(str(demo_limit))
+        if return_type in ("void", ""):
+            main_calls.append(f"    {symbol}({', '.join(call_args)})")
+        else:
+            main_calls.append(f"    print({symbol}({', '.join(call_args)}))")
+
+    main_lines = [
+        'def main(argv=None):',
+        '    """CLI entry point that exercises every C-ABI contract."""',
+        '    import sys',
+        '    if argv is None:',
+        '        argv = sys.argv[1:]',
+    ] + main_calls + ["    return 0"]
 
     return f'''"""Auto-generated Python CLI for the C-ABI bridge."""
 import ctypes
-import os
+import sys
 from pathlib import Path
+from typing import List
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _LIB_NAME = "lib{source_node}.so"
-_LIB_PATH: Path | None = None
-for _p in (_SCRIPT_DIR, *_SCRIPT_DIR.parents):
-    _candidate = _p / "{source_node}" / _LIB_NAME
-    if _candidate.exists():
-        _LIB_PATH = _candidate
-        break
-if _LIB_PATH is None:
-    # Fall back to a conventional sibling layout.
-    _LIB_PATH = _SCRIPT_DIR.parent / "{source_node}" / _LIB_NAME
+# The .so is built in the source-node directory at the workspace root.
+_LIB_PATH = _SCRIPT_DIR.parents[2] / "{source_node}" / _LIB_NAME
 
 _LIB = ctypes.CDLL(str(_LIB_PATH))
 
-# Prefer the unmangled symbol; allow common prefix variations if the ABI
-# boundary used different naming conventions.
-{symbol} = getattr(_LIB, "{symbol}", None)
-if {symbol} is None:
-    {symbol} = getattr(_LIB, "_{symbol}", None)
-if {symbol} is None:
-    {symbol} = getattr(_LIB, "{symbol}_", None)
-if {symbol} is None:
-    raise AttributeError(f"Symbol {symbol!r} not found in {{_LIB_NAME}}")
-{symbol}.argtypes = [{argtypes}]
-{symbol}.restype = {restype}
+{chr(10).join(wrappers)}
+{chr(10).join(main_lines)}
 
 if __name__ == "__main__":
-    result = {call}
-    print(f"{symbol}({call_args}) = {{result}}")
+    sys.exit(main())
 '''
 
 
