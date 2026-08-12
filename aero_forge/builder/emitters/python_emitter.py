@@ -478,8 +478,17 @@ from typing import List
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _LIB_NAME = "lib{source_node}.so"
-# The .so is built in the source-node directory at the workspace root.
-_LIB_PATH = _SCRIPT_DIR.parents[2] / "{source_node}" / _LIB_NAME
+# The .so is built in the source-node directory. Search up the tree because
+# the Python entrypoint may live directly under the node dir or inside a
+# nested ``python_interface`` package.
+_LIB_PATH = None
+for _depth in range(min(4, len(_SCRIPT_DIR.parents))):
+    _candidate = _SCRIPT_DIR.parents[_depth] / "{source_node}" / _LIB_NAME
+    if _candidate.exists():
+        _LIB_PATH = _candidate
+        break
+if _LIB_PATH is None:
+    _LIB_PATH = _SCRIPT_DIR.parent / "{source_node}" / _LIB_NAME
 
 _LIB = ctypes.CDLL(str(_LIB_PATH))
 

@@ -29,7 +29,7 @@ from aero_forge.blueprint.schema import (
 )
 from aero_forge.builder.holographic import HolographicContext, intent_vector
 from aero_forge.builder.foge import FockGraphEncoder
-from aero_forge.builder.adjoint import SchemaBootstrapper
+from aero_forge.builder.adjoint import NodeStub, SchemaBootstrapper
 from aero_forge.builder.concolic import ConcolicManifestVerifier, ConcolicResult
 from aero_forge.builder.firewall import LogicalFirewall
 from aero_forge.builder.chiasmus import (
@@ -1194,6 +1194,407 @@ class IntentCompiler:
             "NO PREAMBLE. NO EXPLANATION. ONLY JSON."
         )
 
+    # ------------------------------------------------------------------
+    # Fiber-wise atomic enrichment with HIS drift correction and adjoint
+    # stubbing fallback.
+    # ------------------------------------------------------------------
+    def _current_symbols(
+        self,
+        classification: Dict[str, Any],
+        partial: Dict[str, Any],
+    ) -> List[str]:
+        """Collect the symbol names currently represented in the partial blueprint."""
+        symbols: set = set()
+        for intent in classification.get("functional_intent") or []:
+            name = intent.get("symbol_name") or intent.get("name")
+            if name:
+                symbols.add(name)
+        for node in partial.get("nodes") or []:
+            node_id = node.get("node_id")
+            if node_id:
+                symbols.add(node_id)
+            for exported in node.get("exports") or []:
+                if exported:
+                    symbols.add(exported)
+        for edge in partial.get("edges") or []:
+            if edge.get("symbol"):
+                symbols.add(edge["symbol"])
+        return sorted(symbols)
+
+    def _measure_his_drift(
+        self,
+        hctx: HolographicContext,
+        classification: Dict[str, Any],
+        partial: Dict[str, Any],
+    ) -> float:
+        """Return drift as 1 - cosine_similarity against the invariant.
+
+        A value greater than 0.3 (similarity below 0.7) triggers context
+        restoration and FoGE pruning.
+        """
+        if hctx.hinv is None:
+            return 0.0
+        symbols = self._current_symbols(classification, partial)
+        if not symbols:
+            return 0.0
+        try:
+            similarity = hctx.measure_symbol_drift(symbols)
+            return 1.0 - similarity
+        except Exception:
+            return 0.0
+
+    def _apply_his_restore(
+        self,
+        hctx: HolographicContext,
+        classification: Dict[str, Any],
+        partial: Dict[str, Any],
+    ) -> None:
+        """Clean a noisy context vector against the stored invariant."""
+        if hctx.hinv is None:
+            return
+        symbols = self._current_symbols(classification, partial)
+        if not symbols:
+            return
+        try:
+            context = intent_vector(symbols)
+            hctx.restore_context(context)
+            _accel_log(
+                "info",
+                f"HIS context restored for symbols: {symbols}; drift exceeded threshold",
+            )
+        except Exception as exc:
+            logger.debug("HIS context restoration skipped: %s", exc)
+
+    def _prune_foge_topology(
+        self,
+        topology: Dict[str, Any],
+        symbols: List[str],
+    ) -> Dict[str, Any]:
+        """Reduce the FoGE prefix to symbols relevant to the current fiber.
+
+        Keeps only nodes whose id or exports overlap with the symbol set and
+        edges between kept nodes.
+        """
+        if not topology.get("encoded"):
+            return topology
+        symbol_set = set(symbols)
+        kept_nodes: List[str] = []
+        for node in topology.get("nodes") or []:
+            name = str(node)
+            if any(sym in name for sym in symbol_set) or not symbol_set:
+                kept_nodes.append(node)
+        # Hard cap on token overhead.
+        kept_nodes = kept_nodes[:10]
+        kept_set = set(kept_nodes)
+        kept_edges: List[Dict[str, Any]] = []
+        for edge in topology.get("edges") or []:
+            src = edge.get("source")
+            tgt = edge.get("target")
+            if src in kept_set and tgt in kept_set:
+                kept_edges.append(edge)
+        return {
+            "encoded": topology.get("encoded", False),
+            "dim": topology.get("dim", 0),
+            "nodes": kept_nodes,
+            "edges": kept_edges,
+        }
+
+    def _stub_to_node(self, stub: NodeStub) -> Dict[str, Any]:
+        """Convert an adjoint NodeStub into a graph node dict with a function stub."""
+        symbol = stub.exports[0] if stub.exports else stub.node_id
+        return {
+            "node_id": stub.node_id,
+            "lang": stub.lang,
+            "toolchain": stub.toolchain,
+            "source_files": list(stub.source_files),
+            "exports": list(stub.exports),
+            "purpose": stub.purpose,
+            "logic_sketch": (
+                f"Auto-generated {stub.lang} stub for '{symbol}'. "
+                f"Implement the symbol matching its functional intent and any ABI contract."
+            ),
+            "contracts": [],
+        }
+
+    def _merge_fiber_node(
+        self,
+        existing: Dict[str, Any],
+        incoming: Dict[str, Any],
+    ) -> None:
+        """Merge a fiber-generated node into an existing partial node."""
+        for key in ("lang", "toolchain", "purpose", "logic_sketch"):
+            if incoming.get(key) and incoming[key] != "<TYPED_HOLE>":
+                existing[key] = incoming[key]
+        for key in ("exports", "source_files"):
+            combined = list(existing.get(key) or [])
+            for item in incoming.get(key) or []:
+                if item and item not in combined:
+                    combined.append(item)
+            existing[key] = combined
+        for key in ("compiler_flags", "dependencies"):
+            combined = list(existing.get(key) or [])
+            for item in incoming.get(key) or []:
+                if item and item not in combined:
+                    combined.append(item)
+            existing[key] = combined
+        if incoming.get("extra"):
+            existing.setdefault("extra", {}).update(incoming["extra"])
+
+    def _sanitize_partial(self, partial: Dict[str, Any]) -> None:
+        """Repair an assembled partial blueprint before formal validation.
+
+        Removes edges referencing unknown nodes and drops intra-language edges
+        (those are internal imports, not FFI boundaries). Cross-language edges
+        are normalized to one of the supported ``BoundaryContractType`` values.
+        """
+        node_ids = {n.get("node_id") for n in partial.get("nodes") or [] if n.get("node_id")}
+        node_langs = {
+            n.get("node_id"): (n.get("lang") or "").lower()
+            for n in partial.get("nodes") or []
+        }
+        valid_boundaries = {
+            "c_abi", "pyo3_maturin", "wasm_wasi", "jni", "cgo", "pinvoke", "cuda_hip_c"
+        }
+        sanitized_edges: List[Dict[str, Any]] = []
+        for edge in partial.get("edges") or []:
+            src = edge.get("source")
+            tgt = edge.get("target")
+            if src not in node_ids or tgt not in node_ids or src == tgt:
+                continue
+            src_lang = node_langs.get(src, "")
+            tgt_lang = node_langs.get(tgt, "")
+            if src_lang and tgt_lang and src_lang == tgt_lang:
+                continue
+            boundary = str(edge.get("boundary_type") or "c_abi").lower().replace("-", "_")
+            if boundary not in valid_boundaries:
+                boundary = "c_abi"
+            edge["boundary_type"] = boundary
+            edge["symbol"] = edge.get("symbol") or ""
+            edge["args"] = [str(a) for a in (edge.get("args") or [])]
+            edge["return_type"] = str(edge.get("return_type") or "")
+            edge["is_zero_copy"] = bool(edge.get("is_zero_copy", False))
+            sanitized_edges.append(edge)
+        partial["edges"] = sanitized_edges
+
+        # Ensure every functional_intent symbol has a node or edge representation.
+        intent_symbols = {
+            i.get("symbol_name") or i.get("name")
+            for i in partial.get("functional_intent") or []
+        }
+        present = node_ids.copy()
+        for edge in sanitized_edges:
+            if edge.get("symbol"):
+                present.add(edge["symbol"])
+        for node in partial.get("nodes") or []:
+            for exported in node.get("exports") or []:
+                if exported:
+                    present.add(exported)
+        missing = sorted(intent_symbols - present)
+        if missing:
+            _accel_log(
+                "warning",
+                f"Fiber-wise enrichment: missing symbols {missing}; injecting adjoint stubs",
+            )
+
+    def _query_fiber(
+        self,
+        client: Any,
+        system: str,
+        prompt_text: str,
+        classification: Dict[str, Any],
+        topology: Dict[str, Any],
+        skeleton: Dict[str, Any],
+        partial: Dict[str, Any],
+        intent: Dict[str, Any],
+        stub: NodeStub,
+    ) -> str:
+        """Ask the LLM to fill a single typed hole / Grothendieck fiber."""
+        symbol = intent.get("symbol_name") or intent.get("name") or (
+            stub.exports[0] if stub.exports else stub.node_id
+        )
+        node_id = stub.node_id
+        architecture = partial.get("architecture", "graph_polyglot")
+
+        context_text = json.dumps(
+            {
+                "project": partial.get("project"),
+                "architecture": architecture,
+                "functional_intent": partial.get("functional_intent"),
+                "already_populated_nodes": [
+                    {"node_id": n.get("node_id"), "exports": n.get("exports")}
+                    for n in partial.get("nodes") or []
+                ],
+            },
+            indent=2,
+        )
+
+        user_content = (
+            f"{prompt_text}\n\n"
+            f"Verified classification:\n```json\n{json.dumps(classification, indent=2)}\n```\n"
+            f"\nTopological prefix (FoGE):\n```json\n{json.dumps(topology, indent=2)}\n```\n"
+            f"\nManifest skeleton (Adjoint):\n```json\n{json.dumps(skeleton, indent=2)}\n```\n"
+            f"\nAlready populated context:\n```json\n{context_text}\n```\n"
+            f"\nFill the typed hole for the symbol '{symbol}' implemented by node '{node_id}'. "
+            f"Return ONLY a JSON object with these keys:\n"
+            f"  - 'nodes': a list containing ONE fully specified node dict for '{node_id}'"
+            f" (lang={stub.lang}, toolchain={stub.toolchain}, exports={stub.exports}, source_files={stub.source_files}).\n"
+            f"  - 'edges': a list of cross-language boundary edges (source, target, boundary_type, symbol, args, return_type) "
+            f"that connect this node's exported symbols to other nodes.\n"
+            f"NO PREAMBLE. NO EXPLANATION. ONLY JSON."
+        )
+
+        messages: List[Dict[str, str]] = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_content},
+        ]
+        return client.generate(messages, temperature=0.2, max_tokens=2048)
+
+    def _fiber_wise_atomic_completion(
+        self,
+        client: Any,
+        system: str,
+        prompt_text: str,
+        classification: Dict[str, Any],
+        hctx: HolographicContext,
+        topology: Dict[str, Any],
+        skeleton: Dict[str, Any],
+        output_dir: Optional[str | Path],
+        project_name: Optional[str],
+    ) -> PolyglotGraphBlueprint:
+        """Populate the blueprint one Grothendieck fiber at a time.
+
+        Each fiber corresponds to one (functional_intent, node_stub) pair. HIS
+        drift is checked before every LLM call; if it exceeds 0.3 the context is
+        restored and the FoGE prefix is pruned. Empty LLM responses fall back
+        to the adjoint ΣF stubbing path.
+        """
+        architecture = (
+            classification.get("architecture")
+            or skeleton.get("architecture")
+            or "graph_polyglot"
+        )
+        functional_intent = (
+            classification.get("functional_intent")
+            or skeleton.get("functional_intent")
+            or []
+        )
+
+        bootstrapper = SchemaBootstrapper(architecture_hint=architecture)
+        stubs = bootstrapper.ΣF(functional_intent)
+        repo_edges = [dict(e) for e in (topology.get("edges") or [])]
+        stubs, edges = bootstrapper.ΔF(stubs, repo_edges)
+        bundle = bootstrapper.grothendieck_bundle(functional_intent, stubs)
+        full_fallback = bootstrapper.ΠF(stubs, edges, functional_intent, architecture)
+        fallback_nodes = {n["node_id"]: n for n in full_fallback.get("nodes") or []}
+
+        partial: Dict[str, Any] = {
+            "project": (
+                project_name
+                or classification.get("project")
+                or skeleton.get("project")
+                or architecture
+            ),
+            "architecture": architecture,
+            "nodes": [],
+            "edges": [],
+            "functional_intent": functional_intent,
+            "metadata": {
+                "bootstrap_method": "category_theoretic",
+                "prompt": prompt_text,
+            },
+            "primary_entrypoint": skeleton.get("primary_entrypoint", ""),
+            "build_script": skeleton.get("build_script", ""),
+            "output_dir": str(Path(output_dir) / "dist") if output_dir else "./dist",
+        }
+
+        node_map: Dict[str, Dict[str, Any]] = {}
+
+        for intent, stub in bundle:
+            symbol = (
+                intent.get("symbol_name")
+                or intent.get("name")
+                or (stub.exports[0] if stub.exports else stub.node_id)
+            )
+
+            # HIS drift check and correction before every LLM call.
+            drift = self._measure_his_drift(hctx, classification, partial)
+            if drift > 0.3:
+                self._apply_his_restore(hctx, classification, partial)
+                topology = self._prune_foge_topology(
+                    topology,
+                    self._current_symbols(classification, partial),
+                )
+
+            raw = self._query_fiber(
+                client,
+                system,
+                prompt_text,
+                classification,
+                topology,
+                skeleton,
+                partial,
+                intent,
+                stub,
+            )
+
+            if not raw:
+                _accel_log(
+                    "warning",
+                    f"Fiber-wise enrichment: empty response for '{symbol}'; using adjoint ΣF stub",
+                )
+                node = fallback_nodes.get(stub.node_id) or self._stub_to_node(stub)
+            else:
+                try:
+                    fiber_data = _extract_json(raw)
+                except Exception as exc:
+                    _accel_log(
+                        "warning",
+                        f"Fiber-wise enrichment: JSON extraction failed for '{symbol}': {exc}",
+                    )
+                    fiber_data = {}
+                if not fiber_data:
+                    node = fallback_nodes.get(stub.node_id) or self._stub_to_node(stub)
+                else:
+                    for edge in fiber_data.get("edges") or []:
+                        partial["edges"].append(edge)
+                    node_list = fiber_data.get("nodes") or []
+                    node = node_list[0] if node_list else None
+                    if not node:
+                        node = fallback_nodes.get(stub.node_id) or self._stub_to_node(stub)
+
+            if node and node.get("node_id"):
+                node_id = node["node_id"]
+                if node_id in node_map:
+                    self._merge_fiber_node(node_map[node_id], node)
+                else:
+                    node_map[node_id] = node
+                    partial["nodes"].append(node)
+
+        self._sanitize_partial(partial)
+
+        # Phases 5-6: run formal verification on the assembled graph.
+        formal_feedback = self._six_phase_formal_feedback(partial, output_dir)
+        if formal_feedback:
+            _accel_log(
+                "warning",
+                f"Fiber-wise enrichment formal feedback: {formal_feedback}",
+            )
+            logger.warning("Fiber-wise enrichment formal feedback: %s", formal_feedback)
+
+        try:
+            graph = PolyglotGraphBlueprint.model_validate(partial)
+        except Exception as exc:
+            raise IntentCompilerError(
+                f"Fiber-wise atomic completion assembled an invalid blueprint: {exc}"
+            ) from exc
+
+        graph.metadata["prompt"] = prompt_text
+        graph.metadata["llm_initialized"] = True
+        graph.metadata["status"] = "finalized"
+        graph.metadata["generation_method"] = "llm_synthesized"
+        _accel_log("success", "Blueprint fiber-wise atomic enrichment complete")
+        return graph
+
     def compile_prompt_to_graph(
         self,
         prompt_text: str,
@@ -1239,6 +1640,31 @@ class IntentCompiler:
         skeleton = self._six_phase_bootstrap_skeleton(
             classification or {}, topology
         )
+
+        # Attempt fiber-wise atomic completion first. It queries the LLM once
+        # per Grothendieck fiber (typed hole) and falls back to adjoint stubbing
+        # when the LLM returns an empty response.
+        try:
+            return self._fiber_wise_atomic_completion(
+                client,
+                system,
+                prompt_text,
+                classification or {},
+                hctx,
+                topology,
+                skeleton,
+                output_dir,
+                project_name,
+            )
+        except Exception as fiber_exc:
+            _accel_log(
+                "warning",
+                f"Fiber-wise atomic completion failed; falling back to monolithic enrichment: {fiber_exc}",
+            )
+            logger.warning(
+                "Fiber-wise atomic completion failed; falling back to monolithic enrichment: %s",
+                fiber_exc,
+            )
 
         messages: List[Dict[str, str]] = [
             {"role": "system", "content": system},

@@ -1082,6 +1082,49 @@ else:
                     artifact.language = "mojo"
         return artifacts
 
+    def _validate_manifest_artifacts(
+        self,
+        node_id: str,
+        node_spec: Dict[str, Any],
+        source_artifacts: List[CodeArtifact],
+        manifest_artifacts: List[CodeArtifact],
+        lang: str,
+    ) -> List[CodeArtifact]:
+        """Replace manifest artifacts whose content is clearly the wrong format."""
+        validated: List[CodeArtifact] = []
+        for artifact in manifest_artifacts:
+            name = Path(artifact.file_path).name
+            content = artifact.content or ""
+            invalid = False
+            if name == "Cargo.toml":
+                invalid = "[package]" not in content
+            elif name == "CMakeLists.txt":
+                invalid = "cmake_minimum_required" not in content.lower()
+            elif name == "pyproject.toml":
+                invalid = "[build-system]" not in content and "[project]" not in content
+            elif name == "go.mod":
+                invalid = "module " not in content
+            if invalid:
+                _accel_log(
+                    "warning",
+                    f"Manifest content invalid for {node_id} ({artifact.file_path}); "
+                    f"recovering deterministic manifest",
+                )
+                try:
+                    recovered = ManifestRecovery.synthesize(
+                        node_id, node_spec, source_artifacts, lang
+                    )
+                    validated.append(recovered)
+                except ManifestRecoveryError as exc:
+                    _accel_log(
+                        "error",
+                        f"Manifest recovery failed for {node_id}: {exc}",
+                    )
+                    validated.append(artifact)
+            else:
+                validated.append(artifact)
+        return validated
+
     def _assign_artifact_paths(
         self, artifacts: List[CodeArtifact], node_id: str, node_spec: Dict[str, Any]
     ) -> List[CodeArtifact]:
@@ -1685,6 +1728,13 @@ else:
         else:
             manifest_artifacts = list(manifest_artifacts)
 
+        # Validate manifest content; replace garbage/manifests from the wrong
+        # language (e.g. a ``Cargo.toml`` containing ``pytest>=7.0.0``) with a
+        # deterministic recovery manifest.
+        manifest_artifacts = self._validate_manifest_artifacts(
+            node_id, node_spec, source_artifacts, manifest_artifacts, lang
+        )
+
         # If the plugin emitted hollow source files (e.g. only imports/docstrings),
         # emitted syntactically invalid code, or failed to define the required
         # export symbols, ask the Builder Code Emission Agent to synthesize real
@@ -1966,6 +2016,11 @@ else:
                 # `_ = arg_X;` for unused parameters, but rejects it as pointless
                 # if the parameter is used later in the function.
                 content = self._zig_normalize_unused_params(content)
+                # Zig 0.16 cannot infer the result type of ``@floatFromInt`` or
+                # ``@intFromFloat`` when they are wrapped in ``@intCast``/``@as``.
+                # Remove redundant casts and let the typed assignment provide the
+                # result type.
+                content = self._zig_simplify_casts(content)
                 artifact.content = content
             elif is_python:
                 content = artifact.content
@@ -1975,6 +2030,18 @@ else:
                 ):
                     content = "from typing import Any\n" + content
                     artifact.content = content
+            elif artifact.language == "rust" or str(artifact.file_path).endswith(".rs"):
+                content = artifact.content
+                # rand 0.8 requires the SeedableRng trait in scope to call
+                # StdRng::seed_from_u64, and the Rng trait for gen_range.
+                if "seed_from_u64" in content and "use rand::SeedableRng" not in content:
+                    content = "use rand::SeedableRng;\n" + content
+                if (
+                    ("thread_rng" in content or ".gen_range(" in content or ".gen(" in content)
+                    and "use rand::Rng" not in content
+                ):
+                    content = "use rand::Rng;\n" + content
+                artifact.content = content
         return artifacts
 
     def _zig_normalize_unused_params(self, content: str) -> str:
@@ -2020,6 +2087,44 @@ else:
         out.append(content[last:])
         return "".join(out)
 
+    def _zig_simplify_casts(self, content: str) -> str:
+        """Remove redundant ``@intCast`` wrappers around float/int builtins.
+
+        Zig 0.16 cannot infer the result type of ``@intFromFloat`` or
+        ``@floatFromInt`` when it is wrapped in ``@intCast(...)`` or
+        ``@as(Type, @intCast(...))``. Because the assignment provides the
+        destination type, the inner conversion alone is sufficient.
+        """
+        pos = 0
+        while True:
+            idx = content.find("@intCast(", pos)
+            if idx == -1:
+                break
+            start = idx + len("@intCast(")
+            depth = 1
+            i = start
+            while i < len(content) and depth > 0:
+                if content[i] == "(":
+                    depth += 1
+                elif content[i] == ")":
+                    depth -= 1
+                i += 1
+            if depth != 0:
+                break
+            inner = content[start : i - 1].strip()
+            if inner.startswith("@floatFromInt(") or inner.startswith("@intFromFloat("):
+                content = content[:idx] + inner + content[i:]
+                pos = idx
+            else:
+                pos = idx + 1
+        # Also rewrite ``@as(Type, @intCast(@floatFromInt(E)))`` and similar.
+        content = re.sub(
+            r"@as\(([^,()]+),\s*@intCast\(@(floatFromInt|intFromFloat)\(([^)]*)\)\)\s*\)",
+            r"@as(\1, @\2(\3))",
+            content,
+        )
+        return content
+
     def _synchronize_shared_library_paths(self, hin_graph_spec: Dict[str, Any]) -> None:
         """Rewrite Python ctypes loaders so they point to the actual built .so.
 
@@ -2058,7 +2163,9 @@ else:
                 content = re.sub(
                     r"^_LIB_PATH\s*=\s*.*$",
                     lambda m, src=source_node: (
-                        f"_LIB_PATH = str((Path(__file__).resolve().parents[2] / {src!r} / 'lib{src}.so').absolute())"
+                        f"_LIB_PATH = next((p for d in range(min(4, len(Path(__file__).resolve().parents))) "
+                        f"if (p := Path(__file__).resolve().parents[d] / {src!r} / 'lib{src}.so').exists()), "
+                        f"Path(__file__).resolve().parent / {src!r} / 'lib{src}.so')"
                     ),
                     content,
                     flags=re.MULTILINE,
@@ -2074,6 +2181,9 @@ else:
                 ),
                 content,
             )
+            # The rewrite uses ``Path``; make sure the module imports it.
+            if "Path(" in content and "from pathlib import Path" not in content:
+                content = "from pathlib import Path\n" + content
             py_file.write_text(content, encoding="utf-8")
 
     def _configure_registry_jit(self) -> None:
