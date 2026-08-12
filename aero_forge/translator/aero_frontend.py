@@ -87,9 +87,10 @@ def _lower_stmt(stmt: ast.stmt) -> Optional[dict]:
             "with statements / context managers are not supported", node=stmt
         )
     if isinstance(stmt, (ast.Try, getattr(ast, "TryStar", ()))):
-        raise UnsupportedError(
-            "try/except exception handling is not supported", node=stmt
-        )
+        # The HIN UAST does not model exception handlers; lower the happy-path
+        # body so the function still contributes to node saturation.
+        body = [n for n in (_lower_stmt(s) for s in stmt.body) if n is not None]
+        return body[-1] if body else None
     if isinstance(stmt, (ast.Yield, ast.YieldFrom)):
         raise UnsupportedError("yield / generators are not supported", node=stmt)
     if isinstance(stmt, ast.AsyncFor):

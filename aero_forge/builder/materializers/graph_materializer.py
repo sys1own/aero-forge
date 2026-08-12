@@ -1900,8 +1900,8 @@ else:
         # files so the native toolchain always has a non-empty build configuration.
         return manifest_artifacts + source_artifacts
 
-    @staticmethod
     def _postprocess_source_artifacts(
+        self,
         artifacts: List[CodeArtifact],
     ) -> List[CodeArtifact]:
         """Apply deterministic fixes to emitted source artifacts.
@@ -1924,14 +1924,48 @@ else:
                 content = artifact.content
                 if "std." in content and 'const std = @import("std");' not in content:
                     content = 'const std = @import("std");\n\n' + content
-                # Remove pointless parameter-discard stubs before the parameter is
-                # actually used; Zig treats these as compile errors.
+                # Zig 0.11+ changed @intCast to a single-argument builtin; the
+                # old `@intCast(T, value)` form must be rewritten to
+                # `@as(T, @intCast(value))`.
                 content = re.sub(
-                    r"^\s*_\s*=\s*arg_\d+\s*;\s*$",
-                    "",
+                    r"@intCast\(([^,]+),\s*([^)]+)\)",
+                    r"@as(\1, @intCast(\2))",
                     content,
-                    flags=re.MULTILINE,
                 )
+                # LLMs sometimes emit `@as(value)` with only one argument; in a
+                # typed context `@as(value)` should be `@intCast(value)` so the
+                # target type is inferred from the assignment.
+                content = re.sub(
+                    r"@as\(([^,()]+)\)",
+                    r"@intCast(\1)",
+                    content,
+                )
+                # Zig forbids the `%` operator for signed integers; use @rem.
+                content = re.sub(
+                    r"(?<![@\w])(\b[a-zA-Z_]\w*\b)\s*%\s*(\b[a-zA-Z_]\w*\b|\d+)",
+                    r"@rem(\1, \2)",
+                    content,
+                )
+                # Array indices computed from exported i64 parameters must be
+                # cast to usize before subscripting. Zig plugins emit both
+                # `arg_0` and `arg0` parameter names.
+                content = re.sub(
+                    r"\b(arg_?\d+)\[(\b[a-zA-Z_]\w*\b)\]",
+                    r"\1[@intCast(\2)]",
+                    content,
+                )
+                # Many-pointer / C-pointer dereferences require index syntax.
+                # Rewrite `ptr.*` to `ptr[0]` so the code works for `[*]T` and
+                # `[*c]T` pointers emitted by LLM-synthesized Zig plugins.
+                content = re.sub(
+                    r"(\b[a-zA-Z_]\w*)\.\*",
+                    r"\1[0]",
+                    content,
+                )
+                # Normalize unused parameter discards. Zig requires an explicit
+                # `_ = arg_X;` for unused parameters, but rejects it as pointless
+                # if the parameter is used later in the function.
+                content = self._zig_normalize_unused_params(content)
                 artifact.content = content
             elif is_python:
                 content = artifact.content
@@ -1942,6 +1976,105 @@ else:
                     content = "from typing import Any\n" + content
                     artifact.content = content
         return artifacts
+
+    def _zig_normalize_unused_params(self, content: str) -> str:
+        """Add/remove `_ = arg_X;` discards in Zig functions as needed.
+
+        Zig rejects unused function parameters unless they are explicitly
+        discarded, and also rejects a discard for a parameter that is used later.
+        """
+        pattern = re.compile(r"(?m)^(?:export\s+)?fn\s+[a-zA-Z_]\w*\s*\(([^)]*)\)(?:[^{]*)\{", re.MULTILINE)
+        matches = list(pattern.finditer(content))
+        if not matches:
+            return content
+        out: List[str] = []
+        last = 0
+        for m in matches:
+            params = re.findall(r"arg_?\d+", m.group(1))
+            body_start = m.end()
+            depth = 1
+            i = body_start
+            while i < len(content) and depth > 0:
+                if content[i] == "{":
+                    depth += 1
+                elif content[i] == "}":
+                    depth -= 1
+                i += 1
+            body_end = i - 1  # index of matching '}'
+            body = content[body_start:body_end]
+            for p in params:
+                # Use a plain substring count; parameter names like `arg_0` are
+                # unique enough within a generated Zig function.
+                usages = body.count(p)
+                discard_pat = r"^\s*_ = " + re.escape(p) + r";\s*$"
+                has_discard = bool(re.search(discard_pat, body, re.MULTILINE))
+                if usages == 0 and not has_discard:
+                    body = f"_ = {p};\n" + body
+                elif usages > 1 and has_discard:
+                    body = re.sub(discard_pat, "", body, flags=re.MULTILINE)
+            out.append(content[last:m.start()])
+            out.append(content[m.start():body_start])
+            out.append(body)
+            out.append(content[body_end:i])
+            last = i
+        out.append(content[last:])
+        return "".join(out)
+
+    def _synchronize_shared_library_paths(self, hin_graph_spec: Dict[str, Any]) -> None:
+        """Rewrite Python ctypes loaders so they point to the actual built .so.
+
+        LLM-generated Python CLI files often hard-code a library name derived
+        from the project title (e.g. ``libprime_kernel.so``) and place it
+        under a ``zig-out/lib`` directory inside the Python package. The engine
+        builds ``lib{source_node}.so`` in the source-node directory. This pass
+        normalizes the loader to ``<workspace>/<source_node>/lib<source_node>.so``
+        so the generated build script and the runtime loader agree.
+        """
+        nodes = hin_graph_spec.get("nodes", [])
+        edges = hin_graph_spec.get("edges", [])
+        node_map = {n["node_id"]: n for n in nodes if n.get("node_id")}
+        edge_sources: Dict[str, List[str]] = {}
+        for e in edges:
+            target = e.get("target", "")
+            source = e.get("source", "")
+            if target and source:
+                edge_sources.setdefault(target, []).append(source)
+
+        for py_file in self.workspace_root.rglob("*.py"):
+            if "ffi_bridges" in py_file.parts:
+                # Bridge loader stubs are synthesized separately; do not rewrite them.
+                continue
+            content = py_file.read_text(encoding="utf-8")
+            rel = py_file.relative_to(self.workspace_root)
+            target_node = rel.parts[0] if rel.parts else ""
+            if target_node not in node_map:
+                continue
+            sources = edge_sources.get(target_node, [])
+            if not sources:
+                continue
+            source_node = sources[0]
+            # Rewrite the _LIB_PATH assignment entirely if it references a .so.
+            if "_LIB_PATH" in content:
+                content = re.sub(
+                    r"^_LIB_PATH\s*=\s*.*$",
+                    lambda m, src=source_node: (
+                        f"_LIB_PATH = str((Path(__file__).resolve().parents[2] / {src!r} / 'lib{src}.so').absolute())"
+                    ),
+                    content,
+                    flags=re.MULTILINE,
+                )
+            # Also normalize any other `os.path.join(..., 'lib<name>.so')` or
+            # `ctypes.CDLL('./lib<name>.so')` references in the same file.
+            content = re.sub(
+                r"(['\"]\S*/)?lib[a-zA-Z_]\w*\.so(['\"])",
+                lambda m, src=source_node: (
+                    f"{m.group(1) or ''}lib{src}.so{m.group(2)}"
+                    if m.group(1) is None or not m.group(1).startswith(("'", '"'))
+                    else f"{m.group(1)}lib{src}.so{m.group(2)}"
+                ),
+                content,
+            )
+            py_file.write_text(content, encoding="utf-8")
 
     def _configure_registry_jit(self) -> None:
         """Pass the configured LLM client/prompt to the plugin registry."""
@@ -2650,7 +2783,8 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                     for tok in shlex.split(str(f))
                 ]
                 # Use the directory prefix requested by the user (e.g. cpp_engine/)
-                # instead of the node_id so build paths match emitted files.
+                # only when it matches a declared node; otherwise stay in the node
+                # directory so emitted files and build commands agree.
                 if (
                     source_files
                     and isinstance(source_files[0], str)
@@ -2660,8 +2794,10 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                     # Conventional source subdirectories live inside the node directory.
                     if first_dir in ("src", "include", "lib", "tests"):
                         package_dir = node_id
-                    else:
+                    elif first_dir in node_map:
                         package_dir = first_dir
+                    else:
+                        package_dir = node_id
                 else:
                     package_dir = node_id
                 if toolchain == "cmake":
@@ -2718,6 +2854,10 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                         f"zig build-lib -dynamic -O ReleaseFast -fPIC "
                         f"-femit-bin=zig-out/lib/lib{node_id}.so {src} && "
                         f"cp zig-out/lib/lib{node_id}.so lib{node_id}.so)"
+                    )
+                    lines.append(
+                        f"cp {package_dir}/lib{node_id}.so lib{node_id}.so 2>/dev/null || "
+                        f"cp {package_dir}/zig-out/lib/lib{node_id}.so lib{node_id}.so 2>/dev/null || true"
                     )
         if primary_entrypoint:
             # Make sure the workspace root is on PYTHONPATH so sibling packages
@@ -3350,6 +3490,8 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             )
 
         _accel_log("info", "HIN AST Normalization")
+
+        self._synchronize_shared_library_paths(hin_graph_spec)
 
         build_artifact = self._generate_build_script(hin_graph_spec, stages)
         if build_artifact:
