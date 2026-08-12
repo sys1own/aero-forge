@@ -705,7 +705,7 @@ class IntentCompiler:
         config_override: Optional[Any] = None,
         system_prompt_extra: Optional[str] = None,
     ):
-        self.provider = provider or "deepseek"
+        self.provider = provider if provider is not None else "deepseek"
         self.model = model
         self.api_key = api_key
         self.max_retries = max(1, max_retries)
@@ -1105,6 +1105,25 @@ class IntentCompiler:
             add(feature, "function")
 
         return intent
+
+    def _inject_wasm_target(
+        self, skeleton: Dict[str, Any], prompt_text: str
+    ) -> None:
+        """Add a wasm32 build target to Rust nodes when the prompt requests it."""
+        if not skeleton or not isinstance(skeleton, dict):
+            return
+        prompt_lower = (prompt_text or "").lower()
+        if "wasm32" not in prompt_lower and "wasm" not in prompt_lower:
+            return
+        for node in skeleton.get("nodes", []) or []:
+            if (node.get("lang") or "").lower() != "rust":
+                continue
+            flags = node.get("compiler_flags") or []
+            if not isinstance(flags, list):
+                flags = [flags]
+            if not any("wasm" in str(f).lower() for f in flags):
+                flags.append("--target wasm32-unknown-unknown")
+                node["compiler_flags"] = flags
 
     def compile_prompt(
         self,
@@ -1961,6 +1980,7 @@ class IntentCompiler:
         skeleton = self._six_phase_bootstrap_skeleton(
             classification or {}, topology
         )
+        self._inject_wasm_target(skeleton, prompt_text)
 
         # Attempt fiber-wise atomic completion first. It queries the LLM once
         # per Grothendieck fiber (typed hole) and falls back to adjoint stubbing
@@ -2139,6 +2159,7 @@ class IntentCompiler:
             languages,
             functional_intent,
         )
+        self._inject_wasm_target(skeleton, prompt_text)
 
         functional_intent = skeleton.get("functional_intent", [])
         if not functional_intent:

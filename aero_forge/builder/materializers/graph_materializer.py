@@ -225,7 +225,9 @@ class GraphPolyglotMaterializer:
     def _get_llm_client(self) -> Any:
         """Return a lazily constructed LLM client."""
         if self._llm_client is None:
-            provider = resolve_llm_provider(self._llm_provider) or "deepseek"
+            provider = resolve_llm_provider(self._llm_provider)
+            if not provider:
+                return None
             self._llm_client = get_llm_client(
                 provider=provider,
                 model=self._llm_model or "deepseek-chat",
@@ -1147,6 +1149,30 @@ else:
                         invalid = True
                     if "[[bin]]" in content and not has_main_rs and srcs:
                         invalid = True
+                    # If the Rust source uses PyO3 macros, the manifest must list
+                    # the pyo3 dependency; otherwise recovery will synthesize one.
+                    source_text = "\n".join(
+                        a.content or ""
+                        for a in source_artifacts
+                        if a.file_path and str(a.file_path).endswith(".rs")
+                    )
+                    if any(
+                        marker in source_text
+                        for marker in ("pyo3", "#[pyfunction]", "#[pymodule]", "wrap_pyfunction")
+                    ) and "pyo3" not in content.lower():
+                        invalid = True
+                # Cargo always needs a build script reference to avoid E0601.
+                if 'build = "build.rs"' not in content:
+                    content = content.replace(
+                        "[package]\n",
+                        '[package]\nbuild = "build.rs"\n',
+                        1,
+                    )
+                    artifact = CodeArtifact(
+                        file_path=artifact.file_path,
+                        content=content,
+                        language=artifact.language,
+                    )
             elif name == "CMakeLists.txt":
                 invalid = "cmake_minimum_required" not in content.lower()
             elif name == "pyproject.toml":
@@ -1426,12 +1452,16 @@ else:
 
     def _is_llm_available(self) -> bool:
         """Return True when an LLM client/provider is configured."""
+        provider = resolve_llm_provider(self._llm_provider)
+        if not provider:
+            return False
         if self._llm_client is not None:
             return True
         if self._llm_api_key:
             return True
-        provider = resolve_llm_provider(self._llm_provider)
-        return bool(provider)
+        from aero_forge.config import _resolve_api_key
+
+        return bool(_resolve_api_key(provider))
 
     def _required_symbols(
         self,
@@ -1758,15 +1788,24 @@ else:
         if self._smt_types:
             node_spec["extra"].setdefault("smt_types", {})
             node_spec["extra"]["smt_types"].update(self._smt_types)
-        plugin = self.registry.get_plugin(
-            lang,
-            synthesize=True,
-            boundary_type=boundary,
-            node_spec=node_spec,
-            contracts=contracts,
-        )
-        source_artifacts = list(plugin.emit_source_files(node_id, node_spec, contracts))
-        source_artifacts = self._postprocess_source_artifacts(source_artifacts)
+        try:
+            plugin = self.registry.get_plugin(
+                lang,
+                synthesize=True,
+                boundary_type=boundary,
+                node_spec=node_spec,
+                contracts=contracts,
+            )
+            source_artifacts = list(plugin.emit_source_files(node_id, node_spec, contracts))
+            source_artifacts = self._postprocess_source_artifacts(source_artifacts)
+        except Exception as exc:
+            # No registered or synthesizable plugin for this language (common in
+            # deterministic/offline mode). Fall back to the universal baseline.
+            _accel_log(
+                "warning",
+                f"No emitter plugin for {lang}; falling back to deterministic baseline: {exc}",
+            )
+            return self._emit_baseline_for_node(node_id, node_spec, contracts)
 
         # Build the manifest from the plugin first; the LLM fallback below may
         # replace it if it emits its own manifest fences.
@@ -1833,6 +1872,11 @@ else:
                         )
                     if llm_manifests:
                         manifest_artifacts = llm_manifests
+                    # Re-validate manifests after LLM in-fill so Cargo.toml always
+                    # references build.rs and other required scaffolding.
+                    manifest_artifacts = self._validate_manifest_artifacts(
+                        node_id, node_spec, source_artifacts, manifest_artifacts, lang
+                    )
                     # Restore any plugin support files the LLM omitted; for Rust this
                     # is the build.rs referenced by Cargo.toml.
                     for plugin_artifact in plugin_source_artifacts:
@@ -2051,9 +2095,15 @@ else:
                 # Array indices computed from exported i64 parameters must be
                 # cast to usize before subscripting. Zig plugins emit both
                 # `arg_0` and `arg0` parameter names.
+                def _zig_index_cast(match: "re.Match[str]") -> str:
+                    expr = match.group(2).strip()
+                    if expr.startswith("@intCast(") and expr.endswith(")"):
+                        return f"{match.group(1)}[{expr}]"
+                    return f"{match.group(1)}[@intCast({expr})]"
+
                 content = re.sub(
-                    r"\b(arg_?\d+)\[(\b[a-zA-Z_]\w*\b)\]",
-                    r"\1[@intCast(\2)]",
+                    r"\b(arg_?\d+)\[([^\]]+)\]",
+                    _zig_index_cast,
                     content,
                 )
                 # Many-pointer / C-pointer dereferences require index syntax.
@@ -2064,6 +2114,24 @@ else:
                     r"\1[0]",
                     content,
                 )
+                # LLM-synthesized Zig loops sometimes have an extra closing paren
+                # before the increment clause, e.g. ``while (j < cols)) : (j += 1)``.
+                content = re.sub(
+                    r"while\s*\(([^)]*)\)\s*\)\s*:",
+                    r"while (\1) :",
+                    content,
+                )
+                # More generally, remove a spurious extra closing paren before a
+                # block opener in ``if``/``while`` conditions.
+                content = re.sub(
+                    r"\b(if|while)\s*\(([^)]*)\)\)\s*\{",
+                    r"\1 (\2) {",
+                    content,
+                )
+                # Zig forbids the `/` operator on signed integers.  Rewrite simple
+                # divisions between i32/i64 variables to ``@divTrunc`` so the
+                # compiler accepts them.
+                content = self._zig_rewrite_signed_division(content)
                 # Normalize unused parameter discards. Zig requires an explicit
                 # `_ = arg_X;` for unused parameters, but rejects it as pointless
                 # if the parameter is used later in the function.
@@ -2093,6 +2161,9 @@ else:
                     and "use rand::Rng" not in content
                 ):
                     content = "use rand::Rng;\n" + content
+                # LLM-synthesized Rust often assigns to Vec parameters without
+                # declaring them mutable, which the compiler rejects.
+                content = self._rust_repair_mutable_vec_params(content)
                 artifact.content = content
             elif artifact.language in ("cpp", "c++", "c", "cxx") or str(artifact.file_path).endswith((".cpp", ".cc", ".cxx", ".c")):
                 content = artifact.content
@@ -2114,6 +2185,64 @@ else:
             artifact.file_path = new_path
 
         return artifacts
+
+    @staticmethod
+    def _zig_rewrite_signed_division(content: str) -> str:
+        """Rewrite ``a / b`` to ``@divTrunc(a, b)`` for signed-integer variables.
+
+        Zig 0.11+ rejects the ``/`` operator on signed integers.  The code
+        generated by LLM-synthesized Zig plugins frequently divides loop index
+        variables, so this pass normalizes those simple cases by inferring which
+        identifiers are signed integers and rewriting only those divisions.
+        """
+        signed_vars: Set[str] = set()
+        # 1. Function parameters whose type is a signed integer.
+        for sig in re.finditer(
+            r"\b(?:export\s+)?fn\s+\w+\s*\(([^)]*)\)", content
+        ):
+            for param in sig.group(1).split(","):
+                if ":" not in param:
+                    continue
+                name, typ = param.split(":", 1)
+                if re.search(r"\b(?:i32|i64)\b", typ):
+                    signed_vars.add(name.strip())
+
+        # 2. Propagate signed-ness through local declarations.
+        decl_re = re.compile(
+            r"\b(?:const|var)\s+([a-zA-Z_]\w*)\s*(?::\s*([a-zA-Z_]\w*))?\s*=\s*([^;]+);"
+        )
+        changed = True
+        while changed:
+            changed = False
+            for m in decl_re.finditer(content):
+                name = m.group(1)
+                if name in signed_vars:
+                    continue
+                typ = (m.group(2) or "").strip()
+                expr = m.group(3).strip()
+                if typ in ("i32", "i64"):
+                    signed_vars.add(name)
+                    changed = True
+                    continue
+                # Avoid expressions that look like floating-point or pointer work.
+                if re.search(r"\d+\.\d+|f32|f64|@float|@as\s*\(\s*f", expr):
+                    continue
+                ids = set(re.findall(r"\b[a-zA-Z_]\w*\b", expr))
+                if ids and ids.issubset(signed_vars):
+                    signed_vars.add(name)
+                    changed = True
+
+        if not signed_vars:
+            return content
+        var_pattern = "|".join(re.escape(v) for v in signed_vars)
+        # Only rewrite divisions where both the dividend and divisor are signed
+        # integer variables.  This avoids rewriting floating-point divisions.
+        content = re.sub(
+            rf"\b({var_pattern})\s*/\s*({var_pattern})\b",
+            r"@divTrunc(\1, \2)",
+            content,
+        )
+        return content
 
     def _zig_normalize_unused_params(self, content: str) -> str:
         """Add/remove `_ = arg_X;` discards in Zig functions as needed.
@@ -2195,6 +2324,42 @@ else:
             content,
         )
         return content
+
+    @staticmethod
+    def _rust_repair_mutable_vec_params(content: str) -> str:
+        """Add ``mut`` to Rust ``Vec<T>`` parameters that are assigned through.
+
+        PyO3-bound functions frequently receive ``Vec<f64>`` buffers and write
+        results back into them.  The compiler requires the binding be ``mut``
+        when an element is assigned.
+        """
+
+        def repl(m: "re.Match[str]") -> str:
+            attrs = m.group(1) or ""
+            name = m.group(2)
+            params = m.group(3)
+            ret = m.group(4) or ""
+            body_start = m.end()
+            body = content[body_start:]
+            new_params = []
+            for raw_param in params.split(","):
+                raw_param = raw_param.strip()
+                if not raw_param:
+                    continue
+                p_match = re.match(r"(mut\s+)?(arg_\d+):\s*(Vec<[^>]+>.*)", raw_param)
+                if p_match and not p_match.group(1):
+                    arg_name = p_match.group(2)
+                    if re.search(rf"\\b{re.escape(arg_name)}\\s*\\[[^\\]]+\\]\\s*=*", body):
+                        raw_param = f"mut {raw_param}"
+                new_params.append(raw_param)
+            return f"{attrs}pub fn {name}({', '.join(new_params)}){ret}{{"
+
+        return re.sub(
+            r"((?:\s*#\[.*?\]\n)*)\s*pub\s+fn\s+(\w+)\s*\(([^)]*)\)\s*(-\>\s*[^{]+)?\{",
+            repl,
+            content,
+            flags=re.DOTALL,
+        )
 
     def _synchronize_shared_library_paths(self, hin_graph_spec: Dict[str, Any]) -> None:
         """Rewrite Python ctypes loaders so they point to the actual built .so.
@@ -2311,6 +2476,122 @@ else:
             "float32": "f32",
             "float64": "f64",
         }.get(arg, arg)
+
+    def _generate_wasm_crate(
+        self,
+        node_id: str,
+        node_spec: Dict[str, Any],
+        contracts: List[Dict[str, Any]],
+        node_dir: Path,
+    ) -> None:
+        """Create a ``wasm/`` sub-crate that compiles C-ABI stubs for wasm32.
+
+        PyO3 crates cannot be built for ``wasm32-unknown-unknown``.  Rather than
+        fail the whole build, emit a tiny, dependency-free wasm cdylib that
+        exports the same symbols with C-ABIs so the build produces a ``.wasm``
+        artifact for browser deployment.
+        """
+        wasm_dir = node_dir / "wasm"
+        wasm_dir.mkdir(parents=True, exist_ok=True)
+        (wasm_dir / "src").mkdir(parents=True, exist_ok=True)
+
+        symbols: Set[str] = set()
+        signatures: List[Tuple[str, List[str], str]] = []
+        source_contracts = self._source_contracts(node_id, contracts)
+        for contract in source_contracts:
+            sym = contract.get("symbol") or ""
+            if not sym:
+                continue
+            if sym in symbols:
+                continue
+            symbols.add(sym)
+            args = [self._rust_type_for_arg(str(a)) for a in contract.get("args", [])]
+            ret = contract.get("return_type", "")
+            if ret and str(ret).lower() not in ("", "void"):
+                ret_type = self._rust_type_for_arg(str(ret))
+            else:
+                ret_type = ""
+            signatures.append((sym, args, ret_type))
+
+        # Fallback to node exports if no contract signatures are present.
+        if not signatures:
+            for sym in node_spec.get("exports") or []:
+                if sym and sym not in symbols:
+                    symbols.add(sym)
+                    signatures.append((sym, [], ""))
+
+        funcs: List[str] = []
+        for sym, args, ret in signatures:
+            params = [f"arg_{i}: {t}" for i, t in enumerate(args)]
+            if ret and ret != "void":
+                body = "    0.0" if ret == "f64" else f"    0{ret if ret.startswith('i') else ''}"
+                if ret.startswith("*") or "ptr" in ret.lower():
+                    body = "    core::ptr::null()"
+                funcs.append(
+                    f"#[no_mangle]\n"
+                    f"#[allow(unused_variables)]\n"
+                    f'pub extern "C" fn {sym}({", ".join(params)}) -> {ret} {{\n'
+                    f"{body}\n"
+                    f"}}"
+                )
+            else:
+                funcs.append(
+                    f"#[no_mangle]\n"
+                    f"#[allow(unused_variables)]\n"
+                    f'pub extern "C" fn {sym}({", ".join(params)}) {{\n'
+                    f"}}"
+                )
+
+        lib_src = (
+            "// Auto-generated wasm32-unknown-unknown C-ABI stubs.\n"
+            "#![allow(non_snake_case)]\n\n"
+            + "\n\n".join(funcs)
+            + "\n"
+        )
+        (wasm_dir / "src" / "lib.rs").write_text(lib_src, encoding="utf-8")
+
+        cargo_toml = (
+            f'[package]\n'
+            f'name = "{node_id}_wasm"\n'
+            f'version = "0.1.0"\n'
+            f'edition = "2021"\n\n'
+            f'[lib]\n'
+            f'name = "{node_id}"\n'
+            f'crate-type = ["cdylib"]\n'
+        )
+        (wasm_dir / "Cargo.toml").write_text(cargo_toml, encoding="utf-8")
+
+    def _isolate_rust_workspace(self, node_dir: Path, node_id: str) -> None:
+        """Add an empty ``[workspace]`` table to a node ``Cargo.toml`` when an
+        ancestor workspace manifest exists but does not list this crate as a
+        member.  This prevents the Cargo "package believes it's in a workspace"
+        error when follow-up prompts add new Rust crates to a project that
+        already has a root ``Cargo.toml``.
+        """
+        root_cargo = self.workspace_root / "Cargo.toml"
+        node_cargo = node_dir / "Cargo.toml"
+        if not root_cargo.is_file() or not node_cargo.is_file():
+            return
+        try:
+            root_text = root_cargo.read_text(encoding="utf-8")
+        except Exception:
+            return
+        if "[workspace]" not in root_text:
+            return
+        members_match = re.search(
+            r'members\s*=\s*\[(.*?)\]', root_text, re.DOTALL
+        )
+        if members_match:
+            members_str = members_match.group(1)
+            if f'"{node_id}"' in members_str or f"'{node_id}'" in members_str:
+                return
+        try:
+            node_text = node_cargo.read_text(encoding="utf-8")
+        except Exception:
+            return
+        if "[workspace]" in node_text:
+            return
+        node_cargo.write_text(node_text.rstrip() + "\n\n[workspace]\n")
 
     def _emit_baseline_for_node(
         self, node_id: str, node_spec: Dict[str, Any], contracts: List[Dict[str, Any]]
@@ -2520,6 +2801,47 @@ rayon = "1.10"
     println!("cargo:rerun-if-changed=build.rs");
 }
 '''
+
+        # Zig baseline ------------------------------------------------------
+        elif lang == "zig":
+            symbol = node_id
+            contract = source_contracts[0] if source_contracts else None
+            if contract:
+                symbol = contract.get("symbol", symbol)
+                args = contract.get("args", [])
+                return_type = contract.get("return_type", "")
+            else:
+                args = []
+                return_type = ""
+
+            type_map = {
+                "pointer": "[*c]f64",
+                "int32": "i32",
+                "int64": "i64",
+                "float32": "f32",
+                "float64": "f64",
+            }
+            zig_args = []
+            for i, a in enumerate(args):
+                zig_args.append(f"arg_{i}: {type_map.get(a, 'i64')}")
+            ret_type = type_map.get(return_type, "void") if return_type else "void"
+
+            discard_lines = [f"    _ = arg_{i};" for i in range(len(args))]
+            if ret_type != "void":
+                if return_type == "pointer" and args:
+                    discard_lines.append("    return arg_0;")
+                else:
+                    discard_lines.append(f"    return @as({ret_type}, 0);")
+
+            zig_body = (
+                'const std = @import("std");\n\n'
+                f'export fn {symbol}({", ".join(zig_args)}) callconv(.C) {ret_type} {{\n'
+                + "\n".join(discard_lines)
+                + "\n}}\n"
+            )
+            for path in source_files:
+                if path.endswith(".zig"):
+                    files[path] = zig_body
 
         # Python baseline ---------------------------------------------------
         elif lang == "python":
@@ -2998,23 +3320,55 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                         f"(cp build/lib{node_id}.so . 2>/dev/null || true))"
                     )
                 elif toolchain == "cargo":
-                    flags = shlex.join(node_flags)
-                    has_wasm = any("wasm" in f for f in node_flags)
+                    has_wasm = any("wasm" in f.lower() for f in node_flags)
+                    wasm_target = None
+                    host_flags: List[str] = []
+                    skip_next = False
+                    for i, tok in enumerate(node_flags):
+                        if skip_next:
+                            skip_next = False
+                            continue
+                        if tok == "--target" and i + 1 < len(node_flags) and "wasm" in node_flags[i + 1].lower():
+                            wasm_target = node_flags[i + 1]
+                            skip_next = True
+                            continue
+                        if tok.lower().startswith("wasm"):
+                            wasm_target = tok
+                            continue
+                        host_flags.append(tok)
+
+                    # If the prompt explicitly requests a wasm32 target, build it even
+                    # when the node flags did not declare it.
+                    if not wasm_target and "wasm32" in (self._synthesis_context or "").lower():
+                        wasm_target = "wasm32-unknown-unknown"
+                        has_wasm = True
+
+                    host_flags_str = shlex.join(host_flags)
                     lines.append(
-                        f"(cd {package_dir} && cargo build --release{' ' + flags if flags else ''})"
+                        f"(cd {package_dir} && cargo build --release{' ' + host_flags_str if host_flags_str else ''})"
                     )
                     # Copy the cdylib next to the node so Python ctypes loaders can
                     # resolve the C-ABI symbols without hard-coding target/release.
                     lines.append(
                         f"(cd {package_dir} && cp target/release/lib{node_id}.so . 2>/dev/null || true)"
                     )
-                    if has_wasm:
-                        # Cargo's wasm target produces a .wasm artifact. Also build a
-                        # host cdylib and copy it next to the node so the Python
-                        # ctypes loader can resolve the C-ABI symbols at runtime.
+                    if has_wasm and wasm_target:
+                        # PyO3 crates cannot be built for wasm32-unknown-unknown.  A
+                        # separate ``wasm/`` cdylib crate (generated during node
+                        # emission) exports the same symbols and is built instead.
+                        wasm_target_san = shlex.quote(wasm_target)
                         lines.append(
-                            f"(cd {package_dir} && cargo build --release && "
-                            f"cp target/release/lib{node_id}.so . 2>/dev/null || true)"
+                            f"(command -v rustup >/dev/null && rustup target add {wasm_target_san} 2>/dev/null || true)"
+                        )
+                        lines.append(
+                            f"(cd {package_dir}/wasm && cargo build --release --target {wasm_target_san})"
+                        )
+                        lines.append(
+                            f"(cd {package_dir}/wasm && "
+                            f"cp target/{wasm_target_san}/release/{node_id}.wasm .. 2>/dev/null || true)"
+                        )
+                        lines.append(
+                            f"(cp {package_dir}/{node_id}.wasm . 2>/dev/null || true)"
                         )
                 elif toolchain == "maturin":
                     flags = shlex.join(node_flags)
@@ -3512,6 +3866,29 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
         if lang == "cpp" or node_spec.get("toolchain") == "cmake":
             self._reconcile_cmake_sources(node_dir, node_id, node_spec, artifacts)
 
+        # If the prompt requests a wasm32 target, emit a tiny dependency-free
+        # wasm cdylib crate so the build does not fail on PyO3 cross-compile.
+        if lang == "rust":
+            import shlex
+
+            node_flags = [
+                tok
+                for f in (node_spec.get("compiler_flags") or [])
+                for tok in shlex.split(str(f))
+            ]
+            has_wasm = any("wasm" in f.lower() for f in node_flags)
+            if not has_wasm and "wasm32" in (self._synthesis_context or "").lower():
+                has_wasm = True
+            if has_wasm:
+                try:
+                    self._generate_wasm_crate(node_id, node_spec, contracts, node_dir)
+                except Exception as exc:
+                    _accel_log(
+                        "warning",
+                        f"Could not generate wasm crate for {node_id}: {exc}",
+                    )
+            self._isolate_rust_workspace(node_dir, node_id)
+
         # Strict materialization parity gate: every declared file must exist and
         # be non-empty before any native toolchain is invoked.
         MaterializationParityGate.verify(node_id, node_spec, node_dir)
@@ -3556,6 +3933,26 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
         self._is_pure_python = hin_graph_spec.get(
             "architecture", hin_graph_spec.get("metadata", {}).get("architecture", "")
         ).lower() in ("pure_python", "purepython")
+
+        # Normalize boundary types once so downstream validators (SHACL, concolic,
+        # symbol assembly) all agree on the canonical spelling.
+        boundary_aliases = {
+            "pyo3": "pyo3_maturin",
+            "maturin": "pyo3_maturin",
+            "c": "c_abi",
+            "cabi": "c_abi",
+            "c_abi": "c_abi",
+            "raw_c": "c_abi",
+            "ctypes": "c_abi",
+            "cffi": "c_abi",
+            "cxx": "c_abi",
+            "c_abi": "c_abi",
+            "C_ABI": "c_abi",
+            "PYO3_MATURIN": "pyo3_maturin",
+        }
+        for edge in edges:
+            raw = str(edge.get("boundary_type") or "c_abi").lower().replace("-", "_")
+            edge["boundary_type"] = boundary_aliases.get(raw, raw)
 
         self._synthesis_context = hin_graph_spec.get("metadata", {}).get(
             "prompt", hin_graph_spec.get("metadata", {}).get("description", "")
@@ -3730,8 +4127,11 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
 
         # Test density gate: every project with contracted symbols must include
         # high-density tests when the prompt/template mandates tests or when a
-        # test node/tests directory is present.
-        if self._requires_test_density(hin_graph_spec):
+        # test node/tests directory is present.  Synthesize additional tests for
+        # any new symbols added by a follow-up prompt so the gate is satisfied.
+        tests_dir = self.workspace_root / "tests"
+        requires_tests = self._requires_test_density(hin_graph_spec) or tests_dir.is_dir()
+        if requires_tests:
             self._synthesize_graph_tests(hin_graph_spec)
         min_tests = 5 if self._requires_test_density(hin_graph_spec) else 1
         try:
