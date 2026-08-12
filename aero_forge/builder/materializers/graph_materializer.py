@@ -108,6 +108,29 @@ class MaterializationError(Exception):
     """Raised when the graph materializer cannot write a valid workspace."""
 
 
+def _strip_common_directory_prefix(paths: List[str]) -> List[str]:
+    """Remove a shared, non-standard leading package directory from all paths.
+
+    The graph blueprint sometimes places every file under a project-specific
+    directory (e.g. ``cpp_engine/src/main.cpp`` and ``cpp_engine/CMakeLists.txt``)
+    inside an already-per-node working directory.  Standard source roots such as
+    ``src/``, ``include/``, ``lib/``, ``tests/`` or ``bin/`` are preserved so
+    language conventions are not broken.
+    """
+    if not paths:
+        return paths
+    split = [p.split("/") for p in paths]
+    if any(len(p) < 2 for p in split):
+        return paths
+    first = split[0][0]
+    standard_roots = {"src", "include", "lib", "tests", "test", "bin", "examples"}
+    if first in standard_roots:
+        return paths
+    if all(p[0] == first for p in split):
+        return ["/".join(p[1:]) for p in split]
+    return paths
+
+
 class GraphPolyglotMaterializer:
     """Materialize a HIN graph into source files and build manifests.
 
@@ -781,7 +804,13 @@ else:
         self._write_artifact(init_artifact, node_dir)
         return init_artifact
 
-    def _reconcile_cmake_sources(self, node_dir: Path, node_id: str) -> None:
+    def _reconcile_cmake_sources(
+        self,
+        node_dir: Path,
+        node_id: str,
+        node_spec: Dict[str, Any],
+        artifacts: List[CodeArtifact],
+    ) -> None:
         """Rewrite CMakeLists.txt source lists to match the actual .cpp files.
 
         LLM-synthesized C++ artifacts sometimes place the source file at a
@@ -792,7 +821,27 @@ else:
         import shlex
 
         cmake_path = node_dir / "CMakeLists.txt"
-        if not cmake_path.is_file():
+        lang = (node_spec.get("lang") or "").lower()
+        if (
+            not cmake_path.is_file()
+            or "cmake_minimum_required" not in cmake_path.read_text(encoding="utf-8", errors="ignore").lower()
+        ):
+            source_artifacts = [
+                CodeArtifact(file_path=sf, content="", language=lang)
+                for sf in node_spec.get("source_files", [])
+                if Path(sf).suffix in {".cpp", ".cc", ".cxx", ".c"}
+            ]
+            if not source_artifacts:
+                source_artifacts = [
+                    a for a in artifacts if not self._is_build_manifest(a)
+                ]
+            try:
+                recovered = ManifestRecovery.synthesize(
+                    node_id, node_spec, source_artifacts, lang or "cpp"
+                )
+                self._write_artifact(recovered, node_dir)
+            except ManifestRecoveryError as exc:
+                _accel_log("error", f"Manifest recovery failed for {node_id}: {exc}")
             return
 
         cpp_files = sorted(
@@ -1098,6 +1147,16 @@ else:
             invalid = False
             if name == "Cargo.toml":
                 invalid = "[package]" not in content
+                if not invalid:
+                    srcs = ManifestRecovery._source_names(
+                        source_artifacts, extensions={".rs"}
+                    )
+                    has_lib_rs = any("lib.rs" in s for s in srcs)
+                    has_main_rs = any("main.rs" in s for s in srcs)
+                    if "[lib]" in content and not has_lib_rs and srcs:
+                        invalid = True
+                    if "[[bin]]" in content and not has_main_rs and srcs:
+                        invalid = True
             elif name == "CMakeLists.txt":
                 invalid = "cmake_minimum_required" not in content.lower()
             elif name == "pyproject.toml":
@@ -1946,9 +2005,9 @@ else:
             for a in source_artifacts
             if not a.is_header
         ]
-        # Manifests are Primary Execution Terminals: write them before source
-        # files so the native toolchain always has a non-empty build configuration.
-        return manifest_artifacts + source_artifacts
+        # Write manifest artifacts last so a recovered/validated manifest is not
+        # overwritten by a source artifact that happens to claim the same name.
+        return source_artifacts + manifest_artifacts
 
     def _postprocess_source_artifacts(
         self,
@@ -2042,6 +2101,25 @@ else:
                 ):
                     content = "use rand::Rng;\n" + content
                 artifact.content = content
+            elif artifact.language in ("cpp", "c++", "c", "cxx") or str(artifact.file_path).endswith((".cpp", ".cc", ".cxx", ".c")):
+                content = artifact.content
+                # LLM-synthesized C++ extern "C" wrappers sometimes emit an
+                # extra closing brace before the block terminator.
+                content = re.sub(
+                    r"\}\}\s*\n\s*(} // extern \"C\")",
+                    r"}\n\1",
+                    content,
+                    flags=re.MULTILINE,
+                )
+                artifact.content = content
+
+        # Strip a redundant shared package directory from emitted artifact paths
+        # so they line up with the normalized node ``source_files``.
+        paths = [a.file_path for a in artifacts]
+        stripped = _strip_common_directory_prefix(paths)
+        for artifact, new_path in zip(artifacts, stripped):
+            artifact.file_path = new_path
+
         return artifacts
 
     def _zig_normalize_unused_params(self, content: str) -> str:
@@ -2600,21 +2678,31 @@ print("rust out:", list(result))
             if path not in files:
                 files[path] = ""
 
-        # Emit required build manifests even if the LLM omitted them.
-        package_dirs = sorted({Path(p).parts[0] for p in source_files if "/" in p})
+        # Emit required build manifests even if the LLM omitted them.  Only treat
+        # a directory as a package root if it is not a standard language layout
+        # directory such as ``src/``; otherwise manifests end up in the wrong place.
+        standard_roots = {"src", "include", "lib", "tests", "test", "bin", "examples"}
+        package_dirs = sorted(
+            {
+                Path(p).parts[0]
+                for p in source_files
+                if "/" in p and Path(p).parts[0] not in standard_roots
+            }
+        )
         # Rust crates always get a build.rs so Cargo never hits E0601.
         needs_build_rs = lang == "rust"
         if lang == "rust" and any(p.endswith("src/lib.rs") for p in source_files):
-            for d in package_dirs:
-                cargo_path = f"{d}/Cargo.toml"
+            for d in (package_dirs or ["."]):
+                cargo_path = "Cargo.toml" if d == "." else f"{d}/Cargo.toml"
                 if cargo_path not in files and cargo_path not in source_files:
+                    crate_name = node_id if d == "." else d
                     files[cargo_path] = f"""[package]
-name = "{d}"
+name = "{crate_name}"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "{d}"
+name = "{crate_name}"
 crate-type = ["cdylib"]
 
 [dependencies]
@@ -2622,8 +2710,8 @@ pyo3 = "0.20.3"
 rayon = "1.10"
 """
         if lang == "cpp" and any(p.endswith("src/kernels.cpp") for p in source_files):
-            for d in package_dirs:
-                cmake_path = f"{d}/CMakeLists.txt"
+            for d in (package_dirs or ["."]):
+                cmake_path = "CMakeLists.txt" if d == "." else f"{d}/CMakeLists.txt"
                 if cmake_path not in files and cmake_path not in source_files:
                     files[cmake_path] = f"""cmake_minimum_required(VERSION 3.16)
 project({node_id} LANGUAGES CXX)
@@ -3276,6 +3364,11 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                 f"Contract Integrity Gate rejected {node_id}: {exc}"
             ) from exc
         original_source_files = list(node_spec.get("source_files") or [])
+        if original_source_files:
+            normalized = _strip_common_directory_prefix(original_source_files)
+            if normalized != original_source_files:
+                node_spec["source_files"] = normalized
+
         if self._is_pure_python and lang == "python":
             node_dir = self.workspace_root
         else:
@@ -3400,8 +3493,31 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                     }
                 )
 
+        if lang == "rust":
+            cargo_path = node_dir / "Cargo.toml"
+            source_rs = [a for a in artifacts if str(a.file_path).endswith(".rs")]
+            cargo_text = (
+                cargo_path.read_text(encoding="utf-8", errors="ignore")
+                if cargo_path.is_file()
+                else ""
+            )
+            has_main_rs = any("main.rs" in a.file_path for a in source_rs)
+            if (
+                not cargo_text
+                or "[package]" not in cargo_text
+                or (source_rs and has_main_rs and "[lib]" in cargo_text and "[[bin]]" not in cargo_text)
+                or (source_rs and not has_main_rs and "src/lib.rs" not in (sf for sf in node_spec.get("source_files", [])) and "lib.rs" not in cargo_text)
+            ):
+                try:
+                    recovered = ManifestRecovery.synthesize(
+                        node_id, node_spec, source_rs, lang
+                    )
+                    self._write_artifact(recovered, node_dir)
+                except ManifestRecoveryError as exc:
+                    _accel_log("error", f"Manifest recovery failed for {node_id}: {exc}")
+
         if lang == "cpp" or node_spec.get("toolchain") == "cmake":
-            self._reconcile_cmake_sources(node_dir, node_id)
+            self._reconcile_cmake_sources(node_dir, node_id, node_spec, artifacts)
 
         # Strict materialization parity gate: every declared file must exist and
         # be non-empty before any native toolchain is invoked.

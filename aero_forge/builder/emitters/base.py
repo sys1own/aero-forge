@@ -1669,6 +1669,9 @@ class PolyglotEmitterPlugin(ABC):
         "cmake": "CMakeLists.txt",
         "cargo": "Cargo.toml",
         "maturin": "Cargo.toml",
+        "cpp": "CMakeLists.txt",
+        "c": "CMakeLists.txt",
+        "c++": "CMakeLists.txt",
     }
 
     @property
@@ -1723,21 +1726,27 @@ class ManifestRecovery:
     ) -> CodeArtifact:
         """Return a manifest artifact for *node_id* based on its toolchain."""
         toolchain = (node_spec.get("toolchain") or node_spec.get("lang") or language_id).lower()
-        if toolchain == "cmake":
+        if toolchain in ("cmake", "cpp", "c", "c++", "cxx"):
             return cls._cmake_manifest(node_id, node_spec, source_artifacts)
-        if toolchain in ("cargo", "maturin"):
+        if toolchain in ("cargo", "maturin", "rust"):
             return cls._cargo_manifest(node_id, node_spec, source_artifacts)
         raise ManifestRecoveryError(
             f"Cannot recover missing manifest for node {node_id}: unknown toolchain {toolchain!r}"
         )
 
     @classmethod
-    def _source_names(cls, source_artifacts: List[CodeArtifact]) -> List[str]:
+    def _source_names(
+        cls,
+        source_artifacts: List[CodeArtifact],
+        extensions: Optional[set] = None,
+    ) -> List[str]:
+        exts = extensions or {".cpp", ".cc", ".cxx", ".rs"}
         srcs = [
-            Path(a.file_path).name
+            str(a.file_path)
             for a in source_artifacts
-            if not cls._is_build_manifest_static(a)
-            and Path(a.file_path).suffix in {".cpp", ".cc", ".cxx", ".rs"}
+            if a.file_path
+            and not cls._is_build_manifest_static(a)
+            and Path(a.file_path).suffix in exts
         ]
         return srcs or ["src/lib.rs"]
 
@@ -1745,7 +1754,7 @@ class ManifestRecovery:
     def _cmake_manifest(
         cls, node_id: str, node_spec: Dict[str, Any], source_artifacts: List[CodeArtifact]
     ) -> CodeArtifact:
-        srcs = cls._source_names(source_artifacts)
+        srcs = cls._source_names(source_artifacts, extensions={".cpp", ".cc", ".cxx"})
         # If the plugin emitted a C++ source at the root of the node dir, the
         # CMake source list should reference it without a phantom src/ prefix.
         if len(srcs) == 1 and srcs[0].endswith(".cpp") and not srcs[0].startswith("src/"):
@@ -1771,15 +1780,33 @@ class ManifestRecovery:
     ) -> CodeArtifact:
         crate = node_id or "rust_project"
         crate_safe = crate.replace("-", "_")
-        content = (
-            "[package]\n"
-            f'name = "{crate}"\n'
-            'version = "0.1.0"\n'
-            'edition = "2021"\n\n'
-            "[lib]\n"
-            f'name = "{crate_safe}"\n'
-            'crate-type = ["cdylib"]\n'
-        )
+        srcs = cls._source_names(source_artifacts, extensions={".rs"})
+        has_main = any("main.rs" in s for s in srcs)
+        if has_main:
+            # Binary node (e.g. a broker executable); cargo expects src/main.rs.
+            content = (
+                "[package]\n"
+                f'name = "{crate}"\n'
+                'version = "0.1.0"\n'
+                'edition = "2021"\n\n'
+                '[[bin]]\n'
+                f'name = "{crate_safe}"\n'
+                'path = "src/main.rs"\n'
+            )
+        else:
+            # Library node: point [lib] at the actual .rs source so arbitrary
+            # file names such as broker.rs/lib.rs are accepted by cargo.
+            lib_path = next((s for s in srcs if s.endswith(".rs")), "src/lib.rs")
+            content = (
+                "[package]\n"
+                f'name = "{crate}"\n'
+                'version = "0.1.0"\n'
+                'edition = "2021"\n\n'
+                "[lib]\n"
+                f'name = "{crate_safe}"\n'
+                f'path = "{lib_path}"\n'
+                'crate-type = ["cdylib"]\n'
+            )
         return CodeArtifact(file_path="Cargo.toml", content=content, language="toml")
 
     @staticmethod

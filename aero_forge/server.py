@@ -85,6 +85,7 @@ from aero_forge.builder.aeroc_compiler import (
 from aero_forge.builder.executor import is_artifact_path, should_report_path
 from aero_forge.materializer import unpack_aeroc_file
 from aero_forge.orchestrator.stack_classifier import (
+    INTENT_GRAPH_POLYGLOT,
     INTENT_HYBRID_CPP_PYTHON,
     INTENT_HYBRID_CPP_RUST,
     INTENT_HYBRID_RUST_PYTHON,
@@ -143,6 +144,15 @@ def _resolve_port(port: Optional[int] = None) -> int:
 def _resolve_llm_provider(body: Dict[str, Any]) -> str:
     """Return the effective LLM provider from the request body or environment."""
     return body.get("provider") or os.getenv("AERO_FORGE_LLM_PROVIDER") or "deepseek"
+
+
+def _enrichment_error_message(exc: Exception) -> str:
+    """Return a single, non-redundant enrichment failure message."""
+    text = str(exc)
+    prefix = "Enrichment Failure: "
+    if text.startswith(prefix):
+        return text
+    return f"{prefix}{text}"
 
 
 _CORS_HEADERS = {
@@ -330,6 +340,7 @@ async def _handle_build_async(request: web.Request) -> web.Response:
         INTENT_HYBRID_CPP_PYTHON,
         INTENT_HYBRID_CPP_RUST,
         INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON,
+        INTENT_GRAPH_POLYGLOT,
     )
 
     # Synchronous enrichment gate: do not allow the build to touch disk from a
@@ -354,7 +365,7 @@ async def _handle_build_async(request: web.Request) -> web.Response:
                 _build_web_response(
                     session_id,
                     session_dir,
-                    {"build": {"success": False, "error": f"Enrichment Failure: {exc}"}},
+                    {"build": {"success": False, "error": _enrichment_error_message(exc)}},
                 ),
                 headers=_CORS_HEADERS,
             )
@@ -1040,6 +1051,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 INTENT_HYBRID_CPP_PYTHON,
                 INTENT_HYBRID_CPP_RUST,
                 INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON,
+                INTENT_GRAPH_POLYGLOT,
             )
 
             # Synchronous enrichment gate: do not allow the build to touch disk
@@ -1065,7 +1077,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                         _build_web_response(
                             session_id,
                             session_dir,
-                            {"build": {"success": False, "error": f"Enrichment Failure: {exc}"}},
+                            {"build": {"success": False, "error": _enrichment_error_message(exc)}},
                         ),
                     )
 
