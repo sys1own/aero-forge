@@ -40,7 +40,13 @@ from aero_forge.builder.intent_compiler import IntentCompiler, IntentCompilerErr
 from aero_forge.builder.language_router import _deduplicate_command_args
 from aero_forge.cache.build_cache import BuildCache
 from aero_forge.cache.fix_cache import FixCache
-from aero_forge.config import ConfigOverride, Tier, load_config, resolve_llm_provider, resolve_settings
+from aero_forge.config import (
+    ConfigOverride,
+    Tier,
+    load_config,
+    resolve_llm_provider,
+    resolve_settings,
+)
 from aero_forge.overlay import OverlayManager, ReapplyStatus
 from aero_forge.precision_shield.rust_shield import RustSemanticShield
 from aero_forge.scaffold.active_merge import find_compiled_library, merge_active
@@ -131,7 +137,9 @@ def _accel_log(level: str, message: str) -> None:
         return
     try:
         with open(log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"level": level, "message": message}, default=str) + "\n")
+            f.write(
+                json.dumps({"level": level, "message": message}, default=str) + "\n"
+            )
     except Exception:
         pass
 
@@ -527,7 +535,9 @@ class Orchestrator:
         # Proactive pre-write AST healing: rewrite dict.get() / dict() into
         # HIN-compatible subscripts and literals before routing.
         fallback_manager = FallbackManager()
-        changed, source, ast_diagnostics = fallback_manager.remediate_collection_ast(source)
+        changed, source, ast_diagnostics = fallback_manager.remediate_collection_ast(
+            source
+        )
         if changed:
             for diag in ast_diagnostics:
                 logger.warning("[AST heal] %s", diag)
@@ -804,7 +814,10 @@ class Orchestrator:
         has_tests = has_tests or any(
             isinstance(entry, ManifestEntry)
             and str(entry.path).startswith("tests/")
-            or (isinstance(entry, dict) and str(entry.get("path", "")).startswith("tests/"))
+            or (
+                isinstance(entry, dict)
+                and str(entry.get("path", "")).startswith("tests/")
+            )
             for entry in (blueprint.manifest or [])
         )
         if not has_tests:
@@ -868,7 +881,7 @@ class Orchestrator:
         lang = (node.get("lang") or "").lower().strip()
         if lang:
             return lang
-        for path in (node.get("source_files") or []):
+        for path in node.get("source_files") or []:
             ext = Path(str(path)).suffix.lower()
             if ext == ".py":
                 return "python"
@@ -881,6 +894,95 @@ class Orchestrator:
             if ext == ".zig":
                 return "zig"
         return "python"
+
+    @staticmethod
+    def verify_classification(
+        architecture: str,
+        toolchains: List[str],
+        nodes: List[Dict[str, Any]],
+    ) -> List[str]:
+        """Deterministically check that an LLM classification is structurally sound.
+
+        This method is prompt-blind: it only inspects the structured fields
+        ``architecture``, ``toolchains``, and ``nodes``. It verifies that the
+        declared architecture matches the languages present in the nodes and that
+        the toolchains support the source file extensions in those nodes.
+        """
+        errors: List[str] = []
+        architecture = (architecture or "").lower().strip()
+        toolchains = {t.lower() for t in toolchains or []}
+
+        ext_toolchains = {
+            ".rs": {"cargo", "rustc"},
+            ".cpp": {"clang", "gcc", "g++", "clang++", "cmake"},
+            ".cc": {"clang", "gcc", "g++", "clang++", "cmake"},
+            ".cxx": {"clang", "gcc", "g++", "clang++", "cmake"},
+            ".c": {"clang", "gcc", "cmake"},
+            ".py": {"python"},
+            ".go": {"go"},
+            ".java": {"javac"},
+            ".cs": {"dotnet", "csc"},
+            ".zig": {"zig"},
+            ".mojo": {"mojo"},
+            ".nim": {"nim", "nimble"},
+            ".d": {"dmd", "ldc", "gdc"},
+            ".f90": {"gfortran", "ifort"},
+        }
+
+        node_langs: Set[str] = set()
+        for node in nodes or []:
+            node_id = node.get("node_id") or "unnamed"
+            lang = (node.get("lang") or "").lower()
+            node_langs.add(lang)
+            node_toolchain = (node.get("toolchain") or "").lower()
+            for path in node.get("source_files") or []:
+                ext = os.path.splitext(str(path))[1].lower()
+                allowed = ext_toolchains.get(ext)
+                if allowed and node_toolchain not in allowed:
+                    errors.append(
+                        f"Node {node_id!r}: {path!r} (extension {ext!r}) requires "
+                        f"one of toolchains {sorted(allowed)}, got {node_toolchain!r}."
+                    )
+
+        required_langs: Set[str] = set()
+        if "hybrid_rust_python" in architecture:
+            required_langs = {"rust", "python"}
+        elif "hybrid_cpp_python" in architecture:
+            required_langs = {"cpp", "python"}
+        elif "hybrid_cpp_rust" in architecture:
+            required_langs = {"cpp", "rust"}
+        elif "tri_polyglot" in architecture:
+            required_langs = {"rust", "cpp", "python"}
+        elif architecture == "pure_python":
+            required_langs = {"python"}
+        elif architecture == "pure_rust":
+            required_langs = {"rust"}
+
+        missing = required_langs - node_langs
+        if missing:
+            errors.append(
+                f"Architecture {architecture!r} requires language nodes {sorted(required_langs)}, "
+                f"missing {sorted(missing)}."
+            )
+
+        required_toolchains: Set[str] = set()
+        if "rust" in node_langs:
+            required_toolchains.add("cargo")
+        if "cpp" in node_langs:
+            required_toolchains.update({"cmake", "clang", "gcc"})
+        if "python" in node_langs:
+            required_toolchains.add("python")
+        if "go" in node_langs:
+            required_toolchains.add("go")
+
+        missing_toolchains = required_toolchains - toolchains
+        if missing_toolchains:
+            errors.append(
+                f"Architecture {architecture!r} with nodes {sorted(node_langs)} requires "
+                f"toolchains {sorted(required_toolchains)}, missing {sorted(missing_toolchains)}."
+            )
+
+        return errors
 
     def _validate_blueprint_integrity(
         self,
@@ -902,7 +1004,9 @@ class Orchestrator:
         nodes = blueprint.module_graph or []
         primary_entrypoint = ""
         if blueprint.execution_strategy:
-            primary_entrypoint = getattr(blueprint.execution_strategy, "primary_entrypoint", "") or ""
+            primary_entrypoint = (
+                getattr(blueprint.execution_strategy, "primary_entrypoint", "") or ""
+            )
             if isinstance(primary_entrypoint, dict):
                 primary_entrypoint = primary_entrypoint.get("file", "")
 
@@ -967,7 +1071,20 @@ class Orchestrator:
                 )
 
         # 2a. Intra-language FFI boundaries are hallucinations; use internal imports.
-        ffi_bindings = {"ctypes", "c_abi", "raw_c", "c", "cffi", "pyo3", "cxx", "wasm_wasi", "cgo", "pinvoke", "jni", "cuda_hip_c"}
+        ffi_bindings = {
+            "ctypes",
+            "c_abi",
+            "raw_c",
+            "c",
+            "cffi",
+            "pyo3",
+            "cxx",
+            "wasm_wasi",
+            "cgo",
+            "pinvoke",
+            "jni",
+            "cuda_hip_c",
+        }
         for abi in blueprint.abi_contracts or []:
             sym = getattr(abi, "symbol", "") or ""
             src = getattr(abi, "source_node", "") or ""
@@ -980,7 +1097,10 @@ class Orchestrator:
             ).lower()
             binding = str(getattr(abi, "binding_framework", "") or "").lower()
             if (
-                src and tgt and src_lang and tgt_lang
+                src
+                and tgt
+                and src_lang
+                and tgt_lang
                 and src_lang == tgt_lang
                 and binding in ffi_bindings
             ):
@@ -1008,7 +1128,8 @@ class Orchestrator:
                 (
                     n
                     for n in nodes
-                    if primary_entrypoint in [str(p) for p in (n.get("source_files") or [])]
+                    if primary_entrypoint
+                    in [str(p) for p in (n.get("source_files") or [])]
                 ),
                 None,
             )
@@ -1156,7 +1277,12 @@ class Orchestrator:
 
             missing: List[str] = []
             missing_tests: List[str] = []
-            if not missing and not missing_tests and not starvation and not integrity_errors:
+            if (
+                not missing
+                and not missing_tests
+                and not starvation
+                and not integrity_errors
+            ):
                 enriched.metadata["llm_initialized"] = "true"
                 enriched.metadata["status"] = "finalized"
                 enriched.metadata["generation_method"] = "llm_synthesized"
@@ -1214,7 +1340,10 @@ class Orchestrator:
                 raise
             except Exception as exc:
                 error_text = str(exc)
-                if "starvation" not in error_text.lower() and "timeout" not in error_text.lower():
+                if (
+                    "starvation" not in error_text.lower()
+                    and "timeout" not in error_text.lower()
+                ):
                     raise
                 result = {
                     "success": False,
@@ -1226,7 +1355,10 @@ class Orchestrator:
                 return result
 
             error_text = result.get("error", "")
-            if "starvation" not in error_text.lower() and "timeout" not in error_text.lower():
+            if (
+                "starvation" not in error_text.lower()
+                and "timeout" not in error_text.lower()
+            ):
                 return result
 
             _accel_log(
@@ -1235,7 +1367,9 @@ class Orchestrator:
                 "triggering Deterministic Re-Enrichment pass",
             )
             # Force a fresh v11 enrichment pass for the next attempt.
-            metadata = blueprint.metadata if isinstance(blueprint.metadata, dict) else {}
+            metadata = (
+                blueprint.metadata if isinstance(blueprint.metadata, dict) else {}
+            )
             metadata["llm_initialized"] = "false"
             blueprint.metadata = metadata
             try:
@@ -1591,7 +1725,8 @@ class Orchestrator:
                 )
                 for var, typ in inferred.items():
                     _accel_log(
-                        "info", f"SMT resolved typed hole: {func_node.name}.{var} -> {typ}"
+                        "info",
+                        f"SMT resolved typed hole: {func_node.name}.{var} -> {typ}",
                     )
                 smt_types_by_function[func_node.name] = inferred
         except Exception as exc:
@@ -2068,7 +2203,10 @@ def _parse_llm_blueprint(
 ) -> Optional[Blueprint]:
     """Parse a raw LLM YAML response into a ``Blueprint``."""
     if not raw:
-        _accel_log("warning", "orchestrator._llm_plan_blueprint: LLM returned an empty response")
+        _accel_log(
+            "warning",
+            "orchestrator._llm_plan_blueprint: LLM returned an empty response",
+        )
         return None
     try:
         cleaned = _strip_markdown_fences(raw)
@@ -2170,7 +2308,10 @@ _ARCHITECTURE_PROMPT_MARKERS: Dict[str, List[str]] = {
     INTENT_HYBRID_RUST_PYTHON: ["hybrid_rust_python", "hybrid rust python"],
     INTENT_HYBRID_CPP_PYTHON: ["hybrid_cpp_python", "hybrid cpp python"],
     INTENT_HYBRID_CPP_RUST: ["hybrid_cpp_rust", "hybrid cpp rust"],
-    INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON: ["tri_polyglot_rust_cpp_python", "tri polyglot rust cpp python"],
+    INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON: [
+        "tri_polyglot_rust_cpp_python",
+        "tri polyglot rust cpp python",
+    ],
     INTENT_GRAPH_POLYGLOT: ["graph_polyglot", "graph polyglot"],
 }
 
@@ -2480,7 +2621,8 @@ class CompactedContextGenerator:
         architecture = data.get("architecture", "pure_python")
         functions = self._compact_functions(data)
         context: Dict[str, Any] = {
-            "project": data.get("project") or data.get("metadata", {}).get("project_name", "aero_forge_project"),
+            "project": data.get("project")
+            or data.get("metadata", {}).get("project_name", "aero_forge_project"),
             "architecture": architecture,
             "contracts": self._compact_contracts(data),
             "functions": functions,
@@ -2577,7 +2719,9 @@ class CompactedContextGenerator:
                         "target": abi.get("target_language", ""),
                         "symbol": abi.get("export_symbol", ""),
                         "args": [e.get("type", "") for e in sig.get("inputs", [])],
-                        "return_type": ", ".join(e.get("type", "") for e in sig.get("outputs", [])),
+                        "return_type": ", ".join(
+                            e.get("type", "") for e in sig.get("outputs", [])
+                        ),
                         "boundary": abi.get("binding_framework", ""),
                     }
                 )
@@ -2591,7 +2735,9 @@ class CompactedContextGenerator:
                         "target": a.get("target_language", ""),
                         "symbol": a.get("export_symbol", ""),
                         "args": [e.get("type", "") for e in sig.get("inputs", [])],
-                        "return_type": ", ".join(e.get("type", "") for e in sig.get("outputs", [])),
+                        "return_type": ", ".join(
+                            e.get("type", "") for e in sig.get("outputs", [])
+                        ),
                         "boundary": a.get("binding_framework", ""),
                     }
                 )
@@ -2599,7 +2745,18 @@ class CompactedContextGenerator:
         return contracts
 
     def _data_payload_markers(self) -> List[str]:
-        return ["matrix", "table", "lookup", "dictionary", "dict", "constants", "data", "scoring", "payload", "blosum"]
+        return [
+            "matrix",
+            "table",
+            "lookup",
+            "dictionary",
+            "dict",
+            "constants",
+            "data",
+            "scoring",
+            "payload",
+            "blosum",
+        ]
 
     def _prompt_text(self, data: Dict[str, Any]) -> str:
         prompt = data.get("prompt") or data.get("metadata", {}).get("prompt") or ""
@@ -2613,12 +2770,20 @@ class CompactedContextGenerator:
         if not symbol:
             return False
         if node:
-            if node.get("data_payload") or (node.get("extra") or {}).get("data_payload"):
+            if node.get("data_payload") or (node.get("extra") or {}).get(
+                "data_payload"
+            ):
                 return True
             if (node.get("extra") or {}).get("payload_kind"):
                 return True
         sym_lower = symbol.lower()
-        if sym_lower in {"blosum62", "scoring_matrix", "lookup_table", "constants", "data_payload"}:
+        if sym_lower in {
+            "blosum62",
+            "scoring_matrix",
+            "lookup_table",
+            "constants",
+            "data_payload",
+        }:
             return True
         if "blosum" in sym_lower:
             return True
@@ -2630,14 +2795,30 @@ class CompactedContextGenerator:
         self, symbol: str, node: Optional[Dict[str, Any]], data: Dict[str, Any]
     ) -> str:
         if node:
-            kind = (node.get("extra") or {}).get("payload_kind") or node.get("payload_kind")
+            kind = (node.get("extra") or {}).get("payload_kind") or node.get(
+                "payload_kind"
+            )
             if kind:
                 return str(kind)
         prompt_lower = self._prompt_text(data)
         sym_lower = symbol.lower()
-        if any(k in sym_lower or k in prompt_lower for k in ("matrix", "scoring", "dict", "dictionary", "lookup", "table", "map")):
+        if any(
+            k in sym_lower or k in prompt_lower
+            for k in (
+                "matrix",
+                "scoring",
+                "dict",
+                "dictionary",
+                "lookup",
+                "table",
+                "map",
+            )
+        ):
             return "dict"
-        if any(k in sym_lower or k in prompt_lower for k in ("list", "sequence", "array", "vector")):
+        if any(
+            k in sym_lower or k in prompt_lower
+            for k in ("list", "sequence", "array", "vector")
+        ):
             return "list"
         if "set" in sym_lower:
             return "set"
@@ -2646,7 +2827,9 @@ class CompactedContextGenerator:
     def _compact_functions(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
         functions: List[Dict[str, Any]] = []
 
-        def _add_function(entry: Dict[str, Any], node: Optional[Dict[str, Any]]) -> None:
+        def _add_function(
+            entry: Dict[str, Any], node: Optional[Dict[str, Any]]
+        ) -> None:
             name = entry.get("name") or entry.get("symbol", "")
             if not name:
                 return
@@ -2800,7 +2983,9 @@ class CompactedContextGenerator:
                     "file": f.get("file", ""),
                     "node_id": f.get("node_id", ""),
                     "lang": f.get("lang", ""),
-                    "logic_sketch": f.get("logic_sketch") or f.get("uast") or f.get("steps"),
+                    "logic_sketch": f.get("logic_sketch")
+                    or f.get("uast")
+                    or f.get("steps"),
                     "data_payload": f.get("data_payload", False),
                     "payload_kind": f.get("payload_kind", ""),
                 }
@@ -2809,7 +2994,9 @@ class CompactedContextGenerator:
             ],
         }
 
-    def _compact_pinned_symbols(self, data: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    def _compact_pinned_symbols(
+        self, data: Dict[str, Any]
+    ) -> Dict[str, Dict[str, Any]]:
         """Pin every contracted symbol to a node_id and file path.
 
         The pinned map is the authoritative bridge between declarative contracts
@@ -2851,9 +3038,7 @@ class CompactedContextGenerator:
         pinned = context.get("pinned_symbols", {})
         impl_map = context.get("full_implementation_map", {})
         impl_symbols = {
-            e.get("name"): e
-            for e in impl_map.get("symbols", [])
-            if e.get("name")
+            e.get("name"): e for e in impl_map.get("symbols", []) if e.get("name")
         }
 
         for symbol, info in pinned.items():
@@ -2866,5 +3051,6 @@ class CompactedContextGenerator:
                 raise ValueError(
                     f"Pinned symbol '{symbol}' missing from Compacted Functional Matrix"
                 )
+
 
 __all__ = ["Orchestrator", "ForgeError", "plan_workspace", "CompactedContextGenerator"]

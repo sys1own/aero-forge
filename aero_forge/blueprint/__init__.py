@@ -18,6 +18,7 @@ from aero_forge.blueprint.core import (
     ContractEntry,
     ExecutionStrategy,
     FunctionSpec,
+    FunctionalIntent,
     LLMConfig,
     ManifestEntry,
     _contracts_to_abi_contracts,
