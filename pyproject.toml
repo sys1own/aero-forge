@@ -15,6 +15,8 @@ dependencies = [
     "tree-sitter-python>=0.20.0",
     "tree-sitter-rust>=0.20.0",
     "tree-sitter-cpp>=0.20.0",
+    "rdflib>=6.0",
+    "pyshacl>=0.25.0",
     "pydantic",
     "pyyaml>=5.0",
     "tomli>=2.0.0",
