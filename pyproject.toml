@@ -11,7 +11,10 @@ requires-python = ">=3.9"
 dependencies = [
     "openai>=1.0,<3.0",
     "click>=8.0",
-    "tree-sitter",
+    "tree-sitter>=0.20.0",
+    "tree-sitter-python>=0.20.0",
+    "tree-sitter-rust>=0.20.0",
+    "tree-sitter-cpp>=0.20.0",
     "pydantic",
     "pyyaml>=5.0",
     "tomli>=2.0.0",
@@ -45,3 +48,4 @@ include = ["aero_forge*"]
 
 [tool.setuptools.package-data]
 aero_forge = ["templates/*"]
+aero_forge_his = ["*.so"]
