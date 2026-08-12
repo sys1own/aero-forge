@@ -388,12 +388,10 @@ class ProactivePolyglotBuilder:
 
         # Persist the enriched graph blueprint before any source files are created
         # so the workspace always reflects a finalized state during materialization.
-        (output_dir / "blueprint.aero").write_text(
-            yaml.safe_dump(
-                graph.model_dump(mode="json"), sort_keys=False, default_flow_style=False
-            ),
-            encoding="utf-8",
-        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        from aero_forge.blueprint.schema import write_v3_blueprint
+
+        write_v3_blueprint(graph, output_dir / "blueprint.aero")
 
         # Build a compacted functional matrix so downstream synthesis is concise
         # and deterministic. The context is attached to the graph metadata so the

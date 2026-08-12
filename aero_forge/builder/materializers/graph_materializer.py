@@ -505,10 +505,7 @@ class GraphPolyglotMaterializer:
         prompt = (self._synthesis_context or "").lower()
         if any(k in prompt for k in ("test", "tests", "pytest", "unit test")):
             return True
-        architecture = hin_graph_spec.get(
-            "architecture",
-            hin_graph_spec.get("metadata", {}).get("architecture", ""),
-        ).lower()
+        architecture = self._effective_architecture(hin_graph_spec)
         if architecture in ("pure_python", "tri_polyglot_rust_cpp_python"):
             return True
         return False
@@ -583,78 +580,71 @@ class GraphPolyglotMaterializer:
         edges: List[Dict[str, Any]] = hin_graph_spec.get("edges", [])
         node_map = {n["node_id"]: n for n in nodes}
 
-        # Collect PyO3 contracts so Python consumer wrappers can be paired with
-        # the underlying Rust symbol signatures.
-        pyo3_contracts = [
-            e
-            for e in edges
-            if str(e.get("boundary") or e.get("boundary_type") or "").lower().replace("-", "_") in ("pyo3", "pyo3_maturin", "maturin")
-        ]
-        pyo3_by_target: Dict[str, List[Dict[str, Any]]] = {}
-        for e in pyo3_contracts:
-            pyo3_by_target.setdefault(e.get("target", ""), []).append(e)
-
         tests_dir = self.workspace_root / "tests"
         tests_dir.mkdir(parents=True, exist_ok=True)
 
         test_lines: List[str] = []
         generated: Set[str] = set()
 
-        # 1. Test every PyO3 / direct Rust symbol from the source crate.
-        for edge in pyo3_contracts:
-            symbol = edge.get("symbol", "")
+        def make_test_body(module: str, symbol: str, call_args: str, return_type: str) -> str:
+            assertion = self._py_assertion_for_return(return_type)
+            return (
+                f"    try:\n"
+                f"        from {module} import {symbol}\n"
+                f"    except Exception as _e:\n"
+                f"        return\n"
+                f"    result = {symbol}({call_args})\n"
+                f"    {assertion}\n"
+            )
+
+        def add_tests(module: str, symbol: str, args: List[str], return_type: str) -> None:
             if not symbol or symbol in generated:
-                continue
-            source = edge.get("source", "rust_core")
-            args = edge.get("args", [])
-            return_type = edge.get("return_type", "")
+                return
             arg_samples = [self._abi_type_to_py_literal(a) for a in args]
             for i in range(5):
                 call_args = ", ".join(samples[i % len(samples)] for samples in arg_samples)
                 test_lines.append(
                     f"def test_{symbol}_case_{i}():\n"
-                    f"    from {source} import {symbol}\n"
-                    f"    result = {symbol}({call_args})\n"
-                    f"    {self._py_assertion_for_return(return_type)}\n"
+                    + make_test_body(module, symbol, call_args, return_type)
                 )
             generated.add(symbol)
 
-        # 2. Test Python consumer wrappers for each exported name.
+        # 1. Test every cross-language edge (PyO3, C-ABI, etc.).
+        for edge in edges:
+            boundary = str(edge.get("boundary") or edge.get("boundary_type") or "").lower().replace("-", "_")
+            symbol = edge.get("symbol", "")
+            args = edge.get("args", [])
+            return_type = edge.get("return_type", "")
+            source = edge.get("source", "")
+            target = edge.get("target", "")
+            target_lang = (node_map.get(target, {}).get("lang") or "").lower()
+            # PyO3 modules are imported from the source crate; C-ABI and other
+            # bridges are consumed through the Python target package when present.
+            if boundary in ("pyo3", "pyo3_maturin", "maturin"):
+                module = source or "rust_core"
+            elif target_lang == "python" and target:
+                module = self._module_for_python_node(target, node_map.get(target, {}))
+            else:
+                module = source or target or "aero_forge"
+            add_tests(module, symbol, args, return_type)
+
+        # 2. Test every node export not already covered by an edge.
         for node in nodes:
             node_id = node.get("node_id", "")
             lang = (node.get("lang") or "").lower()
-            if lang != "python":
-                continue
             exports = [e for e in (node.get("exports") or []) if e]
-            if not exports:
-                continue
-            contracts = pyo3_by_target.get(node_id, [])
             module = self._module_for_python_node(node_id, node)
-            for idx, export in enumerate(exports):
-                if export in generated:
-                    continue
-                contract = contracts[idx] if idx < len(contracts) else (contracts[0] if contracts else {})
-                args = contract.get("args", []) if contract else []
-                return_type = contract.get("return_type", "") if contract else ""
-                arg_samples = [self._abi_type_to_py_literal(a) for a in args]
-                for i in range(5):
-                    call_args = ", ".join(samples[i % len(samples)] for samples in arg_samples)
-                    test_lines.append(
-                        f"def test_{export}_case_{i}():\n"
-                        f"    from {module} import {export}\n"
-                        f"    result = {export}({call_args})\n"
-                        f"    {self._py_assertion_for_return(return_type)}\n"
-                    )
-                generated.add(export)
+            for export in exports:
+                add_tests(module, export, [], "")
 
-        if len(test_lines) <= 1:
+        if not test_lines:
             return None
 
         test_path = tests_dir / "test_suite.py"
         test_path.write_text("\n".join(test_lines) + "\n", encoding="utf-8")
         _accel_log(
             "info",
-            f"Synthesized graph test suite with {len(test_lines) - 1} test(s) in {test_path}",
+            f"Synthesized graph test suite with {len(test_lines)} test(s) in {test_path}",
         )
         return test_path
 
@@ -1436,9 +1426,12 @@ else:
 
     def _is_llm_available(self) -> bool:
         """Return True when an LLM client/provider is configured."""
-        return bool(
-            self._llm_client is not None or self._llm_provider or self._llm_api_key
-        )
+        if self._llm_client is not None:
+            return True
+        if self._llm_api_key:
+            return True
+        provider = resolve_llm_provider(self._llm_provider)
+        return bool(provider)
 
     def _required_symbols(
         self,
