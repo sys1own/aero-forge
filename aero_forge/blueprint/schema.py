@@ -964,6 +964,14 @@ def write_v3_blueprint(blueprint: BlueprintV3, path: Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     data = blueprint.model_dump(mode="json")
+    metadata = data.get("metadata") or {}
+    # Finalized v3 blueprints must expose a finalized status to the workspace UI.
+    if (
+        metadata.get("llm_initialized")
+        and metadata.get("status") != "finalized"
+    ):
+        metadata["status"] = "finalized"
+        data["metadata"] = metadata
     if path.suffix.lower() == ".json":
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     else:

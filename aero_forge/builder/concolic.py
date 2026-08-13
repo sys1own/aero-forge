@@ -45,6 +45,12 @@ _VALID_BOUNDARIES = {
     ("cpp", "rust"): {"C_ABI"},
     ("go", "rust"): {"CGO"},
     ("rust", "go"): {"CGO"},
+    ("python", "zig"): {"C_ABI"},
+    ("zig", "python"): {"C_ABI"},
+    ("rust", "zig"): {"C_ABI"},
+    ("zig", "rust"): {"C_ABI"},
+    ("cpp", "zig"): {"C_ABI"},
+    ("zig", "cpp"): {"C_ABI"},
 }
 
 

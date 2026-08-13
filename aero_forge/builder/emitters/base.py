@@ -1782,6 +1782,18 @@ class ManifestRecovery:
         crate_safe = crate.replace("-", "_")
         srcs = cls._source_names(source_artifacts, extensions={".rs"})
         has_main = any("main.rs" in s for s in srcs)
+        source_text = "\n".join(
+            a.content or ""
+            for a in source_artifacts
+            if a.file_path and str(a.file_path).endswith(".rs")
+        )
+        needs_pyo3 = any(
+            marker in source_text
+            for marker in ("pyo3", "#[pyfunction]", "#[pymodule]", "wrap_pyfunction")
+        )
+        deps = []
+        if needs_pyo3:
+            deps.append('pyo3 = { version = "0.20.3", features = ["extension-module"] }')
         if has_main:
             # Binary node (e.g. a broker executable); cargo expects src/main.rs.
             content = (
@@ -1801,12 +1813,15 @@ class ManifestRecovery:
                 "[package]\n"
                 f'name = "{crate}"\n'
                 'version = "0.1.0"\n'
-                'edition = "2021"\n\n'
+                'edition = "2021"\n'
+                'build = "build.rs"\n\n'
                 "[lib]\n"
                 f'name = "{crate_safe}"\n'
                 f'path = "{lib_path}"\n'
                 'crate-type = ["cdylib"]\n'
             )
+        if deps:
+            content += "\n[dependencies]\n" + "\n".join(deps) + "\n"
         return CodeArtifact(file_path="Cargo.toml", content=content, language="toml")
 
     @staticmethod

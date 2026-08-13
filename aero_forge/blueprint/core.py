@@ -1148,6 +1148,22 @@ def write_blueprint(blueprint: Blueprint, path: Path) -> None:
         "domain_target": blueprint.architecture or "pure_python",
     }
 
+    # A blueprint written after a successful planning/build pass must be visible as
+    # finalized.  Only keep it as draft when llm_initialized is explicitly false or
+    # the blueprint is empty (no prompt/manifest).
+    status = metadata.get("status")
+    llm_initialized_raw = metadata.get("llm_initialized")
+    llm_initialized = (
+        str(llm_initialized_raw).strip().lower() in ("true", "1", "yes")
+        if llm_initialized_raw is not None
+        else False
+    )
+    if status != "finalized" and (
+        llm_initialized or (blueprint.prompt and blueprint.manifest)
+    ):
+        metadata["status"] = "finalized"
+        metadata["llm_initialized"] = "true"
+
     # Synthesise v2 fields from legacy v1 data when the LLM/planner did not emit them.
     manifest = list(blueprint.manifest) if blueprint.manifest else []
     execution_strategy = blueprint.execution_strategy

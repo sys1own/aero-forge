@@ -320,17 +320,62 @@ class ProactivePolyglotBuilder:
         )
         from aero_forge.config import resolve_llm_provider, _resolve_api_key
 
-        provider = resolve_llm_provider(llm_provider) or "deepseek"
+        provider = resolve_llm_provider(llm_provider)
+        if provider is None:
+            # Only default to deepseek when the caller did not explicitly ask for
+            # no LLM. An explicit "none"/"null" provider is preserved as the
+            # literal string "none" so downstream components (IntentCompiler,
+            # GraphPolyglotMaterializer) skip LLM calls deterministically.
+            explicit = str(llm_provider or "").lower().strip()
+            if explicit in ("none", "null", ""):
+                provider = "none"
+            else:
+                provider = "deepseek"
         model = llm_model or "deepseek-chat"
+
+        # Load an existing workspace blueprint so follow-up prompts extend rather
+        # than replace prior state, and feed its compacted context back into
+        # the LLM to keep the prompt within context limits.
+        existing_blueprint: Optional[Any] = None
+        existing_context = ""
+        output_dir = Path(output_dir)
+        existing_blueprint_path = output_dir / "blueprint.aero"
+        if existing_blueprint_path.is_file():
+            try:
+                from aero_forge.blueprint.schema import BlueprintV3
+
+                existing_blueprint = BlueprintV3.load(existing_blueprint_path)
+                compacted = existing_blueprint.metadata.compacted_context
+                if not compacted:
+                    from aero_forge.orchestrator.orchestrator import (
+                        CompactedContextGenerator,
+                    )
+
+                    compacted = CompactedContextGenerator(
+                        existing_blueprint
+                    ).generate()
+                if compacted:
+                    existing_context = (
+                        "Existing workspace compacted context (preserve these nodes and "
+                        "contracts unless explicitly modified):\n```json\n"
+                        f"{compacted}\n```\n\n"
+                    )
+            except Exception as exc:
+                logger.debug(
+                    "Could not load existing blueprint for context compaction: %s", exc
+                )
 
         # Honor an explicitly passed key first, then a request-scoped override,
         # then resolve from the environment so that web/dashboard calls inherit
-        # the configured credentials without requiring global env vars.
+        # the configured credentials without requiring global env vars.  When the
+        # provider is explicitly disabled, avoid resolving a key so the graph
+        # materializer does not accidentally invoke the LLM.
         resolved_key = llm_api_key
-        if not resolved_key and config_override is not None:
-            resolved_key = getattr(config_override, "api_key", None)
-        if not resolved_key:
-            resolved_key = _resolve_api_key(provider)
+        if provider is not None:
+            if not resolved_key and config_override is not None:
+                resolved_key = getattr(config_override, "api_key", None)
+            if not resolved_key:
+                resolved_key = _resolve_api_key(provider)
 
         compiler = IntentCompiler(
             provider=provider,
@@ -361,9 +406,9 @@ class ProactivePolyglotBuilder:
                 )
             try:
                 if extra:
-                    text = f"{prompt}\n\n{extra}\n{skeleton_note}"
+                    text = f"{existing_context}{prompt}\n\n{extra}\n{skeleton_note}"
                 else:
-                    text = f"{prompt}\n\n{skeleton_note}"
+                    text = f"{existing_context}{prompt}\n\n{skeleton_note}"
                 graph = compiler.compile_prompt_to_graph(
                     text, output_dir=output_dir
                 )
@@ -386,14 +431,49 @@ class ProactivePolyglotBuilder:
                 "llm_initialized blueprint. Run a successful Intent Enrichment pass first."
             )
 
+        # Merge the existing workspace graph into the new graph so follow-up
+        # prompts accumulate nodes/edges instead of replacing them.
+        if existing_blueprint is not None:
+            try:
+                from aero_forge.blueprint.schema import (
+                    BoundaryEdgeSpec,
+                    PolyglotNodeSpec,
+                )
+
+                existing_data = existing_blueprint.model_dump(mode="json")
+                existing_node_ids = {n.node_id for n in graph.nodes}
+                for node in existing_data.get("nodes", []):
+                    if node.get("node_id") and node["node_id"] not in existing_node_ids:
+                        graph.nodes.append(PolyglotNodeSpec(**node))
+                        existing_node_ids.add(node["node_id"])
+
+                def _edge_key(edge: Any) -> Any:
+                    return (
+                        edge.get("source"),
+                        edge.get("target"),
+                        edge.get("symbol"),
+                    )
+
+                existing_edge_keys = {_edge_key(e.model_dump(mode="json")) for e in graph.edges}
+                for edge in existing_data.get("edges", []):
+                    if _edge_key(edge) not in existing_edge_keys:
+                        graph.edges.append(BoundaryEdgeSpec(**edge))
+                        existing_edge_keys.add(_edge_key(edge))
+
+                # Preserve the original project identity and any prior metadata.
+                if existing_blueprint.metadata.project_name:
+                    graph.metadata.setdefault("project_name", "")
+                    graph.metadata["project_name"] = existing_blueprint.metadata.project_name
+                    graph.project = existing_blueprint.metadata.project_name
+            except Exception as exc:
+                logger.warning("Could not merge existing blueprint graph: %s", exc)
+
         # Persist the enriched graph blueprint before any source files are created
         # so the workspace always reflects a finalized state during materialization.
-        (output_dir / "blueprint.aero").write_text(
-            yaml.safe_dump(
-                graph.model_dump(mode="json"), sort_keys=False, default_flow_style=False
-            ),
-            encoding="utf-8",
-        )
+        output_dir.mkdir(parents=True, exist_ok=True)
+        from aero_forge.blueprint.schema import write_v3_blueprint
+
+        write_v3_blueprint(graph, output_dir / "blueprint.aero")
 
         # Build a compacted functional matrix so downstream synthesis is concise
         # and deterministic. The context is attached to the graph metadata so the
