@@ -322,21 +322,38 @@ class GraphPolyglotMaterializer:
         edges: List[Dict[str, Any]],
         node_map: Dict[str, Dict[str, Any]],
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """Remove redundant ``wasm_<base>`` Rust nodes and add a wasm target flag.
+        """Remove redundant wasm Rust clone nodes and add a wasm target flag.
 
         The LLM sometimes materializes the wasm32 target as a separate node that
-        mirrors an existing Rust node.  That separate node has no real source and
-        fails Atomic Symbol Assembly.  Collapse it into the base Rust node and let
-        the normal host-crate + ``wasm/`` sub-crate flow produce the ``.wasm``
-        artifact instead.
+        mirrors an existing Rust node (``wasm_<base>`` or ``<base>_wasm``).  That
+        separate node has no real source and fails Atomic Symbol Assembly.
+        Collapse it into the base Rust node and let the normal host-crate +
+        ``wasm/`` sub-crate flow produce the ``.wasm`` artifact instead.
         """
         to_remove: Set[str] = set()
         for node in nodes:
             node_id = node.get("node_id", "")
-            if not node_id.startswith("wasm_") or node.get("lang", "").lower() != "rust":
+            if node.get("lang", "").lower() != "rust" or "wasm" not in node_id.lower():
                 continue
-            base_name = node_id[5:]
+            if node_id.startswith("wasm_"):
+                base_name = node_id[5:]
+            elif node_id.endswith("_wasm"):
+                base_name = node_id[:-5]
+            else:
+                continue
             base = node_map.get(base_name)
+            # The LLM may also emit ``rust_wasm`` where the base is ``rust_core``.
+            if not base:
+                base = next(
+                    (
+                        n
+                        for n in nodes
+                        if n.get("node_id", "").startswith(base_name)
+                        and n.get("lang", "").lower() == "rust"
+                        and n["node_id"] != node_id
+                    ),
+                    None,
+                )
             if not base:
                 continue
             base.setdefault("compiler_flags", []).append("--target wasm32-unknown-unknown")
@@ -946,6 +963,15 @@ else:
 
         if needs_rewrite:
             cmake_path.write_text("\n".join(rewritten) + "\n", encoding="utf-8")
+
+        # If the node has an include/ directory, make sure CMake exposes it so
+        # generated headers are found by source and test files.
+        include_dir = node_dir / "include"
+        if include_dir.is_dir():
+            content = cmake_path.read_text(encoding="utf-8", errors="ignore")
+            if "include_directories" not in content and "target_include_directories" not in content:
+                content += f"\ntarget_include_directories({node_id} PUBLIC include)\n"
+                cmake_path.write_text(content, encoding="utf-8")
 
     def _guard_requested_symbols(
         self, nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]
@@ -2138,7 +2164,7 @@ else:
                     return f"{match.group(1)}[@intCast({expr})]"
 
                 content = re.sub(
-                    r"\b(arg_?\d+)\[([^\]]+)\]",
+                    r"\b([a-zA-Z_]\w*)\[([^\]]+)\]",
                     _zig_index_cast,
                     content,
                 )
@@ -2172,6 +2198,9 @@ else:
                 # result type of a redundant ``@intCast(x)`` when ``x`` is already
                 # a signed integer; unwrap it.
                 content = self._zig_remove_redundant_intcast_in_binops(content)
+                # LLM-generated Zig sometimes declares a function ``void`` and then
+                # returns a pointer variable. Patch the signature to match.
+                content = self._zig_repair_void_returns(content)
                 # LLM-generated ``if (std.math.isFinite(...) {"`` frequently omits
                 # the closing parenthesis of the ``if`` condition. Add it.
                 content = re.sub(
@@ -2322,6 +2351,47 @@ else:
             )
         return content
 
+    @staticmethod
+    def _zig_repair_void_returns(content: str) -> str:
+        """Promote a ``void`` return type when the body returns a typed variable.
+
+        LLM-synthesized Zig sometimes declares an exported C-ABI function as
+        ``void`` and then returns a pointer variable.  Zig rejects that mismatch;
+        we infer the real return type from the local declaration of the returned
+        identifier and patch the signature.
+        """
+        var_types: Dict[str, str] = {}
+        decl_re = re.compile(
+            r"\b(?:const|var)\s+([a-zA-Z_]\w*)\s*:\s*([^=;]+?)(?=\s*=|;)",
+            re.DOTALL,
+        )
+        for m in decl_re.finditer(content):
+            var_types[m.group(1)] = m.group(2).strip()
+
+        sig_re = re.compile(
+            r"((?:export\s+)?fn\s+[a-zA-Z_]\w*\s*\([^)]*\)\s*)(void)(\s*\{)"
+        )
+
+        def _replace(match: "re.Match[str]") -> str:
+            prefix, ret, suffix = match.group(1), match.group(2), match.group(3)
+            body_start = match.end()
+            depth = 1
+            i = body_start
+            while i < len(content) and depth > 0:
+                if content[i] == "{":
+                    depth += 1
+                elif content[i] == "}":
+                    depth -= 1
+                i += 1
+            body = content[body_start : i - 1]
+            for ret_match in re.finditer(r"\breturn\s+([a-zA-Z_]\w*)\s*;", body):
+                name = ret_match.group(1)
+                if name in var_types:
+                    return f"{prefix}{var_types[name]}{suffix}"
+            return match.group(0)
+
+        return sig_re.sub(_replace, content)
+
     def _zig_normalize_unused_params(self, content: str) -> str:
         """Add/remove `_ = arg_X;` discards in Zig functions as needed.
 
@@ -2386,7 +2456,7 @@ else:
             return f"Vec::with_capacity({inner})"
 
         content = re.sub(
-            r"Vec::with_capacity\(\(([^)]+)\)\s*as\s+usize\)",
+            r"Vec::with_capacity\(\((.*?)\)\s*as\s+usize\)",
             _capacity_repl,
             content,
         )
@@ -2397,6 +2467,40 @@ else:
             content,
         )
         return content
+
+    @staticmethod
+    def _rust_repair_cargo_dependencies(
+        cargo_toml: str, source_contents: List[str]
+    ) -> str:
+        """Inject missing crates into ``Cargo.toml`` based on source ``use`` lines.
+
+        The LLM often emits ``use rand::`` / ``use rand_distr::`` without adding
+        the corresponding dependency, which causes prompt-2/3 transitions that
+        extend a Rust node to fail with E0432/E0433.  We scan the source for
+        common crate references and add the dependency lines that are missing.
+        """
+        combined = "\n".join(source_contents)
+        crate_versions = {
+            "rand": "0.8",
+            "rand_distr": "0.4",
+            "ndarray": "0.15",
+            "serde": "1.0",
+            "regex": "1.10",
+        }
+        missing: List[str] = []
+        for crate, version in crate_versions.items():
+            if not re.search(rf"\b{re.escape(crate)}::", combined):
+                continue
+            if re.search(rf"^\s*{re.escape(crate)}\s*=", cargo_toml, re.MULTILINE):
+                continue
+            missing.append(f'{crate} = "{version}"')
+        if not missing:
+            return cargo_toml
+        dep_header = re.search(r"^\s*\[dependencies\]\s*$", cargo_toml, re.MULTILINE)
+        if dep_header:
+            insert_at = dep_header.end()
+            return cargo_toml[:insert_at] + "\n" + "\n".join(missing) + cargo_toml[insert_at:]
+        return cargo_toml + "\n\n[dependencies]\n" + "\n".join(missing) + "\n"
 
     def _zig_simplify_casts(self, content: str) -> str:
         """Remove redundant ``@intCast`` wrappers around float/int builtins.
@@ -3973,6 +4077,15 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                     self._write_artifact(recovered, node_dir)
                 except ManifestRecoveryError as exc:
                     _accel_log("error", f"Manifest recovery failed for {node_id}: {exc}")
+
+            if cargo_path.is_file() and source_rs:
+                cargo_text = cargo_path.read_text(encoding="utf-8", errors="ignore")
+                source_contents = [a.content for a in source_rs]
+                new_cargo = self._rust_repair_cargo_dependencies(
+                    cargo_text, source_contents
+                )
+                if new_cargo != cargo_text:
+                    cargo_path.write_text(new_cargo, encoding="utf-8")
 
         if lang == "cpp" or node_spec.get("toolchain") == "cmake":
             self._reconcile_cmake_sources(node_dir, node_id, node_spec, artifacts)
