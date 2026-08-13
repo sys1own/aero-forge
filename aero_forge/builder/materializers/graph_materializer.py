@@ -317,6 +317,42 @@ class GraphPolyglotMaterializer:
                 )
 
     @staticmethod
+    def _collapse_wasm_clone_nodes(
+        nodes: List[Dict[str, Any]],
+        edges: List[Dict[str, Any]],
+        node_map: Dict[str, Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Remove redundant ``wasm_<base>`` Rust nodes and add a wasm target flag.
+
+        The LLM sometimes materializes the wasm32 target as a separate node that
+        mirrors an existing Rust node.  That separate node has no real source and
+        fails Atomic Symbol Assembly.  Collapse it into the base Rust node and let
+        the normal host-crate + ``wasm/`` sub-crate flow produce the ``.wasm``
+        artifact instead.
+        """
+        to_remove: Set[str] = set()
+        for node in nodes:
+            node_id = node.get("node_id", "")
+            if not node_id.startswith("wasm_") or node.get("lang", "").lower() != "rust":
+                continue
+            base_name = node_id[5:]
+            base = node_map.get(base_name)
+            if not base:
+                continue
+            base.setdefault("compiler_flags", []).append("--target wasm32-unknown-unknown")
+            base.setdefault("extra", {})["wasm_target"] = "wasm32-unknown-unknown"
+            to_remove.add(node_id)
+        if not to_remove:
+            return nodes, edges
+        nodes = [n for n in nodes if n["node_id"] not in to_remove]
+        edges = [
+            e
+            for e in edges
+            if e.get("source") not in to_remove and e.get("target") not in to_remove
+        ]
+        return nodes, edges
+
+    @staticmethod
     def _maybe_simplify_python_c_abi_edge(
         edge: Dict[str, Any], node_map: Dict[str, Dict[str, Any]]
     ) -> None:
@@ -2164,6 +2200,9 @@ else:
                 # LLM-synthesized Rust often assigns to Vec parameters without
                 # declaring them mutable, which the compiler rejects.
                 content = self._rust_repair_mutable_vec_params(content)
+                # Generated loops often use i64 bounds with `.len()` and
+                # `Vec::with_capacity` expects usize; normalize those sites.
+                content = self._rust_repair_usize_capacity_and_ranges(content)
                 artifact.content = content
             elif artifact.language in ("cpp", "c++", "c", "cxx") or str(artifact.file_path).endswith((".cpp", ".cc", ".cxx", ".c")):
                 content = artifact.content
@@ -2286,6 +2325,39 @@ else:
             last = i
         out.append(content[last:])
         return "".join(out)
+
+    @staticmethod
+    def _rust_repair_usize_capacity_and_ranges(content: str) -> str:
+        """Cast i64 loop bounds and capacity expressions to ``usize``.
+
+        The LLM frequently emits ``Vec::with_capacity((n * vec.len()) as usize)``
+        or ``for _ in 0..n`` where ``n`` is an ``i64`` parameter/variable.
+        Rust rejects ``i64 * usize`` and ranges over ``i64``, so cast the scalar
+        operand to ``usize`` before use.
+        """
+        # ``x * vec.len()`` -> ``(x as usize) * vec.len()`` and drop the outer
+        # ``as usize`` if the whole parenthesized expression is being cast.
+        def _capacity_repl(m: "re.Match[str]") -> str:
+            inner = m.group(1)
+            inner = re.sub(
+                r"(\b[a-zA-Z_]\w*\b)\s*\*\s*([a-zA-Z_]\w*\.len\(\))",
+                r"(\1 as usize) * \2",
+                inner,
+            )
+            return f"Vec::with_capacity({inner})"
+
+        content = re.sub(
+            r"Vec::with_capacity\(\(([^)]+)\)\s*as\s+usize\)",
+            _capacity_repl,
+            content,
+        )
+        # ``for _ in 0..n {`` -> ``for _ in 0..(n as usize) {``
+        content = re.sub(
+            r"for\s+(\w+)\s+in\s+0\.\.(\w+)(?!\s*as\b)",
+            r"for \1 in 0..(\2 as usize)",
+            content,
+        )
+        return content
 
     def _zig_simplify_casts(self, content: str) -> str:
         """Remove redundant ``@intCast`` wrappers around float/int builtins.
@@ -3978,6 +4050,10 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
             raise MaterializationError(str(exc)) from exc
 
         self._smt_types = hin_graph_spec.get("metadata", {}).get("smt_types", {})
+        node_map = {n["node_id"]: n for n in nodes}
+        nodes, edges = self._collapse_wasm_clone_nodes(nodes, edges, node_map)
+        hin_graph_spec["nodes"] = nodes
+        hin_graph_spec["edges"] = edges
         node_map = {n["node_id"]: n for n in nodes}
         self._normalize_rust_python_pyo3_boundary(edges, node_map)
         for edge in edges:
