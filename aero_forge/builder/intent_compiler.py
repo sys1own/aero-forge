@@ -2066,7 +2066,8 @@ class IntentCompiler:
         node_id = stub.node_id
         architecture = partial.get("architecture", "graph_polyglot")
         peer_text = json.dumps(peer_nodes, indent=2) if peer_nodes else "[]"
-        skeleton_text = json.dumps(skeleton, indent=2) if skeleton else "{}"
+        compact = self._compact_skeleton_for_section(skeleton, stub, section, symbol, peer_nodes)
+        skeleton_text = json.dumps(compact, indent=2) if compact else "{}"
 
         if section == "manifest":
             return (
@@ -2107,6 +2108,68 @@ class IntentCompiler:
             f"  'contracts' (list of ABIContract dicts) - only for cross-language symbols.\n"
             f"NO PREAMBLE. NO EXPLANATION. ONLY JSON."
         )
+
+    def _compact_skeleton_for_section(
+        self,
+        skeleton: Dict[str, Any],
+        stub: NodeStub,
+        section: str,
+        symbol: str,
+        peer_nodes: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Return only the parts of the skeleton relevant to the current fiber/section."""
+        nodes = skeleton.get("nodes") or []
+        target_node: Optional[Dict[str, Any]] = None
+        for n in nodes:
+            if n.get("node_id") == stub.node_id:
+                target_node = dict(n)
+                target_node.pop("logic_sketch", None)
+                break
+
+        target_intent: Optional[Dict[str, Any]] = None
+        for intent in skeleton.get("functional_intent") or []:
+            if (intent.get("symbol_name") or intent.get("name")) == symbol:
+                target_intent = dict(intent)
+                break
+
+        peers = [
+            {"node_id": p.get("node_id"), "lang": p.get("lang"), "exports": p.get("exports")}
+            for p in (peer_nodes or [])
+        ]
+
+        compact: Dict[str, Any] = {
+            "architecture": skeleton.get("architecture", "graph_polyglot"),
+            "project": skeleton.get("project", skeleton.get("architecture", "graph_polyglot")),
+        }
+
+        if section == "manifest":
+            compact["target_node"] = target_node or {
+                "node_id": stub.node_id,
+                "lang": stub.lang,
+                "toolchain": stub.toolchain,
+                "exports": stub.exports,
+            }
+            compact["peer_nodes"] = peers
+            compact["relevant_typed_holes"] = [
+                th for th in (skeleton.get("typed_holes") or [])
+                if th.get("path", "").startswith(f"nodes.{stub.node_id}.") or th.get("path", "").startswith("functional_intent_map.")
+            ][:10]
+        elif section == "contracts":
+            compact["target_node"] = {
+                "node_id": stub.node_id,
+                "lang": stub.lang,
+                "exports": stub.exports,
+            }
+            compact["peer_nodes"] = peers
+        elif section == "functions":
+            compact["target_node"] = target_node or {
+                "node_id": stub.node_id,
+                "lang": stub.lang,
+                "exports": stub.exports,
+            }
+            compact["functional_intent"] = target_intent or {"symbol_name": symbol}
+
+        return compact
 
     def _prepare_section_llm_call(
         self,
@@ -2845,147 +2908,164 @@ class IntentCompiler:
             )
             last_error = IntentCompilerError("LLM client unavailable")
         else:
-            # Phase 4 drift gate: measure intent drift against the invariant before
-            # the bounded-completion LLM call and restore context if it exceeds the
-            # Theorem 1 safety bound.
-            drift_partial = {
-                "project": project_name or skeleton.get("project") or classification.get("architecture") or "graph_polyglot",
-                "architecture": classification.get("architecture") or skeleton.get("architecture") or "graph_polyglot",
-                "nodes": skeleton.get("nodes", []),
-                "edges": [],
-                "functional_intent": classification.get("functional_intent") or skeleton.get("functional_intent") or [],
-                "metadata": {},
-            }
-            drift = self._measure_his_drift(hctx, classification or {}, drift_partial)
-            if drift > DRIFT_THRESHOLD:
-                self._apply_his_restore(hctx, classification or {}, drift_partial)
-                topology = self._prune_foge_topology(
-                    topology,
-                    self._current_symbols(classification or {}, drift_partial),
+            last_error: Optional[Exception] = None
+            # Sectional Fiber Completion: if the full skeleton exceeds the monolithic
+            # budget, do not attempt a single 2048+ byte Phase 4 prompt; the fiber-wise
+            # path already decomposed it by Grothendieck fiber coordinates.
+            skeleton_size = len(
+                json.dumps(skeleton, default=str, ensure_ascii=False)
+            )
+            if skeleton_size > PHASE4_MAX_TOKENS:
+                _accel_log(
+                    "warning",
+                    f"Skeleton is {skeleton_size} bytes (> {PHASE4_MAX_TOKENS}); "
+                    "skipping monolithic Phase 4 and using the deterministic fallback.",
+                )
+                last_error = IntentCompilerError(
+                    f"Skeleton too large ({skeleton_size} bytes) for monolithic completion; "
+                    "Sectional Fiber Completion was attempted."
+                )
+            else:
+                # Phase 4 drift gate: measure intent drift against the invariant before
+                # the bounded-completion LLM call and restore context if it exceeds the
+                # Theorem 1 safety bound.
+                drift_partial = {
+                    "project": project_name or skeleton.get("project") or classification.get("architecture") or "graph_polyglot",
+                    "architecture": classification.get("architecture") or skeleton.get("architecture") or "graph_polyglot",
+                    "nodes": skeleton.get("nodes", []),
+                    "edges": [],
+                    "functional_intent": classification.get("functional_intent") or skeleton.get("functional_intent") or [],
+                    "metadata": {},
+                }
+                drift = self._measure_his_drift(hctx, classification or {}, drift_partial)
+                if drift > DRIFT_THRESHOLD:
+                    self._apply_his_restore(hctx, classification or {}, drift_partial)
+                    topology = self._prune_foge_topology(
+                        topology,
+                        self._current_symbols(classification or {}, drift_partial),
+                    )
+
+                user_content = self._prepare_phase4_llm_call(
+                    self._six_phase_user_content(
+                        prompt_text, classification or {}, hctx, topology, skeleton
+                    ),
+                    hctx,
+                    classification or {},
+                    drift_partial,
+                    topology=topology,
                 )
 
-            user_content = self._prepare_phase4_llm_call(
-                self._six_phase_user_content(
-                    prompt_text, classification or {}, hctx, topology, skeleton
-                ),
-                hctx,
-                classification or {},
-                drift_partial,
-                topology=topology,
-            )
+                messages: List[Dict[str, str]] = [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user_content},
+                ]
 
-            messages: List[Dict[str, str]] = [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_content},
-            ]
+                for attempt in range(self.max_schema_retries):
+                    raw = client.generate(messages, temperature=0.2, max_tokens=4096)
+                    if not raw:
+                        _accel_log(
+                            "warning",
+                            f"intent_compiler.compile_prompt_to_graph attempt {attempt + 1}: LLM returned an empty response",
+                        )
+                        last_error = IntentCompilerError("LLM returned an empty response")
+                        messages.append({"role": "assistant", "content": ""})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": f"Attempt {attempt + 1} returned empty. Please return valid JSON.",
+                            }
+                        )
+                        continue
 
-            last_error: Optional[Exception] = None
-            for attempt in range(self.max_schema_retries):
-                raw = client.generate(messages, temperature=0.2, max_tokens=4096)
-                if not raw:
-                    _accel_log(
-                        "warning",
-                        f"intent_compiler.compile_prompt_to_graph attempt {attempt + 1}: LLM returned an empty response",
-                    )
-                    last_error = IntentCompilerError("LLM returned an empty response")
-                    messages.append({"role": "assistant", "content": ""})
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": f"Attempt {attempt + 1} returned empty. Please return valid JSON.",
-                        }
-                    )
-                    continue
+                    try:
+                        data = _extract_json(raw)
+                    except Exception as exc:
+                        last_error = exc
+                        _accel_log(
+                            "warning",
+                            f"intent_compiler.compile_prompt_to_graph attempt {attempt + 1}: JSON extraction failed; "
+                            f"raw preview: {raw[:800]!r}; error: {exc}",
+                        )
+                        logger.warning(
+                            "Intent JSON extraction failed (attempt %d): %s", attempt + 1, exc
+                        )
+                        messages.append({"role": "assistant", "content": raw})
+                        messages.append(self._retry_user_message(attempt, raw, exc))
+                        continue
 
-                try:
-                    data = _extract_json(raw)
-                except Exception as exc:
-                    last_error = exc
-                    _accel_log(
-                        "warning",
-                        f"intent_compiler.compile_prompt_to_graph attempt {attempt + 1}: JSON extraction failed; "
-                        f"raw preview: {raw[:800]!r}; error: {exc}",
-                    )
-                    logger.warning(
-                        "Intent JSON extraction failed (attempt %d): %s", attempt + 1, exc
-                    )
-                    messages.append({"role": "assistant", "content": raw})
-                    messages.append(self._retry_user_message(attempt, raw, exc))
-                    continue
+                    # Phases 5-6: concolic (Z3), SHACL, and Prolog/Chiasmus verification.
+                    formal_feedback = self._six_phase_formal_feedback(data, output_dir)
+                    if formal_feedback:
+                        last_error = IntentCompilerError(formal_feedback)
+                        _accel_log(
+                            "warning",
+                            f"intent_compiler.compile_prompt_to_graph attempt {attempt + 1}: formal verification failed; "
+                            f"feedback preview: {formal_feedback[:400]!r}",
+                        )
+                        logger.warning(
+                            "Formal verification failed (attempt %d): %s",
+                            attempt + 1,
+                            formal_feedback[:400],
+                        )
+                        messages.append({"role": "assistant", "content": raw})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Formal verification failed. Resolve these issues and return corrected JSON.\n\n"
+                                    f"{formal_feedback}\n\n"
+                                    "NO PREAMBLE. NO EXPLANATION. ONLY JSON."
+                                ),
+                            }
+                        )
+                        continue
 
-                # Phases 5-6: concolic (Z3), SHACL, and Prolog/Chiasmus verification.
-                formal_feedback = self._six_phase_formal_feedback(data, output_dir)
-                if formal_feedback:
-                    last_error = IntentCompilerError(formal_feedback)
-                    _accel_log(
-                        "warning",
-                        f"intent_compiler.compile_prompt_to_graph attempt {attempt + 1}: formal verification failed; "
-                        f"feedback preview: {formal_feedback[:400]!r}",
-                    )
-                    logger.warning(
-                        "Formal verification failed (attempt %d): %s",
-                        attempt + 1,
-                        formal_feedback[:400],
-                    )
-                    messages.append({"role": "assistant", "content": raw})
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                "Formal verification failed. Resolve these issues and return corrected JSON.\n\n"
-                                f"{formal_feedback}\n\n"
-                                "NO PREAMBLE. NO EXPLANATION. ONLY JSON."
-                            ),
-                        }
-                    )
-                    continue
+                    # Primary path: a native `graph_polyglot` blueprint.
+                    try:
+                        graph = PolyglotGraphBlueprint.model_validate(data)
+                        graph.metadata["prompt"] = prompt_text
+                        graph.metadata["llm_initialized"] = True
+                        graph.metadata["status"] = "finalized"
+                        graph.metadata["generation_method"] = "llm_synthesized"
+                        _accel_log("success", "Blueprint enrichment complete")
+                        return graph
+                    except Exception as graph_exc:
+                        logger.debug(
+                            "Graph blueprint validation failed (attempt %d): %s",
+                            attempt + 1,
+                            graph_exc,
+                        )
 
-                # Primary path: a native `graph_polyglot` blueprint.
-                try:
-                    graph = PolyglotGraphBlueprint.model_validate(data)
-                    graph.metadata["prompt"] = prompt_text
+                    # Fallback path: legacy v2 blueprint lowered to graph.
+                    try:
+                        normalized = _normalize_v2_data(data)
+                        v2 = BlueprintSchemaV2.model_validate(normalized)
+                    except Exception as exc:
+                        last_error = exc
+                        _accel_log(
+                            "warning",
+                            f"intent_compiler.compile_prompt_to_graph attempt {attempt + 1}: schema validation failed; "
+                            f"raw preview: {raw[:800]!r}; error: {exc}",
+                        )
+                        logger.warning(
+                            "Intent schema validation failed (attempt %d): %s", attempt + 1, exc
+                        )
+                        messages.append({"role": "assistant", "content": raw})
+                        messages.append(self._retry_user_message(attempt, raw, exc))
+                        continue
+
+                    graph = self._v2_to_graph_blueprint(
+                        v2,
+                        prompt_text,
+                        output_dir,
+                        project_name,
+                        classification=classification,
+                    )
                     graph.metadata["llm_initialized"] = True
                     graph.metadata["status"] = "finalized"
                     graph.metadata["generation_method"] = "llm_synthesized"
                     _accel_log("success", "Blueprint enrichment complete")
                     return graph
-                except Exception as graph_exc:
-                    logger.debug(
-                        "Graph blueprint validation failed (attempt %d): %s",
-                        attempt + 1,
-                        graph_exc,
-                    )
-
-                # Fallback path: legacy v2 blueprint lowered to graph.
-                try:
-                    normalized = _normalize_v2_data(data)
-                    v2 = BlueprintSchemaV2.model_validate(normalized)
-                except Exception as exc:
-                    last_error = exc
-                    _accel_log(
-                        "warning",
-                        f"intent_compiler.compile_prompt_to_graph attempt {attempt + 1}: schema validation failed; "
-                        f"raw preview: {raw[:800]!r}; error: {exc}",
-                    )
-                    logger.warning(
-                        "Intent schema validation failed (attempt %d): %s", attempt + 1, exc
-                    )
-                    messages.append({"role": "assistant", "content": raw})
-                    messages.append(self._retry_user_message(attempt, raw, exc))
-                    continue
-
-                graph = self._v2_to_graph_blueprint(
-                    v2,
-                    prompt_text,
-                    output_dir,
-                    project_name,
-                    classification=classification,
-                )
-                graph.metadata["llm_initialized"] = True
-                graph.metadata["status"] = "finalized"
-                graph.metadata["generation_method"] = "llm_synthesized"
-                _accel_log("success", "Blueprint enrichment complete")
-                return graph
 
         _accel_log(
             "warning",

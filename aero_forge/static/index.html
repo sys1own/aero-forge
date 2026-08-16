@@ -399,11 +399,11 @@
 
     /* Terminal command bar */
     #action-buttons {
-      display: none; align-items: center; gap: 0.4rem;
-      height: 40px; min-height: 40px; max-height: 40px;
-      padding: 0 0.6rem;
+      display: none; align-items: center; flex-wrap: wrap; gap: 0.4rem;
+      min-height: 40px;
+      padding: 0.25rem 0.6rem;
       border-bottom: 1px solid var(--border); background: var(--panel); flex-shrink: 0;
-      overflow: hidden;
+      overflow-x: auto;
     }
     #action-buttons.visible { display: flex; }
     .command-tab {

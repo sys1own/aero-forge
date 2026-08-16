@@ -389,6 +389,8 @@ class CppEmitter(BaseEmitter):
             "bool": "bool",
             "void": "void",
             "None": "void",
+            "pointer": "double*",
+            "ptr": "double*",
             "list": "std::vector<auto>",
             "dict": "std::map<std::string, auto>",
         }

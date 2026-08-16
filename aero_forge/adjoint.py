@@ -135,7 +135,79 @@ class SchemaBootstrapper:
                 purpose=f"{level} {sym_type}",
             )
             stubs.append(stub)
+        self._ensure_hybrid_language_balance(stubs, functional_intent)
         return stubs
+
+    def _ensure_hybrid_language_balance(
+        self,
+        stubs: List[NodeStub],
+        functional_intent: List[Dict[str, Any]],
+    ) -> None:
+        """Guarantee that hybrid architectures contain at least one node per language.
+
+        If the symbol-type hash placed every symbol on the native side, the Python
+        CLI/ingestion layer would disappear; if all symbols are Python, the native
+        acceleration would disappear. This pass deterministically reassigns the
+        most appropriate symbol to the missing language.
+        """
+        if len(self.languages) < 2:
+            return
+        if not stubs:
+            return
+
+        native_langs = {"rust", "cpp", "c", "go", "zig"}
+        has_python = any(s.lang == "python" for s in stubs)
+        has_native = any(s.lang in native_langs for s in stubs)
+
+        intent_by_symbol = {
+            (e.get("symbol_name") or e.get("name", "")): e
+            for e in functional_intent
+        }
+
+        def score_python(s: NodeStub) -> int:
+            name = s.node_id.lower()
+            typ = (intent_by_symbol.get(s.node_id, {}).get("type") or "").lower()
+            score = 0
+            if typ in ("api", "cli", "ui", "wrapper", "ingestion", "io", "pipeline", "connector"):
+                score += 10
+            if any(k in name for k in ("api", "cli", "main", "entry", "ui", "ingest", "read", "parse", "load", "pipeline", "connector", "io")):
+                score += 5
+            if s.lang == "python":
+                score -= 100
+            if typ in ("kernel", "core", "compute", "algorithm"):
+                score -= 3
+            if any(k in name for k in ("kernel", "compute", "normalize", "matrix", "rust", "cuda", "simd", "gpu")):
+                score -= 5
+            return score
+
+        def score_native(s: NodeStub) -> int:
+            name = s.node_id.lower()
+            typ = (intent_by_symbol.get(s.node_id, {}).get("type") or "").lower()
+            score = 0
+            if typ in ("kernel", "core", "compute", "algorithm"):
+                score += 5
+            if any(k in name for k in ("kernel", "compute", "normalize", "matrix", "cuda", "simd", "gpu")):
+                score += 5
+            if typ in ("api", "cli", "ui", "wrapper", "ingestion"):
+                score -= 10
+            if s.lang in native_langs:
+                score -= 100
+            return score
+
+        if "python" in self.languages and not has_python:
+            candidate = max(stubs, key=score_python)
+            candidate.lang = "python"
+            candidate.toolchain = self._toolchain_for_lang("python")
+            candidate.source_files = [self._package_for_node(candidate.node_id, "python")]
+
+        if any(l in native_langs for l in self.languages) and not has_native:
+            candidate = max(stubs, key=score_native)
+            for lang in self.languages:
+                if lang in native_langs:
+                    candidate.lang = lang
+                    candidate.toolchain = self._toolchain_for_lang(lang)
+                    candidate.source_files = [self._package_for_node(candidate.node_id, lang)]
+                    break
 
     # ------------------------------------------------------------------ ΔF --
     def ΔF(
@@ -194,6 +266,36 @@ class SchemaBootstrapper:
         suitable boundary.
         """
         node_map = {s.node_id: s for s in stubs}
+
+        # For hybrid architectures, auto-wire native nodes into the Python layer.
+        # This guarantees the bootstrapper emits PYO3_MATURIN / C-ABI contracts
+        # even when the upstream classifier did not provide explicit edges.
+        explicit_edges = list(edges)
+        if not explicit_edges and self._is_hybrid_architecture(architecture):
+            python_stubs = [s for s in stubs if s.lang == "python"]
+            native_stubs = [s for s in stubs if s.lang in ("rust", "cpp", "c", "go", "zig")]
+            if python_stubs and native_stubs:
+                for native in native_stubs:
+                    for py in python_stubs:
+                        boundary = self._infer_boundary_type(native.lang, py.lang)
+                        symbol = native.exports[0] if native.exports else "export"
+                        if boundary == "PYO3_MATURIN":
+                            args = ["list[float]"]
+                            return_type = "list[float]"
+                        else:
+                            args = ["pointer"]
+                            return_type = "pointer"
+                        explicit_edges.append(
+                            {
+                                "source": native.node_id,
+                                "target": py.node_id,
+                                "relation": symbol,
+                                "symbol": symbol,
+                                "args": args,
+                                "return_type": return_type,
+                            }
+                        )
+
         nodes_json: List[Dict[str, Any]] = []
         for stub in stubs:
             nodes_json.append(
@@ -211,7 +313,7 @@ class SchemaBootstrapper:
             )
 
         boundary_edges: List[Dict[str, Any]] = []
-        for edge in edges:
+        for edge in explicit_edges:
             src_id = edge.get("source", "")
             tgt_id = edge.get("target", "")
             src_stub = node_map.get(src_id)
@@ -224,12 +326,42 @@ class SchemaBootstrapper:
             else:
                 boundary_type = self._infer_boundary_type(src_stub.lang, tgt_stub.lang)
 
+            symbol = edge.get("symbol") or edge.get("relation") or (
+                src_stub.exports[0] if src_stub.exports else src_id
+            )
+            args = edge.get("args", [])
+            return_type = edge.get("return_type", "")
             boundary_edges.append(
                 {
                     "source": src_id,
                     "target": tgt_id,
                     "boundary_type": boundary_type,
-                    "symbol": edge.get("symbol", edge.get("relation", "")),
+                    "symbol": symbol,
+                    "args": args,
+                    "return_type": return_type,
+                }
+            )
+
+        # Inject deterministic ABI contract stubs for cross-language edges so the
+        # materializer has concrete symbols/types to emit for PyO3 / C-ABI bridges.
+        nodes_by_id = {n["node_id"]: n for n in nodes_json}
+        for edge in boundary_edges:
+            if edge.get("boundary_type") in ("internal", ""):
+                continue
+            src_node = nodes_by_id.get(edge["source"])
+            if src_node is None:
+                continue
+            symbol = edge.get("symbol") or (
+                node_map[edge["source"]].exports[0] if node_map[edge["source"]].exports else edge["source"]
+            )
+            args = edge.get("args") or ["pointer"]
+            return_type = edge.get("return_type") or "pointer"
+            src_node["contracts"].append(
+                {
+                    "boundary_type": edge["boundary_type"],
+                    "symbol": symbol,
+                    "args": list(args),
+                    "return_type": return_type,
                 }
             )
 
@@ -302,6 +434,12 @@ class SchemaBootstrapper:
         if "rust" in pair and "cpp" in pair:
             return "C_ABI"
         return "WASM_WASI"
+
+    @staticmethod
+    def _is_hybrid_architecture(architecture: str) -> bool:
+        return architecture.lower().replace("-", "_").startswith(
+            ("hybrid_", "tri_polyglot_")
+        )
 
     # --------------------------------------------------- Grothendieck bundle --
     def grothendieck_bundle(
