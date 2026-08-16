@@ -105,11 +105,15 @@ from aero_forge.ingestion.zip_parser import extract_zip_safely, generate_draft_v
 from aero_forge.scaffold.module_guard import reify_missing_modules
 from aero_forge.sandbox.manager import (
     SandboxManager,
+    cleanup_stale_job,
     get_accelerator_log_tail,
     get_build_log_tail,
+    is_pid_active,
     read_build_status,
+    read_job_state,
     reset_build_status,
     write_build_status,
+    write_job_state,
 )
 from aero_forge.blueprint import (
     Blueprint,
@@ -223,6 +227,19 @@ _CORS_HEADERS = {
 _manager = SandboxManager()
 _static_dir = Path(__file__).parent / "static"
 _blueprint_templates_dir = Path(__file__).parent / "blueprint_templates"
+
+# Directories that must be ignored by any file-system watcher / auto-reloader
+# so that materialization/build artifacts cannot trigger a server restart.
+_WATCHER_IGNORE_DIRS = {
+    "sandboxes",
+    "dist",
+    ".aero",
+    ".aero_core",
+    "target",
+    "__pycache__",
+    ".pytest_cache",
+    ".venv",
+}
 _active_websockets: Dict[str, Any] = {}
 _active_builds: Dict[str, Any] = {}
 
@@ -403,6 +420,12 @@ def _session_dir(session_id: str) -> Path:
     return _manager.create_session_sandbox(session_id)
 
 
+def _aero_forge_env_snapshot() -> Dict[str, str]:
+    """Return a snapshot of environment variables the worker needs to run independently."""
+    keys = [k for k in os.environ if k.startswith("AERO_FORGE_") or k.startswith("DEEPSEEK_") or k.startswith("OPENAI_") or k.startswith("ANTHROPIC_") or k.startswith("GEMINI_") or k.startswith("OPENROUTER_") or k.startswith("AERO_") or k in ("PATH", "HOME", "USER", "PYTHONPATH")]
+    return {k: os.environ[k] for k in keys}
+
+
 def _reset_his_and_foge(workspace: Path) -> None:
     """Reset the per-request HIS session and regenerate FoGE PaP tokens.
 
@@ -491,6 +514,7 @@ def _detached_build_worker(args: Dict[str, Any]) -> None:
     disconnect does not abort it.  It writes accelerator/build logs and status
     to the session sandbox so the UI can poll and re-attach.
     """
+    import signal
     import traceback
     from datetime import datetime, timezone
     from pathlib import Path
@@ -499,12 +523,29 @@ def _detached_build_worker(args: Dict[str, Any]) -> None:
         append_build_log,
         reset_build_status,
         write_build_status,
+        write_job_state,
     )
+
+    # Detach from the parent's process group/session so a server restart or
+    # terminal hangup does not kill the durable build worker.
+    try:
+        os.setpgrp()
+        os.setsid()
+    except Exception:
+        pass
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
 
     session_id = args["session_id"]
     session_dir = Path(args["session_dir"])
     kind = args["kind"]
     kwargs = dict(args["kwargs"])
+    worker_env = args.get("env") or {}
+
+    # The worker receives a snapshot of AERO_FORGE_* environment variables so it
+    # can reconstruct its own independent LLM client context even if the parent
+    # process or connection goes away.
+    os.environ.update(worker_env)
 
     # Coerce path arguments so the build functions receive Path objects.
     if "output_dir" in kwargs:
@@ -520,14 +561,16 @@ def _detached_build_worker(args: Dict[str, Any]) -> None:
     # Reset status and truncate old logs for this build.
     reset_build_status(session_dir)
 
+    worker_pid = os.getpid()
+    start_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    write_job_state(session_dir, worker_pid=worker_pid, current_phase="PENDING", start_time=start_time)
+
     def _progress_callback(message: str) -> None:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         append_build_log(session_dir, f"[{timestamp}] {message}\n")
-        write_build_status(
-            session_dir,
-            _progress_message_to_status(message),
-            progress_message=message,
-        )
+        phase = _progress_message_to_status(message)
+        write_build_status(session_dir, phase, progress_message=message)
+        write_job_state(session_dir, current_phase=phase)
 
     kwargs["progress_callback"] = _progress_callback
 
@@ -568,9 +611,11 @@ def _detached_build_worker(args: Dict[str, Any]) -> None:
         if success:
             _progress_callback("Build succeeded.")
             write_build_status(session_dir, "SUCCESS", result=result, gate_errors=gate_errors)
+            write_job_state(session_dir, current_phase="SUCCESS")
         else:
             _progress_callback("Build failed.")
             write_build_status(session_dir, "FAILED", result=result, gate_errors=gate_errors)
+            write_job_state(session_dir, current_phase="FAILED")
     except Exception as exc:
         tb = traceback.format_exc()
         append_build_log(session_dir, f"\n--- Worker exception ---\n{tb}\n")
@@ -581,6 +626,7 @@ def _detached_build_worker(args: Dict[str, Any]) -> None:
             progress_message=str(exc),
             gate_errors=[str(exc), tb],
         )
+        write_job_state(session_dir, current_phase="FAILED")
 
 
 # Snapshot the original build functions so we can detect monkeypatching in tests.
@@ -699,6 +745,28 @@ async def _handle_build_async(request: web.Request) -> web.Response:
         output_dir = _session_dir(session_id)
     session_dir = output_dir
     session_dir.mkdir(parents=True, exist_ok=True)
+
+    # Durable orchestrator: re-attach to an already-running worker for this session.
+    job_state = read_job_state(session_dir)
+    existing_pid = job_state.get("worker_pid")
+    existing_phase = job_state.get("current_phase", "IDLE")
+    if existing_pid and is_pid_active(existing_pid) and existing_phase not in ("SUCCESS", "FAILED", "IDLE"):
+        _active_builds[session_id] = {"process": None, "pid": existing_pid, "started_at": time.time()}
+        set_session_blueprint_metadata(session_id, is_building=True)
+        return web.json_response(
+            {
+                "session_id": session_id,
+                "status": existing_phase,
+                "message": "Re-attached to existing build worker",
+                "status_url": f"/api/builder/status?session_id={session_id}",
+                "worker_pid": existing_pid,
+            },
+            status=202,
+            headers=_CORS_HEADERS,
+        )
+    elif existing_pid and not is_pid_active(existing_pid):
+        cleanup_stale_job(session_dir)
+
     variants = 3 if body.get("variants") else 1
     target_language = body.get("target_language", body.get("target", "auto"))
     acceleration_policy = body.get("acceleration_policy", "selective")
@@ -849,15 +917,17 @@ async def _handle_build_async(request: web.Request) -> web.Response:
         "session_dir": str(session_dir),
         "kind": kind,
         "kwargs": worker_kwargs,
+        "env": _aero_forge_env_snapshot(),
     }
 
-    # Reset on-disk status and spawn the background build worker.  The client
-    # can disconnect immediately; the worker will keep running.
+    # Reset on-disk status and spawn the background build worker.  ``daemon=False``
+    # lets the worker survive server restarts; it writes durable state to the
+    # sandbox and is re-attached via ``job_state.json`` on the next server start.
     reset_build_status(session_dir)
     process = _mp_context.Process(
         target=_detached_build_worker,
         args=(worker_args,),
-        daemon=True,
+        daemon=False,
     )
     process.start()
     _active_builds[session_id] = {"process": process, "started_at": time.time()}
@@ -876,7 +946,12 @@ async def _handle_build_async(request: web.Request) -> web.Response:
 
 
 async def _handle_build_status_async(request: web.Request) -> web.Response:
-    """Return the persisted build status, logs, and accelerator tail for a session."""
+    """Return the persisted build status, logs, and accelerator tail for a session.
+
+    If ``job_state.json`` references a worker PID that is still alive, the
+    response indicates the build is still running so the UI can re-attach and
+    continue streaming.
+    """
     query = parse_qs(request.query_string)
     session_id = _first(query, "session_id")
     if not session_id:
@@ -889,10 +964,15 @@ async def _handle_build_status_async(request: web.Request) -> web.Response:
         return web.json_response({"error": "Missing 'session_id'"}, status=400, headers=_CORS_HEADERS)
 
     session_dir = _session_dir(session_id)
+    cleanup_stale_job(session_dir)
     status = read_build_status(session_dir)
+    job_state = read_job_state(session_dir)
     status["logs"] = get_build_log_tail(session_dir)
     status["accelerator_log"] = get_accelerator_log_tail(session_dir)
-    status["is_building"] = status.get("status") not in ("SUCCESS", "FAILED", "IDLE")
+    status["worker_pid"] = job_state.get("worker_pid")
+    status["current_phase"] = job_state.get("current_phase", status.get("status", "IDLE"))
+    is_terminal = status.get("status") in ("SUCCESS", "FAILED", "IDLE")
+    status["is_building"] = not is_terminal and is_pid_active(job_state.get("worker_pid"))
     return web.json_response(status, headers=_CORS_HEADERS)
 
 
@@ -1033,6 +1113,7 @@ SKIP_DIRS = {
     "dist",
     "build",
     "node_modules",
+    "sandboxes",
 }
 
 _HUMAN_RELEVANT_EXTS = {

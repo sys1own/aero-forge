@@ -171,6 +171,81 @@ def get_accelerator_log_tail(session_dir: Path | str, max_bytes: int = 65536) ->
         return ""
 
 
+def _job_state_path(session_dir: Path | str) -> Path:
+    return Path(session_dir) / ".aero" / "job_state.json"
+
+
+def read_job_state(session_dir: Path | str) -> Dict[str, Any]:
+    """Read durable orchestrator state for ``session_dir``.
+
+    Returns a default IDLE record if the job-state file does not yet exist.
+    """
+    path = _job_state_path(session_dir)
+    default: Dict[str, Any] = {
+        "worker_pid": None,
+        "current_phase": "IDLE",
+        "start_time": None,
+        "updated_at": None,
+    }
+    if not path.is_file():
+        return default
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            default.update(data)
+    except Exception as exc:
+        logger.debug("Could not read job state for %s: %s", session_dir, exc)
+    return default
+
+
+def write_job_state(
+    session_dir: Path | str,
+    worker_pid: Optional[int] = None,
+    current_phase: Optional[str] = None,
+    start_time: Optional[str] = None,
+    **extra: Any,
+) -> None:
+    """Persist durable orchestrator state to ``job_state.json``."""
+    path = _job_state_path(session_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = read_job_state(session_dir)
+    updates: Dict[str, Any] = {"updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+    if worker_pid is not None:
+        updates["worker_pid"] = worker_pid
+    if current_phase is not None:
+        updates["current_phase"] = current_phase
+    if start_time is not None:
+        updates["start_time"] = start_time
+    updates.update(extra)
+    data.update(updates)
+    try:
+        path.write_text(json.dumps(data, default=str, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("Failed to write job state for %s: %s", session_dir, exc)
+
+
+def is_pid_active(pid: Optional[int]) -> bool:
+    """Return ``True`` if ``pid`` is a live process on this host."""
+    if pid is None or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError, PermissionError):
+        return False
+
+
+def cleanup_stale_job(session_dir: Path | str) -> bool:
+    """Mark the session's job as ``FAILED`` if its worker PID is no longer alive."""
+    state = read_job_state(session_dir)
+    pid = state.get("worker_pid")
+    if pid is not None and not is_pid_active(pid):
+        write_build_status(session_dir, "FAILED", error="Worker process terminated unexpectedly")
+        write_job_state(session_dir, current_phase="FAILED")
+        return True
+    return False
+
+
 def _parse_pytest_counts(output: str) -> tuple[int, int, int]:
     """Extract (total, passed, failed) from pytest summary text."""
     passed = 0
