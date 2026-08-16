@@ -2372,6 +2372,12 @@ else:
                 # Generated loops often use i64 bounds with `.len()` and
                 # `Vec::with_capacity` expects usize; normalize those sites.
                 content = self._rust_repair_usize_capacity_and_ranges(content)
+                # rand 0.8 uses range syntax for ``gen_range``; the LLM sometimes
+                # emits the legacy two-argument form.
+                content = self._rust_repair_gen_range(content)
+                # Untyped float literals like ``1.0 / 252.0`` become ``{float}``
+                # and method calls such as ``.exp()``/``.sqrt()`` fail.
+                content = self._rust_repair_untyped_float_methods(content)
                 # rand 0.8 moved ``StandardNormal`` to the ``rand_distr`` crate.
                 content = self._rust_repair_rand_distr(content)
                 artifact.content = content
@@ -2581,6 +2587,92 @@ else:
             last = i
         out.append(content[last:])
         return "".join(out)
+
+    @staticmethod
+    def _rust_repair_gen_range(content: str) -> str:
+        """Rewrite the legacy ``rng.gen_range(a, b)`` two-argument form to a range.
+
+        ``rand`` 0.8 requires ``gen_range(a..b)`` (or a ``Range`` object); the
+        legacy comma-separated bounds no longer compile.  This handles nested
+        parentheses in the arguments.
+        """
+        out: List[str] = []
+        i = 0
+        while i < len(content):
+            m = re.search(r"gen_range\(", content[i:])
+            if not m:
+                out.append(content[i:])
+                break
+            start = i + m.start()
+            paren = i + m.end()
+            depth = 1
+            j = paren
+            while j < len(content) and depth > 0:
+                if content[j] == "(":
+                    depth += 1
+                elif content[j] == ")":
+                    depth -= 1
+                j += 1
+            if depth != 0:
+                out.append(content[i:])
+                break
+            args_str = content[paren : j - 1]
+            if ".." in args_str:
+                out.append(content[i:j])
+                i = j
+                continue
+            args: List[str] = []
+            cur: List[str] = []
+            d = 0
+            for ch in args_str:
+                if ch == "(":
+                    d += 1
+                elif ch == ")":
+                    d -= 1
+                elif ch == "," and d == 0:
+                    args.append("".join(cur).strip())
+                    cur = []
+                    continue
+                cur.append(ch)
+            args.append("".join(cur).strip())
+            if len(args) == 2:
+                out.append(content[i:start])
+                out.append(f"gen_range({args[0]}..{args[1]})")
+            else:
+                out.append(content[i:j])
+            i = j
+        return "".join(out)
+
+    @staticmethod
+    def _rust_repair_untyped_float_methods(content: str) -> str:
+        """Annotate ``let`` bindings as ``f64`` when they are used with float methods.
+
+        A declaration like ``let dt = 1.0 / 252.0;`` has the unsuffixed float
+        type ``{float}``; calling ``dt.exp()`` or ``dt.sqrt()`` then fails.  We
+        add an explicit ``f64`` annotation only when a later method call proves
+        the variable must be a float.
+        """
+        float_methods = {
+            "exp", "sqrt", "ln", "log", "log10", "log2",
+            "sin", "cos", "tan", "asin", "acos", "atan",
+            "sinh", "cosh", "tanh", "abs", "powi", "powf",
+            "round", "floor", "ceil", "trunc", "fract", "signum", "recip",
+        }
+        decl_re = re.compile(r"(?m)^\s*let\s+([A-Za-z_]\w*)\s*=\s*([^;]+?);")
+
+        def repl(m: "re.Match[str]") -> str:
+            name = m.group(1)
+            expr = m.group(2)
+            if not re.search(r"\d+\.\d+(?:[eE][+-]?\d+)?", expr):
+                return m.group(0)
+            if not re.search(
+                r"\b" + re.escape(name) + r"\.(?:" + "|".join(float_methods) + r")\(",
+                content[m.end():],
+            ):
+                return m.group(0)
+            return m.group(0).replace(f"let {name} =", f"let {name}: f64 =", 1)
+
+        return decl_re.sub(repl, content)
 
     @staticmethod
     def _rust_repair_usize_capacity_and_ranges(content: str) -> str:
