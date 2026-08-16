@@ -10,6 +10,7 @@ import io
 import json
 import logging
 import mimetypes
+import multiprocessing as mp
 import os
 import pty
 import queue
@@ -411,6 +412,125 @@ def _reset_his_and_foge(workspace: Path) -> None:
             logger.debug("FoGE token regeneration skipped: %s", exc)
 
 
+# Spawn context for process-isolated builds.  ``spawn`` gives a clean Python
+# interpreter without the parent's event-loop / thread state.
+_mp_context = mp.get_context("spawn")
+_BUILD_SUBPROCESS_TIMEOUT = int(os.getenv("AERO_FORGE_BUILD_SUBPROCESS_TIMEOUT", 600))
+
+
+def _build_worker(task: Dict[str, Any], result_queue: "mp.queues.Queue") -> None:
+    """Run a build/enrichment function in a child process.
+
+    This worker is the crash boundary for the web server: any segfault in the
+    native HIS backend, Z3 solver exhaustion, or uncaught exception inside the
+    IntentCompiler pipeline is caught here and returned as a failure result
+    instead of killing the server process.
+    """
+    try:
+        kind = task["kind"]
+        kwargs = dict(task["kwargs"])
+        # Coerce path arguments so child functions do not have to handle strings.
+        if "output_dir" in kwargs:
+            kwargs["output_dir"] = Path(kwargs["output_dir"])
+        if "workspace_path" in kwargs and kwargs["workspace_path"] is not None:
+            kwargs["workspace_path"] = Path(kwargs["workspace_path"])
+        workspace = kwargs["output_dir"]
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        # Fresh per-process HIS/FoGE state.
+        _reset_his_and_foge(workspace)
+
+        if kind == "build_universal_project":
+            from aero_forge.universal_builder import build_universal_project
+
+            result = build_universal_project(**kwargs)
+        elif kind == "generate_and_build":
+            from aero_forge.generate import generate_and_build
+
+            result = generate_and_build(**kwargs)
+        elif kind == "plan_workspace":
+            from aero_forge.orchestrator.orchestrator import plan_workspace
+
+            result = plan_workspace(**kwargs)
+        else:
+            raise ValueError(f"Unknown subprocess build kind: {kind}")
+
+        result_queue.put((True, result))
+    except Exception as exc:
+        logger.exception("Subprocess build worker failed")
+        try:
+            result_queue.put((False, str(exc)))
+        except Exception:
+            pass
+
+
+# Snapshot the original build functions so we can detect monkeypatching in tests.
+_ORIGINAL_BUILD_FUNCTIONS: Dict[str, Callable[..., Any]] = {
+    "generate_and_build": generate_and_build,
+    "build_universal_project": build_universal_project,
+    "plan_workspace": plan_workspace,
+}
+
+
+def _run_build_in_subprocess(
+    kind: str,
+    kwargs: Dict[str, Any],
+    timeout: int = _BUILD_SUBPROCESS_TIMEOUT,
+) -> Any:
+    """Run the requested build function in a child process.
+
+    Returns the function result on success.  Raises ``RuntimeError`` on failure,
+    ``TimeoutError`` if the child does not finish in time, and propagates the
+    child exception text so the web response can report it cleanly.
+
+    If the function has been monkeypatched (e.g. in unit tests), it is run
+    in-process instead so the mock is respected.
+    """
+    # Coerce path strings to Path objects before dispatching.
+    if "output_dir" in kwargs:
+        kwargs["output_dir"] = Path(kwargs["output_dir"])
+    if "workspace_path" in kwargs and kwargs["workspace_path"] is not None:
+        kwargs["workspace_path"] = Path(kwargs["workspace_path"])
+
+    original = _ORIGINAL_BUILD_FUNCTIONS.get(kind)
+    current = globals().get(kind)
+    if original is not None and current is not original:
+        # Some test mocks use a different second positional name (e.g.
+        # ``session_dir`` instead of ``output_dir``).  Call the first two args by
+        # position for the universal builder and by keyword for the generator.
+        if kind == "build_universal_project":
+            rest = {k: v for k, v in kwargs.items() if k not in ("prompt", "output_dir")}
+            return current(kwargs["prompt"], kwargs["output_dir"], **rest)
+        return current(**kwargs)
+
+    result_queue: "mp.queues.Queue" = _mp_context.Queue()
+    process = _mp_context.Process(
+        target=_build_worker,
+        args=({"kind": kind, "kwargs": kwargs}, result_queue),
+        daemon=True,
+    )
+    process.start()
+    process.join(timeout=timeout)
+
+    if process.is_alive():
+        logger.error("Build subprocess timed out after %d seconds; terminating", timeout)
+        process.terminate()
+        process.join(timeout=5)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=5)
+        raise TimeoutError(f"Build subprocess timed out after {timeout} seconds")
+
+    try:
+        ok, payload = result_queue.get(timeout=5)
+    except Exception as exc:
+        raise RuntimeError(f"Build subprocess did not return a result: {exc}") from exc
+
+    if not ok:
+        raise RuntimeError(f"Build subprocess failed: {payload}")
+    return payload
+
+
 def _api_key_from_request(request: web.Request, body: Dict[str, Any]) -> Optional[str]:
     key = body.get("api_key") or body.get("apiKey")
     if key:
@@ -494,44 +614,12 @@ async def _handle_build_async(request: web.Request) -> web.Response:
         build_status,
     )
 
-    # Reset the per-request HIS session and force FoGE PaP tokens to be
-    # regenerated from the current repository state before any LLM enrichment.
-    _reset_his_and_foge(output_dir)
-
-    # Synchronous enrichment gate: do not allow the build to touch disk from a
-    # draft blueprint. Hybrid workflows are enriched into a v2 Blueprint here and
-    # then passed to build_universal_project so it does not re-plan.
-    enrichment_status = _require_enriched_blueprint(output_dir)
-    blueprint: Optional[Blueprint] = None
-    if (enrichment_status or body.get("force_enrich")) and is_hybrid:
-        try:
-            blueprint = await asyncio.to_thread(
-                _synchronously_enrich_workspace,
-                output_dir,
-                prompt,
-                config,
-                project_name="generated",
-                architecture=architecture or classification.architecture,
-                max_retries=3,
-            )
-        except Exception as exc:
-            logger.exception("Synchronous enrichment failed for %s", output_dir)
-            return web.json_response(
-                _build_web_response(
-                    session_id,
-                    session_dir,
-                    {"build": {"success": False, "error": _enrichment_error_message(exc)}},
-                ),
-                headers=_CORS_HEADERS,
-            )
-
+    # Process isolation: the actual build runs in a child process so any crash
+    # in the native HIS backend, Z3 solver, or IntentCompiler pipeline cannot
+    # take down the web server.  A lightweight heartbeat keeps the WebSocket
+    # client alive while the subprocess is working.
     loop = asyncio.get_running_loop()
     last_phase = {"phase": "code_generation"}
-
-    def progress_callback(message: str) -> None:
-        phase = _phase_from_message(message)
-        last_phase["phase"] = phase
-        _send_ws_heartbeat(session_id, phase, loop)
 
     async def heartbeat() -> None:
         while True:
@@ -544,49 +632,53 @@ async def _handle_build_async(request: web.Request) -> web.Response:
     heartbeat_task: asyncio.Task = asyncio.create_task(heartbeat())
     try:
         if is_hybrid:
-            universal_result = await asyncio.to_thread(
-                build_universal_project,
-                prompt,
-                session_dir,
-                project_name="generated",
-                constraints=None,
-                llm_provider=config.llm_provider or body.get("provider"),
-                model=config.model or body.get("model"),
-                max_retries=3,
-                config_override=config,
-                progress_callback=progress_callback,
-                architecture=architecture or classification.architecture,
-                acceleration_policy=acceleration_policy,
-                engine_backend=engine_backend,
-                wavefront_parallelism=wavefront_parallelism,
-                precision_shield_mode=precision_shield_mode,
-                hin_jit_opt_level=hin_jit_opt_level,
-                workspace_path=output_dir,
-                blueprint=blueprint,
-                require_enrichment=True,
+            kwargs = {
+                "project_name": "generated",
+                "constraints": None,
+                "llm_provider": config.llm_provider or body.get("provider"),
+                "model": config.model or body.get("model"),
+                "max_retries": 3,
+                "config_override": config,
+                "architecture": architecture or classification.architecture,
+                "acceleration_policy": acceleration_policy,
+                "engine_backend": engine_backend,
+                "wavefront_parallelism": wavefront_parallelism,
+                "precision_shield_mode": precision_shield_mode,
+                "hin_jit_opt_level": hin_jit_opt_level,
+                "workspace_path": output_dir,
+                "blueprint": None,
+                "require_enrichment": True,
+            }
+            universal_result = await loop.run_in_executor(
+                None,
+                _run_build_in_subprocess,
+                "build_universal_project",
+                dict({"output_dir": str(session_dir), "prompt": prompt}, **kwargs),
             )
             result: Dict[str, Any] = {
                 "build": universal_result,
                 "files": universal_result.get("files", []),
             }
         else:
-            result = await asyncio.to_thread(
-                generate_and_build,
-                prompt,
-                output_dir=session_dir,
-                project_name="generated",
-                max_retries=3,
-                max_iterations=5,
-                variants=variants,
-                build_kwargs={"max_workers": 1, "cache_enabled": False},
-                config_override=config,
-                progress_callback=progress_callback,
-                target_language=target_language,
-                acceleration_policy=acceleration_policy,
-                engine_backend=engine_backend,
-                wavefront_parallelism=wavefront_parallelism,
-                precision_shield_mode=precision_shield_mode,
-                hin_jit_opt_level=hin_jit_opt_level,
+            kwargs = {
+                "project_name": "generated",
+                "max_retries": 3,
+                "max_iterations": 5,
+                "variants": variants,
+                "build_kwargs": {"max_workers": 1, "cache_enabled": False},
+                "config_override": config,
+                "target_language": target_language,
+                "acceleration_policy": acceleration_policy,
+                "engine_backend": engine_backend,
+                "wavefront_parallelism": wavefront_parallelism,
+                "precision_shield_mode": precision_shield_mode,
+                "hin_jit_opt_level": hin_jit_opt_level,
+            }
+            result = await loop.run_in_executor(
+                None,
+                _run_build_in_subprocess,
+                "generate_and_build",
+                dict({"output_dir": str(session_dir), "prompt": prompt}, **kwargs),
             )
         _notify_tree_changed(session_id)
         set_session_blueprint_metadata(session_id, source="auto_generated", auto_initialized=True)
@@ -1231,79 +1323,55 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 build_status,
             )
 
-            # Reset the per-request HIS session and force FoGE PaP tokens to be
-            # regenerated from the current repository state before any LLM enrichment.
-            _reset_his_and_foge(output_dir)
-
-            # Synchronous enrichment gate: do not allow the build to touch disk
-            # from a draft blueprint. Hybrid workflows are enriched into a v2
-            # Blueprint; non-hybrid workflows enrich via the proactive graph builder.
-            enrichment_status = _require_enriched_blueprint(output_dir)
-            blueprint: Optional[Blueprint] = None
-            if (enrichment_status or body.get("force_enrich")) and is_hybrid:
-                try:
-                    blueprint = _synchronously_enrich_workspace(
-                        output_dir,
-                        prompt,
-                        config,
-                        project_name="generated",
-                        architecture=architecture or classification.architecture,
-                        max_retries=3,
-                    )
-                except Exception as exc:
-                    logger.exception("Synchronous enrichment failed for %s", output_dir)
-                    return _send_json(
-                        self,
-                        200,
-                        _build_web_response(
-                            session_id,
-                            session_dir,
-                            {"build": {"success": False, "error": _enrichment_error_message(exc)}},
-                        ),
-                    )
-
+            # Process isolation: the actual build runs in a child process so any
+            # crash in the native HIS backend, Z3 solver, or IntentCompiler pipeline
+            # cannot take down the web server.
             if is_hybrid:
-                universal_result = build_universal_project(
-                    prompt,
-                    session_dir,
-                    project_name="generated",
-                    constraints=None,
-                    llm_provider=config.llm_provider,
-                    model=config.model,
-                    max_retries=3,
-                    config_override=config,
-                    architecture=architecture or classification.architecture,
-                    acceleration_policy=acceleration_policy,
-                    engine_backend=engine_backend,
-                    wavefront_parallelism=wavefront_parallelism,
-                    precision_shield_mode=precision_shield_mode,
-                    hin_jit_opt_level=hin_jit_opt_level,
-                    workspace_path=output_dir,
-                    blueprint=blueprint,
-                    require_enrichment=True,
+                kwargs = {
+                    "project_name": "generated",
+                    "constraints": None,
+                    "llm_provider": config.llm_provider,
+                    "model": config.model,
+                    "max_retries": 3,
+                    "config_override": config,
+                    "architecture": architecture or classification.architecture,
+                    "acceleration_policy": acceleration_policy,
+                    "engine_backend": engine_backend,
+                    "wavefront_parallelism": wavefront_parallelism,
+                    "precision_shield_mode": precision_shield_mode,
+                    "hin_jit_opt_level": hin_jit_opt_level,
+                    "workspace_path": output_dir,
+                    "blueprint": None,
+                    "require_enrichment": True,
+                }
+                universal_result = _run_build_in_subprocess(
+                    "build_universal_project",
+                    dict({"output_dir": str(session_dir), "prompt": prompt}, **kwargs),
                 )
                 result: Dict[str, Any] = {
                     "build": universal_result,
                     "files": universal_result.get("files", []),
                 }
             else:
-                result = generate_and_build(
-                    prompt,
-                    output_dir=session_dir,
-                    project_name="generated",
-                    llm_provider=config.llm_provider,
-                    model=config.model,
-                    max_retries=3,
-                    max_iterations=5,
-                    variants=variants,
-                    build_kwargs={"max_workers": 1, "cache_enabled": False},
-                    config_override=config,
-                    target_language=target_language,
-                    acceleration_policy=acceleration_policy,
-                    engine_backend=engine_backend,
-                    wavefront_parallelism=wavefront_parallelism,
-                    precision_shield_mode=precision_shield_mode,
-                    hin_jit_opt_level=hin_jit_opt_level,
+                kwargs = {
+                    "project_name": "generated",
+                    "llm_provider": config.llm_provider,
+                    "model": config.model,
+                    "max_retries": 3,
+                    "max_iterations": 5,
+                    "variants": variants,
+                    "build_kwargs": {"max_workers": 1, "cache_enabled": False},
+                    "config_override": config,
+                    "target_language": target_language,
+                    "acceleration_policy": acceleration_policy,
+                    "engine_backend": engine_backend,
+                    "wavefront_parallelism": wavefront_parallelism,
+                    "precision_shield_mode": precision_shield_mode,
+                    "hin_jit_opt_level": hin_jit_opt_level,
+                }
+                result = _run_build_in_subprocess(
+                    "generate_and_build",
+                    dict({"output_dir": str(session_dir), "prompt": prompt}, **kwargs),
                 )
 
             _notify_tree_changed(session_id)

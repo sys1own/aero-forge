@@ -58,6 +58,7 @@ class MemoryModel(str, Enum):
     caller_allocates = "caller_allocates"
     callee_allocates = "callee_allocates"
     shared_pyo3 = "shared_pyo3"
+    internal = "internal"
 
 
 class BindingFramework(str, Enum):
@@ -68,6 +69,7 @@ class BindingFramework(str, Enum):
     cffi = "cffi"
     pyo3 = "pyo3"
     cxx = "cxx"
+    internal = "internal"
 
 
 class FunctionalIntent(BaseModel):
