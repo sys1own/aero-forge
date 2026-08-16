@@ -32,7 +32,7 @@ from aero_forge.blueprint.schema import (
 from aero_forge.blueprint.validator import InvalidBlueprintError
 from aero_forge.builder.aeroc_compiler import compile_blueprint_to_aeroc
 from aero_forge.bundle_repo import bundle_workspace, format_context_block
-from aero_forge.config import Tier
+from aero_forge.config import Tier, resolve_llm_provider
 from aero_forge.healing.llm_healer import LLMHealer
 from aero_forge.llm.clients import BaseLLMClient, get_llm_client
 from aero_forge.overlay.manager import OverlayManager
@@ -233,8 +233,14 @@ class LLMBlueprintSynthesizer:
         if self.llm is not None:
             return self.llm
 
+        # Normalize an unset/"none" provider to the best available key so we do
+        # not silently fall back to a provider that returns empty responses.
+        provider = self.provider
+        if not provider or str(provider).lower() in ("", "none", "null"):
+            provider = resolve_llm_provider(None)
+
         client = get_llm_client(
-            self.provider,
+            provider,
             model=self.model,
             api_key=self.api_key,
             config_override=self.config_override,
@@ -242,9 +248,11 @@ class LLMBlueprintSynthesizer:
             tier=Tier.REASONING,
         )
         if client is None:
-            # Try other providers for which an API key might be configured.
-            for fallback in ("openai", "openrouter", "gemini", "deepseek"):
-                if fallback == self.provider:
+            # Try other providers for which an API key is configured.  Prefer
+            # providers with strong API availability (deepseek, openai, gemini)
+            # over openrouter, which was observed returning empty responses.
+            for fallback in ("deepseek", "openai", "gemini", "openrouter"):
+                if fallback == provider:
                     continue
                 client = get_llm_client(
                     fallback,

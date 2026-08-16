@@ -21,7 +21,7 @@ from aero_forge.scheduler.goi_solver import GoIWavefrontSolver, GoiSolverError
 
 from aero_forge.blueprint import Blueprint, FunctionSpec, discover_functions
 from aero_forge.cache.build_cache import BuildCache
-from aero_forge.config import ConfigOverride
+from aero_forge.config import ConfigOverride, resolve_llm_provider
 from aero_forge.context_bundler import ContextBundler
 from aero_forge.error_explainer import explain_error
 from aero_forge.errors import BuildStageError, UserError
@@ -293,8 +293,12 @@ class BuildRunner:
         self.blueprint = blueprint
         self.blueprint_path = Path(blueprint_path) if blueprint_path else None
         self.max_workers = max(1, max_workers)
-        self.llm_provider = llm_provider or blueprint.llm.provider
-        self.model = model or blueprint.llm.model
+        self.llm_provider = self._resolve_llm_provider(
+            llm_provider, blueprint.llm.provider, config_override
+        )
+        self.model = model or blueprint.llm.model or (
+            config_override.model if config_override else None
+        )
         self.max_iterations = max_iterations
         self.max_retries = max_retries
         self.force = force
@@ -371,6 +375,31 @@ class BuildRunner:
         cache_root = cache_dir or _cache_dir_from_env()
         self.cache = BuildCache(root=cache_root, enabled=effective_cache_enabled)
         self.dry_run = dry_run
+
+    @staticmethod
+    def _resolve_llm_provider(
+        explicit: Optional[str],
+        blueprint_provider: str,
+        config_override: Optional[ConfigOverride],
+    ) -> str:
+        """Return a concrete LLM provider for post-build synthesis and healing.
+
+        Falls back from an explicit caller override to the blueprint value,
+        then to the request-scoped ``ConfigOverride``, and finally to the
+        best available provider from the environment.  A value of ``none`` is
+        treated as unset so callers do not get a silent no-LLM path when keys
+        are available.
+        """
+        candidates = [
+            explicit,
+            None if str(blueprint_provider).lower() == "none" else blueprint_provider,
+            getattr(config_override, "llm_provider", None),
+            resolve_llm_provider(None),
+        ]
+        for candidate in candidates:
+            if candidate and str(candidate).lower() not in ("", "none", "null"):
+                return str(candidate).lower()
+        return "none"
 
     def build(self) -> Dict[str, Any]:
         """Run the build for every source file in the blueprint."""
