@@ -31,11 +31,15 @@ OUTPUT RULES
    on their own lines. No prose, markdown commentary, explanations, or apologies
    may appear outside these delimiters.
 2. Inside the delimiters, emit each file as a fenced Markdown block labeled with
-   the target file path. For Python targets the preferred format is a UAST JSON
-   sketch; the engine will lower it to source and resolve attributes like
-   ``conj`` -> ``conjugate``. For all other languages emit the final source.
-   ```uast:main.py
-   {"type": "Module", "body": [{"type": "FunctionDef", "name": "fft", ...}]}
+   the target file path. For all languages, including Python, emit the final
+   compilable source code directly (``python:<path>`` for Python). UAST JSON
+   (``uast:<path>`` fences) is accepted as a fallback but source code is
+   strongly preferred because it avoids truncation and AST conversion errors.
+   ```python:python_engine/main.py
+   from typing import Any, List, Dict
+
+   def normalize_batch(...):
+       ...
    ```
    Other language example:
    ```cpp:cpp_engine/src/kernels.cpp

@@ -251,14 +251,35 @@ class SchemaBootstrapper:
                 "description": "Concrete implementation body for the node.",
             }
             for stub in stubs
-        ] + [
-            {
-                "path": f"nodes.{stub.node_id}.contracts",
-                "expected_type": "List[ABIContract]",
-                "description": "Cross-language ABI contracts for exported symbols.",
-            }
-            for stub in stubs
         ]
+        # Only ask for contracts when there are real cross-language boundaries.
+        if boundary_edges:
+            typed_holes += [
+                {
+                    "path": f"nodes.{stub.node_id}.contracts",
+                    "expected_type": "List[ABIContract]",
+                    "description": "Cross-language ABI contracts for exported symbols.",
+                }
+                for stub in stubs
+            ]
+        # Grothendieck fiber coordinates: map every functional intent object to
+        # the node stub that materializes it, even when no FFI edges exist.
+        for intent, stub in self.grothendieck_bundle(functional_intent, stubs):
+            sym = (
+                intent.get("symbol_name")
+                or intent.get("name")
+                or (stub.exports[0] if stub.exports else stub.node_id)
+            )
+            typed_holes.append(
+                {
+                    "path": f"functional_intent_map.{sym}",
+                    "expected_type": "NodeStub",
+                    "description": (
+                        f"Grothendieck fiber coordinate: symbol '{sym}' is "
+                        f"implemented by node '{stub.node_id}' ({stub.lang})."
+                    ),
+                }
+            )
 
         return {
             "schema_version": "2.0.0",

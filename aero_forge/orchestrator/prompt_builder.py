@@ -273,8 +273,14 @@ def extract_aero_logic(raw: str) -> str:
                     "present but the delimited payload is empty"
                 )
             return extracted
-        # The model opened the SSP block but never closed it; the response is
-        # almost certainly truncated mid-statement. Do not attempt to parse it.
+        # The model opened the SSP block but did not close it. If the payload still
+        # contains one or more complete fenced code blocks, extract them rather than
+        # discarding the whole response. We leave truncation mid-fence to the fenced
+        # block parser, which requires a closing ``` and will ignore an open tail.
+        tail = text[start_match.end():].strip()
+        if re.search(r"```[\s\S]*?```", tail, re.DOTALL | re.IGNORECASE):
+            return tail
+        # Otherwise the response is almost certainly truncated mid-statement.
         raise TruncatedAeroLogicError("Truncated response: missing __AERO_LOGIC_END__")
 
     # Markdown fence fallback (first fenced block is the primary implementation).
