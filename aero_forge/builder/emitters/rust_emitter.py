@@ -438,6 +438,11 @@ class RustEmitter(BaseEmitter):
         if hint in ("Python", "Py"):
             return "Python"
 
+        # PyO3 functions can accept Python lists as Vec<T>; a bare "pointer" is too
+        # ambiguous to map to a C pointer in a PyO3 context, so default to f64 vector.
+        if self.is_pyo3 and hint in ("pointer", "vec", "vector"):
+            return "Vec<f64>"
+
         if re.match(r"^&?PyArray\d*<", hint) or hint in (
             "np.ndarray",
             "numpy.ndarray",

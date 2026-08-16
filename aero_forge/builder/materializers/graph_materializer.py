@@ -294,29 +294,27 @@ class GraphPolyglotMaterializer:
     ) -> None:
         """Normalize boundary naming and confirm PyO3/Maturin for Rust/Python edges.
 
-        When an edge connects a Rust node to a Python node and is explicitly
-        marked with a PyO3 binding (``pyo3``, ``maturin``, or ``pyo3_maturin``),
-        log that the PyO3 toolchain was selected. We do not silently downgrade
-        an explicit ``c_abi`` edge; callers that requested C-ABI/ctypes keep it.
+        Rust/Python edges default to PyO3/Maturin unless the caller explicitly
+        requests C-ABI/ctypes. This keeps the two sides of the boundary aligned.
         """
         pyo3_aliases = {"pyo3", "maturin", "pyo3_maturin"}
         for edge in edges:
             raw_boundary = (
-                str(edge.get("boundary_type", "c_abi")).lower().replace("-", "_")
+                str(edge.get("boundary_type", "pyo3_maturin")).lower().replace("-", "_")
             )
-            if raw_boundary in pyo3_aliases:
-                edge["boundary_type"] = "pyo3_maturin"
             src = node_map.get(edge.get("source", ""), {}).get("lang", "").lower()
             tgt = node_map.get(edge.get("target", ""), {}).get("lang", "").lower()
-            if (
-                src in ("rust", "rs")
-                and tgt in ("python", "py")
-                and edge.get("boundary_type") == "pyo3_maturin"
-            ):
-                _accel_log(
-                    "success",
-                    "Target: rust_hin (PyO3) selected",
-                )
+            if src in ("rust", "rs") and tgt in ("python", "py"):
+                if raw_boundary == "c_abi" or raw_boundary == "raw_c":
+                    edge["boundary_type"] = "c_abi"
+                else:
+                    edge["boundary_type"] = "pyo3_maturin"
+                    _accel_log(
+                        "success",
+                        "Target: rust_hin (PyO3) selected",
+                    )
+            elif raw_boundary in pyo3_aliases:
+                edge["boundary_type"] = "pyo3_maturin"
 
     @staticmethod
     def _collapse_wasm_clone_nodes(
