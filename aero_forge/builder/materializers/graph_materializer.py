@@ -22,6 +22,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import yaml
+
 logger = logging.getLogger("aero_forge.graph_materializer")
 
 import numpy as np
@@ -825,15 +827,20 @@ import sys
 
 _dir = os.path.dirname(os.path.abspath(__file__))
 
-# Cargo builds the canonical artifact under ``target/release/``.  Prefer that
-# over a possibly-stale copy at the node root so the loaded extension always
-# matches the freshly-compiled ``#[pymodule]`` name.
-_so_paths = [
+# Cargo builds the canonical artifact under ``target/release/`` relative to the
+# workspace root.  Search the local package target, the workspace target (one
+# directory up for a member crate), and any pre-copied .so at the node root.
+# PyO3/Maturin may also emit a ``{node_id}*.so`` file without the ``lib`` prefix.
+_so_candidates = [
     os.path.join(_dir, "target", "release", {repr(so_name)}),
-    os.path.join(_dir, {repr(so_name)}),
     os.path.join(_dir, "target", "debug", {repr(so_name)}),
+    os.path.join(_dir, {repr(so_name)}),
+    os.path.join(os.path.dirname(_dir), "target", "release", {repr(so_name)}),
+    os.path.join(os.path.dirname(_dir), "target", "debug", {repr(so_name)}),
 ] + glob.glob(os.path.join(_dir, "target", "*", {repr(so_name)}))
-_so_path = next((p for p in _so_paths if os.path.exists(p)), None)
+# Also accept a bare ``{node_id}*.so`` (e.g. from Maturin) or a matching cdylib.
+_so_candidates += sorted(glob.glob(os.path.join(_dir, "{node_id}*.so")) + glob.glob(os.path.join(_dir, "lib{node_id}*.so")))
+_so_path = next((p for p in _so_candidates if os.path.exists(p)), None)
 
 if _so_path:
     _spec = importlib.util.spec_from_file_location({repr(node_id)}, _so_path)
@@ -2384,6 +2391,8 @@ else:
                 content = self._rust_repair_untyped_float_methods(content)
                 # rand 0.8 moved ``StandardNormal`` to the ``rand_distr`` crate.
                 content = self._rust_repair_rand_distr(content)
+                # HashMap generic keys sometimes conflict with usize loop indexes.
+                content = self._rust_repair_hashmap_key_types(content)
                 artifact.content = content
             elif artifact.language in ("cpp", "c++", "c", "cxx") or str(artifact.file_path).endswith((".cpp", ".cc", ".cxx", ".c")):
                 content = artifact.content
@@ -2750,6 +2759,25 @@ else:
             r"for \1 in 0..(\2 as usize)",
             content,
         )
+        return content
+
+    @staticmethod
+    def _rust_repair_hashmap_key_types(content: str) -> str:
+        """Unify HashMap key types with the loop index type used at call sites.
+
+        The LLM often declares ``HashMap<i64, T>`` but then uses a ``usize`` loop
+        variable as the key (``guard.entry(i)``, ``guard.get(&i)``).  Rust rejects
+        the mismatch.  When a bare ``usize`` index is passed to HashMap methods,
+        rewrite the generic key to ``usize``.
+        """
+        # Detect the common pattern: a usize loop variable ``i`` used as a HashMap key.
+        has_usize_loop = bool(re.search(r"for\s+\w+\s+in\s+0\.\.\([^)]*as\s+usize\)", content))
+        uses_entry_i = ".entry(i)" in content
+        uses_get_i = ".get(&i)" in content
+        if has_usize_loop and (uses_entry_i or uses_get_i):
+            # Only rewrite if the map is declared with an i64 key that conflicts.
+            if "HashMap<i64," in content:
+                content = content.replace("HashMap<i64,", "HashMap<usize,")
         return content
 
     @staticmethod
@@ -4126,8 +4154,12 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                     )
                     # Copy the cdylib next to the node so Python ctypes loaders can
                     # resolve the C-ABI symbols without hard-coding target/release.
+                    # Cargo may place the artifact in the workspace root target when a
+                    # workspace manifest is present, so fall back one directory.
                     lines.append(
-                        f"(cd {package_dir} && cp target/release/lib{node_id}.so . 2>/dev/null || true)"
+                        f"(cd {package_dir} && "
+                        f"(cp target/release/lib{node_id}.so . 2>/dev/null || "
+                        f"cp ../target/release/lib{node_id}.so . 2>/dev/null || true))"
                     )
                     if has_wasm and wasm_target:
                         # PyO3 crates cannot be built for wasm32-unknown-unknown.  A
@@ -4396,6 +4428,41 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
 
         path = self.workspace_root / "blueprint.aero"
         write_v3_blueprint(blueprint, path)
+        # Also persist the graph nodes/edges and architecture at the top level so
+        # the finalized ``blueprint.aero`` is self-describing and can be re-verified
+        # by the Z3 Concolic and SHACL Logical Firewall gates after materialization.
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                data["architecture"] = architecture
+                data["project"] = project
+                data["nodes"] = [
+                    {
+                        "node_id": n.get("node_id"),
+                        "lang": n.get("lang"),
+                        "toolchain": n.get("toolchain"),
+                        "source_files": n.get("source_files", []),
+                        "exports": n.get("exports", []),
+                    }
+                    for n in hin_graph_spec.get("nodes", [])
+                ]
+                data["edges"] = [
+                    {
+                        "source": e.get("source"),
+                        "target": e.get("target"),
+                        "symbol": e.get("symbol"),
+                        "boundary_type": e.get("boundary_type"),
+                        "args": e.get("args", []),
+                        "return_type": e.get("return_type", ""),
+                    }
+                    for e in hin_graph_spec.get("edges", [])
+                ]
+                path.write_text(
+                    yaml.safe_dump(data, sort_keys=False, default_flow_style=False),
+                    encoding="utf-8",
+                )
+        except Exception as exc:
+            logger.debug("Could not enrich blueprint.aero with graph topology: %s", exc)
         return path
 
     @staticmethod

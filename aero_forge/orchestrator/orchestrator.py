@@ -2509,6 +2509,7 @@ def plan_workspace(
                 prompt,
                 output_dir=output_dir,
                 project_name=project_name,
+                architecture=intent,
             )
             mismatch = _validate_blueprint_against_intent(prompt, blueprint)
             if mismatch is not None:

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import logging
 import os
 import re
 import time
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
 from aero_forge.config import (
@@ -19,6 +22,56 @@ from aero_forge.config import (
 )
 
 logger = logging.getLogger("aero_forge.llm")
+
+
+def _telemetry_dir() -> Path:
+    """Return the directory used for LLM call telemetry."""
+    path = Path(os.getenv("AERO_FORGE_TELEMETRY_DIR", "/tmp/aero-forge-telemetry"))
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _approx_token_count(text: str) -> int:
+    """Approximate token count without requiring tiktoken."""
+    try:
+        import tiktoken
+
+        enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text))
+    except Exception:
+        return max(1, len(text) // 4)
+
+
+def _log_llm_telemetry(
+    provider: Optional[str],
+    model: Optional[str],
+    prompt: Union[str, List[Dict[str, str]]],
+    response: Optional[str],
+    error: Optional[str] = None,
+    **extra: Any,
+) -> None:
+    """Append a structured record of an LLM call to the telemetry log."""
+    try:
+        if isinstance(prompt, list):
+            prompt_text = "\n".join(m.get("content", "") for m in prompt)
+        else:
+            prompt_text = str(prompt)
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "provider": provider,
+            "model": model,
+            "prompt_token_count": _approx_token_count(prompt_text),
+            "prompt": prompt_text,
+            "response_preview": (response or "")[:2000] if not error else None,
+            "response_empty": not bool(response),
+            "error": error,
+            **extra,
+        }
+        log_path = _telemetry_dir() / "llm_calls.jsonl"
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, default=str, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        logger.debug("Failed to write LLM telemetry: %s", exc)
 
 
 class LLMError(Exception):
@@ -119,9 +172,27 @@ class BaseLLMClient(ABC):
                 )
                 time.sleep(delay)
             try:
-                return self._call(prompt, temperature, tier=tier, **kwargs)
+                response = self._call(prompt, temperature, tier=tier, **kwargs)
+                _log_llm_telemetry(
+                    self.provider,
+                    self.model,
+                    prompt,
+                    response,
+                    attempt=attempt + 1,
+                    temperature=temperature,
+                    tier=str(tier) if tier is not None else None,
+                )
+                return response
             except LLMError:
                 # Configuration or usage errors should not be retried.
+                _log_llm_telemetry(
+                    self.provider,
+                    self.model,
+                    prompt,
+                    None,
+                    error="LLMError",
+                    attempt=attempt + 1,
+                )
                 raise
             except self._retryable_exceptions() as exc:
                 logger.warning(
@@ -129,6 +200,14 @@ class BaseLLMClient(ABC):
                     self.model,
                     attempt + 1,
                     exc,
+                )
+                _log_llm_telemetry(
+                    self.provider,
+                    self.model,
+                    prompt,
+                    None,
+                    error=f"retryable: {exc}",
+                    attempt=attempt + 1,
                 )
                 last_error = exc
                 server_delay = self._extract_retry_delay(exc)
@@ -145,6 +224,14 @@ class BaseLLMClient(ABC):
                     self.model,
                     attempt + 1,
                     exc,
+                )
+                _log_llm_telemetry(
+                    self.provider,
+                    self.model,
+                    prompt,
+                    None,
+                    error=f"non-retryable: {exc}",
+                    attempt=attempt + 1,
                 )
                 break
 

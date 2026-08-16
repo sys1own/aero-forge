@@ -23,11 +23,12 @@ import threading
 import time
 import uuid
 import zipfile
+from datetime import datetime, timezone
 from http.client import HTTPResponse
 from http.server import BaseHTTPRequestHandler
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 from urllib.parse import parse_qs, urlparse
 
 import aiohttp
@@ -127,6 +128,54 @@ from aero_forge.universal_builder import build_universal_project
 
 logger = logging.getLogger("aero_forge.server")
 
+
+def _telemetry_dir() -> Path:
+    """Return the directory used for web-build telemetry."""
+    path = Path(os.getenv("AERO_FORGE_TELEMETRY_DIR", "/tmp/aero-forge-telemetry"))
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _approx_token_count(text: str) -> int:
+    """Approximate token count without requiring tiktoken."""
+    try:
+        import tiktoken
+
+        enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text))
+    except Exception:
+        return max(1, len(text) // 4)
+
+
+def _log_build_request(
+    session_id: str,
+    prompt: str,
+    architecture: str,
+    is_hybrid: bool,
+    status: str,
+    error: Optional[str] = None,
+    **extra: Any,
+) -> None:
+    """Append a web-build request record to the telemetry log."""
+    try:
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "session_id": session_id,
+            "prompt_token_count": _approx_token_count(prompt),
+            "prompt": prompt,
+            "architecture": architecture,
+            "is_hybrid": is_hybrid,
+            "status": status,
+            "error": error,
+            **extra,
+        }
+        log_path = _telemetry_dir() / "build_requests.jsonl"
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, default=str, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        logger.debug("Failed to write build telemetry: %s", exc)
+
+
 DEFAULT_PORT = 8080
 
 
@@ -198,6 +247,78 @@ def _classification_for_target(
         toolchains=toolchains_for_intent(architecture),
         languages=classification.languages,
         features=features,
+    )
+
+
+def _workspace_languages(workspace: Path) -> List[str]:
+    """Detect existing source languages in *workspace* from file extensions."""
+    if not workspace.is_dir():
+        return []
+    suffixes: Set[str] = set()
+    for path in workspace.rglob("*"):
+        if path.is_file() and path.suffix:
+            suffixes.add(path.suffix.lower())
+    languages: List[str] = []
+    if ".py" in suffixes:
+        languages.append("python")
+    if ".rs" in suffixes:
+        languages.append("rust")
+    if suffixes & {".cpp", ".cc", ".cxx", ".c"}:
+        languages.append("cpp")
+    return languages
+
+
+def _detect_tri_polyglot(
+    prompt: str,
+    classification: StackClassification,
+    workspace: Optional[Path] = None,
+) -> StackClassification:
+    """Promote a hybrid classification to tri-polyglot when the prompt asks for it.
+
+    If the user explicitly mentions ``tri`` together with ``polyglot`` and the
+    workspace already contains at least two of {python, rust, cpp}, the build
+    should keep all three languages.  This is important for follow-up prompts
+    where the natural-language text does not repeat ``python`` but the existing
+    workspace clearly has a Python layer.
+    """
+    raw = (
+        prompt.lower()
+        .replace("-", " ")
+        .replace("_", " ")
+        .replace(",", " ")
+        .replace(":", " ")
+        .replace(";", " ")
+        .replace(".", " ")
+        .replace("?", " ")
+        .replace("!", " ")
+    )
+    tokens = {t.strip() for t in raw.split() if t.strip()}
+    is_tri = any(t in {"tri", "tripolyglot", "triplet", "triple"} for t in tokens)
+    is_polyglot = any(t == "polyglot" or t.startswith("polyglot") for t in tokens)
+    if not (is_tri and is_polyglot):
+        return classification
+
+    ws_langs = _workspace_languages(workspace) if workspace else []
+    all_langs = sorted(set(classification.languages) | set(ws_langs))
+    has_python = "python" in all_langs
+    has_rust = "rust" in all_langs
+    has_cpp = "cpp" in all_langs
+
+    if has_python and has_rust and has_cpp:
+        architecture = INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON
+    elif has_rust and has_cpp and "tri" in tokens:
+        # The user asked for a tri-polyglot but only mentioned Rust/C++;
+        # preserve the existing Python layer if it exists in the workspace.
+        architecture = INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON
+    else:
+        return classification
+
+    toolchains = sorted({"python", "rust", "cpp", "cargo"})
+    return StackClassification(
+        architecture=architecture,
+        toolchains=toolchains,
+        languages=all_langs,
+        features=sorted(set(classification.features) | {"tri_polyglot"}),
     )
 
 
@@ -337,12 +458,23 @@ async def _handle_build_async(request: web.Request) -> web.Response:
     )
 
     classification = _classification_for_target(classify_stack(prompt), target_language)
+    classification = _detect_tri_polyglot(prompt, classification, output_dir)
     is_hybrid = classification.architecture in (
         INTENT_HYBRID_RUST_PYTHON,
         INTENT_HYBRID_CPP_PYTHON,
         INTENT_HYBRID_CPP_RUST,
         INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON,
         INTENT_GRAPH_POLYGLOT,
+    )
+
+    build_status = "started"
+    build_error: Optional[str] = None
+    _log_build_request(
+        session_id,
+        prompt,
+        classification.architecture,
+        is_hybrid,
+        build_status,
     )
 
     # Reset the per-request HIS session and force FoGE PaP tokens to be
@@ -448,12 +580,15 @@ async def _handle_build_async(request: web.Request) -> web.Response:
             )
         _notify_tree_changed(session_id)
         set_session_blueprint_metadata(session_id, source="auto_generated", auto_initialized=True)
+        build_status = "success"
         return web.json_response(
             _build_web_response(session_id, session_dir, result),
             headers=_CORS_HEADERS,
         )
     except Exception as exc:
         logger.exception("Build endpoint failed")
+        build_status = "failure"
+        build_error = str(exc)
         return web.json_response(
             _build_web_response(
                 session_id,
@@ -463,6 +598,14 @@ async def _handle_build_async(request: web.Request) -> web.Response:
             headers=_CORS_HEADERS,
         )
     finally:
+        _log_build_request(
+            session_id,
+            prompt,
+            classification.architecture,
+            is_hybrid,
+            build_status,
+            error=build_error,
+        )
         heartbeat_task.cancel()
         try:
             await heartbeat_task
@@ -1059,12 +1202,23 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             )
 
             classification = _classification_for_target(classify_stack(prompt), target_language)
+            classification = _detect_tri_polyglot(prompt, classification, output_dir)
             is_hybrid = classification.architecture in (
                 INTENT_HYBRID_RUST_PYTHON,
                 INTENT_HYBRID_CPP_PYTHON,
                 INTENT_HYBRID_CPP_RUST,
                 INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON,
                 INTENT_GRAPH_POLYGLOT,
+            )
+
+            build_status = "started"
+            build_error: Optional[str] = None
+            _log_build_request(
+                session_id,
+                prompt,
+                classification.architecture,
+                is_hybrid,
+                build_status,
             )
 
             # Reset the per-request HIS session and force FoGE PaP tokens to be
@@ -1153,9 +1307,12 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             set_session_blueprint_metadata(
                 session_id, source="auto_generated", auto_initialized=True
             )
+            build_status = "success"
             return _send_json(self, 200, _build_web_response(session_id, session_dir, result))
         except Exception as exc:  # pragma: no cover
             logger.exception("Build endpoint failed")
+            build_status = "failure"
+            build_error = str(exc)
             return _send_json(
                 self,
                 200,
@@ -1166,6 +1323,14 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 ),
             )
         finally:
+            _log_build_request(
+                session_id,
+                prompt,
+                classification.architecture,
+                is_hybrid,
+                build_status,
+                error=build_error,
+            )
             set_session_blueprint_metadata(session_id, is_building=False)
 
     def _handle_aeroc_exec(self) -> None:

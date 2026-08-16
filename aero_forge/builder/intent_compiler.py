@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -32,7 +33,8 @@ from aero_forge.blueprint.schema import (
 from aero_forge.builder.holographic import HolographicContext, intent_vector
 from aero_forge.builder.foge import FockGraphEncoder
 from aero_forge.adjoint import NodeStub, SchemaBootstrapper
-from aero_forge.orchestrator.stack_classifier import classify_stack
+from aero_forge.orchestrator.stack_classifier import StackClassification, classify_stack
+from aero_forge.orchestrator.router import toolchains_for_intent
 from aero_forge.concolic import ConcolicManifestVerifier, ConcolicResult
 from aero_forge.builder.firewall import LogicalFirewall
 from aero_forge.builder.chiasmus import (
@@ -159,6 +161,43 @@ def _phase4_token_count(text: str) -> int:
         return len(enc.encode(text))
     except Exception:
         return max(1, len(text) // 4)
+
+
+def _telemetry_dir() -> Path:
+    """Return the directory used for Phase 4 intent-compiler telemetry."""
+    path = Path(os.getenv("AERO_FORGE_TELEMETRY_DIR", "/tmp/aero-forge-telemetry"))
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _log_phase4_telemetry(
+    prompt: str,
+    token_count: int,
+    drift: float,
+    fiber_coordinate: Optional[str],
+    restoration_triggered: bool,
+    topology_node_count: int,
+    topology_edge_count: int,
+) -> None:
+    """Append a Phase 4 prompt telemetry record to the telemetry log."""
+    try:
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "phase": "bounded_completion",
+            "prompt_token_count": token_count,
+            "drift": drift,
+            "theorem_1_bound_similarity": SAFETY_LOWER_BOUND_SIMILARITY,
+            "fiber_coordinate": fiber_coordinate,
+            "restoration_triggered": restoration_triggered,
+            "topology_nodes": topology_node_count,
+            "topology_edges": topology_edge_count,
+            "prompt_preview": prompt[:2000],
+        }
+        log_path = _telemetry_dir() / "phase4_prompts.jsonl"
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, default=str, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        logger.debug("Failed to write Phase 4 telemetry: %s", exc)
 
 
 _CLASSIFICATION_SYSTEM_PROMPT = """You are the Aero-Forge structural classifier.
@@ -718,6 +757,20 @@ def _infer_architecture(languages: set) -> str:
     return BUILD_INTENT_PURE_PYTHON
 
 
+def _languages_for_architecture(architecture: str) -> List[str]:
+    """Return the canonical language set for an aero-forge architecture."""
+    mapping: Dict[str, List[str]] = {
+        "pure_python": ["python"],
+        "pure_rust": ["rust"],
+        "hybrid_rust_python": ["python", "rust"],
+        "hybrid_cpp_python": ["python", "cpp"],
+        "hybrid_cpp_rust": ["rust", "cpp"],
+        "tri_polyglot_rust_cpp_python": ["python", "rust", "cpp"],
+        "graph_polyglot": ["python", "rust", "cpp"],
+    }
+    return mapping.get(str(architecture).lower(), ["python"])
+
+
 class IntentCompiler:
     """Compile an unstructured user prompt into a validated Blueprint v2.0.0."""
 
@@ -812,24 +865,34 @@ class IntentCompiler:
         client: Any,
         system: str,
         prompt_text: str,
+        architecture: Optional[str] = None,
     ) -> Tuple[Optional[Dict[str, Any]], List[str]]:
         """Tier 0: ask the LLM for architecture/toolchains/functional_intent/nodes.
 
         Returns the classification dict and a list of structural errors. If the LLM
         returns a complete graph blueprint, it is validated and returned as the
         full graph (errors empty and classification dict contains the graph).
+
+        If *architecture* is provided, it is injected into the classification
+        prompt and used to override the LLM's returned architecture.
         """
         if client is None:
             _accel_log(
                 "warning",
                 "No LLM client available for classification; using deterministic fallback.",
             )
-            return self._deterministic_classification(prompt_text), []
+            return self._deterministic_classification(prompt_text, architecture=architecture), []
 
+        architecture_hint = (
+            f"\n\n[CRITICAL: the target architecture for this build is '{architecture}'. "
+            f"You MUST return architecture='{architecture}' and include nodes/toolchains for all languages implied by it.]"
+            if architecture
+            else ""
+        )
         classification_messages: List[Dict[str, str]] = [
             {"role": "system", "content": _CLASSIFICATION_SYSTEM_PROMPT},
             {"role": "system", "content": system},
-            {"role": "user", "content": prompt_text},
+            {"role": "user", "content": prompt_text + architecture_hint},
         ]
 
         last_error: Optional[Exception] = None
@@ -926,6 +989,22 @@ class IntentCompiler:
             except Exception:
                 pass
 
+            if architecture:
+                returned_arch = str(data.get("architecture") or "").lower()
+                if returned_arch != architecture.lower():
+                    _accel_log(
+                        "info",
+                        f"Overriding LLM classification architecture from '{returned_arch}' to '{architecture}'",
+                    )
+                    data["architecture"] = architecture
+                    # Ensure the classifier keeps the expected language set.
+                    nodes = data.get("nodes") or []
+                    existing_langs = {n.get("lang", "").lower() for n in nodes if isinstance(n, dict)}
+                    for lang in _languages_for_architecture(architecture):
+                        if lang not in existing_langs:
+                            nodes.append({"node_id": f"{lang}_node", "lang": lang, "toolchain": lang})
+                    data["nodes"] = nodes
+
             errors = self._verify_classification(data)
             if not errors:
                 return data, []
@@ -951,10 +1030,12 @@ class IntentCompiler:
             f"LLM classification failed after {self.max_schema_retries} attempts ({last_error}); "
             "falling back to deterministic prompt classification.",
         )
-        return self._deterministic_classification(prompt_text), []
+        return self._deterministic_classification(prompt_text, architecture=architecture), []
 
     def _deterministic_classification(
-        self, prompt_text: str
+        self,
+        prompt_text: str,
+        architecture: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build a structural classification without an LLM call.
 
@@ -963,6 +1044,13 @@ class IntentCompiler:
         an empty response.
         """
         classification = classify_stack(prompt_text)
+        if architecture:
+            classification = StackClassification(
+                architecture=architecture,
+                toolchains=toolchains_for_intent(architecture),
+                languages=_languages_for_architecture(architecture),
+                features=classification.features,
+            )
         architecture = classification.architecture
         languages = classification.languages or ["python"]
         toolchains = classification.toolchains or []
@@ -1198,6 +1286,7 @@ class IntentCompiler:
         prompt_text: str,
         output_dir: Optional[str | Path] = None,
         project_name: Optional[str] = None,
+        architecture: Optional[str] = None,
     ) -> Blueprint:
         """Convert *prompt_text* into a validated ``Blueprint`` and write ``blueprint.aero``.
 
@@ -1206,11 +1295,16 @@ class IntentCompiler:
         pipeline (HIS -> FoGE -> Adjoint -> Bounded Completion -> Concolic ->
         SHACL/Prolog) and converts the resulting ``PolyglotGraphBlueprint`` into
         the legacy ``Blueprint`` v2 format.
+
+        If *architecture* is provided, it is injected into the classification
+        prompt and overrides any LLM classification that does not match the
+        caller's explicit target.
         """
         graph = self.compile_prompt_to_graph(
             prompt_text,
             output_dir=output_dir,
             project_name=project_name,
+            architecture=architecture,
         )
 
         # If an LLM was requested but we only produced a deterministic fallback,
@@ -1836,6 +1930,7 @@ class IntentCompiler:
         classification: Dict[str, Any],
         partial: Dict[str, Any],
         topology: Optional[Dict[str, Any]] = None,
+        fiber_coordinate: Optional[str] = None,
     ) -> str:
         """Log the exact Phase 4 prompt and force HIS restoration when required.
 
@@ -1854,7 +1949,22 @@ class IntentCompiler:
             user_content,
         )
 
-        if token_count > PHASE4_MAX_TOKENS or drift > DRIFT_THRESHOLD:
+        restoration_triggered = (
+            token_count > PHASE4_MAX_TOKENS or drift > DRIFT_THRESHOLD
+        )
+        topology_nodes = len(topology.get("nodes", [])) if topology else 0
+        topology_edges = len(topology.get("edges", [])) if topology else 0
+        _log_phase4_telemetry(
+            prompt=user_content,
+            token_count=token_count,
+            drift=drift,
+            fiber_coordinate=fiber_coordinate,
+            restoration_triggered=restoration_triggered,
+            topology_node_count=topology_nodes,
+            topology_edge_count=topology_edges,
+        )
+
+        if restoration_triggered:
             _accel_log(
                 "info",
                 f"HIS context restoration forced: tokens={token_count}, drift={drift:.4f}, "
@@ -2051,6 +2161,7 @@ class IntentCompiler:
             classification,
             partial,
             topology=topology,
+            fiber_coordinate=json.dumps(fiber_coordinate),
         )
 
         messages: List[Dict[str, str]] = [
@@ -2227,6 +2338,7 @@ class IntentCompiler:
         prompt_text: str,
         output_dir: Optional[str | Path] = None,
         project_name: Optional[str] = None,
+        architecture: Optional[str] = None,
     ) -> PolyglotGraphBlueprint:
         """Compile *prompt_text* into a validated ``PolyglotGraphBlueprint``.
 
@@ -2235,6 +2347,10 @@ class IntentCompiler:
         The Orchestrator verifies the classification deterministically (without
         reading the prompt). If the classification is sound, a second call asks
         for the complete graph blueprint populated with contracts/edges.
+
+        If *architecture* is provided, it is injected into the classification
+        prompt and used to override an LLM classification that does not match
+        the caller's explicit target.
         """
         _accel_log("info", "Enriching Blueprint (six-phase pipeline)...")
         client = self._llm_client
@@ -2255,7 +2371,7 @@ class IntentCompiler:
 
         # Phase 0 / Tier 0: classify architecture, toolchains, nodes, and functional_intent.
         classification, _class_errors = self._classify_graph(
-            client, system, prompt_text
+            client, system, prompt_text, architecture=architecture
         )
         if classification is not None and "_full_graph" in classification:
             return classification["_full_graph"]
