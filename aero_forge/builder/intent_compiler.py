@@ -214,24 +214,31 @@ def _log_phase4_telemetry(
     prompt: str,
     token_count: int,
     drift: float,
+    similarity: float,
     fiber_coordinate: Optional[str],
     restoration_triggered: bool,
     topology_node_count: int,
     topology_edge_count: int,
 ) -> None:
-    """Append a Phase 4 prompt telemetry record to the telemetry log."""
+    """Append a Phase 4 prompt telemetry record to the telemetry log.
+
+    The full rendered prompt is stored under ``prompt_full`` so the exact input
+    sent to the LLM can be audited; ``prompt_preview`` is a short head.
+    """
     try:
         record = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "phase": "bounded_completion",
             "prompt_token_count": token_count,
             "drift": drift,
+            "similarity": similarity,
             "theorem_1_bound_similarity": SAFETY_LOWER_BOUND_SIMILARITY,
             "fiber_coordinate": fiber_coordinate,
             "restoration_triggered": restoration_triggered,
             "topology_nodes": topology_node_count,
             "topology_edges": topology_edge_count,
-            "prompt_preview": prompt[:2000],
+            "prompt_preview": prompt[:500],
+            "prompt_full": prompt,
         }
         log_path = _telemetry_dir() / "phase4_prompts.jsonl"
         with log_path.open("a", encoding="utf-8") as fh:
@@ -1913,7 +1920,12 @@ class IntentCompiler:
         classification: Dict[str, Any],
         partial: Dict[str, Any],
     ) -> None:
-        """Clean a noisy context vector against the stored invariant."""
+        """Clean a noisy context vector against the stored invariant.
+
+        Computes the current context vector ``N_context`` from the symbols in the
+        partial blueprint, then applies the ``sign(H_inv + N_context)`` cleanup
+        operator through ``HolographicContext.restore_context``.
+        """
         if hctx.hinv is None:
             return
         symbols = self._current_symbols(classification, partial)
@@ -1921,7 +1933,9 @@ class IntentCompiler:
             return
         try:
             context = intent_vector(symbols)
-            hctx.restore_context(context)
+            # Theorem 1 context cleanup: bundle the invariant with the current
+            # noisy context and threshold back to a clean bipolar vector.
+            hctx.restore_context(context, noise=1.0)
             _accel_log(
                 "info",
                 f"HIS context restored for symbols: {symbols}; drift exceeded threshold",
@@ -1981,16 +1995,19 @@ class IntentCompiler:
         """
         token_count = _phase4_token_count(user_content)
         drift = self._measure_his_drift(hctx, classification, partial)
+        similarity = 1.0 - drift
 
         logger.info(
-            "Phase 4 prompt (tokens=%d, drift=%.4f):\n%s",
+            "Phase 4 prompt (tokens=%d, similarity=%.4f, drift=%.4f):\n%s",
             token_count,
+            similarity,
             drift,
             user_content,
         )
 
         restoration_triggered = (
-            token_count > PHASE4_MAX_TOKENS or drift > DRIFT_THRESHOLD
+            token_count > PHASE4_MAX_TOKENS
+            or similarity < SAFETY_LOWER_BOUND_SIMILARITY
         )
         topology_nodes = len(topology.get("nodes", [])) if topology else 0
         topology_edges = len(topology.get("edges", [])) if topology else 0
@@ -1998,6 +2015,7 @@ class IntentCompiler:
             prompt=user_content,
             token_count=token_count,
             drift=drift,
+            similarity=similarity,
             fiber_coordinate=fiber_coordinate,
             restoration_triggered=restoration_triggered,
             topology_node_count=topology_nodes,
@@ -2007,8 +2025,8 @@ class IntentCompiler:
         if restoration_triggered:
             _accel_log(
                 "info",
-                f"HIS context restoration forced: tokens={token_count}, drift={drift:.4f}, "
-                f"Theorem 1 bound similarity>={SAFETY_LOWER_BOUND_SIMILARITY:.4f}",
+                f"HIS context restoration forced: tokens={token_count}, similarity={similarity:.4f}, "
+                f"drift={drift:.4f}, Theorem 1 bound similarity>={SAFETY_LOWER_BOUND_SIMILARITY:.4f}",
             )
             self._apply_his_restore(hctx, classification, partial)
             if topology is not None:
@@ -2020,8 +2038,8 @@ class IntentCompiler:
                 )
             user_content += (
                 f"\n\n[HIS context restoration triggered: "
-                f"tokens={token_count}, drift={drift:.4f}. "
-                f"H_inv has been bundled with the current context before the LLM call.]"
+                f"tokens={token_count}, similarity={similarity:.4f}, drift={drift:.4f}. "
+                f"H_inv has been bundled with the current context using sign(H_inv + N_context) before the LLM call.]"
             )
 
         return user_content
@@ -2039,6 +2057,7 @@ class IntentCompiler:
         stub: NodeStub,
         partial: Dict[str, Any],
         peer_nodes: List[Dict[str, Any]],
+        skeleton: Dict[str, Any],
     ) -> str:
         """Return a compact prompt for one section of one Grothendieck fiber."""
         symbol = fiber_coordinate.get("symbol") or (
@@ -2047,6 +2066,7 @@ class IntentCompiler:
         node_id = stub.node_id
         architecture = partial.get("architecture", "graph_polyglot")
         peer_text = json.dumps(peer_nodes, indent=2) if peer_nodes else "[]"
+        skeleton_text = json.dumps(skeleton, indent=2) if skeleton else "{}"
 
         if section == "manifest":
             return (
@@ -2054,6 +2074,7 @@ class IntentCompiler:
                 f"You are filling the MANIFEST block for the Grothendieck fiber "
                 f"π_X^{{-1}}({symbol}) -> {node_id}.\n"
                 f"Architecture: {architecture}.\n"
+                f"Manifest skeleton (Adjoint / typed holes to fill):\n```json\n{skeleton_text}\n```\n\n"
                 f"Stub: {json.dumps(stub.__dict__, default=str)}\n\n"
                 f"Return ONLY a JSON object with these keys for the node:\n"
                 f"  'node_id' (string), 'lang' (string), 'toolchain' (string),\n"
@@ -2098,26 +2119,34 @@ class IntentCompiler:
     ) -> str:
         """Ensure the sectional prompt is under the 1024-token budget.
 
-        If a sectional prompt still exceeds ``SECTIONAL_MAX_TOKENS``, force HIS
-        context restoration and drop the FoGE topological prefix.
+        If the prompt exceeds ``SECTIONAL_MAX_TOKENS`` or the HIS similarity
+        against the invariant drops below Theorem 1's safety bound
+        (``SAFETY_LOWER_BOUND_SIMILARITY``), force a context cleanup using the
+        ``sign(H_inv + N_context)`` operator before the LLM call.
         """
         token_count = _phase4_token_count(user_content)
+        # _measure_his_drift returns 1 - similarity; recover similarity for the
+        # explicit Theorem 1 comparison.
         drift = self._measure_his_drift(hctx, classification, partial)
+        similarity = 1.0 - drift
 
         logger.info(
-            "Sectional Phase 4 prompt (%s, tokens=%d, drift=%.4f)",
+            "Sectional Phase 4 prompt (%s, tokens=%d, similarity=%.4f, drift=%.4f)",
             section,
             token_count,
+            similarity,
             drift,
         )
 
         restoration_triggered = (
-            token_count > SECTIONAL_MAX_TOKENS or drift > DRIFT_THRESHOLD
+            token_count > SECTIONAL_MAX_TOKENS
+            or similarity < SAFETY_LOWER_BOUND_SIMILARITY
         )
         _log_phase4_telemetry(
             prompt=user_content,
             token_count=token_count,
             drift=drift,
+            similarity=similarity,
             fiber_coordinate=fiber_coordinate,
             restoration_triggered=restoration_triggered,
             topology_node_count=0,
@@ -2128,13 +2157,14 @@ class IntentCompiler:
             _accel_log(
                 "info",
                 f"HIS context restoration forced for section {section}: "
-                f"tokens={token_count}, drift={drift:.4f}",
+                f"tokens={token_count}, similarity={similarity:.4f}, drift={drift:.4f}",
             )
             self._apply_his_restore(hctx, classification, partial)
             user_content += (
                 f"\n\n[HIS context restoration triggered for section {section}: "
-                f"tokens={token_count}, drift={drift:.4f}. "
-                f"H_inv has been bundled with the current context before the LLM call.]"
+                f"tokens={token_count}, similarity={similarity:.4f}, drift={drift:.4f}. "
+                f"H_inv has been bundled with the current context using "
+                f"sign(H_inv + N_context) before the LLM call.]"
             )
 
         return user_content
@@ -2151,6 +2181,7 @@ class IntentCompiler:
         hctx: HolographicContext,
         classification: Dict[str, Any],
         peer_nodes: List[Dict[str, Any]],
+        skeleton: Dict[str, Any],
     ) -> Result:
         """Execute one sectional LLM call with localized retry/fallback.
 
@@ -2158,7 +2189,7 @@ class IntentCompiler:
         success, ``ok=False`` with an error description after all retries fail.
         """
         user_content = self._build_section_prompt(
-            section, prompt_text, fiber_coordinate, stub, partial, peer_nodes
+            section, prompt_text, fiber_coordinate, stub, partial, peer_nodes, skeleton
         )
         user_content = self._prepare_section_llm_call(
             user_content,
@@ -2375,15 +2406,15 @@ class IntentCompiler:
         # single 3056-byte skeleton can push the prompt over the attention window.
         manifest_result = self._run_section(
             client, system, prompt_text, "manifest", fiber_coordinate,
-            stub, partial, hctx, classification, peer_nodes,
+            stub, partial, hctx, classification, peer_nodes, skeleton,
         )
         contracts_result = self._run_section(
             client, system, prompt_text, "contracts", fiber_coordinate,
-            stub, partial, hctx, classification, peer_nodes,
+            stub, partial, hctx, classification, peer_nodes, skeleton,
         )
         functions_result = self._run_section(
             client, system, prompt_text, "functions", fiber_coordinate,
-            stub, partial, hctx, classification, peer_nodes,
+            stub, partial, hctx, classification, peer_nodes, skeleton,
         )
 
         node, edges = self._recompose_fiber_sections(

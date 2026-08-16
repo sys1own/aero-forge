@@ -394,6 +394,23 @@ def _session_dir(session_id: str) -> Path:
     return _manager.create_session_sandbox(session_id)
 
 
+def _reset_his_and_foge(workspace: Path) -> None:
+    """Reset the per-request HIS session and regenerate FoGE PaP tokens.
+
+    This helper is called at the beginning of every build/plan/accelerate path
+    so that no stale HolographicContext or cached Fock-space graph leaks into
+    the current request.
+    """
+    HolographicContext.reset_session()
+    if workspace.is_dir() and any(f.is_file() for f in workspace.rglob("*")):
+        try:
+            encoder = FockGraphEncoder(dim=256)
+            encoder.regenerate_pap_tokens(workspace)
+            logger.info("FoGE PaP tokens regenerated for %s", workspace)
+        except Exception as exc:
+            logger.debug("FoGE token regeneration skipped: %s", exc)
+
+
 def _api_key_from_request(request: web.Request, body: Dict[str, Any]) -> Optional[str]:
     key = body.get("api_key") or body.get("apiKey")
     if key:
@@ -479,14 +496,7 @@ async def _handle_build_async(request: web.Request) -> web.Response:
 
     # Reset the per-request HIS session and force FoGE PaP tokens to be
     # regenerated from the current repository state before any LLM enrichment.
-    HolographicContext.reset_session()
-    if output_dir.is_dir() and any(f.is_file() for f in output_dir.rglob("*")):
-        try:
-            encoder = FockGraphEncoder(dim=256)
-            encoder.regenerate_pap_tokens(output_dir)
-            logger.info("FoGE PaP tokens regenerated for %s", output_dir)
-        except Exception as exc:
-            logger.debug("FoGE token regeneration skipped: %s", exc)
+    _reset_his_and_foge(output_dir)
 
     # Synchronous enrichment gate: do not allow the build to touch disk from a
     # draft blueprint. Hybrid workflows are enriched into a v2 Blueprint here and
@@ -1223,14 +1233,7 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
 
             # Reset the per-request HIS session and force FoGE PaP tokens to be
             # regenerated from the current repository state before any LLM enrichment.
-            HolographicContext.reset_session()
-            if output_dir.is_dir() and any(f.is_file() for f in output_dir.rglob("*")):
-                try:
-                    encoder = FockGraphEncoder(dim=256)
-                    encoder.regenerate_pap_tokens(output_dir)
-                    logger.info("FoGE PaP tokens regenerated for %s", output_dir)
-                except Exception as exc:
-                    logger.debug("FoGE token regeneration skipped: %s", exc)
+            _reset_his_and_foge(output_dir)
 
             # Synchronous enrichment gate: do not allow the build to touch disk
             # from a draft blueprint. Hybrid workflows are enriched into a v2
@@ -1600,6 +1603,10 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 workspace = workspace_arg.resolve()
             else:
                 workspace = session_dir
+
+            # Reset the per-request HIS session and force FoGE PaP tokens to be
+            # regenerated for the workspace before any LLM synthesis.
+            _reset_his_and_foge(workspace)
 
             draft_path = workspace / "blueprint.aero"
             draft: Optional[BlueprintV3] = None
@@ -2389,6 +2396,10 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
             # Purge caches, overlays, and healing state before regenerating so
             # stale state cannot corrupt the rebuilt workspace.
             purge_workspace_state(workspace_path)
+
+            # Reset the per-request HIS session and force FoGE PaP tokens to be
+            # regenerated for the workspace before any LLM regeneration.
+            _reset_his_and_foge(workspace_path)
 
             config = ConfigOverride(
                 llm_provider=body.get("provider"),
