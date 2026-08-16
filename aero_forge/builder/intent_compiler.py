@@ -16,6 +16,7 @@ from aero_forge.blueprint import (
     Blueprint,
     BlueprintSchemaV2,
     ContractEntry,
+    ExecutionStrategy,
     FunctionalIntent,
     LLMConfig,
     ManifestEntry,
@@ -24,6 +25,7 @@ from aero_forge.blueprint import (
 from aero_forge.blueprint.schema import (
     BoundaryEdgeSpec,
     BoundaryContractType,
+    FunctionalIntent as SchemaFunctionalIntent,
     PolyglotGraphBlueprint,
     PolyglotNodeSpec,
 )
@@ -132,6 +134,12 @@ Example JSON shape:
   "metadata": {}
 }
 """
+
+# Theorem 1 safety lower bound: cosine similarity between the current intent
+# context and the HIS invariant must stay above this value.  Drift is measured
+# as 1 - similarity, so the corresponding drift threshold is 1 - bound.
+SAFETY_LOWER_BOUND_SIMILARITY = 0.7071067811865476
+DRIFT_THRESHOLD = 1.0 - SAFETY_LOWER_BOUND_SIMILARITY
 
 
 _CLASSIFICATION_SYSTEM_PROMPT = """You are the Aero-Forge structural classifier.
@@ -858,6 +866,47 @@ class IntentCompiler:
             except Exception:
                 pass
 
+            # Accept legacy v2 BlueprintSchemaV2 responses and lower them into a
+            # graph blueprint so the web workspace still validates existing flows.
+            try:
+                normalized = _normalize_v2_data(data)
+                v2 = BlueprintSchemaV2.model_validate(normalized)
+                v2_languages: set = set()
+                for node in v2.module_graph:
+                    lang = (node.get("lang") or node.get("language") or "").lower()
+                    if lang:
+                        v2_languages.add(lang)
+                for abi in v2.abi_contracts:
+                    target = (abi.target_language or "").lower()
+                    if target:
+                        v2_languages.add(target)
+                    if abi.binding_framework == "pyo3":
+                        v2_languages.update({"rust", "python"})
+                    elif abi.binding_framework == "c_abi":
+                        v2_languages.add("cpp")
+                v2_classification = {
+                    "architecture": v2.metadata.get("domain_target")
+                    or _infer_architecture(v2_languages),
+                    "functional_intent": [
+                        fi.model_dump(mode="json") for fi in (v2.functional_intent or [])
+                    ],
+                    "nodes": [dict(n) for n in (normalized.get("nodes") or [])],
+                }
+                graph = self._v2_to_graph_blueprint(
+                    v2,
+                    prompt_text,
+                    output_dir=None,
+                    project_name=None,
+                    classification=v2_classification,
+                )
+                graph.metadata["prompt"] = prompt_text
+                graph.metadata["llm_initialized"] = True
+                graph.metadata["status"] = "finalized"
+                graph.metadata["generation_method"] = "llm_synthesized"
+                return {"_full_graph": graph}, []
+            except Exception:
+                pass
+
             errors = self._verify_classification(data)
             if not errors:
                 return data, []
@@ -1133,87 +1182,40 @@ class IntentCompiler:
     ) -> Blueprint:
         """Convert *prompt_text* into a validated ``Blueprint`` and write ``blueprint.aero``.
 
-        Returns the constructed ``Blueprint``. The schema validation/repair loop
-        re-queries the LLM with concrete JSON Schema errors up to
-        ``max_schema_retries`` times.
+        This is the backward-compatible v2 entry point used by the web workspace
+        and ``generate_and_build``.  Internally it runs the six-phase graph
+        pipeline (HIS -> FoGE -> Adjoint -> Bounded Completion -> Concolic ->
+        SHACL/Prolog) and converts the resulting ``PolyglotGraphBlueprint`` into
+        the legacy ``Blueprint`` v2 format.
         """
-        client = self._llm_client
-        if client is None:
-            client = get_llm_client(
-                self.provider,
-                model=self.model,
-                max_retries=self.max_retries,
-                api_key=self.api_key,
-                config_override=self.config_override,
-                raise_on_error=True,
-                tier=Tier.REASONING,
-            )
-
-        schema = BlueprintSchemaV2.model_json_schema()
-        validator = Draft7Validator(schema)
-
-        system = _SYSTEM_PROMPT
-        if self._system_prompt_extra:
-            system = f"{system}\n\n{self._system_prompt_extra}"
-
-        messages: List[Dict[str, str]] = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt_text},
-        ]
-
-        last_error: Optional[Exception] = None
-        for attempt in range(self.max_schema_retries):
-            raw = client.generate(messages, temperature=0.2, max_tokens=4096)
-            if not raw:
-                _accel_log(
-                    "warning",
-                    f"intent_compiler.compile_prompt attempt {attempt + 1}: LLM returned an empty response",
-                )
-                last_error = IntentCompilerError("LLM returned an empty response")
-                messages.append({"role": "assistant", "content": ""})
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": f"Attempt {attempt + 1} returned empty. Please return valid JSON.",
-                    }
-                )
-                continue
-
-            try:
-                data = _normalize_v2_data(_extract_json(raw))
-                validator.validate(data)
-                v2 = BlueprintSchemaV2.model_validate(data)
-            except Exception as exc:
-                last_error = exc
-                _accel_log(
-                    "warning",
-                    f"intent_compiler.compile_prompt attempt {attempt + 1}: schema validation failed; "
-                    f"raw preview: {raw[:800]!r}; error: {exc}",
-                )
-                logger.warning(
-                    "Intent JSON schema validation failed (attempt %d): %s",
-                    attempt + 1,
-                    exc,
-                )
-                messages.append({"role": "assistant", "content": raw})
-                messages.append(self._retry_user_message(attempt, raw, exc))
-                continue
-
-            blueprint = self._v2_to_blueprint(
-                v2,
-                prompt_text,
-                output_dir,
-                project_name,
-            )
-            if output_dir:
-                out_path = Path(output_dir)
-                out_path.mkdir(parents=True, exist_ok=True)
-                write_blueprint(blueprint, out_path / "blueprint.aero")
-            return blueprint
-
-        raise IntentCompilerError(
-            f"Failed to compile intent after {self.max_schema_retries} schema validation attempts: {last_error}"
+        graph = self.compile_prompt_to_graph(
+            prompt_text,
+            output_dir=output_dir,
+            project_name=project_name,
         )
+
+        # If an LLM was requested but we only produced a deterministic fallback,
+        # surface that as an enrichment failure so callers can retry or escalate.
+        provider = (self.provider or "").lower()
+        if (
+            provider not in ("", "none", "null")
+            and graph.metadata.get("generation_method") == "deterministic_fallback"
+        ):
+            raise IntentCompilerError(
+                "LLM enrichment failed and only a deterministic fallback blueprint was produced."
+            )
+
+        blueprint = self._graph_to_blueprint_v2(
+            graph,
+            prompt_text,
+            output_dir=output_dir,
+            project_name=project_name,
+        )
+        if output_dir:
+            out_path = Path(output_dir)
+            out_path.mkdir(parents=True, exist_ok=True)
+            write_blueprint(blueprint, out_path / "blueprint.aero")
+        return blueprint
 
     @staticmethod
     def _derive_functional_intent(v2: BlueprintSchemaV2) -> List[FunctionalIntent]:
@@ -1336,6 +1338,164 @@ class IntentCompiler:
             modification_plan=modification_plan,
         )
 
+    def _graph_to_blueprint_v2(
+        self,
+        graph: PolyglotGraphBlueprint,
+        prompt_text: str,
+        output_dir: Optional[str | Path] = None,
+        project_name: Optional[str] = None,
+    ) -> Blueprint:
+        """Convert a ``PolyglotGraphBlueprint`` into the legacy v2 ``Blueprint``.
+
+        This keeps the web workspace and ``generate_and_build`` interfaces stable
+        while the enrichment core runs the six-phase graph pipeline.
+        """
+        from aero_forge.orchestrator.router import default_manifest_for_architecture
+
+        project = project_name or graph.project or "aero_forge_project"
+
+        node_map = {n.node_id: n for n in graph.nodes}
+        languages: set = set()
+        manifest_entries: List[ManifestEntry] = []
+        for node in graph.nodes:
+            if node.lang:
+                languages.add(node.lang.lower())
+            for sf in node.source_files or []:
+                manifest_entries.append(
+                    ManifestEntry(path=sf, lang=node.lang or "python", purpose=node.node_id)
+                )
+
+        contract_entries: List[ContractEntry] = []
+        abi_contracts: List[ABIContract] = []
+        for edge in graph.edges:
+            tgt = node_map.get(edge.target)
+            src = node_map.get(edge.source)
+            if src and src.lang:
+                languages.add(src.lang.lower())
+            if tgt and tgt.lang:
+                languages.add(tgt.lang.lower())
+
+            inputs = [{"name": f"arg{i}", "type": arg} for i, arg in enumerate(edge.args or [])]
+            outputs = [{"name": "return", "type": edge.return_type}] if edge.return_type else []
+
+            binding = str(edge.boundary_type or "c_abi").lower().replace("-", "_")
+            abi_contracts.append(
+                ABIContract(
+                    contract_id=f"{edge.source}_{edge.target}_{edge.symbol}",
+                    target_language=(tgt.lang if tgt else "python"),
+                    binding_framework=binding,
+                    export_symbol=edge.symbol,
+                    memory_model="caller_allocates",
+                    signature={"inputs": inputs, "outputs": outputs},
+                )
+            )
+
+            if inputs:
+                arg_str = ", ".join(
+                    f"{inp['name']}: {_abi_type_to_py(inp['type'])}" for inp in inputs
+                )
+            else:
+                arg_str = ""
+            return_type = _abi_type_to_py(outputs[0]["type"]) if outputs else "None"
+            contract_entries.append(
+                ContractEntry(
+                    name=edge.symbol,
+                    signature=f"def {edge.symbol}({arg_str}) -> {return_type}",
+                    language=(tgt.lang if tgt else "python"),
+                    python_name=edge.symbol,
+                    purpose=f"Cross-language edge {edge.source} -> {edge.target}",
+                )
+            )
+
+        architecture = graph.architecture or _infer_architecture(languages)
+        if not manifest_entries:
+            manifest_entries = [
+                ManifestEntry(path=e["path"], lang=e["lang"], purpose=e["purpose"])
+                for e in default_manifest_for_architecture(architecture, project)
+            ]
+
+        resolved_output_dir = Path(output_dir) / "dist" if output_dir else Path("./dist")
+
+        metadata: Dict[str, Any] = dict(graph.metadata or {})
+        metadata.setdefault("schema_version", "2.0.0")
+        metadata["llm_initialized"] = "true"
+        metadata["auto_generated"] = "true"
+        metadata["generation_method"] = metadata.get("generation_method") or "llm_synthesized"
+        # v2 metadata is Dict[str, str]; stringify values for YAML/JSON safety.
+        metadata = {k: str(v) for k, v in metadata.items()}
+
+        toolchains = _derive_toolchains(architecture, manifest_entries, abi_contracts)
+        contracts = contract_entries
+        if architecture != "pure_python" and not contracts:
+            contracts = _synthesize_contracts_from_manifest(manifest_entries)
+
+        module_graph = []
+        for node in graph.nodes:
+            node_data = node.model_dump(mode="json")
+            if not node_data.get("path") and node.source_files:
+                node_data["path"] = node.source_files[0]
+            module_graph.append(node_data)
+
+        primary_path = graph.primary_entrypoint or ""
+        execution_strategy_data = graph.metadata.get("execution_strategy")
+        if execution_strategy_data:
+            try:
+                execution_strategy = ExecutionStrategy.model_validate(execution_strategy_data)
+            except Exception:
+                execution_strategy = ExecutionStrategy(
+                    primary_entrypoint={"path": primary_path, "runtime": "python3" if primary_path.endswith(".py") else "./"},
+                    run_spec={"command": graph.build_script or "build.sh"},
+                )
+        else:
+            execution_strategy = ExecutionStrategy(
+                primary_entrypoint={"path": primary_path, "runtime": "python3" if primary_path.endswith(".py") else "./"},
+                run_spec={"command": graph.build_script or "build.sh"},
+            )
+
+        functional_intent: List[FunctionalIntent] = []
+        for fi in graph.functional_intent or []:
+            functional_intent.append(
+                FunctionalIntent(
+                    symbol_name=fi.symbol_name,
+                    type=fi.type or "function",
+                    requirement_level=fi.requirement_level or "required",
+                )
+            )
+        if not functional_intent:
+            seen: set = set()
+            for node in graph.nodes:
+                for exp in node.exports or []:
+                    if exp and exp not in seen:
+                        functional_intent.append(
+                            FunctionalIntent(
+                                symbol_name=exp, type="function", requirement_level="required"
+                            )
+                        )
+                        seen.add(exp)
+
+        return Blueprint(
+            project=project,
+            architecture=architecture,
+            toolchains=toolchains,
+            manifest=manifest_entries,
+            contracts=contracts,
+            functions=[],
+            output_dir=resolved_output_dir,
+            llm=LLMConfig(provider=self.provider or "none", model=self.model or ""),
+            prompt=prompt_text,
+            constraints="",
+            languages=sorted(languages) if languages else ["python"],
+            features=[],
+            execution_strategy=execution_strategy,
+            abi_contracts=abi_contracts,
+            functional_intent=functional_intent,
+            verification_nodes=graph.metadata.get("verification_nodes") or [],
+            metadata=metadata,
+            module_graph=module_graph,
+            cargo_dependencies=graph.metadata.get("cargo_dependencies") or {},
+            modification_plan={},
+        )
+
     def _build_modification_plan(
         self,
         v2: BlueprintSchemaV2,
@@ -1404,6 +1564,10 @@ class IntentCompiler:
                     for e in repo.get("edges", [])
                 ],
             }
+            _accel_log(
+                "info",
+                f"FoGE Phase 2 PaP tokens regenerated for {root}: dim={result['dim']}, nodes={len(result['nodes'])}, edges={len(result['edges'])}",
+            )
         except Exception as exc:
             logger.debug("FoGE encoding skipped: %s", exc)
         return result
@@ -1502,6 +1666,7 @@ class IntentCompiler:
         )
         skeleton_text = json.dumps(skeleton, indent=2) if skeleton else "{}"
         topology_text = json.dumps(topology, indent=2)
+
         drift_text = ""
         if hctx.hinv is not None:
             symbols = [
@@ -1510,16 +1675,26 @@ class IntentCompiler:
             ]
             if symbols:
                 try:
-                    drift = hctx.measure_symbol_drift(symbols)
-                    drift_text = f"\nIntent-to-invariant drift: {drift:.4f}"
+                    similarity = hctx.measure_symbol_drift(symbols)
+                    drift = 1.0 - similarity
+                    drift_text = (
+                        f"\nIntent-to-invariant drift: {drift:.4f} "
+                        f"(similarity: {similarity:.4f}; Theorem 1 safety bound: similarity >= {SAFETY_LOWER_BOUND_SIMILARITY:.4f})"
+                    )
+                    if drift > DRIFT_THRESHOLD:
+                        drift_text += " Holographic context restoration triggered before this LLM call."
                 except Exception:
                     pass
+
+        typed_holes = skeleton.get("typed_holes", [])
+        typed_holes_text = json.dumps(typed_holes, indent=2) if typed_holes else "[]"
 
         return (
             f"{prompt_text}\n\n"
             f"Verified classification:\n```json\n{classification_text}\n```\n"
             f"\nTopological prefix (FoGE):\n```json\n{topology_text}\n```\n"
             f"\nManifest skeleton (Adjoint / typed holes to fill):\n```json\n{skeleton_text}\n```\n"
+            f"\nExplicit typed holes:\n```json\n{typed_holes_text}\n```\n"
             f"{drift_text}\n\n"
             "Return the COMPLETE PolyglotGraphBlueprint JSON. "
             "Fill every <TYPED_HOLE> with a concrete value. "
@@ -1562,7 +1737,8 @@ class IntentCompiler:
     ) -> float:
         """Return drift as 1 - cosine_similarity against the invariant.
 
-        A value greater than 0.3 (similarity below 0.7) triggers context
+        Theorem 1 sets the safety lower bound at similarity 0.7071, so a drift
+        value greater than ``DRIFT_THRESHOLD`` (1 - 0.7071) triggers context
         restoration and FoGE pruning.  Low-complexity prompts (fewer than 4
         symbols) are short and stable, so the invariant itself is fragile;
         skip drift correction to avoid pruning useful context.
@@ -1742,6 +1918,7 @@ class IntentCompiler:
         partial: Dict[str, Any],
         intent: Dict[str, Any],
         stub: NodeStub,
+        hctx: HolographicContext,
     ) -> str:
         """Ask the LLM to fill a single typed hole / Grothendieck fiber."""
         symbol = intent.get("symbol_name") or intent.get("name") or (
@@ -1749,6 +1926,13 @@ class IntentCompiler:
         )
         node_id = stub.node_id
         architecture = partial.get("architecture", "graph_polyglot")
+
+        # Pass the HIS drift metric into the bounded-completion prompt so the
+        # LLM can see how far the current context has drifted from the invariant.
+        drift = self._measure_his_drift(hctx, classification, partial)
+        drift_note = f"Intent-to-invariant drift: {drift:.4f} (Theorem 1 safety bound: similarity >= {SAFETY_LOWER_BOUND_SIMILARITY:.4f})"
+        if drift > DRIFT_THRESHOLD:
+            drift_note += " Holographic context restoration triggered."
 
         fiber_coordinate = {
             "base_intent": intent,
@@ -1769,17 +1953,23 @@ class IntentCompiler:
                     for n in partial.get("nodes") or []
                 ],
                 "fiber_coordinate": fiber_coordinate,
+                "drift_note": drift_note,
             },
             indent=2,
         )
+
+        typed_holes = skeleton.get("typed_holes", [])
+        typed_holes_text = json.dumps(typed_holes, indent=2) if typed_holes else "[]"
 
         user_content = (
             f"{prompt_text}\n\n"
             f"Verified classification:\n```json\n{json.dumps(classification, indent=2)}\n```\n"
             f"\nTopological prefix (FoGE):\n```json\n{json.dumps(topology, indent=2)}\n```\n"
-            f"\nManifest skeleton (Adjoint):\n```json\n{json.dumps(skeleton, indent=2)}\n```\n"
+            f"\nManifest skeleton (Adjoint / typed holes to fill):\n```json\n{json.dumps(skeleton, indent=2)}\n```\n"
+            f"\nExplicit typed holes:\n```json\n{typed_holes_text}\n```\n"
             f"\nAlready populated context:\n```json\n{context_text}\n```\n"
             f"\nGrothendieck fiber coordinate: {json.dumps(fiber_coordinate)}\n"
+            f"\n{drift_note}\n"
             f"\nFill the typed hole for the symbol '{symbol}' implemented by node '{node_id}'. "
             f"Return ONLY a JSON object with these keys:\n"
             f"  - 'nodes': a list containing ONE fully specified node dict for '{node_id}'"
@@ -1810,9 +2000,10 @@ class IntentCompiler:
         """Populate the blueprint one Grothendieck fiber at a time.
 
         Each fiber corresponds to one (functional_intent, node_stub) pair. HIS
-        drift is checked before every LLM call; if it exceeds 0.3 the context is
-        restored and the FoGE prefix is pruned. Empty LLM responses fall back
-        to the adjoint ΣF stubbing path.
+        drift is checked before every LLM call; if it exceeds the Theorem 1
+        safety threshold (``DRIFT_THRESHOLD``) the context is restored and the
+        FoGE prefix is pruned. Empty LLM responses fall back to the adjoint ΣF
+        stubbing path.
         """
         architecture = (
             classification.get("architecture")
@@ -1857,6 +2048,7 @@ class IntentCompiler:
         }
 
         node_map: Dict[str, Dict[str, Any]] = {}
+        llm_fiber_used = False
 
         for intent, stub in bundle:
             symbol = (
@@ -1867,7 +2059,7 @@ class IntentCompiler:
 
             # HIS drift check and correction before every LLM call.
             drift = self._measure_his_drift(hctx, classification, partial)
-            if drift > 0.3:
+            if drift > DRIFT_THRESHOLD:
                 self._apply_his_restore(hctx, classification, partial)
                 topology = self._prune_foge_topology(
                     topology,
@@ -1884,6 +2076,7 @@ class IntentCompiler:
                 partial,
                 intent,
                 stub,
+                hctx,
             )
 
             if not raw:
@@ -1908,7 +2101,9 @@ class IntentCompiler:
                         partial["edges"].append(edge)
                     node_list = fiber_data.get("nodes") or []
                     node = node_list[0] if node_list else None
-                    if not node:
+                    if node:
+                        llm_fiber_used = True
+                    else:
                         node = fallback_nodes.get(stub.node_id) or self._stub_to_node(stub)
 
             if node and node.get("node_id"):
@@ -1944,8 +2139,13 @@ class IntentCompiler:
         graph.metadata["prompt"] = prompt_text
         graph.metadata["llm_initialized"] = True
         graph.metadata["status"] = "finalized"
-        graph.metadata["generation_method"] = "llm_synthesized"
-        _accel_log("success", "Blueprint fiber-wise atomic enrichment complete")
+        graph.metadata["generation_method"] = (
+            "llm_synthesized" if llm_fiber_used else "deterministic_fallback"
+        )
+        _accel_log(
+            "success",
+            f"Blueprint fiber-wise atomic enrichment complete (llm_used={llm_fiber_used})",
+        )
         return graph
 
     def compile_prompt_to_graph(
@@ -2027,6 +2227,25 @@ class IntentCompiler:
             )
             last_error = IntentCompilerError("LLM client unavailable")
         else:
+            # Phase 4 drift gate: measure intent drift against the invariant before
+            # the bounded-completion LLM call and restore context if it exceeds the
+            # Theorem 1 safety bound.
+            drift_partial = {
+                "project": project_name or skeleton.get("project") or classification.get("architecture") or "graph_polyglot",
+                "architecture": classification.get("architecture") or skeleton.get("architecture") or "graph_polyglot",
+                "nodes": skeleton.get("nodes", []),
+                "edges": [],
+                "functional_intent": classification.get("functional_intent") or skeleton.get("functional_intent") or [],
+                "metadata": {},
+            }
+            drift = self._measure_his_drift(hctx, classification or {}, drift_partial)
+            if drift > DRIFT_THRESHOLD:
+                self._apply_his_restore(hctx, classification or {}, drift_partial)
+                topology = self._prune_foge_topology(
+                    topology,
+                    self._current_symbols(classification or {}, drift_partial),
+                )
+
             messages: List[Dict[str, str]] = [
                 {"role": "system", "content": system},
                 {
@@ -2308,7 +2527,7 @@ class IntentCompiler:
                 BoundaryEdgeSpec(
                     source=source_lang,
                     target=target_lang,
-                    boundary_type=boundary_type,
+                    boundary_type=boundary_type.value,
                     symbol=abi.export_symbol or abi.contract_id or "ffi_symbol",
                     args=[inp.get("type", "int64") for inp in inputs],
                     return_type=(outputs[0].get("type", "") if outputs else ""),
@@ -2354,9 +2573,9 @@ class IntentCompiler:
         )
 
         # Build functional_intent from v2 or classification.
-        functional_intent = self._derive_functional_intent(v2)
-        if not functional_intent and classification:
-            functional_intent = [
+        core_intents = self._derive_functional_intent(v2)
+        if not core_intents and classification:
+            core_intents = [
                 FunctionalIntent(
                     symbol_name=fi.get("symbol_name", ""),
                     type=fi.get("type", "function"),
@@ -2364,6 +2583,14 @@ class IntentCompiler:
                 for fi in classification.get("functional_intent", [])
                 if fi.get("symbol_name")
             ]
+        functional_intent = [
+            SchemaFunctionalIntent(
+                symbol_name=fi.symbol_name,
+                type=fi.type or "function",
+                requirement_level=fi.requirement_level or "required",
+            )
+            for fi in core_intents
+        ]
 
         return PolyglotGraphBlueprint(
             project=project,
@@ -2376,6 +2603,13 @@ class IntentCompiler:
             build_script=build_script or None,
             metadata={
                 "prompt": prompt_text,
+                "verification_nodes": [dict(vn) for vn in v2.verification_nodes],
+                "cargo_dependencies": v2.cargo_dependencies or {},
+                "execution_strategy": (
+                    v2.execution_strategy.model_dump(mode="json")
+                    if v2.execution_strategy
+                    else {}
+                ),
                 **v2.metadata,
             },
         )
