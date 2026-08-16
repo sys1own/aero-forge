@@ -818,26 +818,34 @@ class GraphPolyglotMaterializer:
         so_name = f"lib{node_id}.so"
         exports = list(node_spec.get("exports") or [])
         exports_str = ", ".join(repr(e) for e in exports)
-        content = f"""import os
+        content = f"""import glob
+import os
 import importlib.util
 import sys
 
 _dir = os.path.dirname(os.path.abspath(__file__))
-_so_path = os.path.join(_dir, {repr(so_name)})
 
-if os.path.exists(_so_path):
-    # The compiled artifact is named ``librust_core.so`` but the PyO3 module
-    # inside expects to be loaded as the crate name ``rust_core``.  Load it
-    # under that name and replace the package entry in ``sys.modules`` so
-    # that ``from rust_core import butterfly`` resolves directly to the Rust
-    # extension.
+# Cargo builds the canonical artifact under ``target/release/``.  Prefer that
+# over a possibly-stale copy at the node root so the loaded extension always
+# matches the freshly-compiled ``#[pymodule]`` name.
+_so_paths = [
+    os.path.join(_dir, "target", "release", {repr(so_name)}),
+    os.path.join(_dir, {repr(so_name)}),
+    os.path.join(_dir, "target", "debug", {repr(so_name)}),
+] + glob.glob(os.path.join(_dir, "target", "*", {repr(so_name)}))
+_so_path = next((p for p in _so_paths if os.path.exists(p)), None)
+
+if _so_path:
     _spec = importlib.util.spec_from_file_location({repr(node_id)}, _so_path)
-    _aero_rust_ext = importlib.util.module_from_spec(_spec)
-    _spec.loader.exec_module(_aero_rust_ext)
-    sys.modules[{repr(node_id)}] = _aero_rust_ext
-    __all__ = [{exports_str}]
-    for _sym in __all__:
-        globals()[_sym] = getattr(_aero_rust_ext, _sym, None)
+    if _spec and _spec.loader:
+        _aero_rust_ext = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_aero_rust_ext)
+        sys.modules[{repr(node_id)}] = _aero_rust_ext
+        __all__ = [{exports_str}]
+        for _sym in __all__:
+            globals()[_sym] = getattr(_aero_rust_ext, _sym, None)
+    else:
+        __all__ = []
 else:
     __all__ = []
 """
@@ -848,6 +856,63 @@ else:
         )
         self._write_artifact(init_artifact, node_dir)
         return init_artifact
+
+    @staticmethod
+    def _cpp_defined_symbols(path: Path) -> Set[str]:
+        """Return the top-level function names defined in a C/C++ source file.
+
+        This is intentionally coarse: it looks for function-definition lines,
+        including those inside ``extern "C"`` blocks, and ignores control-flow
+        keywords like ``if`` and ``for``.
+        """
+        try:
+            content = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            return set()
+        func_re = re.compile(
+            r"(?m)^\s*(?:extern\s*\"C\"\s+)?"
+            r"(?:(?:static|inline|const|constexpr)\s+)*"
+            r"(?:[\w\*:,\"&<>\[\]]+\s+)+"
+            r"[\*]*\s*([A-Za-z_]\w*)\s*\([^)]*\)\s*(?:const)?\s*\{"
+        )
+        return set(func_re.findall(content))
+
+    def _deduplicate_cpp_source_files(self, node_dir: Path, cpp_files: List[Path]) -> List[Path]:
+        """Remove redundant ``.cpp`` files that define the same symbols as another.
+
+        LLM-synthesized C++ nodes sometimes emit multiple source files that all
+        implement the same contract symbol.  Keeping the richest file (the one
+        with the most distinct top-level definitions) and dropping pure duplicate
+        files prevents ``multiple definition`` linker errors.
+        """
+        if len(cpp_files) <= 1:
+            return cpp_files
+        file_symbols: List[Tuple[Path, Set[str], int]] = []
+        for p in cpp_files:
+            symbols = self._cpp_defined_symbols(p)
+            try:
+                size = p.stat().st_size
+            except Exception:
+                size = 0
+            file_symbols.append((p, symbols, size))
+        # Prefer the file that defines the most symbols, then the largest file.
+        file_symbols.sort(key=lambda t: (-len(t[1]), -t[2], t[0].name))
+
+        kept: List[Path] = []
+        kept_symbols: Set[str] = set()
+        for p, symbols, _ in file_symbols:
+            if symbols - kept_symbols:
+                kept.append(p)
+                kept_symbols.update(symbols)
+            else:
+                # This file contributes no new top-level symbols; it is a subset
+                # of an already-selected file.  Remove it to avoid duplicate
+                # symbol linker errors.
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+        return kept
 
     def _reconcile_cmake_sources(
         self,
@@ -897,6 +962,54 @@ else:
         )
         if not cpp_files:
             return
+
+        cpp_files = self._deduplicate_cpp_source_files(node_dir, cpp_files)
+        if not cpp_files:
+            return
+
+        # If the C++ source files ended up under ``src/`` but the test harness
+        # and CMake convention expect them at the node root, move them up.  This
+        # also prevents duplicate-symbol linker errors when a file exists both
+        # at the root and under ``src/``.
+        root_cpp_files = [p for p in cpp_files if p.parent == node_dir]
+        moved_map: Dict[Path, Path] = {}
+        if not root_cpp_files:
+            moved: List[Path] = []
+            for p in cpp_files:
+                rel = p.relative_to(node_dir)
+                if str(rel).startswith("src/") or str(rel).startswith("source/"):
+                    dest = node_dir / p.name
+                    if dest.exists():
+                        moved.append(p)
+                    else:
+                        try:
+                            p.rename(dest)
+                            moved.append(dest)
+                            moved_map[p] = dest
+                        except Exception:
+                            moved.append(p)
+                else:
+                    moved.append(p)
+            cpp_files = moved
+
+        # Keep the node spec in sync so later parity gates and the toolchain
+        # router point at the relocated source files.
+        if moved_map:
+            source_files = list(node_spec.get("source_files") or [])
+            if source_files:
+                updated: List[str] = []
+                for sf in source_files:
+                    old = (node_dir / sf).resolve()
+                    if old in moved_map:
+                        new = moved_map[old]
+                        updated.append(str(new.relative_to(node_dir)).replace("\\", "/"))
+                    else:
+                        updated.append(sf)
+                node_spec["source_files"] = updated
+            else:
+                node_spec["source_files"] = [
+                    str(p.relative_to(node_dir)).replace("\\", "/") for p in cpp_files
+                ]
 
         rel_sources = [str(p.relative_to(node_dir)) for p in cpp_files]
         quoted_sources = " ".join(shlex.quote(s) for s in rel_sources)
@@ -2217,6 +2330,9 @@ else:
                 # Remove redundant casts and let the typed assignment provide the
                 # result type.
                 content = self._zig_simplify_casts(content)
+                # Collapse nested ``@intCast(@intCast(x))`` so the outer (typed)
+                # cast is the only one remaining.
+                content = self._zig_collapse_nested_intcast(content)
                 artifact.content = content
             elif is_python:
                 content = artifact.content
@@ -2240,9 +2356,14 @@ else:
                 # LLM-synthesized Rust often assigns to Vec parameters without
                 # declaring them mutable, which the compiler rejects.
                 content = self._rust_repair_mutable_vec_params(content)
+                # ``thread_rng()`` is not ``Send``/``Sync`` and cannot be used
+                # inside Rayon parallel closures.  Switch to ``StdRng``.
+                content = self._rust_repair_thread_rng_for_rayon(content)
                 # Generated loops often use i64 bounds with `.len()` and
                 # `Vec::with_capacity` expects usize; normalize those sites.
                 content = self._rust_repair_usize_capacity_and_ranges(content)
+                # rand 0.8 moved ``StandardNormal`` to the ``rand_distr`` crate.
+                content = self._rust_repair_rand_distr(content)
                 artifact.content = content
             elif artifact.language in ("cpp", "c++", "c", "cxx") or str(artifact.file_path).endswith((".cpp", ".cc", ".cxx", ".c")):
                 content = artifact.content
@@ -2357,10 +2478,26 @@ else:
 
         LLM-synthesized Zig sometimes declares an exported C-ABI function as
         ``void`` and then returns a pointer variable.  Zig rejects that mismatch;
-        we infer the real return type from the local declaration of the returned
-        identifier and patch the signature.
+        we infer the real return type from the local declaration (or parameter)
+        of the returned identifier and patch the signature.
         """
         var_types: Dict[str, str] = {}
+
+        # Function parameters with explicit types.
+        param_re = re.compile(
+            r"(?:export\s+)?fn\s+[a-zA-Z_]\w*\s*\(([^)]*)\)"
+        )
+        for m in param_re.finditer(content):
+            for raw in m.group(1).split(","):
+                if ":" not in raw:
+                    continue
+                name, typ = raw.split(":", 1)
+                name = name.strip()
+                typ = typ.strip()
+                if name and typ:
+                    var_types[name] = typ
+
+        # Local declarations.
         decl_re = re.compile(
             r"\b(?:const|var)\s+([a-zA-Z_]\w*)\s*:\s*([^=;]+?)(?=\s*=|;)",
             re.DOTALL,
@@ -2460,12 +2597,61 @@ else:
             _capacity_repl,
             content,
         )
-        # ``for _ in 0..n {`` -> ``for _ in 0..(n as usize) {``
+        # ``for _ in 0..n {`` -> ``for _ in 0..(n as usize) {``,
+        # but only when ``n`` is a bare scalar identifier (not ``vec.len()``,
+        # ``arr[i]``, a method call, or an already-typed expression).
         content = re.sub(
-            r"for\s+(\w+)\s+in\s+0\.\.(\w+)(?!\s*as\b)",
+            r"for\s+(\w+)\s+in\s+0\.\.(\w+)(?!\w)(?!\s*as\b)(?!\s*[.\[(])",
             r"for \1 in 0..(\2 as usize)",
             content,
         )
+        return content
+
+    @staticmethod
+    def _rust_repair_rand_distr(content: str) -> str:
+        """Move ``StandardNormal`` to ``rand_distr`` for rand 0.8 compatibility.
+
+        The ``StandardNormal`` distribution was removed from ``rand::distributions``
+        in rand 0.8 and now lives in the ``rand_distr`` crate.  Rewriting the
+        import (and any fully-qualified uses) lets the auto-dependency injector
+        add ``rand_distr = "0.4"``.
+        """
+        # Fully-qualified inline uses.
+        content = re.sub(
+            r"\brand::distributions::StandardNormal\b",
+            r"rand_distr::StandardNormal",
+            content,
+        )
+        # Import statements, with or without braces.
+        content = re.sub(
+            r"\buse\s+rand::distributions::(\{[^}]*\bStandardNormal\b[^}]*\}|StandardNormal);",
+            r"use rand_distr::\1;",
+            content,
+        )
+        return content
+
+    @staticmethod
+    def _rust_repair_thread_rng_for_rayon(content: str) -> str:
+        """Replace ``thread_rng()`` with a ``Send``/``Sync`` PRNG in Rayon code.
+
+        ``rand::thread_rng()`` uses an ``Rc`` internally, so a closure passed to
+        ``rayon`` parallel iterators cannot capture ``&mut rng``.  ``StdRng`` is
+        ``Send`` and ``Sync`` and works with ``rand_distr`` distributions.
+        """
+        if "rayon" not in content or "thread_rng" not in content:
+            return content
+
+        # Fully-qualified call to avoid relying on the prelude.
+        content = re.sub(
+            r"\b(let\s+(?:mut\s+)?\w+\s*=\s*)thread_rng\(\)",
+            r"\1rand::rngs::StdRng::seed_from_u64(42)",
+            content,
+        )
+        # Ensure the ``SeedableRng`` trait is in scope for ``seed_from_u64``.
+        if "seed_from_u64" in content and "use rand::SeedableRng" not in content:
+            content = "use rand::SeedableRng;\n" + content
+        if "rand::rngs::StdRng" not in content:
+            content = "use rand::rngs::StdRng;\n" + content
         return content
 
     @staticmethod
@@ -2541,6 +2727,24 @@ else:
         return content
 
     @staticmethod
+    def _zig_collapse_nested_intcast(content: str) -> str:
+        """Collapse ``@intCast(@intCast(x))`` to a single typed cast.
+
+        The LLM sometimes emits nested ``@intCast`` calls.  Zig cannot infer the
+        result type of the inner cast, so we keep only the outermost cast and
+        let its surrounding ``@as`` or assignment provide the type.
+        """
+        prev = None
+        while prev != content:
+            prev = content
+            content = re.sub(
+                r"@intCast\(\s*@intCast\(([^()]*)\)\s*\)",
+                r"@intCast(\1)",
+                content,
+            )
+        return content
+
+    @staticmethod
     def _rust_repair_mutable_vec_params(content: str) -> str:
         """Add ``mut`` to Rust ``Vec<T>`` parameters that are assigned through.
 
@@ -2561,10 +2765,13 @@ else:
                 raw_param = raw_param.strip()
                 if not raw_param:
                     continue
-                p_match = re.match(r"(mut\s+)?(arg_\d+):\s*(Vec<[^>]+>.*)", raw_param)
+                p_match = re.match(r"(mut\s+)?(arg_?\d+):\s*(Vec<[^>]+>.*)", raw_param)
                 if p_match and not p_match.group(1):
                     arg_name = p_match.group(2)
-                    if re.search(rf"\\b{re.escape(arg_name)}\\s*\\[[^\\]]+\\]\\s*=*", body):
+                    if re.search(
+                        r"\b" + re.escape(arg_name) + r"\s*\[[^\]]+\]\s*=[^=]",
+                        body,
+                    ):
                         raw_param = f"mut {raw_param}"
                 new_params.append(raw_param)
             return f"{attrs}pub fn {name}({', '.join(new_params)}){ret}{{"
@@ -2599,6 +2806,11 @@ else:
         for py_file in self.workspace_root.rglob("*.py"):
             if "ffi_bridges" in py_file.parts:
                 # Bridge loader stubs are synthesized separately; do not rewrite them.
+                continue
+            if py_file.name == "__init__.py":
+                # Package ``__init__.py`` files (e.g. the PyO3 bootstrap inside a
+                # Rust crate) import the crate's own ``lib<node_id>.so``; they must
+                # not be rewritten to point at an upstream source node's library.
                 continue
             content = py_file.read_text(encoding="utf-8")
             rel = py_file.relative_to(self.workspace_root)

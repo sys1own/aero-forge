@@ -248,14 +248,17 @@ def _has_c_abi_consumer_contract(node_id: str, boundary_contracts: List[dict]) -
 
 
 def _demo_call_args(args: List[str]) -> str:
-    """Return a literal argument list for the CLI demo call."""
+    """Return a literal argument list for the CLI demo call.
+
+    Use integer literals for every numeric type.  PyO3 accepts Python ints for
+    both integer and float parameters, but a float will raise when the Rust
+    function expects an integer.
+    """
     parts: List[str] = []
     for a in args:
         if a == "pointer":
             parts.append("[1.0, 2.0, 3.0, 4.0]")
-        elif a in ("float32", "float64"):
-            parts.append("42.0")
-        elif a in ("int32", "int64"):
+        elif a in ("float32", "float64", "int32", "int64"):
             parts.append("42")
         else:
             parts.append("42")
