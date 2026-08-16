@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -716,10 +717,12 @@ def generate_from_prompt(
 ) -> str:
     """Call the configured LLM and return the raw generated text."""
     llm_provider = resolve_llm_provider(llm_provider)
+    # Use max_retries=1 for the underlying client; this function implements its own
+    # exponential backoff so retries are independent of the web connection state.
     client = get_llm_client(
         llm_provider,
         model=model,
-        max_retries=max_retries,
+        max_retries=1,
         config_override=config_override,
         tier=Tier.REASONING,
     )
@@ -779,6 +782,38 @@ def generate_from_prompt(
         max_tokens = int(settings.get("MAX_TOKENS", os.getenv("AERO_FORGE_MAX_TOKENS", "4096")))
     reduced_context = bool(settings.get("REDUCED_CONTEXT", False))
 
+    def _generate_with_retry(
+        messages: List[Dict[str, str]],
+        max_tokens: int,
+        temperature: float,
+        label: str,
+        base_delay: float = 1.0,
+        max_delay: float = 30.0,
+    ) -> Optional[str]:
+        """Call ``client.generate`` with exponential backoff on transient failures.
+
+        This retry loop lives inside ``generate_from_prompt`` and is independent of
+        the web request lifecycle; disconnects/timeouts from the HTTP layer cannot
+        abort it. Empty responses are returned as-is so the outer loop can fall
+        back to the next prompt template.
+        """
+        delay = base_delay
+        last_error: Optional[Exception] = None
+        for attempt in range(max_retries):
+            try:
+                return client.generate(messages, temperature=temperature, max_tokens=max_tokens)
+            except Exception as exc:
+                last_error = exc
+                _accel_log("warning", f"generate_from_prompt ({label}) attempt {attempt + 1}/{max_retries} failed: {exc}")
+                logger.warning("generate_from_prompt (%s) attempt %d/%d failed: %s", label, attempt + 1, max_retries, exc)
+                if attempt < max_retries - 1:
+                    sleep = min(delay * (2 ** attempt), max_delay)
+                    logger.info("generate_from_prompt: backing off %.1fs before retry %d/%d", sleep, attempt + 2, max_retries)
+                    time.sleep(sleep)
+        if last_error:
+            raise last_error
+        return None
+
     v11_template = get_template("v11_universal_architect")
     skeleton_note = _skeleton_for_prompt(prompt, selected)
 
@@ -810,7 +845,7 @@ def generate_from_prompt(
                 "generate_from_prompt: empty/low-density response on first attempt; "
                 "retrying with v11_universal_architect template and skeleton"
             )
-        response = client.generate(messages, temperature=temperature, max_tokens=tokens)
+        response = _generate_with_retry(messages, temperature=temperature, max_tokens=tokens, label=label)
         if not response:
             _accel_log("warning", f"generate_from_prompt ({label}): LLM returned an empty response")
             continue
@@ -841,7 +876,9 @@ def generate_from_prompt(
             {"role": "user", "content": reduced_user + skeleton_note + reduced_note},
         ]
         _accel_log("info", "generate_from_prompt: reduced-context fallback retry")
-        response = client.generate(messages, temperature=0.1, max_tokens=max(max_tokens, 4096))
+        response = _generate_with_retry(
+            messages, temperature=0.1, max_tokens=max(max_tokens, 4096), label="reduced"
+        )
         if not response:
             _accel_log("warning", "generate_from_prompt (reduced): LLM returned an empty response")
         else:

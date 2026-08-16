@@ -29,6 +29,7 @@ ARTIFACT_DIR_PATTERNS: Set[str] = {
     "node_modules",
     ".cargo",
     "*.egg-info",
+    "sandboxes",
 }
 
 ARTIFACT_FILE_PATTERNS: Set[str] = {
