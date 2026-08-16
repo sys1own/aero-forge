@@ -1590,6 +1590,7 @@ def generate_and_build(
             discover=discover,
             explain=explain,
             review=review,
+            progress_callback=progress_callback,
             config_override=config_override,
         )
     except ValidationError as exc:

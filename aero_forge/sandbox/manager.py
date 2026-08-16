@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import io
+import json
 import logging
 import os
 import re
@@ -22,6 +23,152 @@ from aero_forge.scheduler.wavefront import Task, WavefrontScheduler
 
 CARGO_BIN_DIR = Path(os.path.expanduser("~/.cargo/bin"))
 logger = logging.getLogger("aero_forge.sandbox")
+
+
+def _build_status_path(session_dir: Path | str) -> Path:
+    return Path(session_dir) / ".aero" / "build_status.json"
+
+
+def _build_log_path(session_dir: Path | str) -> Path:
+    return Path(session_dir) / ".aero" / "build.log"
+
+
+def _accelerator_log_path(session_dir: Path | str) -> Path:
+    return Path(session_dir) / ".aero" / "accelerator.log"
+
+
+def read_build_status(session_dir: Path | str) -> Dict[str, Any]:
+    """Read the persisted build status for ``session_dir``.
+
+    Returns a default IDLE record if the status file does not yet exist.
+    """
+    path = _build_status_path(session_dir)
+    default: Dict[str, Any] = {
+        "status": "IDLE",
+        "error": None,
+        "progress_message": "",
+        "started_at": None,
+        "finished_at": None,
+        "result": None,
+        "gate_errors": [],
+    }
+    if not path.is_file():
+        return default
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            default.update(data)
+    except Exception as exc:
+        logger.debug("Could not read build status for %s: %s", session_dir, exc)
+    return default
+
+
+def write_build_status(
+    session_dir: Path | str,
+    status: str,
+    error: Optional[str] = None,
+    progress_message: Optional[str] = None,
+    result: Optional[Dict[str, Any]] = None,
+    gate_errors: Optional[List[str]] = None,
+    append_gate_errors: bool = False,
+) -> None:
+    """Persist the build state, any gate errors, and the final result."""
+    path = _build_status_path(session_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = read_build_status(session_dir)
+    updates: Dict[str, Any] = {"status": status}
+    if error is not None:
+        updates["error"] = error
+    if progress_message is not None:
+        updates["progress_message"] = progress_message
+    if result is not None:
+        updates["result"] = result
+    if gate_errors is not None:
+        if append_gate_errors:
+            existing = data.get("gate_errors") or []
+            existing.extend(gate_errors)
+            updates["gate_errors"] = existing
+        else:
+            updates["gate_errors"] = gate_errors
+    data.update(updates)
+    if status in ("SUCCESS", "FAILED") and data.get("started_at"):
+        data["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    elif status == "PENDING" and not data.get("started_at"):
+        data["started_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    try:
+        path.write_text(json.dumps(data, default=str, ensure_ascii=False), encoding="utf-8")
+    except Exception as exc:
+        logger.warning("Failed to write build status for %s: %s", session_dir, exc)
+
+
+def append_build_log(session_dir: Path | str, text: str) -> None:
+    """Append ``text`` to the per-session build log."""
+    path = _build_log_path(session_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(text)
+    except Exception as exc:
+        logger.warning("Failed to append build log for %s: %s", session_dir, exc)
+
+
+def append_accelerator_log(session_dir: Path | str, text: str) -> None:
+    """Append ``text`` to the per-session accelerator log."""
+    path = _accelerator_log_path(session_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(text)
+    except Exception as exc:
+        logger.warning("Failed to append accelerator log for %s: %s", session_dir, exc)
+
+
+def reset_build_status(session_dir: Path | str) -> None:
+    """Reset the build status and truncate per-session log files."""
+    for path in (_build_status_path(session_dir), _build_log_path(session_dir), _accelerator_log_path(session_dir)):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if path.is_file():
+                path.write_text("", encoding="utf-8")
+        except Exception as exc:
+            logger.debug("Could not reset %s: %s", path, exc)
+    write_build_status(session_dir, "PENDING", progress_message="Build queued")
+
+
+def get_build_log_tail(session_dir: Path | str, max_bytes: int = 65536) -> str:
+    """Return the tail of the build log, capped at ``max_bytes``."""
+    path = _build_log_path(session_dir)
+    if not path.is_file():
+        return ""
+    try:
+        size = path.stat().st_size
+        start = max(0, size - max_bytes)
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            if start > 0:
+                fh.seek(start)
+                fh.readline()  # discard partial first line
+            return fh.read(max_bytes)
+    except Exception as exc:
+        logger.debug("Could not read build log for %s: %s", session_dir, exc)
+        return ""
+
+
+def get_accelerator_log_tail(session_dir: Path | str, max_bytes: int = 65536) -> str:
+    """Return the tail of the accelerator log, capped at ``max_bytes``."""
+    path = _accelerator_log_path(session_dir)
+    if not path.is_file():
+        return ""
+    try:
+        size = path.stat().st_size
+        start = max(0, size - max_bytes)
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            if start > 0:
+                fh.seek(start)
+                fh.readline()
+            return fh.read(max_bytes)
+    except Exception as exc:
+        logger.debug("Could not read accelerator log for %s: %s", session_dir, exc)
+        return ""
 
 
 def _parse_pytest_counts(output: str) -> tuple[int, int, int]:

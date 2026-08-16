@@ -531,6 +531,10 @@ def _run_polyglot_materializer(
         }
     write_blueprint(updated, output_dir / "blueprint.aero")
 
+    progress_callback = kwargs.get("progress_callback")
+    if progress_callback:
+        progress_callback("Running tests...")
+
     test_env = dict(os.environ)
     pythonpath_parts = [str(output_dir)]
     if (output_dir / "src").is_dir():
@@ -873,6 +877,7 @@ def build_universal_project(
             wavefront_parallelism=wavefront_parallelism,
             precision_shield_mode=precision_shield_mode,
             hin_jit_opt_level=hin_jit_opt_level,
+            progress_callback=progress_callback,
         )
     elif blueprint.architecture == INTENT_HYBRID_CPP_RUST:
         result = _run_hybrid_cpp_rust_materializer(
@@ -883,6 +888,7 @@ def build_universal_project(
             wavefront_parallelism=wavefront_parallelism,
             precision_shield_mode=precision_shield_mode,
             hin_jit_opt_level=hin_jit_opt_level,
+            progress_callback=progress_callback,
         )
     elif blueprint.architecture == INTENT_HYBRID_CPP_PYTHON:
         # C++/pybind11 builds go straight to the polyglot materializer because
@@ -897,6 +903,7 @@ def build_universal_project(
             wavefront_parallelism=wavefront_parallelism,
             precision_shield_mode=precision_shield_mode,
             hin_jit_opt_level=hin_jit_opt_level,
+            progress_callback=progress_callback,
         )
     elif blueprint.architecture == INTENT_HYBRID_RUST_PYTHON:
         # Explicit PyO3/NumPy/Rayon native extension updates are handled directly
@@ -916,6 +923,7 @@ def build_universal_project(
                 wavefront_parallelism=wavefront_parallelism,
                 precision_shield_mode=precision_shield_mode,
                 hin_jit_opt_level=hin_jit_opt_level,
+                progress_callback=progress_callback,
             )
         else:
             try:
@@ -958,6 +966,7 @@ def build_universal_project(
                     wavefront_parallelism=wavefront_parallelism,
                     precision_shield_mode=precision_shield_mode,
                     hin_jit_opt_level=hin_jit_opt_level,
+                    progress_callback=progress_callback,
                 )
     else:
         result = _build_pure_python(
@@ -974,6 +983,7 @@ def build_universal_project(
             wavefront_parallelism=wavefront_parallelism,
             precision_shield_mode=precision_shield_mode,
             hin_jit_opt_level=hin_jit_opt_level,
+            progress_callback=progress_callback,
         )
 
     result["blueprint_path"] = str(output_dir / "blueprint.aero")
