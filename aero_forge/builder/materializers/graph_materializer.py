@@ -2340,6 +2340,9 @@ else:
                 # Collapse nested ``@intCast(@intCast(x))`` so the outer (typed)
                 # cast is the only one remaining.
                 content = self._zig_collapse_nested_intcast(content)
+                # Zig treats unused local constants/variables as compile errors.
+                # Prefix their declarations with ``_`` so the build is reliable.
+                content = self._zig_rename_unused_locals(content)
                 artifact.content = content
             elif is_python:
                 content = artifact.content
@@ -2791,6 +2794,62 @@ else:
         return content
 
     @staticmethod
+    def _zig_rename_unused_locals(content: str) -> str:
+        """Prefix unused local ``const`` / ``var`` declarations with ``_``.
+
+        Zig 0.x treats unused local constants and variables as compile errors.
+        Renaming the declaration (and only the declaration) to ``_name`` keeps
+        the initializer side effects while suppressing the error.
+        """
+        fn_pattern = re.compile(
+            r"(?m)^(?:export\s+)?fn\s+[a-zA-Z_]\w*\s*\([^)]*\)(?:[^{]*)\{",
+            re.MULTILINE,
+        )
+        decl_pattern = re.compile(
+            r"(?m)^(\s+)(const|var)\s+([A-Za-z_]\w*)(\s*:\s*[^=]+)?\s*=\s*([^;]+);",
+        )
+        matches = list(fn_pattern.finditer(content))
+        if not matches:
+            return content
+
+        out: List[str] = []
+        last = 0
+        for m in matches:
+            body_start = m.end()
+            depth = 1
+            i = body_start
+            while i < len(content) and depth > 0:
+                if content[i] == "{":
+                    depth += 1
+                elif content[i] == "}":
+                    depth -= 1
+                i += 1
+            body_end = i - 1
+            body = content[body_start:body_end]
+
+            def _repl(dm: "re.Match[str]") -> str:
+                indent = dm.group(1)
+                name = dm.group(3)
+                expr = dm.group(5).strip()
+                rest_start = dm.end()
+                after_decl = body[rest_start:]
+                if re.search(
+                    r"(?<![.\w])" + re.escape(name) + r"(?![\w])",
+                    after_decl,
+                ):
+                    return dm.group(0)
+                return f"{indent}_ = {expr};"
+
+            new_body = decl_pattern.sub(_repl, body)
+            out.append(content[last:m.start()])
+            out.append(content[m.start():body_start])
+            out.append(new_body)
+            out.append(content[body_end:i])
+            last = i
+        out.append(content[last:])
+        return "".join(out)
+
+    @staticmethod
     def _rust_repair_mutable_vec_params(content: str) -> str:
         """Add ``mut`` to Rust ``Vec<T>`` parameters that are assigned through.
 
@@ -2992,6 +3051,61 @@ else:
                 if sym and sym not in symbols:
                     symbols.add(sym)
                     signatures.append((sym, [], ""))
+
+        # If the node already emitted a plain C-ABI lib.rs, reuse it for the
+        # wasm32 target instead of emitting a hollow stub.  This lets the real
+        # Rust risk logic run in the browser.
+        node_lib_rs = node_dir / "src" / "lib.rs"
+        use_existing_source = False
+        if node_lib_rs.is_file():
+            node_src_text = node_lib_rs.read_text(encoding="utf-8", errors="ignore")
+            lower_src = node_src_text.lower()
+            if (
+                "pyo3" not in lower_src
+                and "#[pyfunction]" not in node_src_text
+                and "#[pymodule]" not in node_src_text
+                and "#[no_mangle]" in node_src_text
+                and 'extern "C"' in node_src_text
+                and any(sym in node_src_text for sym in symbols)
+            ):
+                use_existing_source = True
+
+        if use_existing_source:
+            lib_src = (
+                "// Auto-generated wasm32-unknown-unknown C-ABI crate.\n"
+                "#![allow(non_snake_case)]\n"
+                "#![allow(unused_variables)]\n\n"
+                + node_src_text
+                + "\n"
+            )
+            (wasm_dir / "src" / "lib.rs").write_text(lib_src, encoding="utf-8")
+
+            # Re-use any [dependencies] from the host node.
+            deps_text = ""
+            node_cargo = node_dir / "Cargo.toml"
+            if node_cargo.is_file():
+                cargo_text = node_cargo.read_text(encoding="utf-8", errors="ignore")
+                deps_match = re.search(
+                    r"\[dependencies\].*?(?=\n\[|\Z)", cargo_text, re.DOTALL
+                )
+                if deps_match:
+                    deps_text = deps_match.group(0).strip() + "\n\n"
+
+            cargo_toml = (
+                f'[package]\n'
+                f'name = "{node_id}_wasm"\n'
+                f'version = "0.1.0"\n'
+                f'edition = "2021"\n\n'
+                f'[lib]\n'
+                f'name = "{node_id}"\n'
+                f'crate-type = ["cdylib"]\n\n'
+                f'{deps_text}'
+                f'[profile.release]\n'
+                f'opt-level = "s"\n'
+                f'lto = true\n'
+            )
+            (wasm_dir / "Cargo.toml").write_text(cargo_toml, encoding="utf-8")
+            return
 
         funcs: List[str] = []
         for sym, args, ret in signatures:
