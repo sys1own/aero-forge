@@ -12,7 +12,7 @@ from aero_forge.builder.emitters.base import (
     EmitterRegistry,
     PolyglotEmitterPlugin,
 )
-from aero_forge.builder.spec import ASTNode, EngineSpec, function, module
+from aero_forge.builder.spec import ASTNode, EngineSpec, function, module, param
 
 
 class CppEmitter(BaseEmitter):
@@ -377,7 +377,9 @@ class CppEmitter(BaseEmitter):
         type_map = {
             "int": "int64_t" if self.c_abi else "int",
             "i32": "int32_t",
+            "int32": "int32_t",
             "i64": "int64_t",
+            "int64": "int64_t",
             "float": "double" if self.c_abi else "float",
             "f32": "float",
             "f64": "double",
@@ -512,7 +514,7 @@ class CppEmitterPlugin(PolyglotEmitterPlugin):
         node_spec: dict,
         boundary_contracts: List[dict],
     ) -> List[CodeArtifact]:
-        spec = _cpp_engine_spec_from_node_spec(node_id, node_spec)
+        spec = _cpp_engine_spec_from_node_spec(node_id, node_spec, boundary_contracts)
         source = CppEmitter(c_abi=True).emit(spec)
         return [CodeArtifact(file_path=f"{node_id or 'module'}.cpp", content=source, language="cpp")]
 
@@ -540,20 +542,71 @@ class CppEmitterPlugin(PolyglotEmitterPlugin):
         return CodeArtifact(file_path="CMakeLists.txt", content=content, language="cmake")
 
 
-def _cpp_engine_spec_from_node_spec(node_id: str, node_spec: dict) -> EngineSpec:
+def _cpp_engine_spec_from_node_spec(
+    node_id: str,
+    node_spec: dict,
+    boundary_contracts: Optional[List[dict]] = None,
+) -> EngineSpec:
     """Best-effort conversion of a plugin node spec to an EngineSpec."""
     spec = node_spec.get("spec")
-    if isinstance(spec, EngineSpec):
+    if not isinstance(spec, EngineSpec):
+        if "source" in node_spec:
+            name = node_spec.get("name") or node_id or "module"
+            spec = EngineSpec(name=name, root=module(children=[function(name, body=[])]))
+        elif "root" in node_spec:
+            spec = EngineSpec(
+                name=node_spec.get("name", node_id or "module"),
+                root=node_spec["root"],
+            )
+        else:
+            spec = EngineSpec(name=node_id or "module", root=module(children=[]))
+
+    # Align the exported function(s) with the source-side boundary contract(s) so
+    # the materializer's symbol-integrity gate does not fall through to the
+    # non-deterministic LLM in-fill path.
+    if boundary_contracts:
+        source_contracts = [
+            c for c in boundary_contracts if c.get("source") == node_id and c.get("symbol")
+        ]
+        if source_contracts:
+            spec = _align_spec_to_source_contracts(spec, source_contracts, node_id)
+    return spec
+
+
+def _align_spec_to_source_contracts(
+    spec: EngineSpec,
+    source_contracts: List[dict],
+    node_id: str,
+) -> EngineSpec:
+    """Return a spec whose top-level functions match the contracted source symbols."""
+    existing_funcs = [c for c in spec.root.children if c.kind == "function"]
+    new_funcs: List[ASTNode] = []
+    for i, contract in enumerate(source_contracts):
+        sym = str(contract.get("symbol") or node_id)
+        args = list(contract.get("args") or [])
+        ret = contract.get("return_type") or ""
+        if i < len(existing_funcs):
+            existing = existing_funcs[i]
+            base_params = existing.params
+            body = existing.body
+            name = sym or existing.name or node_id
+            # Keep original param names when possible, but adopt contract types.
+            params = [
+                param(
+                    base_params[j].name if j < len(base_params) else f"arg_{j}",
+                    args[j] if j < len(args) else (base_params[j].type_hint if j < len(base_params) else None),
+                )
+                for j in range(max(len(args), len(base_params)))
+            ]
+            ret = ret or existing.type_hint
+        else:
+            name = sym or node_id
+            params = [param(f"arg_{j}", args[j]) for j in range(len(args))]
+            body = []
+        new_funcs.append(function(name, params=params, return_type=ret or None, body=body))
+    if not new_funcs:
         return spec
-    if "source" in node_spec:
-        name = node_spec.get("name") or node_id or "module"
-        return EngineSpec(name=name, root=module(children=[function(name, body=[])]))
-    if "root" in node_spec:
-        return EngineSpec(
-            name=node_spec.get("name", node_id or "module"),
-            root=node_spec["root"],
-        )
-    return EngineSpec(name=node_id or "module", root=module(children=[]))
+    return EngineSpec(name=spec.name, root=module(children=new_funcs), metadata=spec.metadata)
 
 
 EmitterRegistry.get_instance().register(CppEmitterPlugin())
