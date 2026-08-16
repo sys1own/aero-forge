@@ -2340,6 +2340,10 @@ else:
                 # Collapse nested ``@intCast(@intCast(x))`` so the outer (typed)
                 # cast is the only one remaining.
                 content = self._zig_collapse_nested_intcast(content)
+                # The LLM occasionally wraps an entire range in ``@intCast``,
+                # e.g. ``@intCast(0..@intCast(cols))``.  Remove the outer cast
+                # and rely on the per-bound cast.
+                content = self._zig_unwrap_intcast_over_ranges(content)
                 # Zig treats unused local constants/variables as compile errors.
                 # Prefix their declarations with ``_`` so the build is reliable.
                 content = self._zig_rename_unused_locals(content)
@@ -2884,6 +2888,66 @@ else:
                 content,
             )
         return content
+
+    @staticmethod
+    def _zig_unwrap_intcast_over_ranges(content: str) -> str:
+        """Remove an ``@intCast`` that incorrectly wraps an entire range.
+
+        Generated code may emit ``@intCast(0..@intCast(cols))`` for a slice
+        bound.  ``@intCast`` takes a scalar, not a range, so we drop the outer
+        cast and keep the (already cast) range end.
+        """
+        out: List[str] = []
+        i = 0
+        while i < len(content):
+            m = re.search(r"@intCast\(", content[i:])
+            if not m:
+                out.append(content[i:])
+                break
+            start = i + m.start()
+            paren = i + m.end()
+            depth = 1
+            j = paren
+            while j < len(content) and depth > 0:
+                if content[j] == "(":
+                    depth += 1
+                elif content[j] == ")":
+                    depth -= 1
+                j += 1
+            if depth != 0:
+                out.append(content[i:])
+                break
+            inner = content[paren : j - 1]
+            d = 0
+            range_at = -1
+            for idx, ch in enumerate(inner):
+                if ch == "(":
+                    d += 1
+                elif ch == ")":
+                    d -= 1
+                elif (
+                    ch == "."
+                    and d == 0
+                    and idx + 1 < len(inner)
+                    and inner[idx + 1] == "."
+                ):
+                    range_at = idx
+                    break
+            if range_at >= 0:
+                start_expr = inner[:range_at].strip()
+                end_expr = inner[range_at + 2 :].strip()
+                out.append(content[i:start])
+                if re.match(r"@(?:intCast|as)\(", end_expr) or re.fullmatch(
+                    r"\d+", end_expr
+                ):
+                    out.append(f"{start_expr}..{end_expr}")
+                else:
+                    out.append(f"{start_expr}..@intCast({end_expr})")
+                i = j
+                continue
+            out.append(content[i:j])
+            i = j
+        return "".join(out)
 
     @staticmethod
     def _zig_rename_unused_locals(content: str) -> str:
@@ -4075,7 +4139,7 @@ target_compile_options({node_id} PRIVATE -O3 -march=native -fPIC)
                     # relative loaders like ``./libzig_kernel.so`` resolve.
                     lines.append(
                         f"(cd {package_dir} && mkdir -p zig-out/lib && "
-                        f"zig build-lib -dynamic -O ReleaseFast -fPIC "
+                        f"zig build-lib -dynamic -lc -O ReleaseFast -fPIC "
                         f"-femit-bin=zig-out/lib/lib{node_id}.so {src} && "
                         f"cp zig-out/lib/lib{node_id}.so lib{node_id}.so)"
                     )
