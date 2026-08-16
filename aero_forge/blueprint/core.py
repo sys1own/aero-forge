@@ -211,9 +211,13 @@ class ABIContract(BaseModel):
             "swig": "c_abi",
             "boost": "c_abi",
             "boost_python": "c_abi",
+            "internal": "internal",
+            "native": "internal",
+            "python": "internal",
+            "pure": "internal",
         }
         value = synonyms.get(value, value)
-        if value not in {"c_abi", "pyo3", "ctypes"}:
+        if value not in {"c_abi", "pyo3", "ctypes", "internal"}:
             if "pyo3" in value:
                 value = "pyo3"
             elif "ctypes" in value:
@@ -223,7 +227,6 @@ class ABIContract(BaseModel):
                 for k in (
                     "c_abi",
                     "cabi",
-                    "native",
                     "extern",
                     "c_api",
                     "c_ffi",
@@ -233,7 +236,9 @@ class ABIContract(BaseModel):
                 )
             ):
                 value = "c_abi"
-        allowed = {"c_abi", "pyo3", "ctypes"}
+            elif any(k in value for k in ("internal", "native", "pure")):
+                value = "internal"
+        allowed = {"c_abi", "pyo3", "ctypes", "internal"}
         if value not in allowed:
             # Unknown binding frameworks are treated as C-ABI rather than
             # failing schema validation; the materializer can later reject
@@ -264,6 +269,9 @@ class ABIContract(BaseModel):
             "c_alloc": "caller_allocates",
             "callee_owned": "callee_allocates",
             "caller_owned": "caller_allocates",
+            "internal": "caller_allocates",
+            "pure": "caller_allocates",
+            "native": "caller_allocates",
         }
         value = synonyms.get(value, value)
         if value not in {"callee_allocates", "caller_allocates", "shared_pyo3"}:
@@ -1085,8 +1093,8 @@ def _contracts_to_abi_contracts(
             memory_model = "shared_pyo3"
         else:
             target_language = "python"
-            binding_framework = "ctypes"
-            memory_model = "caller_allocates"
+            binding_framework = "internal"
+            memory_model = "internal"
 
         header_path = ""
         base = re.sub(r"\.(cpp|cc|cxx)$", ".h", name)
@@ -1250,10 +1258,14 @@ def _derive_graph_nodes_edges(
 
         # The export_symbol is implemented by the native side. PyO3 always
         # means a Rust extension exported to Python; for C-ABI we infer the
-        # native language from the contract metadata.
+        # native language from the contract metadata.  Internal/native bindings
+        # have a single implementation node and no cross-language edge.
         if binding == "PYO3_MATURIN":
             target_lang = "rust"
             source_lang = "python"
+        elif binding in ("INTERNAL", "NATIVE"):
+            target_lang = raw_target_lang
+            source_lang = raw_target_lang
         else:
             inferred_native = _infer_native_language(abi)
             target_lang = inferred_native
@@ -1266,6 +1278,10 @@ def _derive_graph_nodes_edges(
             target["contracts"].append(
                 {"symbol": symbol, "boundary_type": binding}
             )
+
+        if binding in ("INTERNAL", "NATIVE"):
+            # No cross-language boundary for internal symbols.
+            continue
 
         source_id = lang_to_node.get(source_lang, f"{source_lang}_interface")
         source = _ensure_node(source_id, source_lang)

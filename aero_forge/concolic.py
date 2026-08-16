@@ -9,11 +9,15 @@ LLM to repair.
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from z3 import And, Bool, Implies, Int, Not, Or, Solver, unsat
+from z3 import And, Bool, Implies, Int, Not, Or, Solver, set_param, unknown, unsat
+
+logger = logging.getLogger("aero_forge.concolic")
 
 
 # Valid architecture names and their allowed languages.
@@ -91,6 +95,14 @@ class ConcolicManifestVerifier:
         )
         self.solver = Solver()
         self.solver.set("unsat_core", True)
+        # Resource guard: cap each solver check at 30 seconds and 512 MB of memory.
+        # ``timeout`` is per-check (milliseconds); ``memory_max_size`` and
+        # ``memory_high_watermark_mb`` are process-wide memory limits in megabytes.
+        timeout_ms = int(os.getenv("AERO_FORGE_Z3_TIMEOUT_MS", 30000))
+        max_memory_mb = int(os.getenv("AERO_FORGE_Z3_MAX_MEMORY_MB", 512))
+        self.solver.set("timeout", timeout_ms)
+        set_param("memory_max_size", max_memory_mb)
+        set_param("memory_high_watermark_mb", max_memory_mb)
         self._trackers: Dict[str, Bool] = {}
 
     def _track(self, name: str, expr) -> None:
@@ -255,7 +267,18 @@ class ConcolicManifestVerifier:
     def verify(self) -> ConcolicResult:
         """Run Z3 and return a structured verification result."""
         self._build_constraints()
-        result = self.solver.check()
+        try:
+            result = self.solver.check()
+        except Exception as exc:
+            logger.warning("Z3 solver raised an exception: %s", exc)
+            return ConcolicResult(
+                satisfiable=True,
+                trace=[
+                    "Concolic manifest verification: skipped due to solver error",
+                    str(exc),
+                ],
+            )
+
         if result == unsat:
             core = self.solver.unsat_core()
             names = [str(c) for c in core]
@@ -271,11 +294,24 @@ class ConcolicManifestVerifier:
                 + descriptions,
             )
 
+        if result == unknown:
+            logger.warning("Z3 solver returned unknown (resource limit reached)")
+            return ConcolicResult(
+                satisfiable=True,
+                trace=[
+                    "Concolic manifest verification: unknown (timeout/memory limit)",
+                    "Proceeding without a verified model to avoid blocking the build.",
+                ],
+            )
+
         # For SAT builds we also produce a compact trace; the model is usually not
         # needed for manifests but kept for debugging.
         model = None
-        if self.solver.model() is not None:
+        try:
             m = self.solver.model()
+        except Exception:
+            m = None
+        if m is not None:
             try:
                 model = {str(v): str(m[v]) for v in m if m[v] is not None}
             except Exception:

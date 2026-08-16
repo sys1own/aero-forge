@@ -15,7 +15,7 @@ from aero_forge.builder.emitters.base import (
     EmitterRegistry,
     PolyglotEmitterPlugin,
 )
-from aero_forge.builder.spec import ASTNode, EngineSpec, function, module
+from aero_forge.builder.spec import ASTNode, EngineSpec, function, module, param
 
 
 class SignatureBodyMatch:
@@ -469,9 +469,14 @@ class RustEmitter(BaseEmitter):
             "size_t": "usize",
             "usize": "usize",
             "i64": "i64",
+            "int64": "i64",
             "f64": "f64",
+            "float64": "f64",
             "u64": "u64",
             "i32": "i32",
+            "int32": "i32",
+            "f32": "f32",
+            "float32": "f32",
             "u32": "u32",
         }
 
@@ -697,28 +702,61 @@ def _rust_engine_spec_from_node_spec(
 ) -> EngineSpec:
     """Best-effort conversion of a plugin node spec to an EngineSpec."""
     spec = node_spec.get("spec")
-    if isinstance(spec, EngineSpec):
-        if boundary_contracts:
-            _inject_boundary_metadata(spec.metadata, boundary_contracts)
-        return spec
-    if "source" in node_spec:
-        name = node_spec.get("name") or node_id or "module"
-        spec = EngineSpec(name=name, root=module(children=[function(name, body=[])]))
-        if boundary_contracts:
-            _inject_boundary_metadata(spec.metadata, boundary_contracts)
-        return spec
-    if "root" in node_spec:
-        spec = EngineSpec(
-            name=node_spec.get("name", node_id or "module"),
-            root=node_spec["root"],
-        )
-        if boundary_contracts:
-            _inject_boundary_metadata(spec.metadata, boundary_contracts)
-        return spec
-    spec = EngineSpec(name=node_id or "module", root=module(children=[]))
+    if not isinstance(spec, EngineSpec):
+        if "source" in node_spec:
+            name = node_spec.get("name") or node_id or "module"
+            spec = EngineSpec(name=name, root=module(children=[function(name, body=[])]))
+        elif "root" in node_spec:
+            spec = EngineSpec(
+                name=node_spec.get("name", node_id or "module"),
+                root=node_spec["root"],
+            )
+        else:
+            spec = EngineSpec(name=node_id or "module", root=module(children=[]))
+
     if boundary_contracts:
         _inject_boundary_metadata(spec.metadata, boundary_contracts)
+        source_contracts = [
+            c for c in boundary_contracts if c.get("source") == node_id and c.get("symbol")
+        ]
+        if source_contracts:
+            spec = _align_rust_spec_to_source_contracts(spec, source_contracts, node_id)
     return spec
+
+
+def _align_rust_spec_to_source_contracts(
+    spec: EngineSpec,
+    source_contracts: List[dict],
+    node_id: str,
+) -> EngineSpec:
+    """Return a spec whose top-level functions match the contracted source symbols."""
+    existing_funcs = [c for c in spec.root.children if c.kind == "function"]
+    new_funcs: List[ASTNode] = []
+    for i, contract in enumerate(source_contracts):
+        sym = str(contract.get("symbol") or node_id)
+        args = list(contract.get("args") or [])
+        ret = contract.get("return_type") or ""
+        if i < len(existing_funcs):
+            existing = existing_funcs[i]
+            base_params = existing.params
+            body = existing.body
+            name = sym or existing.name or node_id
+            params = [
+                param(
+                    base_params[j].name if j < len(base_params) else f"arg_{j}",
+                    args[j] if j < len(args) else (base_params[j].type_hint if j < len(base_params) else None),
+                )
+                for j in range(max(len(args), len(base_params)))
+            ]
+            ret = ret or existing.type_hint
+        else:
+            name = sym or node_id
+            params = [param(f"arg_{j}", args[j]) for j in range(len(args))]
+            body = []
+        new_funcs.append(function(name, params=params, return_type=ret or None, body=body))
+    if not new_funcs:
+        return spec
+    return EngineSpec(name=spec.name, root=module(children=new_funcs), metadata=spec.metadata)
 
 
 def _inject_boundary_metadata(

@@ -9,6 +9,7 @@ invariant and a noisy runtime context.
 from __future__ import annotations
 
 import hashlib
+import threading
 from typing import List, Optional
 
 try:
@@ -102,43 +103,52 @@ class HolographicContext:
         drift = ctx.measure_drift(noisy_context)
     """
 
-    _session: Optional["HolographicContext"] = None
+    _local = threading.local()
 
     def __init__(self, seed: int = 0) -> None:
         self._goal: Optional[List[int]] = None
         self._safety: Optional[List[int]] = None
         self._hinv: Optional[List[int]] = None
         self._seed = seed
+        self._lock = threading.Lock()
 
     @classmethod
     def reset_session(cls) -> "HolographicContext":
-        """Reset the per-request HIS session and return a fresh context."""
-        cls._session = cls()
-        return cls._session
+        """Reset the per-request HIS session and return a fresh context.
+
+        Uses thread-local storage so concurrent web handlers do not share a
+        single context instance.
+        """
+        ctx = cls()
+        cls._local.session = ctx
+        return ctx
 
     @classmethod
     def get_session(cls) -> "HolographicContext":
         """Return the current per-request HIS session, creating one if needed."""
-        if cls._session is None:
-            cls._session = cls()
-        return cls._session
+        ctx = getattr(cls._local, "session", None)
+        if ctx is None:
+            ctx = cls()
+            cls._local.session = ctx
+        return ctx
 
     def build_invariant(
         self, goal: List[int], safety: List[int]
     ) -> List[int]:
         """Bind a target goal to a safety constraint and cache the invariant."""
-        if len(goal) != DIMENSION:
-            raise ValueError(
-                f"goal dimension must be {DIMENSION}, got {len(goal)}"
-            )
-        if len(safety) != DIMENSION:
-            raise ValueError(
-                f"safety dimension must be {DIMENSION}, got {len(safety)}"
-            )
-        self._goal = _to_bipolar(goal)
-        self._safety = _to_bipolar(safety)
-        self._hinv = invariant(self._goal, self._safety)
-        return self._hinv
+        with self._lock:
+            if len(goal) != DIMENSION:
+                raise ValueError(
+                    f"goal dimension must be {DIMENSION}, got {len(goal)}"
+                )
+            if len(safety) != DIMENSION:
+                raise ValueError(
+                    f"safety dimension must be {DIMENSION}, got {len(safety)}"
+                )
+            self._goal = _to_bipolar(goal)
+            self._safety = _to_bipolar(safety)
+            self._hinv = invariant(self._goal, self._safety)
+            return self._hinv
 
     def measure_drift(
         self, context: List[float], *, noise: float = 1.0
@@ -148,23 +158,25 @@ class HolographicContext:
         A high value (close to 1.0) means the context is aligned with the
         invariant; a low or negative value indicates drift.
         """
-        if self._hinv is None:
-            raise RuntimeError("build_invariant() must be called first")
-        if len(context) != DIMENSION:
-            raise ValueError(
-                f"context dimension must be {DIMENSION}, got {len(context)}"
-            )
-        # Convert the bipolar invariant to floats for cosine similarity.
-        hinv_floats = [float(x) for x in self._hinv]
-        return cosine_similarity(hinv_floats, context)
+        with self._lock:
+            if self._hinv is None:
+                raise RuntimeError("build_invariant() must be called first")
+            if len(context) != DIMENSION:
+                raise ValueError(
+                    f"context dimension must be {DIMENSION}, got {len(context)}"
+                )
+            # Convert the bipolar invariant to floats for cosine similarity.
+            hinv_floats = [float(x) for x in self._hinv]
+            return cosine_similarity(hinv_floats, context)
 
     def restore_context(
         self, context: List[int], *, noise: float = 1.0
     ) -> List[int]:
         """Clean up a noisy context against the stored invariant."""
-        if self._hinv is None:
-            raise RuntimeError("build_invariant() must be called first")
-        return restore(self._hinv, context, noise)
+        with self._lock:
+            if self._hinv is None:
+                raise RuntimeError("build_invariant() must be called first")
+            return restore(self._hinv, context, noise)
 
     def build_invariant_from_symbols(
         self,
