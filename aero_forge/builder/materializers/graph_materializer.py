@@ -1086,6 +1086,13 @@ else:
                 content += f"\ntarget_include_directories({node_id} PUBLIC include)\n"
                 cmake_path.write_text(content, encoding="utf-8")
 
+        # Synchronize node_spec source_files with the actual .cpp files that
+        # exist on disk after relocation/deduplication.  This prevents
+        # MaterializationParityGate from expecting stale ``src/...`` paths when
+        # the file was moved or removed as a duplicate.
+        if rel_sources:
+            node_spec["source_files"] = [s.replace("\\", "/") for s in rel_sources]
+
     def _guard_requested_symbols(
         self, nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]]
     ) -> None:
@@ -2576,27 +2583,66 @@ else:
     def _rust_repair_usize_capacity_and_ranges(content: str) -> str:
         """Cast i64 loop bounds and capacity expressions to ``usize``.
 
-        The LLM frequently emits ``Vec::with_capacity((n * vec.len()) as usize)``
-        or ``for _ in 0..n`` where ``n`` is an ``i64`` parameter/variable.
-        Rust rejects ``i64 * usize`` and ranges over ``i64``, so cast the scalar
-        operand to ``usize`` before use.
+        The LLM frequently emits ``Vec::with_capacity(num_simulations * n)`` or
+        ``for _ in 0..n`` where ``n`` is an ``i64`` parameter/variable.  Rust
+        rejects ``i64 * usize`` and ranges over ``i64``, so every bare scalar in
+        a capacity/range expression is cast to ``usize`` before use.
         """
-        # ``x * vec.len()`` -> ``(x as usize) * vec.len()`` and drop the outer
-        # ``as usize`` if the whole parenthesized expression is being cast.
-        def _capacity_repl(m: "re.Match[str]") -> str:
-            inner = m.group(1)
-            inner = re.sub(
-                r"(\b[a-zA-Z_]\w*\b)\s*\*\s*([a-zA-Z_]\w*\.len\(\))",
-                r"(\1 as usize) * \2",
-                inner,
-            )
-            return f"Vec::with_capacity({inner})"
+        rust_keywords = {
+            "as", "let", "mut", "if", "else", "while", "for", "loop", "match",
+            "return", "break", "continue", "true", "false", "fn", "pub", "use",
+            "mod", "struct", "enum", "impl", "trait", "type", "const", "static",
+            "unsafe", "async", "await", "move", "ref", "where", "Self", "self",
+            "super", "crate", "in", "box", "dyn", "usize", "isize", "u8", "u16",
+            "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "bool", "char",
+            "str",
+        }
 
-        content = re.sub(
-            r"Vec::with_capacity\(\((.*?)\)\s*as\s+usize\)",
-            _capacity_repl,
-            content,
-        )
+        def _cast_bare_idents(expr: str) -> str:
+            def _repl(m: "re.Match[str]") -> str:
+                name = m.group(1)
+                if name in rust_keywords:
+                    return m.group(0)
+                if re.match(r"\s*as\b", expr[m.end() :]):
+                    return m.group(0)
+                return f"({name} as usize)"
+
+            return re.sub(
+                r"(?<![.\w])([A-Za-z_][A-Za-z0-9_]*)(?![\w(])(?!\s*as\b)(?!::)(?!\.)",
+                _repl,
+                expr,
+            )
+
+        def _rewrite_capacity(text: str) -> str:
+            out: List[str] = []
+            i = 0
+            while i < len(text):
+                m = re.search(r"Vec::with_capacity\(", text[i:])
+                if not m:
+                    out.append(text[i:])
+                    break
+                start = i + m.end()
+                depth = 1
+                j = start
+                while j < len(text) and depth > 0:
+                    if text[j] == "(":
+                        depth += 1
+                    elif text[j] == ")":
+                        depth -= 1
+                    j += 1
+                if depth != 0:
+                    out.append(text[i:])
+                    break
+                expr = text[start : j - 1]
+                new_expr = _cast_bare_idents(expr)
+                out.append(text[i : i + m.start()])
+                out.append("Vec::with_capacity(")
+                out.append(new_expr)
+                i = j - 1
+            return "".join(out)
+
+        content = _rewrite_capacity(content)
+
         # ``for _ in 0..n {`` -> ``for _ in 0..(n as usize) {``,
         # but only when ``n`` is a bare scalar identifier (not ``vec.len()``,
         # ``arr[i]``, a method call, or an already-typed expression).
