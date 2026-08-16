@@ -316,6 +316,15 @@ class FockGraphEncoder:
                 out.append(e)
         return out
 
+    def regenerate_pap_tokens(
+        self,
+        root: Path | str,
+        extensions: Optional[Tuple[str, ...]] = None,
+    ) -> Dict[str, Any]:
+        """Force regeneration of cached PaP vectors and re-encode ``root``."""
+        self._vectors = {}
+        return self.encode_repository(root, extensions=extensions)
+
     def encode_repository(
         self,
         root: Path | str,

@@ -141,6 +141,25 @@ Example JSON shape:
 SAFETY_LOWER_BOUND_SIMILARITY = 0.7071067811865476
 DRIFT_THRESHOLD = 1.0 - SAFETY_LOWER_BOUND_SIMILARITY
 
+# Phase 4 bounded-completion prompt token budget.  Long prompts are restored
+# through the HIS invariant before being sent to the LLM.
+PHASE4_MAX_TOKENS = 2048
+
+
+def _phase4_token_count(text: str) -> int:
+    """Approximate token count for a Phase 4 prompt.
+
+    Uses tiktoken when available; otherwise falls back to a conservative
+    character-based estimate (roughly 4 characters per token for code/JSON).
+    """
+    try:
+        import tiktoken
+
+        enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text))
+    except Exception:
+        return max(1, len(text) // 4)
+
 
 _CLASSIFICATION_SYSTEM_PROMPT = """You are the Aero-Forge structural classifier.
 Your job is to read the user request and emit a compact JSON classification with exactly these keys:
@@ -1529,7 +1548,7 @@ class IntentCompiler:
         classification: Dict[str, Any],
     ) -> HolographicContext:
         """Phase 1: bind the prompt's functional intent into an invariant."""
-        ctx = HolographicContext(seed=0xA3A0)
+        ctx = HolographicContext.get_session()
         intents = classification.get("functional_intent") or []
         if intents:
             ctx.build_invariant_from_symbols(
@@ -1810,6 +1829,53 @@ class IntentCompiler:
             "edges": kept_edges,
         }
 
+    def _prepare_phase4_llm_call(
+        self,
+        user_content: str,
+        hctx: HolographicContext,
+        classification: Dict[str, Any],
+        partial: Dict[str, Any],
+        topology: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Log the exact Phase 4 prompt and force HIS restoration when required.
+
+        Restoration is triggered when the prompt exceeds ``PHASE4_MAX_TOKENS``
+        tokens or when the HIS drift metric violates Theorem 1 (similarity
+        < ``SAFETY_LOWER_BOUND_SIMILARITY``).  The restored context is bundled
+        by calling ``hctx.restore_context`` with the invariant ``H_inv`` vector.
+        """
+        token_count = _phase4_token_count(user_content)
+        drift = self._measure_his_drift(hctx, classification, partial)
+
+        logger.info(
+            "Phase 4 prompt (tokens=%d, drift=%.4f):\n%s",
+            token_count,
+            drift,
+            user_content,
+        )
+
+        if token_count > PHASE4_MAX_TOKENS or drift > DRIFT_THRESHOLD:
+            _accel_log(
+                "info",
+                f"HIS context restoration forced: tokens={token_count}, drift={drift:.4f}, "
+                f"Theorem 1 bound similarity>={SAFETY_LOWER_BOUND_SIMILARITY:.4f}",
+            )
+            self._apply_his_restore(hctx, classification, partial)
+            if topology is not None:
+                topology.update(
+                    self._prune_foge_topology(
+                        topology,
+                        self._current_symbols(classification, partial),
+                    )
+                )
+            user_content += (
+                f"\n\n[HIS context restoration triggered: "
+                f"tokens={token_count}, drift={drift:.4f}. "
+                f"H_inv has been bundled with the current context before the LLM call.]"
+            )
+
+        return user_content
+
     def _stub_to_node(self, stub: NodeStub) -> Dict[str, Any]:
         """Convert an adjoint NodeStub into a graph node dict with a function stub."""
         symbol = stub.exports[0] if stub.exports else stub.node_id
@@ -1977,6 +2043,14 @@ class IntentCompiler:
             f"  - 'edges': a list of cross-language boundary edges (source, target, boundary_type, symbol, args, return_type) "
             f"that connect this node's exported symbols to other nodes. For pure_python nodes leave 'edges' empty.\n"
             f"NO PREAMBLE. NO EXPLANATION. ONLY JSON."
+        )
+
+        user_content = self._prepare_phase4_llm_call(
+            user_content,
+            hctx,
+            classification,
+            partial,
+            topology=topology,
         )
 
         messages: List[Dict[str, str]] = [
@@ -2246,14 +2320,19 @@ class IntentCompiler:
                     self._current_symbols(classification or {}, drift_partial),
                 )
 
+            user_content = self._prepare_phase4_llm_call(
+                self._six_phase_user_content(
+                    prompt_text, classification or {}, hctx, topology, skeleton
+                ),
+                hctx,
+                classification or {},
+                drift_partial,
+                topology=topology,
+            )
+
             messages: List[Dict[str, str]] = [
                 {"role": "system", "content": system},
-                {
-                    "role": "user",
-                    "content": self._six_phase_user_content(
-                        prompt_text, classification or {}, hctx, topology, skeleton
-                    ),
-                },
+                {"role": "user", "content": user_content},
             ]
 
             last_error: Optional[Exception] = None

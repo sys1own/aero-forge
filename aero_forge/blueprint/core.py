@@ -1191,8 +1191,10 @@ def write_blueprint(blueprint: Blueprint, path: Path) -> None:
         metadata=metadata,
         execution_strategy=execution_strategy,
         abi_contracts=abi_contracts,
+        functional_intent=list(blueprint.functional_intent or []),
         module_graph=module_graph,
         verification_nodes=verification_nodes,
+        cargo_dependencies=dict(blueprint.cargo_dependencies or {}),
     )
     data = v2.model_dump(mode="json")
 
