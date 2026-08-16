@@ -498,7 +498,13 @@ class Blueprint(BaseModel):
         return self
 
     def _derive_functional_intent(self) -> List[FunctionalIntent]:
-        """Derive a minimal functional_intent from contracts/functions/manifest."""
+        """Derive a minimal functional_intent from contracts/functions/manifest.
+
+        Contracts and exported symbols are preferred.  Manifest/module_graph
+        entries are only used as a fallback and are filtered to real source
+        files so build/config artifacts (Cargo.toml, README.md, __init__.py,
+        test_*.py) do not pollute the functional_intent list.
+        """
         derived: List[FunctionalIntent] = []
         seen: set = set()
         for contract in self.contracts or []:
@@ -511,24 +517,70 @@ class Blueprint(BaseModel):
             if name and name not in seen:
                 derived.append(FunctionalIntent(symbol_name=name, type="function"))
                 seen.add(name)
-        for entry in self.manifest or []:
-            symbol = Path(entry.path).stem
-            if symbol and symbol not in seen:
-                derived.append(FunctionalIntent(symbol_name=symbol, type="function"))
-                seen.add(symbol)
         for node in self.module_graph or []:
             if not isinstance(node, dict):
                 continue
-            node_id = node.get("node_id") or ""
-            if node_id and node_id not in seen:
-                derived.append(FunctionalIntent(symbol_name=node_id, type="function"))
-                seen.add(node_id)
             for sym in node.get("exports") or []:
                 if sym and sym not in seen:
                     derived.append(
                         FunctionalIntent(symbol_name=str(sym), type="function")
                     )
                     seen.add(sym)
+
+        if not derived:
+            # Last resort: infer symbols from source files in the manifest/graph.
+            allowed_ext = {
+                ".py",
+                ".rs",
+                ".cpp",
+                ".c",
+                ".zig",
+                ".go",
+                ".js",
+                ".ts",
+            }
+            skip_names = {
+                "__init__",
+                "_pure",
+                "lib",
+                "Cargo",
+                "README",
+                "pyproject",
+                "setup",
+                "conftest",
+                "main",
+            }
+            skip_prefixes = ("test_", "_")
+
+            def _is_meaningful_symbol(symbol: str, suffix: str) -> bool:
+                if not symbol or symbol in skip_names:
+                    return False
+                if any(symbol.startswith(p) for p in skip_prefixes):
+                    return False
+                if suffix and suffix.lower() not in allowed_ext:
+                    return False
+                return True
+
+            for entry in self.manifest or []:
+                path = Path(entry.path)
+                symbol = path.stem
+                if _is_meaningful_symbol(symbol, path.suffix) and symbol not in seen:
+                    derived.append(
+                        FunctionalIntent(symbol_name=symbol, type="function")
+                    )
+                    seen.add(symbol)
+            for node in self.module_graph or []:
+                if not isinstance(node, dict):
+                    continue
+                node_id = node.get("node_id") or ""
+                if node_id and node_id not in seen and not any(
+                    node_id.startswith(p) for p in skip_prefixes
+                ):
+                    derived.append(
+                        FunctionalIntent(symbol_name=node_id, type="function")
+                    )
+                    seen.add(node_id)
+
         return derived
 
     @model_validator(mode="after")
@@ -1105,6 +1157,161 @@ def _module_graph_from_manifest(manifest: List[ManifestEntry]) -> List[Dict[str,
     ]
 
 
+def _infer_native_language(abi: Dict[str, Any]) -> str:
+    """Infer the native implementation language from an ABI contract."""
+    # 1. target_language is authoritative when it names a non-Python language.
+    tl = str(abi.get("target_language") or "").lower()
+    if tl and tl != "python":
+        return tl
+
+    # 2. Fall back to markers in the contract identity and symbol names.
+    text = " ".join(
+        str(abi.get(k) or "")
+        for k in ("contract_id", "export_symbol", "c_symbol_alias", "header_path")
+    ).lower()
+    markers: List[Tuple[str, str]] = [
+        ("rust", ("rust_core", "_rs", "rs", "cargo", "pyo3")),
+        ("cpp", ("cpp_engine", "_cpp", "cpp", "c++", ".hpp")),
+        ("c", ("_c", ".h", ".c")),
+        ("zig", ("zig_kernel", "_zig", ".zig")),
+        ("go", ("go_module", "_go", ".go")),
+    ]
+    for lang, hints in markers:
+        if any(h in text for h in hints):
+            return lang
+
+    # 3. Default to C++ for generic C-ABI contracts.
+    return "cpp"
+
+
+def _derive_graph_nodes_edges(
+    abi_contracts: List[Dict[str, Any]],
+    functional_intent: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Infer a minimal graph node/edge view from ABI contracts for SHACL validation.
+
+    The Logical Firewall validates the manifest against ``nodes`` and ``edges``,
+    so ``write_blueprint`` injects a derived graph when the planner did not emit one.
+    """
+    nodes: Dict[str, Dict[str, Any]] = {}
+    edges: List[Dict[str, Any]] = []
+
+    lang_to_node: Dict[str, str] = {
+        "python": "python_interface",
+        "rust": "rust_core",
+        "cpp": "cpp_engine",
+        "c": "cpp_engine",
+        "c++": "cpp_engine",
+        "zig": "zig_kernel",
+        "go": "go_module",
+        "wasm": "rust_wasm",
+    }
+    lang_to_toolchain: Dict[str, str] = {
+        "python": "python",
+        "rust": "cargo",
+        "cpp": "cmake",
+        "c": "cmake",
+        "c++": "cmake",
+        "zig": "zig",
+        "go": "go",
+        "wasm": "wasm32",
+    }
+
+    def _ensure_node(node_id: str, lang: str) -> Dict[str, Any]:
+        if node_id not in nodes:
+            nodes[node_id] = {
+                "node_id": node_id,
+                "lang": lang,
+                "toolchain": lang_to_toolchain.get(lang, lang),
+                "exports": [],
+                "contracts": [],
+            }
+        return nodes[node_id]
+
+    for abi in abi_contracts or []:
+        raw_target_lang = str(abi.get("target_language") or "python").lower()
+        binding_raw = str(abi.get("binding_framework") or "c_abi").lower().replace("-", "_")
+        binding = (
+            "PYO3_MATURIN"
+            if binding_raw in ("pyo3", "maturin", "pyo3_maturin")
+            else "C_ABI"
+            if binding_raw in ("c_abi", "cabi", "c-abi")
+            else "WASM_WASI"
+            if binding_raw in ("wasm", "wasm_wasi", "wasm-wasi")
+            else "INTERNAL"
+            if binding_raw in ("", "internal", "native")
+            else binding_raw.upper()
+        )
+        symbol = str(
+            abi.get("export_symbol") or abi.get("c_symbol_alias") or abi.get("contract_id") or "fn"
+        )
+        if not symbol:
+            continue
+
+        # The export_symbol is implemented by the native side. PyO3 always
+        # means a Rust extension exported to Python; for C-ABI we infer the
+        # native language from the contract metadata.
+        if binding == "PYO3_MATURIN":
+            target_lang = "rust"
+            source_lang = "python"
+        else:
+            inferred_native = _infer_native_language(abi)
+            target_lang = inferred_native
+            source_lang = raw_target_lang if raw_target_lang != inferred_native else "python"
+
+        target_id = lang_to_node.get(target_lang, f"{target_lang}_core")
+        target = _ensure_node(target_id, target_lang)
+        if symbol not in target["exports"]:
+            target["exports"].append(symbol)
+            target["contracts"].append(
+                {"symbol": symbol, "boundary_type": binding}
+            )
+
+        source_id = lang_to_node.get(source_lang, f"{source_lang}_interface")
+        source = _ensure_node(source_id, source_lang)
+        # The caller/wrapper also exposes the symbol (e.g. a Python module that
+        # re-exports a Rust PyO3 function), so mark it as an export on both sides.
+        if symbol not in source["exports"]:
+            source["exports"].append(symbol)
+        edges.append(
+            {
+                "source": source_id,
+                "target": target_id,
+                "boundary_type": binding,
+                "symbol": symbol,
+            }
+        )
+
+    # Ensure every functional_intent symbol is covered by a node export.
+    suffix_to_node: Dict[str, str] = {
+        "_rust": "rust_core",
+        "_rs": "rust_core",
+        "_cpp": "cpp_engine",
+        "_c": "cpp_engine",
+        "_zig": "zig_kernel",
+        "_go": "go_module",
+        "_wasm": "rust_wasm",
+    }
+    for fi in functional_intent or []:
+        sym = str(fi.get("symbol_name") or fi.get("name") or "").strip()
+        if not sym:
+            continue
+        if any(sym in n["exports"] for n in nodes.values()):
+            continue
+        target_id = "python_interface"
+        for suffix, node_id in suffix_to_node.items():
+            if sym.endswith(suffix) and node_id in nodes:
+                target_id = node_id
+                break
+        if not nodes:
+            target_id = "python_interface"
+            _ensure_node(target_id, "python")
+        if sym not in nodes[target_id]["exports"]:
+            nodes[target_id]["exports"].append(sym)
+
+    return sorted(nodes.values(), key=lambda n: n["node_id"]), edges
+
+
 def _default_verification_nodes(
     primary_entrypoint: Dict[str, Any], project_name: str
 ) -> List[Dict[str, Any]]:
@@ -1207,6 +1414,18 @@ def write_blueprint(blueprint: Blueprint, path: Path) -> None:
     # but deduplicate once more here before serialising.
     data["manifest"] = deduplicate_manifest_entries(data.get("manifest", []))
     data["module_graph"] = deduplicate_manifest_entries(data.get("module_graph", []))
+
+    # Materialization flows that emit a v2 Blueprint without a graph view still need
+    # ``nodes``/``edges`` for the SHACL Logical Firewall.  Derive a minimal graph
+    # from the ABI contracts and functional_intent when none was provided.
+    if not data.get("nodes"):
+        nodes, edges = _derive_graph_nodes_edges(
+            data.get("abi_contracts", []),
+            data.get("functional_intent", []),
+        )
+        if nodes:
+            data["nodes"] = nodes
+            data["edges"] = edges
 
     text = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
     try:
