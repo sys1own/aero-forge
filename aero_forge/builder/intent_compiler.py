@@ -7,7 +7,9 @@ import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+from dataclasses import dataclass
 
 import yaml
 from jsonschema import Draft7Validator, ValidationError as JsonSchemaValidationError
@@ -146,6 +148,44 @@ DRIFT_THRESHOLD = 1.0 - SAFETY_LOWER_BOUND_SIMILARITY
 # Phase 4 bounded-completion prompt token budget.  Long prompts are restored
 # through the HIS invariant before being sent to the LLM.
 PHASE4_MAX_TOKENS = 2048
+
+# Sectional Fiber Completion keeps each independent LLM call inside the
+# high-attention 1024-token window by decomposing the skeleton by Grothendieck
+# fiber coordinates and retrying each section locally on syntactic failure.
+SECTIONAL_MAX_TOKENS = 1024
+SECTIONAL_RETRY_ATTEMPTS = 3
+
+
+@dataclass(frozen=True)
+class Result:
+    """Algebraic error-handling monad for Sectional Fiber Completion.
+
+    A section returns ``Result(ok=True, value=...)`` when it produces a valid
+    fragment and ``Result(ok=False, error=...)`` when it fails.  ``bind`` chains
+    fragment transformations while short-circuiting on the first error so that a
+    syntactic failure in one section can be retried locally without aborting the
+    whole enrichment pipeline.
+    """
+
+    ok: bool
+    value: Any = None
+    error: Optional[str] = None
+
+    def bind(self, func: Callable[[Any], "Result"]) -> "Result":
+        if not self.ok:
+            return self
+        try:
+            return func(self.value)
+        except Exception as exc:
+            return Result(ok=False, error=str(exc))
+
+    def map(self, func: Callable[[Any], Any]) -> "Result":
+        if not self.ok:
+            return self
+        try:
+            return Result(ok=True, value=func(self.value))
+        except Exception as exc:
+            return Result(ok=False, error=str(exc))
 
 
 def _phase4_token_count(text: str) -> int:
@@ -1986,6 +2026,372 @@ class IntentCompiler:
 
         return user_content
 
+    # ------------------------------------------------------------------
+    # Sectional Fiber Completion: split each Grothendieck fiber into
+    # manifest / contracts / functions blocks so each LLM call stays inside
+    # the high-attention 1024-token window.
+    # ------------------------------------------------------------------
+    def _build_section_prompt(
+        self,
+        section: str,
+        prompt_text: str,
+        fiber_coordinate: Dict[str, Any],
+        stub: NodeStub,
+        partial: Dict[str, Any],
+        peer_nodes: List[Dict[str, Any]],
+    ) -> str:
+        """Return a compact prompt for one section of one Grothendieck fiber."""
+        symbol = fiber_coordinate.get("symbol") or (
+            stub.exports[0] if stub.exports else stub.node_id
+        )
+        node_id = stub.node_id
+        architecture = partial.get("architecture", "graph_polyglot")
+        peer_text = json.dumps(peer_nodes, indent=2) if peer_nodes else "[]"
+
+        if section == "manifest":
+            return (
+                f"{prompt_text}\n\n"
+                f"You are filling the MANIFEST block for the Grothendieck fiber "
+                f"π_X^{{-1}}({symbol}) -> {node_id}.\n"
+                f"Architecture: {architecture}.\n"
+                f"Stub: {json.dumps(stub.__dict__, default=str)}\n\n"
+                f"Return ONLY a JSON object with these keys for the node:\n"
+                f"  'node_id' (string), 'lang' (string), 'toolchain' (string),\n"
+                f"  'source_files' (list of strings), 'exports' (list of strings),\n"
+                f"  'purpose' (string).\n"
+                f"NO PREAMBLE. NO EXPLANATION. ONLY JSON."
+            )
+
+        if section == "contracts":
+            return (
+                f"{prompt_text}\n\n"
+                f"You are filling the CONTRACTS / EDGES block for node '{node_id}' "
+                f"with exports {stub.exports}.\n"
+                f"Architecture: {architecture}.\n"
+                f"Other nodes already in the blueprint:\n```json\n{peer_text}\n```\n\n"
+                f"Return ONLY a JSON object with key 'edges'.\n"
+                f"Each edge is: source (string), target (string), boundary_type (string),\n"
+                f"symbol (string), args (list of type names), return_type (string).\n"
+                f"For pure_python / single-language nodes return '{{\"edges\": []}}'.\n"
+                f"NO PREAMBLE. NO EXPLANATION. ONLY JSON."
+            )
+
+        # section == "functions"
+        return (
+            f"{prompt_text}\n\n"
+            f"You are filling the FUNCTIONS block for node '{node_id}'.\n"
+            f"Exports: {stub.exports}.\n"
+            f"Return ONLY a JSON object with:\n"
+            f"  'logic_sketch' (string) - concise implementation description,\n"
+            f"  'contracts' (list of ABIContract dicts) - only for cross-language symbols.\n"
+            f"NO PREAMBLE. NO EXPLANATION. ONLY JSON."
+        )
+
+    def _prepare_section_llm_call(
+        self,
+        user_content: str,
+        hctx: HolographicContext,
+        classification: Dict[str, Any],
+        partial: Dict[str, Any],
+        section: str,
+        fiber_coordinate: Optional[str] = None,
+    ) -> str:
+        """Ensure the sectional prompt is under the 1024-token budget.
+
+        If a sectional prompt still exceeds ``SECTIONAL_MAX_TOKENS``, force HIS
+        context restoration and drop the FoGE topological prefix.
+        """
+        token_count = _phase4_token_count(user_content)
+        drift = self._measure_his_drift(hctx, classification, partial)
+
+        logger.info(
+            "Sectional Phase 4 prompt (%s, tokens=%d, drift=%.4f)",
+            section,
+            token_count,
+            drift,
+        )
+
+        restoration_triggered = (
+            token_count > SECTIONAL_MAX_TOKENS or drift > DRIFT_THRESHOLD
+        )
+        _log_phase4_telemetry(
+            prompt=user_content,
+            token_count=token_count,
+            drift=drift,
+            fiber_coordinate=fiber_coordinate,
+            restoration_triggered=restoration_triggered,
+            topology_node_count=0,
+            topology_edge_count=0,
+        )
+
+        if restoration_triggered:
+            _accel_log(
+                "info",
+                f"HIS context restoration forced for section {section}: "
+                f"tokens={token_count}, drift={drift:.4f}",
+            )
+            self._apply_his_restore(hctx, classification, partial)
+            user_content += (
+                f"\n\n[HIS context restoration triggered for section {section}: "
+                f"tokens={token_count}, drift={drift:.4f}. "
+                f"H_inv has been bundled with the current context before the LLM call.]"
+            )
+
+        return user_content
+
+    def _run_section(
+        self,
+        client: Any,
+        system: str,
+        prompt_text: str,
+        section: str,
+        fiber_coordinate: Dict[str, Any],
+        stub: NodeStub,
+        partial: Dict[str, Any],
+        hctx: HolographicContext,
+        classification: Dict[str, Any],
+        peer_nodes: List[Dict[str, Any]],
+    ) -> Result:
+        """Execute one sectional LLM call with localized retry/fallback.
+
+        Returns a ``Result`` monad: ``ok=True`` with the parsed JSON fragment on
+        success, ``ok=False`` with an error description after all retries fail.
+        """
+        user_content = self._build_section_prompt(
+            section, prompt_text, fiber_coordinate, stub, partial, peer_nodes
+        )
+        user_content = self._prepare_section_llm_call(
+            user_content,
+            hctx,
+            classification,
+            partial,
+            section,
+            fiber_coordinate=json.dumps(fiber_coordinate),
+        )
+        messages: List[Dict[str, str]] = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_content},
+        ]
+
+        last_error = "empty response"
+        for attempt in range(SECTIONAL_RETRY_ATTEMPTS):
+            try:
+                raw = client.generate(
+                    messages, temperature=0.2, max_tokens=SECTIONAL_MAX_TOKENS
+                )
+            except Exception as exc:
+                last_error = str(exc)
+                _accel_log("warning", f"Section {section} LLM error: {last_error}")
+                continue
+
+            if not raw or not raw.strip():
+                last_error = "empty response"
+                _accel_log("warning", f"Section {section} attempt {attempt + 1}: empty response")
+                continue
+
+            try:
+                data = _extract_json(raw)
+            except Exception as exc:
+                last_error = f"JSON extraction failed: {exc}"
+                _accel_log(
+                    "warning",
+                    f"Section {section} attempt {attempt + 1}: {last_error}; raw preview: {raw[:400]!r}",
+                )
+                messages.append({"role": "assistant", "content": raw})
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "Return ONLY valid JSON. No prose. No markdown.",
+                    }
+                )
+                continue
+
+            validated = self._validate_section(section, data, stub)
+            if validated is not None:
+                _accel_log(
+                    "info",
+                    f"Section {section} for '{stub.node_id}' succeeded on attempt {attempt + 1}",
+                )
+                return Result(ok=True, value=validated)
+            last_error = "section validation failed"
+
+        _accel_log(
+            "warning",
+            f"Section {section} for '{stub.node_id}' failed after {SECTIONAL_RETRY_ATTEMPTS} attempts: {last_error}",
+        )
+        return Result(ok=False, error=f"{section}: {last_error}")
+
+    @staticmethod
+    def _validate_section(
+        section: str, data: Any, stub: NodeStub
+    ) -> Optional[Any]:
+        """Validate and normalize a sectional JSON fragment.
+
+        A section is only accepted when the response contains the specific key(s)
+        requested for that section.  This prevents a malformed or unrelated JSON
+        object (e.g. a compressed v2 blueprint) from being mistaken for a valid
+        fiber section.
+        """
+        if section == "manifest":
+            if not isinstance(data, dict) or "node_id" not in data:
+                return None
+            node = {
+                "node_id": str(data.get("node_id") or stub.node_id),
+                "lang": str(data.get("lang") or stub.lang),
+                "toolchain": str(data.get("toolchain") or stub.toolchain),
+                "source_files": list(data.get("source_files") or stub.source_files or []),
+                "exports": list(data.get("exports") or stub.exports or []),
+                "purpose": str(data.get("purpose") or stub.purpose or ""),
+            }
+            return node
+
+        if section == "contracts":
+            if isinstance(data, list):
+                edges = data
+            elif isinstance(data, dict) and "edges" in data:
+                edges = data.get("edges", [])
+            else:
+                return None
+            normalized = []
+            for edge in edges or []:
+                if not isinstance(edge, dict):
+                    continue
+                src = edge.get("source") or stub.node_id
+                tgt = edge.get("target")
+                if not src or not tgt:
+                    continue
+                normalized.append(
+                    {
+                        "source": str(src),
+                        "target": str(tgt),
+                        "boundary_type": str(edge.get("boundary_type") or "c_abi"),
+                        "symbol": str(edge.get("symbol") or ""),
+                        "args": [str(a) for a in (edge.get("args") or [])],
+                        "return_type": str(edge.get("return_type") or ""),
+                        "is_zero_copy": bool(edge.get("is_zero_copy", False)),
+                    }
+                )
+            return normalized
+
+        if section == "functions":
+            if not isinstance(data, dict) or "logic_sketch" not in data:
+                return None
+            node_update = {
+                "logic_sketch": str(data.get("logic_sketch") or ""),
+            }
+            contracts = data.get("contracts")
+            if contracts is not None:
+                node_update["contracts"] = list(contracts)
+            return node_update
+
+        return None
+
+    def _recompose_fiber_sections(
+        self,
+        manifest_result: Result,
+        contracts_result: Result,
+        functions_result: Result,
+        stub: NodeStub,
+    ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Recompose the three section results for one fiber into a node + edges.
+
+        Uses the algebraic error-handling monad: a failed section is replaced by
+        the deterministic adjoint stub rather than aborting the whole graph.
+        """
+        node: Dict[str, Any] = manifest_result.value if manifest_result.ok else {
+            "node_id": stub.node_id,
+            "lang": stub.lang,
+            "toolchain": stub.toolchain,
+            "source_files": list(stub.source_files or []),
+            "exports": list(stub.exports or []),
+            "purpose": stub.purpose,
+        }
+
+        edges: List[Dict[str, Any]] = []
+        if contracts_result.ok:
+            edges = list(contracts_result.value or [])
+
+        if functions_result.ok:
+            node.update(functions_result.value or {})
+        else:
+            node["logic_sketch"] = (
+                f"Auto-generated {stub.lang} stub for '{stub.exports[0] if stub.exports else stub.node_id}'. "
+                f"Implement the symbol matching its functional intent and any ABI contract."
+            )
+
+        if not manifest_result.ok:
+            _accel_log(
+                "warning",
+                f"Manifest section failed for '{stub.node_id}'; using adjoint stub",
+            )
+        if not contracts_result.ok:
+            _accel_log(
+                "warning",
+                f"Contracts section failed for '{stub.node_id}'; leaving edges empty",
+            )
+        if not functions_result.ok:
+            _accel_log(
+                "warning",
+                f"Functions section failed for '{stub.node_id}'; using logic stub",
+            )
+
+        return node, edges
+
+    def _query_fiber_sectional(
+        self,
+        client: Any,
+        system: str,
+        prompt_text: str,
+        classification: Dict[str, Any],
+        topology: Dict[str, Any],
+        skeleton: Dict[str, Any],
+        partial: Dict[str, Any],
+        intent: Dict[str, Any],
+        stub: NodeStub,
+        hctx: HolographicContext,
+    ) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Fill one Grothendieck fiber through three independent bounded sections."""
+        symbol = (
+            intent.get("symbol_name")
+            or intent.get("name")
+            or (stub.exports[0] if stub.exports else stub.node_id)
+        )
+        node_id = stub.node_id
+        fiber_coordinate = {
+            "symbol": symbol,
+            "node_id": node_id,
+            "lang": stub.lang,
+            "toolchain": stub.toolchain,
+            "exports": stub.exports,
+            "grothendieck_fiber": f"π_X^{{-1}}({symbol}) -> {node_id}",
+        }
+
+        peer_nodes = [
+            {"node_id": n.get("node_id"), "lang": n.get("lang"), "exports": n.get("exports")}
+            for n in partial.get("nodes", [])
+        ]
+
+        # Manifest, contracts, and functions are queried independently so no
+        # single 3056-byte skeleton can push the prompt over the attention window.
+        manifest_result = self._run_section(
+            client, system, prompt_text, "manifest", fiber_coordinate,
+            stub, partial, hctx, classification, peer_nodes,
+        )
+        contracts_result = self._run_section(
+            client, system, prompt_text, "contracts", fiber_coordinate,
+            stub, partial, hctx, classification, peer_nodes,
+        )
+        functions_result = self._run_section(
+            client, system, prompt_text, "functions", fiber_coordinate,
+            stub, partial, hctx, classification, peer_nodes,
+        )
+
+        node, edges = self._recompose_fiber_sections(
+            manifest_result, contracts_result, functions_result, stub
+        )
+        section_used = manifest_result.ok or contracts_result.ok or functions_result.ok
+        return node, edges, section_used
+
     def _stub_to_node(self, stub: NodeStub) -> Dict[str, Any]:
         """Convert an adjoint NodeStub into a graph node dict with a function stub."""
         symbol = stub.exports[0] if stub.exports else stub.node_id
@@ -2251,7 +2657,7 @@ class IntentCompiler:
                     self._current_symbols(classification, partial),
                 )
 
-            raw = self._query_fiber(
+            node, fiber_edges, section_used = self._query_fiber_sectional(
                 client,
                 system,
                 prompt_text,
@@ -2264,34 +2670,25 @@ class IntentCompiler:
                 hctx,
             )
 
-            if not raw:
-                _accel_log(
-                    "warning",
-                    f"Fiber-wise enrichment: empty response for '{symbol}'; using adjoint ΣF stub",
-                )
-                node = fallback_nodes.get(stub.node_id) or self._stub_to_node(stub)
-            else:
-                try:
-                    fiber_data = _extract_json(raw)
-                except Exception as exc:
-                    _accel_log(
-                        "warning",
-                        f"Fiber-wise enrichment: JSON extraction failed for '{symbol}': {exc}",
-                    )
-                    fiber_data = {}
-                if not fiber_data:
-                    node = fallback_nodes.get(stub.node_id) or self._stub_to_node(stub)
-                else:
-                    for edge in fiber_data.get("edges") or []:
-                        partial["edges"].append(edge)
-                    node_list = fiber_data.get("nodes") or []
-                    node = node_list[0] if node_list else None
-                    if node:
-                        llm_fiber_used = True
-                    else:
-                        node = fallback_nodes.get(stub.node_id) or self._stub_to_node(stub)
+            if section_used:
+                llm_fiber_used = True
+
+            for edge in fiber_edges:
+                partial["edges"].append(edge)
 
             if node and node.get("node_id"):
+                node_id = node["node_id"]
+                if node_id in node_map:
+                    self._merge_fiber_node(node_map[node_id], node)
+                else:
+                    node_map[node_id] = node
+                    partial["nodes"].append(node)
+            else:
+                _accel_log(
+                    "warning",
+                    f"Fiber-wise enrichment: sectional fiber failed for '{symbol}'; using adjoint ΣF stub",
+                )
+                node = fallback_nodes.get(stub.node_id) or self._stub_to_node(stub)
                 node_id = node["node_id"]
                 if node_id in node_map:
                     self._merge_fiber_node(node_map[node_id], node)
