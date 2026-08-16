@@ -1563,12 +1563,14 @@ class IntentCompiler:
         """Return drift as 1 - cosine_similarity against the invariant.
 
         A value greater than 0.3 (similarity below 0.7) triggers context
-        restoration and FoGE pruning.
+        restoration and FoGE pruning.  Low-complexity prompts (fewer than 4
+        symbols) are short and stable, so the invariant itself is fragile;
+        skip drift correction to avoid pruning useful context.
         """
         if hctx.hinv is None:
             return 0.0
         symbols = self._current_symbols(classification, partial)
-        if not symbols:
+        if len(symbols) < 4:
             return 0.0
         try:
             similarity = hctx.measure_symbol_drift(symbols)
@@ -1748,6 +1750,15 @@ class IntentCompiler:
         node_id = stub.node_id
         architecture = partial.get("architecture", "graph_polyglot")
 
+        fiber_coordinate = {
+            "base_intent": intent,
+            "node_id": node_id,
+            "lang": stub.lang,
+            "toolchain": stub.toolchain,
+            "exports": stub.exports,
+            "source_files": stub.source_files,
+            "grothendieck_fiber": f"π_X^{{-1}}({symbol}) -> {node_id}",
+        }
         context_text = json.dumps(
             {
                 "project": partial.get("project"),
@@ -1757,6 +1768,7 @@ class IntentCompiler:
                     {"node_id": n.get("node_id"), "exports": n.get("exports")}
                     for n in partial.get("nodes") or []
                 ],
+                "fiber_coordinate": fiber_coordinate,
             },
             indent=2,
         )
@@ -1767,12 +1779,13 @@ class IntentCompiler:
             f"\nTopological prefix (FoGE):\n```json\n{json.dumps(topology, indent=2)}\n```\n"
             f"\nManifest skeleton (Adjoint):\n```json\n{json.dumps(skeleton, indent=2)}\n```\n"
             f"\nAlready populated context:\n```json\n{context_text}\n```\n"
+            f"\nGrothendieck fiber coordinate: {json.dumps(fiber_coordinate)}\n"
             f"\nFill the typed hole for the symbol '{symbol}' implemented by node '{node_id}'. "
             f"Return ONLY a JSON object with these keys:\n"
             f"  - 'nodes': a list containing ONE fully specified node dict for '{node_id}'"
             f" (lang={stub.lang}, toolchain={stub.toolchain}, exports={stub.exports}, source_files={stub.source_files}).\n"
             f"  - 'edges': a list of cross-language boundary edges (source, target, boundary_type, symbol, args, return_type) "
-            f"that connect this node's exported symbols to other nodes.\n"
+            f"that connect this node's exported symbols to other nodes. For pure_python nodes leave 'edges' empty.\n"
             f"NO PREAMBLE. NO EXPLANATION. ONLY JSON."
         )
 
@@ -1780,7 +1793,7 @@ class IntentCompiler:
             {"role": "system", "content": system},
             {"role": "user", "content": user_content},
         ]
-        return client.generate(messages, temperature=0.2, max_tokens=2048)
+        return client.generate(messages, temperature=0.2, max_tokens=4096)
 
     def _fiber_wise_atomic_completion(
         self,
