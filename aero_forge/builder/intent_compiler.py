@@ -29,9 +29,9 @@ from aero_forge.blueprint.schema import (
 )
 from aero_forge.builder.holographic import HolographicContext, intent_vector
 from aero_forge.builder.foge import FockGraphEncoder
-from aero_forge.builder.adjoint import NodeStub, SchemaBootstrapper
+from aero_forge.adjoint import NodeStub, SchemaBootstrapper
 from aero_forge.orchestrator.stack_classifier import classify_stack
-from aero_forge.builder.concolic import ConcolicManifestVerifier, ConcolicResult
+from aero_forge.concolic import ConcolicManifestVerifier, ConcolicResult
 from aero_forge.builder.firewall import LogicalFirewall
 from aero_forge.builder.chiasmus import (
     PrologFactEmitter,

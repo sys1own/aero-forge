@@ -2382,24 +2382,56 @@ def _contracts_from_manifest(manifest: List[ManifestEntry]) -> List[ContractEntr
     """Synthesize a minimal contract list from non-Python manifest entries.
 
     Deterministic fallback blueprints need at least one ``ContractEntry`` for
-    hybrid/polyglot architectures.  We derive the symbol from the first Rust or
-    C/C++ source file, falling back to the project name.
+    hybrid/polyglot architectures.  We derive the symbol from a Rust or C/C++
+    source filename, but we skip generic scaffolding names like ``lib.rs``,
+    ``main.rs`` and ``__init__.py`` because they do not name an exported ABI
+    symbol.
     """
+    skip_names = {
+        "lib",
+        "main",
+        "__init__",
+        "setup",
+        "conftest",
+        "build",
+        "Cargo",
+    }
     contracts: List[ContractEntry] = []
     for entry in manifest:
         if entry.lang in ("rust", "cpp", "c", "c++"):
             symbol = Path(entry.path).stem or entry.lang
+            # ``lib.rs``, ``main.rs`` and similar scaffolding files do not name an
+            # exported ABI symbol.  Skip them and let downstream materializers fall
+            # back to a known set of generic contracts.
+            if symbol in skip_names:
+                continue
+            # Use a valid Python signature so the stub parser can handle it.
             contracts.append(
                 ContractEntry(
                     name=symbol,
-                    signature=f"{symbol}(...)",
+                    signature=f"def {symbol}() -> Any",
                     language=entry.lang,
                     purpose="fallback ABI contract",
                 )
             )
-    return contracts or [
-        ContractEntry(name="main", signature="main(...)", language="cpp")
-    ]
+    # Hybrid/polyglot blueprints require at least one contract.  Fall back to a
+    # stable, valid set of signatures when the manifest gives us no usable symbol.
+    if not contracts:
+        return [
+            ContractEntry(
+                name="fast_vector_transform",
+                signature="def fast_vector_transform(v: list[float], scalar: float) -> list[float]",
+                language="python/rust",
+                purpose="fallback ABI contract",
+            ),
+            ContractEntry(
+                name="get_engine_status",
+                signature="def get_engine_status() -> dict[str, str]",
+                language="python/rust",
+                purpose="fallback ABI contract",
+            ),
+        ]
+    return contracts
 
 
 def _classification_from_prompt(
