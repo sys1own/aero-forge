@@ -894,6 +894,9 @@
       initializedFromAeroc: false,
       hasAeroc: false,
       isBuilding: false,
+      buildPollTimer: null,
+      lastBuildLog: '',
+      lastAccelLog: '',
       blueprintReady: false,
       sourceCount: 0,
       commands: [],
@@ -2590,8 +2593,8 @@
 
     function formatBuildSummary(data) {
       const r = (data && data.result) ? data.result : (data || {});
-      const files = (data && data.files) ? data.files : [];
-      const build = r.build || {};
+      const files = (data && data.files) ? data.files : (r.files || []);
+      const build = r.build || r || {};
       const success = !!build.success;
       const lines = [`## Build ${success ? 'Succeeded ✅' : 'Failed ❌'}`];
 
@@ -2666,48 +2669,117 @@
       addChat('system', `Building: ${prompt}`);
       try {
         const profile = buildProfilePayload();
-        const data = await api('POST', '/api/build', buildBody({
-          prompt,
-          variants: ui.variantToggle.checked,
-          target_language: ui.targetLanguage.value,
-          ...profile,
-          model: state.provider === 'deepseek' ? 'deepseek-v4-flash' : undefined
-        }));
+        const res = await fetch('/api/builder/generate', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(state.apiKey ? { 'X-API-Key': state.apiKey } : {})
+          },
+          body: JSON.stringify(buildBody({
+            prompt,
+            variants: ui.variantToggle.checked,
+            target_language: ui.targetLanguage.value,
+            ...profile,
+            model: state.provider === 'deepseek' ? 'deepseek-v4-flash' : undefined
+          }))
+        });
+        const text = await res.text();
+        let data = {};
+        try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { error: text || `HTTP ${res.status}` }; }
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
         state.sessionId = data.session_id;
         state.blueprintSource = data.blueprint_source || state.blueprintSource;
         state.autoInitialized = !!data.auto_initialized;
         try { LS.setItem(LS_KEYS.session, state.sessionId); } catch (e) {}
         ui.settingSession.value = state.sessionId;
-
-        const summary = formatBuildSummary(data);
-        if (data.result && data.result.build) {
-          const b = data.result.build;
-          const hasTests = (b.test_total !== undefined && b.test_total !== null && b.test_total > 0) || (b.total !== undefined && b.total !== null && b.total > 0);
-          if (b.success) {
-            if (hasTests) {
-              const total = (b.test_total !== undefined && b.test_total !== null) ? b.test_total : b.total;
-              const passed = (b.test_passed !== undefined && b.test_passed !== null) ? b.test_passed : b.passed;
-              log(`Build succeeded: ${passed || 0}/${total} tests`, 'success');
-            } else {
-              log('Build succeeded', 'success');
-            }
-          } else {
-            log(`Build failed: ${b.error || 'unknown'}`, 'error');
-          }
-          if (b.logs) logRaw(b.logs, b.success ? 'success' : 'error');
-        } else {
-          log('Build response received', 'success');
-        }
-        // Render the full summary into the chat stream while still busy, then go idle.
-        addChat('assistant', summary);
-        reconnectTerminal();
-        await loadTree();
-        renderCommandBar(data.commands || data.runnable_commands || []);
-        await loadVerificationActions();
+        log(`Build queued (session ${state.sessionId})`, 'info');
+        state.lastBuildLog = '';
+        state.lastAccelLog = '';
+        startBuildPolling(state.sessionId);
       } catch (e) {
         log(`Build error: ${e.message}`, 'error');
         addChat('assistant', `Build error: ${e.message}`);
-      } finally { setBusy(false); }
+        setBusy(false);
+      }
+    }
+
+    function startBuildPolling(sessionId) {
+      stopBuildPolling();
+      state.isBuilding = true;
+      ui.statusText.textContent = 'Build queued...';
+      state.buildPollTimer = setInterval(() => pollBuildStatus(sessionId), 2000);
+    }
+
+    function stopBuildPolling() {
+      if (state.buildPollTimer) { clearInterval(state.buildPollTimer); state.buildPollTimer = null; }
+      state.isBuilding = false;
+    }
+
+    async function pollBuildStatus(sessionId) {
+      try {
+        const data = await api('GET', `/api/builder/status?session_id=${encodeURIComponent(sessionId)}`);
+        ui.statusText.textContent = `${data.status}${data.progress_message ? ': ' + data.progress_message : ''}`;
+
+        if (data.logs && data.logs.length > state.lastBuildLog.length) {
+          const newText = data.logs.slice(state.lastBuildLog.length);
+          state.lastBuildLog = data.logs;
+          if (newText.trim()) logRaw(newText, 'info');
+        } else {
+          state.lastBuildLog = data.logs || '';
+        }
+
+        if (data.accelerator_log && data.accelerator_log.length > state.lastAccelLog.length) {
+          const newText = data.accelerator_log.slice(state.lastAccelLog.length);
+          state.lastAccelLog = data.accelerator_log;
+          if (newText.trim()) {
+            if (ui.acceleratorLog.querySelector('.placeholder')) ui.acceleratorLog.innerHTML = '';
+            appendAccelLog(escapeHtml(newText), '');
+          }
+        } else {
+          state.lastAccelLog = data.accelerator_log || '';
+        }
+
+        if (data.status === 'SUCCESS' || data.status === 'FAILED') {
+          stopBuildPolling();
+          await finalizeBuildStatus(data);
+        }
+      } catch (e) {
+        log(`Status poll error: ${e.message}`, 'error');
+      }
+    }
+
+    async function finalizeBuildStatus(data) {
+      setBusy(false);
+      const summary = formatBuildSummary(data);
+      if (data.status === 'SUCCESS') {
+        log('Build succeeded', 'success');
+      } else {
+        log(`Build failed: ${data.error || (data.gate_errors && data.gate_errors[0]) || 'unknown'}`, 'error');
+      }
+      if (data.logs) logRaw(data.logs, data.status === 'SUCCESS' ? 'success' : 'error');
+      addChat('assistant', summary);
+      reconnectTerminal();
+      await loadTree();
+      const result = data.result || {};
+      renderCommandBar(result.commands || result.runnable_commands || []);
+      await loadVerificationActions();
+    }
+
+    async function checkExistingBuild() {
+      if (!state.sessionId) return;
+      try {
+        const data = await api('GET', `/api/builder/status?session_id=${encodeURIComponent(state.sessionId)}`);
+        if (data.is_building || (data.status !== 'SUCCESS' && data.status !== 'FAILED' && data.status !== 'IDLE')) {
+          state.lastBuildLog = data.logs || '';
+          state.lastAccelLog = data.accelerator_log || '';
+          log(`Re-attached to running build (${data.status})`, 'info');
+          if (data.logs) logRaw(data.logs, 'info');
+          setBusy(true);
+          startBuildPolling(state.sessionId);
+        }
+      } catch (e) {
+        // no active build or status unavailable
+      }
     }
 
     async function runAerocExec(path, isDir) {
@@ -3134,6 +3206,7 @@
     initMonaco();
     initTerminal();
     startTreeRefresh();
+    checkExistingBuild();
     log('Aero Forge UI loaded');
   </script>
 

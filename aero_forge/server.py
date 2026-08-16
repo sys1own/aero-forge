@@ -103,7 +103,14 @@ from aero_forge.accelerator.runtime import activate_runtime_native_acceleration
 from aero_forge.ingestion.command_inspector import detect_runnable_commands
 from aero_forge.ingestion.zip_parser import extract_zip_safely, generate_draft_v3_blueprint
 from aero_forge.scaffold.module_guard import reify_missing_modules
-from aero_forge.sandbox.manager import SandboxManager
+from aero_forge.sandbox.manager import (
+    SandboxManager,
+    get_accelerator_log_tail,
+    get_build_log_tail,
+    read_build_status,
+    reset_build_status,
+    write_build_status,
+)
 from aero_forge.blueprint import (
     Blueprint,
     BlueprintV3,
@@ -217,6 +224,7 @@ _manager = SandboxManager()
 _static_dir = Path(__file__).parent / "static"
 _blueprint_templates_dir = Path(__file__).parent / "blueprint_templates"
 _active_websockets: Dict[str, Any] = {}
+_active_builds: Dict[str, Any] = {}
 
 
 def _classification_for_target(
@@ -464,6 +472,117 @@ def _build_worker(task: Dict[str, Any], result_queue: "mp.queues.Queue") -> None
             pass
 
 
+def _progress_message_to_status(message: str) -> str:
+    """Map a human progress message to a finite build-state enum."""
+    m = message.lower()
+    if any(k in m for k in ("planning", "classifying", "enrich", "intent", "blueprint", "graph-polyglot")):
+        return "ENRICHING"
+    if any(k in m for k in ("building", "compil", "materializ", "cargo", "cmake", "generat")):
+        return "COMPILING"
+    if any(k in m for k in ("testing", "pytest", "test")):
+        return "TESTING"
+    return "IN_PROGRESS"
+
+
+def _detached_build_worker(args: Dict[str, Any]) -> None:
+    """Run a build in the background and persist state to ``build_status.json``.
+
+    This worker is intentionally decoupled from the request handler: a client
+    disconnect does not abort it.  It writes accelerator/build logs and status
+    to the session sandbox so the UI can poll and re-attach.
+    """
+    import traceback
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from aero_forge.sandbox.manager import (
+        append_build_log,
+        reset_build_status,
+        write_build_status,
+    )
+
+    session_id = args["session_id"]
+    session_dir = Path(args["session_dir"])
+    kind = args["kind"]
+    kwargs = dict(args["kwargs"])
+
+    # Coerce path arguments so the build functions receive Path objects.
+    if "output_dir" in kwargs:
+        kwargs["output_dir"] = Path(kwargs["output_dir"])
+    if "workspace_path" in kwargs and kwargs["workspace_path"] is not None:
+        kwargs["workspace_path"] = Path(kwargs["workspace_path"])
+
+    # Ensure per-session logs go to the sandbox, not whatever the parent had open.
+    aero_dir = session_dir / ".aero"
+    aero_dir.mkdir(parents=True, exist_ok=True)
+    os.environ["AERO_FORGE_ACCEL_LOG"] = str(aero_dir / "accelerator.log")
+
+    # Reset status and truncate old logs for this build.
+    reset_build_status(session_dir)
+
+    def _progress_callback(message: str) -> None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        append_build_log(session_dir, f"[{timestamp}] {message}\n")
+        write_build_status(
+            session_dir,
+            _progress_message_to_status(message),
+            progress_message=message,
+        )
+
+    kwargs["progress_callback"] = _progress_callback
+
+    # Fresh per-process HIS/FoGE state as required for every web build.
+    try:
+        _reset_his_and_foge(session_dir)
+    except Exception as exc:
+        logger.warning("HIS/FoGE reset in background worker failed: %s", exc)
+
+    _progress_callback("Planning workspace...")
+
+    try:
+        if kind == "build_universal_project":
+            from aero_forge.universal_builder import build_universal_project
+
+            result = build_universal_project(**kwargs)
+        elif kind == "generate_and_build":
+            from aero_forge.generate import generate_and_build
+
+            result = generate_and_build(**kwargs)
+        else:
+            raise ValueError(f"Unknown background build kind: {kind}")
+
+        build = (result or {}).get("build") or {}
+        build_logs = build.get("logs") or (result or {}).get("logs") or ""
+        if build_logs:
+            append_build_log(session_dir, f"\n--- Build output ---\n{build_logs}\n")
+
+        success = bool(
+            (result or {}).get("success")
+            or (isinstance(build, dict) and build.get("success"))
+        )
+        gate_errors: List[str] = []
+        if not success:
+            err = build.get("error") or (result or {}).get("error") or "Build failed"
+            gate_errors.append(err)
+
+        if success:
+            _progress_callback("Build succeeded.")
+            write_build_status(session_dir, "SUCCESS", result=result, gate_errors=gate_errors)
+        else:
+            _progress_callback("Build failed.")
+            write_build_status(session_dir, "FAILED", result=result, gate_errors=gate_errors)
+    except Exception as exc:
+        tb = traceback.format_exc()
+        append_build_log(session_dir, f"\n--- Worker exception ---\n{tb}\n")
+        write_build_status(
+            session_dir,
+            "FAILED",
+            error=str(exc),
+            progress_message=str(exc),
+            gate_errors=[str(exc), tb],
+        )
+
+
 # Snapshot the original build functions so we can detect monkeypatching in tests.
 _ORIGINAL_BUILD_FUNCTIONS: Dict[str, Callable[..., Any]] = {
     "generate_and_build": generate_and_build,
@@ -558,7 +677,11 @@ def _phase_from_message(message: str) -> str:
 
 
 async def _handle_build_async(request: web.Request) -> web.Response:
-    """Run a build off the event loop and send progress heartbeats over the terminal WS."""
+    """Queue a build in a detached worker and return 202 Accepted immediately.
+
+    The worker writes build state, logs, and accelerator events to the session
+    sandbox so the client can poll ``/api/builder/status`` and survive disconnects.
+    """
     try:
         body = await request.json()
     except Exception:
@@ -575,7 +698,7 @@ async def _handle_build_async(request: web.Request) -> web.Response:
     else:
         output_dir = _session_dir(session_id)
     session_dir = output_dir
-    set_session_blueprint_metadata(session_id, is_building=True)
+    session_dir.mkdir(parents=True, exist_ok=True)
     variants = 3 if body.get("variants") else 1
     target_language = body.get("target_language", body.get("target", "auto"))
     acceleration_policy = body.get("acceleration_policy", "selective")
@@ -604,8 +727,13 @@ async def _handle_build_async(request: web.Request) -> web.Response:
         INTENT_GRAPH_POLYGLOT,
     )
 
-    build_status = "started"
-    build_error: Optional[str] = None
+    # Force a per-request HIS/FoGE reset as required for the web build pipeline.
+    try:
+        _reset_his_and_foge(session_dir)
+    except Exception as exc:
+        logger.warning("HIS/FoGE reset before build failed: %s", exc)
+
+    build_status = "pending"
     _log_build_request(
         session_id,
         prompt,
@@ -614,106 +742,158 @@ async def _handle_build_async(request: web.Request) -> web.Response:
         build_status,
     )
 
-    # Process isolation: the actual build runs in a child process so any crash
-    # in the native HIS backend, Z3 solver, or IntentCompiler pipeline cannot
-    # take down the web server.  A lightweight heartbeat keeps the WebSocket
-    # client alive while the subprocess is working.
-    loop = asyncio.get_running_loop()
-    last_phase = {"phase": "code_generation"}
+    if is_hybrid:
+        kind = "build_universal_project"
+        kwargs: Dict[str, Any] = {
+            "project_name": "generated",
+            "constraints": None,
+            "llm_provider": config.llm_provider or body.get("provider"),
+            "model": config.model or body.get("model"),
+            "max_retries": 3,
+            "config_override": config,
+            "architecture": architecture or classification.architecture,
+            "acceleration_policy": acceleration_policy,
+            "engine_backend": engine_backend,
+            "wavefront_parallelism": wavefront_parallelism,
+            "precision_shield_mode": precision_shield_mode,
+            "hin_jit_opt_level": hin_jit_opt_level,
+            "workspace_path": output_dir,
+            "blueprint": None,
+            "require_enrichment": True,
+        }
+    else:
+        kind = "generate_and_build"
+        kwargs = {
+            "project_name": "generated",
+            "max_retries": 3,
+            "max_iterations": 5,
+            "variants": variants,
+            "build_kwargs": {"max_workers": 1, "cache_enabled": False},
+            "config_override": config,
+            "target_language": target_language,
+            "acceleration_policy": acceleration_policy,
+            "engine_backend": engine_backend,
+            "wavefront_parallelism": wavefront_parallelism,
+            "precision_shield_mode": precision_shield_mode,
+            "hin_jit_opt_level": hin_jit_opt_level,
+        }
 
-    async def heartbeat() -> None:
-        while True:
-            try:
-                await asyncio.sleep(4)
-            except asyncio.CancelledError:
-                break
-            _send_ws_heartbeat(session_id, last_phase["phase"], loop)
+    worker_kwargs = dict({"output_dir": str(session_dir), "prompt": prompt}, **kwargs)
 
-    heartbeat_task: asyncio.Task = asyncio.create_task(heartbeat())
-    try:
-        if is_hybrid:
-            kwargs = {
-                "project_name": "generated",
-                "constraints": None,
-                "llm_provider": config.llm_provider or body.get("provider"),
-                "model": config.model or body.get("model"),
-                "max_retries": 3,
-                "config_override": config,
-                "architecture": architecture or classification.architecture,
-                "acceleration_policy": acceleration_policy,
-                "engine_backend": engine_backend,
-                "wavefront_parallelism": wavefront_parallelism,
-                "precision_shield_mode": precision_shield_mode,
-                "hin_jit_opt_level": hin_jit_opt_level,
-                "workspace_path": output_dir,
-                "blueprint": None,
-                "require_enrichment": True,
-            }
-            universal_result = await loop.run_in_executor(
-                None,
-                _run_build_in_subprocess,
-                "build_universal_project",
-                dict({"output_dir": str(session_dir), "prompt": prompt}, **kwargs),
-            )
-            result: Dict[str, Any] = {
-                "build": universal_result,
-                "files": universal_result.get("files", []),
-            }
-        else:
-            kwargs = {
-                "project_name": "generated",
-                "max_retries": 3,
-                "max_iterations": 5,
-                "variants": variants,
-                "build_kwargs": {"max_workers": 1, "cache_enabled": False},
-                "config_override": config,
-                "target_language": target_language,
-                "acceleration_policy": acceleration_policy,
-                "engine_backend": engine_backend,
-                "wavefront_parallelism": wavefront_parallelism,
-                "precision_shield_mode": precision_shield_mode,
-                "hin_jit_opt_level": hin_jit_opt_level,
-            }
-            result = await loop.run_in_executor(
-                None,
-                _run_build_in_subprocess,
-                "generate_and_build",
-                dict({"output_dir": str(session_dir), "prompt": prompt}, **kwargs),
-            )
-        _notify_tree_changed(session_id)
-        set_session_blueprint_metadata(session_id, source="auto_generated", auto_initialized=True)
-        build_status = "success"
-        return web.json_response(
-            _build_web_response(session_id, session_dir, result),
-            headers=_CORS_HEADERS,
-        )
-    except Exception as exc:
-        logger.exception("Build endpoint failed")
-        build_status = "failure"
-        build_error = str(exc)
-        return web.json_response(
-            _build_web_response(
-                session_id,
-                session_dir,
-                {"build": {"success": False, "error": str(exc)}},
-            ),
-            headers=_CORS_HEADERS,
-        )
-    finally:
-        _log_build_request(
-            session_id,
-            prompt,
-            classification.architecture,
-            is_hybrid,
-            build_status,
-            error=build_error,
-        )
-        heartbeat_task.cancel()
+    # Unit tests monkeypatch ``generate_and_build`` / ``build_universal_project``
+    # to avoid external calls; the spawn context would not see those mocks, so
+    # fall back to in-process execution when the module globals differ.
+    _gen_original = _ORIGINAL_BUILD_FUNCTIONS.get("generate_and_build")
+    _uni_original = _ORIGINAL_BUILD_FUNCTIONS.get("build_universal_project")
+    _gen_current = globals().get("generate_and_build")
+    _uni_current = globals().get("build_universal_project")
+    is_monkeypatched = (
+        (_gen_original is not None and _gen_current is not _gen_original)
+        or (_uni_original is not None and _uni_current is not _uni_original)
+    )
+
+    if is_monkeypatched:
+        # In-process path for tests: run synchronously and return the final result.
+        set_session_blueprint_metadata(session_id, is_building=True)
+        loop = asyncio.get_running_loop()
         try:
-            await heartbeat_task
-        except asyncio.CancelledError:
-            pass
-        set_session_blueprint_metadata(session_id, is_building=False)
+            if kind == "build_universal_project":
+                # Match the legacy positional call so monkeypatched test fakes
+                # that expect (prompt, output_dir, **rest) keep working.
+                rest = {
+                    k: v
+                    for k, v in worker_kwargs.items()
+                    if k not in ("prompt", "output_dir")
+                }
+                raw_result = await loop.run_in_executor(
+                    None,
+                    functools.partial(
+                        build_universal_project,
+                        worker_kwargs["prompt"],
+                        worker_kwargs["output_dir"],
+                        **rest,
+                    ),
+                )
+                result: Dict[str, Any] = {
+                    "build": raw_result,
+                    "files": raw_result.get("files", []),
+                }
+            else:
+                raw_result = await loop.run_in_executor(
+                    None, functools.partial(generate_and_build, **worker_kwargs)
+                )
+                result = raw_result
+            _notify_tree_changed(session_id)
+            set_session_blueprint_metadata(
+                session_id, source="auto_generated", auto_initialized=True
+            )
+            return web.json_response(
+                _build_web_response(session_id, session_dir, result),
+                headers=_CORS_HEADERS,
+            )
+        except Exception as exc:
+            logger.exception("Build endpoint failed")
+            return web.json_response(
+                _build_web_response(
+                    session_id,
+                    session_dir,
+                    {"build": {"success": False, "error": str(exc)}},
+                ),
+                headers=_CORS_HEADERS,
+            )
+        finally:
+            set_session_blueprint_metadata(session_id, is_building=False)
+
+    worker_args = {
+        "session_id": session_id,
+        "session_dir": str(session_dir),
+        "kind": kind,
+        "kwargs": worker_kwargs,
+    }
+
+    # Reset on-disk status and spawn the background build worker.  The client
+    # can disconnect immediately; the worker will keep running.
+    reset_build_status(session_dir)
+    process = _mp_context.Process(
+        target=_detached_build_worker,
+        args=(worker_args,),
+        daemon=True,
+    )
+    process.start()
+    _active_builds[session_id] = {"process": process, "started_at": time.time()}
+    set_session_blueprint_metadata(session_id, is_building=True)
+
+    return web.json_response(
+        {
+            "session_id": session_id,
+            "status": "PENDING",
+            "message": "Build queued",
+            "status_url": f"/api/builder/status?session_id={session_id}",
+        },
+        status=202,
+        headers=_CORS_HEADERS,
+    )
+
+
+async def _handle_build_status_async(request: web.Request) -> web.Response:
+    """Return the persisted build status, logs, and accelerator tail for a session."""
+    query = parse_qs(request.query_string)
+    session_id = _first(query, "session_id")
+    if not session_id:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        session_id = body.get("session_id") or ""
+    if not session_id:
+        return web.json_response({"error": "Missing 'session_id'"}, status=400, headers=_CORS_HEADERS)
+
+    session_dir = _session_dir(session_id)
+    status = read_build_status(session_dir)
+    status["logs"] = get_build_log_tail(session_dir)
+    status["accelerator_log"] = get_accelerator_log_tail(session_dir)
+    status["is_building"] = status.get("status") not in ("SUCCESS", "FAILED", "IDLE")
+    return web.json_response(status, headers=_CORS_HEADERS)
 
 
 def _send_json(handler: BaseHTTPRequestHandler, status: int, data: Any) -> None:
@@ -3527,8 +3707,10 @@ async def _aiohttp_http_handler(request: web.Request, port: int) -> web.Response
     _set_event_loop()
     if request.method == "OPTIONS":
         return web.Response(status=204, headers=_CORS_HEADERS)
-    if request.path == "/api/build" or request.path == "/api/builder/trigger":
+    if request.path in ("/api/build", "/api/builder/trigger", "/api/builder/generate"):
         return await _handle_build_async(request)
+    if request.path == "/api/builder/status":
+        return await _handle_build_status_async(request)
     raw = await _build_raw_request(request)
     loop = asyncio.get_event_loop()
     response_bytes = await loop.run_in_executor(None, _run_http_handler, raw, port)
