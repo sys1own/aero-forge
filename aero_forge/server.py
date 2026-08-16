@@ -43,6 +43,8 @@ from aero_forge.bundle_repo import (
     zip_export_filename,
 )
 from aero_forge.builder.context import normalize_engine_options
+from aero_forge.builder.holographic import HolographicContext
+from aero_forge.builder.foge import FockGraphEncoder
 from aero_forge.chat import (
     ChatSession,
     get_session_metadata,
@@ -342,6 +344,17 @@ async def _handle_build_async(request: web.Request) -> web.Response:
         INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON,
         INTENT_GRAPH_POLYGLOT,
     )
+
+    # Reset the per-request HIS session and force FoGE PaP tokens to be
+    # regenerated from the current repository state before any LLM enrichment.
+    HolographicContext.reset_session()
+    if output_dir.is_dir() and any(f.is_file() for f in output_dir.rglob("*")):
+        try:
+            encoder = FockGraphEncoder(dim=256)
+            encoder.regenerate_pap_tokens(output_dir)
+            logger.info("FoGE PaP tokens regenerated for %s", output_dir)
+        except Exception as exc:
+            logger.debug("FoGE token regeneration skipped: %s", exc)
 
     # Synchronous enrichment gate: do not allow the build to touch disk from a
     # draft blueprint. Hybrid workflows are enriched into a v2 Blueprint here and
@@ -1053,6 +1066,17 @@ class AeroForgeHandler(BaseHTTPRequestHandler):
                 INTENT_TRI_POLYGLOT_RUST_CPP_PYTHON,
                 INTENT_GRAPH_POLYGLOT,
             )
+
+            # Reset the per-request HIS session and force FoGE PaP tokens to be
+            # regenerated from the current repository state before any LLM enrichment.
+            HolographicContext.reset_session()
+            if output_dir.is_dir() and any(f.is_file() for f in output_dir.rglob("*")):
+                try:
+                    encoder = FockGraphEncoder(dim=256)
+                    encoder.regenerate_pap_tokens(output_dir)
+                    logger.info("FoGE PaP tokens regenerated for %s", output_dir)
+                except Exception as exc:
+                    logger.debug("FoGE token regeneration skipped: %s", exc)
 
             # Synchronous enrichment gate: do not allow the build to touch disk
             # from a draft blueprint. Hybrid workflows are enriched into a v2

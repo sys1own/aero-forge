@@ -102,11 +102,26 @@ class HolographicContext:
         drift = ctx.measure_drift(noisy_context)
     """
 
+    _session: Optional["HolographicContext"] = None
+
     def __init__(self, seed: int = 0) -> None:
         self._goal: Optional[List[int]] = None
         self._safety: Optional[List[int]] = None
         self._hinv: Optional[List[int]] = None
         self._seed = seed
+
+    @classmethod
+    def reset_session(cls) -> "HolographicContext":
+        """Reset the per-request HIS session and return a fresh context."""
+        cls._session = cls()
+        return cls._session
+
+    @classmethod
+    def get_session(cls) -> "HolographicContext":
+        """Return the current per-request HIS session, creating one if needed."""
+        if cls._session is None:
+            cls._session = cls()
+        return cls._session
 
     def build_invariant(
         self, goal: List[int], safety: List[int]

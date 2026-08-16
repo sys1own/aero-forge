@@ -1715,6 +1715,9 @@ def generate_and_build(
                     "auto_generated": "true",
                     "generation_method": "llm_synthesized",
                 }
+                bp.architecture = intent_bp.architecture or bp.architecture
+                bp.functional_intent = intent_bp.functional_intent or bp.functional_intent
+                bp.manifest = intent_bp.manifest or bp.manifest
                 bp.execution_strategy = intent_bp.execution_strategy
                 bp.abi_contracts = intent_bp.abi_contracts
                 bp.module_graph = intent_bp.module_graph
